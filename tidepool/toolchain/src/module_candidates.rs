@@ -6637,3 +6637,7 @@ pub(crate) mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "module_candidates/publication_refusal_tests.rs"]
+mod publication_refusal_tests;

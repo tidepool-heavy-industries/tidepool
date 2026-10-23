@@ -3041,7 +3041,6 @@ enum CellProgramAudit<'a> {
     None,
     MalformedBindingBeforeProjection,
     Receipts(&'static str),
-    PublicationRefusal(&'a Path),
     WorkCounts(Option<scaling_tests::SegmentWorkShape>),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
 }
@@ -3061,98 +3060,29 @@ fn compile_cell_program_admitted_native_emission_controls(
 }
 
 #[cfg(test)]
-enum ObservedReceiptOwnerRow {
-    NativeModule,
-    CapturedValue,
-}
-
-#[cfg(test)]
-fn observed_receipt_owner(row: &CborValue, kind: ObservedReceiptOwnerRow) -> (&str, &str) {
-    let fields = row.as_array().unwrap();
-    let (unit, module) = match kind {
-        ObservedReceiptOwnerRow::NativeModule => (1, 2),
-        ObservedReceiptOwnerRow::CapturedValue => (0, 1),
-    };
-    (
-        fields[unit].as_text().unwrap(),
-        fields[module].as_text().unwrap(),
-    )
-}
-
-#[cfg(test)]
 fn audit_current_native_emission(
-    program: &tidepool_toolchain::checked_cell::CellProgram,
-    directory: &Path,
+    program: &tidepool_toolchain::compiler_world::CheckedWorldCellProgram,
     old_owners: &std::collections::BTreeSet<(String, String)>,
 ) {
-    let requirements = tidepool_toolchain::prepared_artifact::production_requirements().unwrap();
+    let emissions = program
+        .emitted_native_modules()
+        .expect("actual emitted World packets");
     let mut observed = 0;
-    for (index, segment) in program.typed_segments().iter().enumerate() {
-        if !segment
-            .items()
-            .iter()
-            .any(|item| program.items()[item.ordinal()].native().is_some())
-        {
-            continue;
-        }
-        observed += 1;
-        let directory = directory.join(format!("segment-{index}"));
-        let receipt_path = directory.join("certified-products.cbor");
-        let native_path = directory.join("module-products.cbor");
-        assert!(std::fs::metadata(&receipt_path).unwrap().len() <= 32 << 20);
-        assert!(std::fs::metadata(&native_path).unwrap().len() <= 64 << 20);
-        // The complete receipt has already passed same-directory admission,
-        // including its execution-source sidecar. These raw rows observe only
-        // this request's emission, before inherited custody is appended.
-        let receipt: CborValue =
-            ciborium::de::from_reader(std::fs::File::open(receipt_path).unwrap()).unwrap();
-        let payload = receipt.as_array().unwrap()[2].as_array().unwrap();
-        assert_eq!(payload[0].as_text(), Some("segment-originals"));
-        let receipt_modules = payload[1].as_array().unwrap();
-        let emitted = tidepool_repr::execution_schema::parse_module_products(
-            &std::fs::read(native_path).unwrap(),
-            &requirements,
-            tidepool_repr::execution_schema::InventoryDecodeLimits::default(),
-        )
-        .unwrap();
-        assert!(!emitted.is_empty());
-        let receipt_owners = receipt_modules
-            .iter()
-            .map(|module| {
-                let (unit, module) =
-                    observed_receipt_owner(module, ObservedReceiptOwnerRow::NativeModule);
-                (unit.to_owned(), module.to_owned())
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        let native_owners = emitted
-            .iter()
-            .map(|module| (module.unit.clone(), module.module.clone()))
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(receipt_owners.len(), receipt_modules.len());
-        assert_eq!(native_owners.len(), emitted.len());
-        assert_eq!(receipt_owners, native_owners);
-        for row in receipt_modules {
-            let (unit, module) = observed_receipt_owner(row, ObservedReceiptOwnerRow::NativeModule);
+    for emission in emissions {
+        for owner in emission.owners() {
+            observed += 1;
             assert!(
-                !old_owners.contains(&(unit.to_owned(), module.to_owned())),
-                "current compiler receipt re-emitted old owner {}:{} with origin {:?}",
-                unit,
-                module,
-                row.as_array().unwrap()[0],
-            );
-        }
-        for module in &emitted {
-            assert!(
-                !old_owners.contains(&(module.unit.clone(), module.module.clone())),
-                "current native packet re-emitted old owner {}:{}",
-                module.unit,
-                module.module,
+                !old_owners.contains(&(owner.unit.clone(), owner.module.clone())),
+                "World stage {} re-emitted old native owner {}:{}",
+                emission.first_ordinal(),
+                owner.unit,
+                owner.module
             );
         }
     }
     assert!(
         observed > 0,
-        "a native emission audit must observe real native items"
+        "a native emission audit must observe real emitted modules"
     );
 }
 
@@ -3441,58 +3371,38 @@ fn compile_cell_program_admitted_inner(
         },
     )?;
     #[cfg(test)]
-    if matches!(audit, CellProgramAudit::None) {
-        return finish_cell_program_admitted(outcome);
-    }
-    #[cfg(test)]
-    let evidence = outcome.action().as_ref().ok().map(|prepared| {
-        (
-            prepared.finite_evidence().1.clone(),
-            prepared.finite_evidence().2.clone(),
-        )
-    });
-    #[cfg(test)]
-    if let (CellProgramAudit::Receipts(test_name), Ok(prepared)) = (audit, outcome.action()) {
-        audit_compiler_issued_item_receipts(
-            prepared.finite_evidence().0,
-            prepared.finite_evidence().1.path(),
-            test_name,
-        );
-    }
+    let world = match (audit, outcome.action()) {
+        (CellProgramAudit::None, _) => None,
+        (_, Ok(prepared)) => match &prepared.evidence {
+            PreparedRuntimeCellEvidence::World(program) => Some(Arc::clone(program)),
+            PreparedRuntimeCellEvidence::Finite { .. } => {
+                panic!("executable audits require an actual World preparation")
+            }
+        },
+        (_, Err(_)) => None,
+    };
     let result = finish_cell_program_admitted(outcome);
     #[cfg(test)]
-    if let (CellProgramAudit::PublicationRefusal(cache), Some((root, _))) = (audit, &evidence) {
-        let outcome = match &result {
-            Ok(_) => "admitted".to_owned(),
-            Err(error) => error.to_string(),
-        };
-        let count = observe_candidate_publication(
-            cache,
-            root.path(),
-            CandidatePublicationStage::Valid,
-            &outcome,
-        );
-        if result.is_ok() {
-            assert!(
-                count > 0,
-                "valid follow-up must publish ordinary support suggestions"
-            );
+    if let (Some(world), Ok((_, program))) = (world, &result) {
+        match audit {
+            CellProgramAudit::None => unreachable!(),
+            CellProgramAudit::Receipts(test_name) => {
+                audit_compiler_issued_item_receipts(program, test_name)
+            }
+            CellProgramAudit::NativeEmissionOwnersAbsent(old_owners) => {
+                audit_current_native_emission(&world, old_owners);
+            }
+            CellProgramAudit::WorkCounts(expected_shape) => {
+                scaling_tests::assert_compiler_work(
+                    program,
+                    world.compiler_observation().stderr(),
+                    expected_shape,
+                );
+            }
+            CellProgramAudit::MalformedBindingBeforeProjection => {
+                panic!("finite binding-file mutation is not a World executable audit");
+            }
         }
-    }
-    #[cfg(test)]
-    if let (
-        CellProgramAudit::NativeEmissionOwnersAbsent(old_owners),
-        Ok((_, program)),
-        Some((root, _)),
-    ) = (audit, &result, &evidence)
-    {
-        audit_current_native_emission(program, root.path(), old_owners);
-    }
-    #[cfg(test)]
-    if let (CellProgramAudit::WorkCounts(expected_shape), Ok((_, program)), Some((_, stderr))) =
-        (audit, &result, &evidence)
-    {
-        scaling_tests::assert_compiler_work(program, stderr, expected_shape);
     }
     result
 }
@@ -3685,10 +3595,6 @@ fn prepare_cell_program_admitted_inner(
                 .into());
         }
     };
-    #[cfg(test)]
-    if let CellProgramAudit::PublicationRefusal(cache) = audit {
-        audit_compiler_publication_refusal(&offer, &scratch, cache);
-    }
     #[cfg(test)]
     if let CellProgramAudit::MalformedBindingBeforeProjection = audit {
         let path = scratch.path().join("item-1/turn.cbor");
@@ -3933,223 +3839,16 @@ fn decode_cell_program_turn(
 }
 
 #[cfg(test)]
-enum CandidatePublicationStage {
-    Before,
-    Mutated,
-    Valid,
-}
-
-#[cfg(test)]
-fn observe_candidate_publication(
-    cache: &Path,
-    compiler_root: &Path,
-    stage: CandidatePublicationStage,
-    outcome: &str,
-) -> usize {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let stage = match stage {
-        CandidatePublicationStage::Before => "before-mutation",
-        CandidatePublicationStage::Mutated => "after-mutated-admission",
-        CandidatePublicationStage::Valid => "after-valid-admission",
-    };
-    // This fixture observes the candidate owner's namespace and record format.
-    // The parent compile cache also holds legitimate mutable compiler products.
-    let namespace = cache.join("module-candidates-v12");
-    let mut pending = match std::fs::symlink_metadata(&namespace) {
-        Ok(_) => vec![(namespace.clone(), 0)],
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => panic!("candidate namespace census failed: {error}"),
-    };
-    let evidence = compiler_root.join("publication-control").join(stage);
-    let mut records = Vec::new();
-    let mut entries = 0;
-    let mut record_bytes = 0_u64;
-    while let Some((path, depth)) = pending.pop() {
-        entries += 1;
-        assert!(
-            entries <= 4096 && depth <= 16,
-            "candidate census is incomplete"
-        );
-        let metadata = std::fs::symlink_metadata(&path).unwrap();
-        assert!(
-            !metadata.is_symlink(),
-            "candidate census must not follow symlinks"
-        );
-        if metadata.is_dir() {
-            for entry in std::fs::read_dir(&path).unwrap() {
-                pending.push((entry.unwrap().path(), depth + 1));
-            }
-            continue;
-        }
-        assert!(
-            metadata.is_file(),
-            "candidate census contains a special file"
-        );
-        if metadata.len() < 8 {
-            continue;
-        }
-        let mut file = std::fs::File::open(&path).unwrap();
-        let mut prefix = [0; 8];
-        file.read_exact(&mut prefix).unwrap();
-        if &prefix != b"TPCRE10\n" {
-            continue;
-        }
-        record_bytes += metadata.len();
-        assert!(
-            metadata.len() <= 32 << 20 && record_bytes <= 128 << 20,
-            "candidate record census exceeds its byte bound"
-        );
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        bytes.extend_from_slice(&prefix);
-        file.take(metadata.len() - 8 + 1)
-            .read_to_end(&mut bytes)
-            .unwrap();
-        assert_eq!(
-            bytes.len() as u64,
-            metadata.len(),
-            "candidate record changed during census"
-        );
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        let retained = evidence.join(format!("{digest}.cbor"));
-        std::fs::create_dir_all(&evidence).unwrap();
-        std::fs::write(&retained, &bytes).unwrap();
-        records.push(serde_json::json!({
-            "path": path.strip_prefix(cache).unwrap(),
-            "bytes": bytes.len(), "sha256": digest, "retained_path": retained,
-        }));
-    }
-    records.sort_by_key(|record| record["path"].as_str().unwrap().to_owned());
-    let mut cache_entries = std::fs::read_dir(cache)
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            let kind = entry.file_type().unwrap();
-            let name = entry.file_name();
-            serde_json::json!({
-                "name": name.to_str().expect("cache entry name is not UTF-8"),
-                "directory": kind.is_dir(), "symlink": kind.is_symlink(),
-            })
-        })
-        .collect::<Vec<_>>();
-    cache_entries.sort_by_key(|entry| entry["name"].as_str().unwrap().to_owned());
-    let turn = std::fs::read(compiler_root.join("item-0/turn.cbor")).unwrap();
-    assert!(
-        turn.len() <= 32 << 20,
-        "turn evidence exceeds its byte bound"
-    );
-    let count = records.len();
-    std::fs::create_dir_all(&evidence).unwrap();
-    std::fs::write(evidence.join("turn.cbor"), &turn).unwrap();
-    std::fs::write(
-        evidence.join("census.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "stage": stage, "outcome": outcome, "cache_root": cache,
-            "compiler_root": compiler_root, "cache_entries": cache_entries,
-            "candidate_namespace": namespace, "records": records,
-            "turn_sha256": format!("{:x}", Sha256::digest(&turn)),
-            "extract_spawns": tidepool_extract_cmd::extract_spawn_count(),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    count
-}
-
-#[cfg(test)]
-fn audit_compiler_publication_refusal(
-    offer: &SelectedModuleCandidateOffer,
-    owner: &Arc<tempfile::TempDir>,
-    cache: &Path,
-) {
-    let root = owner.path();
-    assert_eq!(
-        observe_candidate_publication(
-            cache,
-            root,
-            CandidatePublicationStage::Before,
-            "not attempted"
-        ),
-        0,
-        "publication refusal requires an empty candidate store"
-    );
-    assert!(!offer.has_candidates());
-    let path = root.join("item-0/turn.cbor");
-    let original = std::fs::read(&path).unwrap();
-    struct RestoreTurn<'a> {
-        path: &'a Path,
-        bytes: &'a [u8],
-    }
-    impl Drop for RestoreTurn<'_> {
-        fn drop(&mut self) {
-            std::fs::write(self.path, self.bytes).expect("restore producer-issued turn");
-        }
-    }
-    let restore = RestoreTurn {
-        path: &path,
-        bytes: &original,
-    };
-    let mut turn: CborValue = ciborium::de::from_reader(original.as_slice()).unwrap();
-    let fields = turn.as_array_mut().unwrap();
-    assert_eq!(fields[0].as_text(), Some("Bind"));
-    let payload = fields[1].as_array_mut().unwrap();
-    assert_eq!(payload.len(), 5);
-    payload[0] = CborValue::Array(vec![CborValue::Text("foreign_bound_name".into())]);
-    let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&turn, &mut bytes).unwrap();
-    assert_ne!(
-        bytes, original,
-        "boundNames control did not alter the producer output"
-    );
-    std::fs::write(&path, &bytes).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    let before = tidepool_extract_cmd::extract_spawn_count();
-    let result = offer.prepare_cell_program(owner.clone());
-    let outcome = match &result {
-        Ok(_) => "admitted".to_owned(),
-        Err(error) => error.to_string(),
-    };
-    let count =
-        observe_candidate_publication(cache, root, CandidatePublicationStage::Mutated, &outcome);
-    let error = result.expect_err("wrong boundNames must refuse the final checked item seal");
-    assert!(error
-        .to_string()
-        .contains("compiled bind has another authored verdict or wrapper"));
-    assert_eq!(
-        count, 0,
-        "refused native item must leave the candidate store empty"
-    );
-    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-    drop(restore);
-}
-
-#[cfg(test)]
 fn audit_compiler_issued_item_receipts(
-    offer: &SelectedModuleCandidateOffer,
-    root: &Path,
+    program: &tidepool_toolchain::checked_cell::CellProgram,
     test_name: &'static str,
 ) {
-    use sha2::{Digest, Sha256};
-    use tidepool_toolchain::certified_products::CertificationError;
-    struct RestoreReceipt {
-        path: PathBuf,
-        original: Vec<u8>,
-    }
-    impl Drop for RestoreReceipt {
-        fn drop(&mut self) {
-            std::fs::write(&self.path, &self.original).expect("restore original compiler receipt");
-        }
-    }
-    let before = tidepool_extract_cmd::extract_spawn_count();
-    let valid = offer
-        .admit_cell_program(root)
-        .expect("unchanged original worker receipts must admit");
     // Reuse this actual producer/admission fixture for generated cross-item
     // observations; the oracle comes from checked ordinals and reserved capture
     // owners, independently of the shared packet's complete private inventory.
     {
         use proptest::prelude::*;
-        let native = valid
+        let native = program
             .items()
             .iter()
             .filter(|item| item.native().is_some())
@@ -4183,11 +3882,12 @@ fn audit_compiler_issued_item_receipts(
                 |(item_index, capture_index)| {
                     let item = native[item_index];
                     let (ordinal, module) = captures[capture_index];
-                    let selected = item
+                    let selected_context = item
                         .native_products()
                         .unwrap()
-                        .artifact_view()
-                        .descriptors();
+                        .original_execution_context()
+                        .unwrap();
+                    let selected = selected_context.compiler_roles().keys().collect::<Vec<_>>();
                     let table = item.native().unwrap().table();
                     let sites = match decode_turn_out(item.native_turn_bytes().unwrap()).unwrap() {
                         DecodedTurnOut::Bind { asks, .. } | DecodedTurnOut::Expr { asks, .. } => {
@@ -4203,21 +3903,24 @@ fn audit_compiler_issued_item_receipts(
                             table,
                             &sites,
                         )
-                        .unwrap()
-                        .artifact_view()
-                        .descriptors();
+                        .unwrap();
+                    let execution = execution
+                        .compiler_roles()
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>();
                     if ordinal > item.checked_item().index() {
                         prop_assert!(
-                            selected.iter().all(|entry| entry.owner.module != module),
+                            selected.iter().all(|entry| entry.module != module),
                             "future capture entered selected item view"
                         );
                         prop_assert!(
-                            execution.iter().all(|entry| entry.owner.module != module),
+                            execution.iter().all(|entry| entry.module != module),
                             "future capture entered original execution context"
                         );
                     } else if ordinal == item.checked_item().index() {
                         prop_assert!(
-                            selected.iter().any(|entry| entry.owner.module == module),
+                            selected.iter().any(|entry| entry.module == module),
                             "current capture type missing"
                         );
                     }
@@ -4226,495 +3929,6 @@ fn audit_compiler_issued_item_receipts(
             )
             .unwrap();
     }
-    let index = valid
-        .items()
-        .iter()
-        .find(|item| item.native().is_some())
-        .expect("witness controls require a real native entry")
-        .checked_item()
-        .index();
-    let path = root.join(format!("item-{index}")).join("checked-item.cbor");
-    let original = std::fs::read(&path).unwrap();
-    let receipt: CborValue = ciborium::de::from_reader(original.as_slice()).unwrap();
-    let fields = receipt.as_array().unwrap();
-    assert_eq!(fields.len(), 9);
-    assert_eq!(fields[0].as_text(), Some("TPEXACTITEM"));
-    assert_eq!(fields[1].as_text(), Some("2"));
-    assert_eq!(fields[8].as_array().unwrap().len(), 4);
-    assert_eq!(index, 0, "this control starts with one executable segment");
-    let module = fields[8].as_array().unwrap()[2].as_array().unwrap()[1]
-        .as_text()
-        .unwrap();
-    let segment = root.join("segment-0");
-    let source_path = segment.join(format!("{module}.hs"));
-    let source = std::fs::read(&source_path).unwrap();
-    let item_source = root.join("item-0").join(format!("{module}.hs"));
-    assert_eq!(std::fs::read(&item_source).unwrap(), source);
-    assert!(
-        !root.join("item-0/.exact-compilations").exists(),
-        "projection products must admit from their actual segment receipt owner"
-    );
-    struct RestoreDirectory {
-        original: PathBuf,
-        held: PathBuf,
-    }
-    impl Drop for RestoreDirectory {
-        fn drop(&mut self) {
-            std::fs::rename(&self.held, &self.original)
-                .expect("restore original compiler receipt directory");
-        }
-    }
-    let receipts = segment.join(".exact-compilations");
-    let held = tempfile::tempdir_in(&segment).unwrap();
-    let moved = RestoreDirectory {
-        original: receipts.clone(),
-        held: held.path().join("receipts"),
-    };
-    std::fs::rename(&receipts, &moved.held).unwrap();
-    assert!(matches!(
-        offer.admit_cell_program(root),
-        Err(CompileError::ExtractFailed(_))
-    ));
-    drop(moved);
-    offer
-        .admit_cell_program(root)
-        .expect("restored genuine segment receipts must admit");
-    let restore_source = RestoreReceipt {
-        path: source_path.clone(),
-        original: source.clone(),
-    };
-    let mut changed_source = source;
-    changed_source.extend_from_slice(b"\n-- changed after compilation\n");
-    std::fs::write(&source_path, changed_source).unwrap();
-    assert_ne!(
-        std::fs::read(&item_source).unwrap(),
-        std::fs::read(&source_path).unwrap()
-    );
-    assert!(matches!(
-        offer.admit_cell_program(root),
-        Err(CompileError::ExtractFailed(_))
-    ));
-    drop(restore_source);
-    offer
-        .admit_cell_program(root)
-        .expect("restored consumed segment source must admit independently");
-    let output_module = valid.items()[index]
-        .native()
-        .unwrap()
-        .value_interface()
-        .expect("this worker control produces an actual capture")
-        .0;
-    let products_path = segment.join("certified-products.cbor");
-    let products_original = std::fs::read(&products_path).unwrap();
-    let products: CborValue = ciborium::de::from_reader(products_original.as_slice()).unwrap();
-    fn captured_owner(row: &CborValue) -> (&str, &str) {
-        observed_receipt_owner(row, ObservedReceiptOwnerRow::CapturedValue)
-    }
-    fn captured_rows(packet: &CborValue) -> &[CborValue] {
-        let envelope = packet.as_array().expect("issued receipt envelope");
-        assert_eq!(envelope.len(), 3);
-        let payload = envelope[2].as_array().expect("issued receipt payload");
-        assert_eq!(payload[0].as_text(), Some("segment-originals"));
-        let finalization = payload[4].as_array().expect("issued finalization");
-        finalization[3]
-            .as_array()
-            .expect("issued captured value rows")
-    }
-    fn captured_rows_mut(packet: &mut CborValue) -> &mut Vec<CborValue> {
-        captured_rows(packet);
-        packet.as_array_mut().unwrap()[2].as_array_mut().unwrap()[4]
-            .as_array_mut()
-            .unwrap()[3]
-            .as_array_mut()
-            .unwrap()
-    }
-    let value_rows = captured_rows(&products);
-    let output_index = value_rows
-        .iter()
-        .position(|row| row.as_array().unwrap()[1].as_text() == Some(output_module))
-        .expect("the finalization packet carries the produced capture type");
-    let declaration = valid
-        .items()
-        .iter()
-        .position(|item| item.native().is_none())
-        .expect("future-output control requires a genuine declaration barrier");
-    assert!(declaration > index);
-    let future = valid.items()[declaration + 1..]
-        .iter()
-        .find(|item| {
-            item.native()
-                .and_then(|native| native.value_interface())
-                .is_some()
-        })
-        .expect("the later segment must produce a real reserved capture");
-    let future_module = future.native().unwrap().value_interface().unwrap().0;
-    let mut future_receipts = std::fs::read_dir(root)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|directory| {
-            directory
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .starts_with("segment-")
-        })
-        .filter_map(|directory| {
-            let path = directory.join("certified-products.cbor");
-            let bytes = std::fs::read(path).ok()?;
-            let packet: CborValue = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-            let payload = packet.as_array().unwrap()[2].as_array().unwrap();
-            if payload[0].as_text() != Some("segment-originals") {
-                return None;
-            }
-            captured_rows(&packet)
-                .iter()
-                .find(|row| row.as_array().unwrap()[1].as_text() == Some(future_module))
-                .cloned()
-                .map(|row| (directory, row))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        future_receipts.len(),
-        1,
-        "capture has one issued originals owner"
-    );
-    let (future_directory, future_row) = future_receipts.pop().unwrap();
-    let same_segment_future = valid.items()[index + 1..declaration]
-        .iter()
-        .find(|item| {
-            item.native()
-                .and_then(|native| native.value_interface())
-                .is_some()
-        })
-        .expect("the first segment must contain a later genuine capture");
-    let same_segment_module = same_segment_future
-        .native()
-        .unwrap()
-        .value_interface()
-        .unwrap()
-        .0;
-    assert_ne!(same_segment_module, output_module);
-    assert!(
-        value_rows
-            .iter()
-            .any(|row| row.as_array().unwrap()[1].as_text() == Some(same_segment_module)),
-        "shared originals privately capture later types once"
-    );
-    let first_view = valid.items()[index]
-        .native_products()
-        .unwrap()
-        .artifact_view();
-    assert!(
-        !first_view
-            .descriptors()
-            .iter()
-            .any(|entry| entry.owner.module == same_segment_module
-                || entry.owner.module == future_module),
-        "future types cannot enter the earlier item's selected view"
-    );
-    let future_item_path = root.join(format!(
-        "item-{}/certified-products.cbor",
-        same_segment_future.checked_item().index()
-    ));
-    let first_item_path = root.join(format!("item-{index}/certified-products.cbor"));
-    let first_delta = std::fs::read(&first_item_path).unwrap();
-    let future_delta = std::fs::read(future_item_path).unwrap();
-    assert_ne!(first_delta, future_delta, "actual item targets differ");
-    {
-        let restore_delta = RestoreReceipt {
-            path: first_item_path.clone(),
-            original: first_delta,
-        };
-        std::fs::write(&first_item_path, future_delta).unwrap();
-        assert!(
-            offer.admit_cell_program(root).is_err(),
-            "a later target delta cannot authorize this item"
-        );
-        drop(restore_delta);
-    }
-    assert_ne!(future_module, output_module);
-    assert!(
-        value_rows
-            .iter()
-            .all(|row| { row.as_array().unwrap()[1].as_text() != Some(future_module) }),
-        "the first segment must not already emit later capture evidence"
-    );
-    for mutation in 0..4 {
-        let restore_products = RestoreReceipt {
-            path: products_path.clone(),
-            original: products_original.clone(),
-        };
-        let mut changed = products.clone();
-        let rows = captured_rows_mut(&mut changed);
-        let mut restore_payload = None;
-        let mut foreign_payloads = None;
-        match mutation {
-            0 => {
-                rows.remove(output_index);
-            }
-            1 | 3 => {
-                let mut foreign = match mutation {
-                    3 => future_row.clone(),
-                    _ => rows[output_index].clone(),
-                };
-                let row = foreign.as_array_mut().unwrap();
-                if mutation == 1 {
-                    row[1] = CborValue::Text(format!("Tidepool.Session.Val.G{}", u64::MAX));
-                }
-                let parent = products_path.parent().unwrap();
-                let payload_parent: &Path = match mutation {
-                    3 => &future_directory,
-                    _ => parent,
-                };
-                let directory = tempfile::tempdir_in(parent).unwrap();
-                for (field, name) in [(2, "foreign.hi"), (5, "foreign.packages.cbor")] {
-                    let original = payload_parent.join(row[field].as_text().unwrap());
-                    std::fs::copy(original, directory.path().join(name)).unwrap();
-                    row[field] = CborValue::Text(format!(
-                        "{}/{name}",
-                        directory.path().file_name().unwrap().to_str().unwrap()
-                    ));
-                }
-                foreign_payloads = Some(directory);
-                rows.push(foreign);
-            }
-            2 => {
-                let row = rows[output_index].as_array_mut().unwrap();
-                let payload = products_path
-                    .parent()
-                    .unwrap()
-                    .join(row[2].as_text().unwrap());
-                let original = std::fs::read(&payload).unwrap();
-                let mut substituted = original.clone();
-                assert!(!substituted.is_empty());
-                substituted[0] ^= 1;
-                row[3] = CborValue::Text(
-                    Sha256::digest(&substituted)
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect(),
-                );
-                restore_payload = Some(RestoreReceipt {
-                    path: payload.clone(),
-                    original,
-                });
-                std::fs::write(payload, substituted).unwrap();
-            }
-            _ => unreachable!(),
-        }
-        // Keep the producer's strict owner order so each mutation reaches its
-        // type-evidence guard rather than the envelope ordering check.
-        rows.sort_by(|left, right| captured_owner(left).cmp(&captured_owner(right)));
-        assert!(rows
-            .windows(2)
-            .all(|pair| captured_owner(&pair[0]) < captured_owner(&pair[1])));
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&changed, &mut bytes).unwrap();
-        std::fs::write(&products_path, bytes).unwrap();
-        let refusal = offer.admit_cell_program(root).expect_err(
-            "missing, foreign, future or substituted produced type evidence must refuse",
-        );
-        assert!(
-            matches!(&refusal, CompileError::CompilerEvidence(error)
-            if matches!(error.as_ref(), CertificationError::Mismatch(_))),
-            "produced type mutation {mutation} must reach its evidence guard: {refusal:?}"
-        );
-        if let Some(expected) = match mutation {
-            0 => Some("produced value type output is missing"),
-            1 | 3 => Some("captured value was not selected by the request"),
-            2 => Some("produced value type output differs from its reserved capture"),
-            _ => None,
-        } {
-            assert!(
-                matches!(&refusal, CompileError::CompilerEvidence(error)
-                if matches!(error.as_ref(), CertificationError::Mismatch(message) if *message == expected)),
-                "produced type mutation {mutation} must reach its exact owner guard: {refusal:?}"
-            );
-        }
-        drop(restore_payload);
-        drop(restore_products);
-        drop(foreign_payloads);
-        offer
-            .admit_cell_program(root)
-            .expect("restored produced type evidence must admit independently");
-    }
-    for field in 0..4 {
-        let restore = RestoreReceipt {
-            path: path.clone(),
-            original: original.clone(),
-        };
-        let mut changed = receipt.clone();
-        let proof = changed.as_array_mut().unwrap()[8].as_array_mut().unwrap();
-        match field {
-            0 => proof[0] = CborValue::Text("0".repeat(64)),
-            1 | 2 => {
-                let identity = proof[field].as_array_mut().unwrap();
-                let occurrence = identity[2].as_text().unwrap();
-                identity[2] = CborValue::Text(format!("{occurrence}_substituted"));
-            }
-            3 => {
-                let ordinal = u32::try_from(proof[3].as_integer().unwrap()).unwrap();
-                proof[3] = CborValue::Integer((u64::from(ordinal ^ 1)).into());
-            }
-            _ => unreachable!(),
-        }
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&changed, &mut bytes).unwrap();
-        assert_ne!(bytes, original);
-        std::fs::write(&path, bytes).unwrap();
-        let refusal = offer
-            .admit_cell_program(root)
-            .expect_err("a substituted ITEM2 witness must refuse");
-        assert!(
-            matches!(&refusal, CompileError::CompilerEvidence(error)
-            if matches!(error.as_ref(), CertificationError::Mismatch(_))),
-            "field {field} must reach the typed native-entry seal guard: {refusal:?}"
-        );
-        drop(restore);
-        offer
-            .admit_cell_program(root)
-            .expect("restored actual worker bytes must admit independently");
-    }
-    let cell_path = root.join("checked-cell.cbor");
-    let observations_path = root.join("cell.cbor");
-    let cell_original = std::fs::read(&cell_path).unwrap();
-    let observations_original = std::fs::read(&observations_path).unwrap();
-    let cell: CborValue = ciborium::de::from_reader(cell_original.as_slice()).unwrap();
-    let observations: CborValue =
-        ciborium::de::from_reader(observations_original.as_slice()).unwrap();
-    assert_eq!(cell.as_array().unwrap().len(), 12);
-    assert_eq!(cell.as_array().unwrap()[1].as_text(), Some("4"));
-    let first_signature = cell.as_array().unwrap()[8]
-        .as_array()
-        .unwrap()
-        .first()
-        .expect("the real cell must publish descriptor-derived capture types")
-        .clone();
-    let payload = observations.as_array().unwrap()[2].as_array().unwrap();
-    assert!(
-        payload[1].as_array().unwrap().is_empty(),
-        "PROGRAM4 must not recreate synthetic pins"
-    );
-    let first_observation = payload[4]
-        .as_array()
-        .unwrap()
-        .first()
-        .expect("the actual final expression must publish its typed observation descriptor")
-        .clone();
-    for mutation in 0..9 {
-        let restore_cell = RestoreReceipt {
-            path: cell_path.clone(),
-            original: cell_original.clone(),
-        };
-        let restore_observations = RestoreReceipt {
-            path: observations_path.clone(),
-            original: observations_original.clone(),
-        };
-        let mut changed_cell = cell.clone();
-        let mut changed_observations = observations.clone();
-        match mutation {
-            0..=2 => {
-                let signatures = changed_cell.as_array_mut().unwrap()[8]
-                    .as_array_mut()
-                    .unwrap();
-                match mutation {
-                    0 => {
-                        signatures.remove(0);
-                    }
-                    1 => signatures.push(first_signature.clone()),
-                    2 => {
-                        let mut extra = first_signature.clone();
-                        extra.as_array_mut().unwrap()[1] =
-                            CborValue::Text("unowned:capture".into());
-                        signatures.push(extra);
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            3 => {
-                changed_observations.as_array_mut().unwrap()[2]
-                    .as_array_mut()
-                    .unwrap()[1]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(CborValue::Array(vec![
-                        CborValue::Text("obsolete_pin".into()),
-                        CborValue::Text("unused".into()),
-                        CborValue::Array(Vec::new()),
-                    ]));
-            }
-            4..=8 => {
-                let expressions = changed_observations.as_array_mut().unwrap()[2]
-                    .as_array_mut()
-                    .unwrap()[4]
-                    .as_array_mut()
-                    .unwrap();
-                match mutation {
-                    4 => {
-                        expressions.remove(0);
-                    }
-                    5 => expressions.push(first_observation.clone()),
-                    6 => {
-                        let mut extra = first_observation.clone();
-                        extra.as_array_mut().unwrap()[0] = CborValue::Text("unowned_entry".into());
-                        expressions.push(extra);
-                    }
-                    7 => {
-                        expressions[0].as_array_mut().unwrap()[0] = CborValue::Text(
-                            valid.items()[index]
-                                .native()
-                                .unwrap()
-                                .typed_entry()
-                                .unwrap()
-                                .entry()
-                                .occurrence
-                                .clone(),
-                        )
-                    }
-                    8 => {
-                        expressions[0].as_array_mut().unwrap()[1] =
-                            CborValue::Text("unknown_lift".into())
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            _ => unreachable!(),
-        }
-        let mut observation_bytes = Vec::new();
-        ciborium::ser::into_writer(&changed_observations, &mut observation_bytes).unwrap();
-        // Keep the ordinary byte seal consistent so observation corruption
-        // reaches the new typed metadata ownership guard.
-        changed_cell.as_array_mut().unwrap()[6] = CborValue::Text(
-            Sha256::digest(&observation_bytes)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
-        );
-        let mut cell_bytes = Vec::new();
-        ciborium::ser::into_writer(&changed_cell, &mut cell_bytes).unwrap();
-        assert!(cell_bytes != cell_original || observation_bytes != observations_original);
-        std::fs::write(&observations_path, observation_bytes).unwrap();
-        std::fs::write(&cell_path, cell_bytes).unwrap();
-        let refusal = offer
-            .admit_cell_program(root)
-            .expect_err("unowned typed metadata must refuse");
-        assert!(
-            matches!(&refusal, CompileError::CompilerEvidence(error)
-            if matches!(error.as_ref(), CertificationError::Mismatch("typed segment metadata"))),
-            "mutation {mutation} must reach the typed metadata ownership guard: {refusal:?}"
-        );
-        drop(restore_observations);
-        drop(restore_cell);
-        offer
-            .admit_cell_program(root)
-            .expect("restored genuine typed metadata must admit");
-    }
-    assert_eq!(
-        tidepool_extract_cmd::extract_spawn_count(),
-        before,
-        "receipt controls revalidate original outputs without another compiler request"
-    );
 }
 
 /// Pure original-type rendering recipe; it publishes no resident value interface.
@@ -8387,91 +7601,6 @@ mod tests {
             .expect("foreign receiver refusal must not claim the same settled prefix")
             .unwrap();
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn program_bound_names_refusal_preserves_empty_candidate_store() {
-        use crate::session::{
-            resident_cell_check_template, resident_workbench_templates, ModuleEnv,
-            PersistentSession, SessionLib, SourceImports,
-        };
-        use tidepool_codegen::scope::ScopeId;
-        use tidepool_repr::SessionId;
-        use tidepool_testing::effect_surface::TestEffectSurface;
-        tidepool_testing::eval_harness::require_extract();
-        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        let cache = tempfile::tempdir().unwrap();
-        let _cache = TestEnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("CheckedTiny.hs"),
-            include_str!("fixtures/checked-tiny-support.hs"),
-        )
-        .unwrap();
-        let effects = TestEffectSurface::minimal(&[]).unwrap();
-        let lib = SessionLib::open(
-            SessionId(1029),
-            root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap()
-        .with_validation_include(effects.include_paths().to_vec());
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let execution = Arc::new(session.begin_private_execution(public).unwrap());
-        let view = execution.view().unwrap();
-        let imports = view.turn_imports(&SourceImports::from_specs(["qualified CheckedTiny"]));
-        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
-        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-        let source = "let tiny = CheckedTiny.tinyValue";
-        let specification = CellRecipe::new(
-            source.to_string(),
-            template.clone(),
-            templates
-                .iter()
-                .map(|template| {
-                    (
-                        template.kind.wire_name().to_string(),
-                        template.source.clone(),
-                    )
-                })
-                .collect(),
-            view.injected_module_names(),
-        )
-        .unwrap();
-        let mut roots = effects.include_paths().to_vec();
-        roots.insert(0, root.path().to_owned());
-        let include = view.include_paths(&roots);
-        let plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                Arc::new(specification.clone()),
-                &include,
-                settlement,
-            )
-        })
-        .unwrap();
-        let admission = session
-            .admit_planned_cell_for_execution(
-                execution,
-                plan,
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [1; 32],
-                include,
-                None,
-            )
-            .unwrap();
-        let (_, program) = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted_inner(
-                admission.clone(),
-                CellProgramAudit::PublicationRefusal(cache.path()),
-                settlement,
-            )
-        })
-        .unwrap();
-        assert_eq!(program.items().len(), 1);
-        assert!(program.items()[0].native().is_some());
     }
 
     #[test]

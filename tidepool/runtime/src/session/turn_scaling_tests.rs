@@ -1312,7 +1312,11 @@ pub(super) fn assert_compiler_work(
         } else {
             let declaration = item.checked_item().planned_declaration().unwrap();
             let owner = declaration.product().owner();
-            (owner.unit.clone(), owner.module.clone(), "program_item")
+            (
+                owner.unit.clone(),
+                owner.module.clone(),
+                "world_original_declaration",
+            )
         };
         if let Some(previous) = owners.insert((owner.0, owner.1), owner.2) {
             assert_eq!(previous, owner.2);
@@ -1394,26 +1398,25 @@ pub(super) fn assert_compiler_work(
             })
         );
     }
-    if let Some(shape) = expected_shape {
-        let count = shape.item_count();
-        for (name, expected) in [
-            ("typed_segment_kept_entries", count),
-            ("typed_segment_generated_instance_retries", 0),
-        ] {
-            let prefix = format!("tidepool-count name={name} count=");
-            let counts = stderr
-                .lines()
-                .filter_map(|line| line.strip_prefix(&prefix))
-                .map(|rest| {
-                    rest.split_whitespace()
-                        .next()
-                        .unwrap()
-                        .parse::<usize>()
-                        .unwrap()
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(counts, [expected], "successful segment counter: {stderr}");
-        }
+    for (unit, module) in owners.keys() {
+        let prefix =
+            format!("tidepool-count name=world.cell.source_frontends.{unit}:{module} count=");
+        let counts = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix(&prefix))
+            .map(|rest| {
+                rest.split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            counts,
+            [1],
+            "one actual World frontend for {unit}:{module}: {stderr}"
+        );
     }
 }
 
