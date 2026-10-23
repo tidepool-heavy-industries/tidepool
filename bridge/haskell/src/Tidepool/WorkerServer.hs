@@ -7,7 +7,7 @@ module Tidepool.WorkerServer
   , NativeDemandExchange, NativeDemandReply(..), exchangeNativeDemand, requireNativeDemandOwner
   ) where
 
-import Control.Exception (SomeException, mask, throwIO, try, finally, onException)
+import Control.Exception (Exception, SomeException, mask, throwIO, try, finally, onException)
 import Control.Concurrent (ThreadId, myThreadId)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef, atomicModifyIORef')
 import Control.Monad (replicateM, unless, when, forM_)
@@ -44,6 +44,13 @@ data NativeDemandExchange = NativeDemandExchange !BS.ByteString !ThreadId !Handl
 
 data NativeDemandReply = NativeResolved BS.ByteString | NativeRefused BS.ByteString
 
+data NativeDemandAccessFailure
+  = NativeDemandClosed
+  | NativeDemandWrongThread !ThreadId !ThreadId
+  deriving (Show)
+
+instance Exception NativeDemandAccessFailure
+
 requireNativeDemandOwner :: NativeDemandExchange -> BS.ByteString -> BS.ByteString -> BS.ByteString -> IO ()
 requireNativeDemandOwner exchange@(NativeDemandExchange header _ _ _ _ _) admission world inputs = do
   requireNativeExchangeOpen exchange
@@ -55,7 +62,8 @@ requireNativeExchangeOpen :: NativeDemandExchange -> IO ()
 requireNativeExchangeOpen (NativeDemandExchange _ issuing _ _ open _) = do
   actual <- myThreadId
   active <- readIORef open
-  unless (active && actual == issuing) (fail "worker: native demand outside its active handler")
+  unless active (throwIO NativeDemandClosed)
+  unless (actual == issuing) (throwIO (NativeDemandWrongThread issuing actual))
 
 exchangeNativeDemand :: NativeDemandExchange -> Word64 -> BS.ByteString -> IO NativeDemandReply
 exchangeNativeDemand exchange@(NativeDemandExchange header _ input protocol _ state) stage payload = mask $ \restore -> do
