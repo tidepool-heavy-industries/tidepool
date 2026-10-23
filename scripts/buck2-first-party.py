@@ -1079,6 +1079,8 @@ def compile_fail_cases(package, library):
     directory = pathlib.Path(package["manifest_path"]).parent
     extra_dependencies = {
         "checked_cell_request_digest_is_issued": (),
+        "retained_context_is_not_completed_execution": (),
+        "original_execution_census_is_private": (),
         "checked_cell_request_inventory_is_issued": (),
         "native_group_issuer_is_not_artifact": (),
         "native_group_issuer_fields_are_private": (),

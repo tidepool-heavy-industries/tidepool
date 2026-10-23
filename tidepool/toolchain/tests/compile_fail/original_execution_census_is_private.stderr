@@ -1,0 +1,2 @@
+error[E0616]: field `census` of struct `OriginalExecutionEvidence` is private
+ --> tests/compile_fail/original_execution_census_is_private.rs:3:21
