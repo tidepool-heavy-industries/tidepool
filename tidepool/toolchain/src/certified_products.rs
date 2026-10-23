@@ -31713,7 +31713,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        let original_graph = original.recovery_products[0]
+        let original_graph = original.data().recovery_products[0]
             .execution_source()
             .unwrap()
             .clone();
@@ -31724,7 +31724,7 @@ pub(crate) mod tests {
             parsed,
             source,
             version_origin,
-            &original.recovery_products,
+            &original.data().recovery_products,
         );
         publish_prepared(publication).unwrap();
         let scratch = root.path().join("offer");
@@ -31734,7 +31734,10 @@ pub(crate) mod tests {
             .get(&(accepted.unit.clone(), accepted.module.clone()))
             .unwrap();
         let selected_owner = bundle.owner.clone();
-        assert_eq!(selected_owner, *original.recovery_products[0].owner());
+        assert_eq!(
+            selected_owner,
+            *original.data().recovery_products[0].owner()
+        );
         assert_eq!(
             bundle.original_execution.as_ref().unwrap().graph.digest(),
             original_graph.digest()
@@ -31768,7 +31771,7 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
-            let product = &fresh.recovery_products[0];
+            let product = &fresh.data().recovery_products[0];
             assert_eq!(product.owner(), &bundle.owner);
             let graph = product.execution_source().unwrap();
             assert_ne!(graph.digest(), original_graph.digest());
@@ -31796,11 +31799,13 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
-            assert_eq!(fresh.recovery_products[0].owner(), &bundle.owner);
-            assert!(fresh.recovery_products[0].execution_source().is_none());
+            assert_eq!(fresh.data().recovery_products[0].owner(), &bundle.owner);
+            assert!(fresh.data().recovery_products[0]
+                .execution_source()
+                .is_none());
             assert_eq!(
                 home_execution_source_digest_with_validation(
-                    fresh.recovery_products[0].certification_bytes(),
+                    fresh.data().recovery_products[0].certification_bytes(),
                     &bundle.owner,
                     &mut PackageInterfaceValidation::default(),
                 )
@@ -31897,16 +31902,22 @@ pub(crate) mod tests {
             Err(CertificationError::StaleEvidence)
         ));
         let restored_package = certify_cached(&cached_receipt).unwrap();
-        assert_eq!(restored_package.recovery_products[0].owner(), &bundle.owner);
         assert_eq!(
-            restored_package.recovery_products[0].package_imports_bytes(),
+            restored_package.data().recovery_products[0].owner(),
+            &bundle.owner
+        );
+        assert_eq!(
+            restored_package.data().recovery_products[0].package_imports_bytes(),
             bundle.package_imports_bytes
         );
         let mut stale_cached_receipt = cached_receipt.clone();
         stale_cached_receipt.modules[0].dependency_witness_sha256 = [0; 32];
         assert!(certify_cached(&stale_cached_receipt).is_err());
-        let restored = &cached.recovery_products[0];
-        assert_eq!(restored.owner(), original.recovery_products[0].owner());
+        let restored = &cached.data().recovery_products[0];
+        assert_eq!(
+            restored.owner(),
+            original.data().recovery_products[0].owner()
+        );
         assert_eq!(
             restored.execution_source().unwrap().bytes(),
             original_graph.bytes()
@@ -32127,6 +32138,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             assert!(native_only
+                .data()
                 .recovery_products
                 .iter()
                 .all(|product| product.execution_source().is_none()));
@@ -34360,14 +34372,20 @@ None,
                         .collect::<Vec<_>>(),
                     vec![&owner]
                 );
-                assert_eq!(cached.groups.len(), 2);
-                for (group, raw) in cached.groups.iter().zip(&parsed.products()[0].groups) {
+                assert_eq!(cached.data().groups.len(), 2);
+                for (group, raw) in cached
+                    .data()
+                    .groups
+                    .iter()
+                    .zip(&parsed.products()[0].groups)
+                {
                     assert_eq!(group.owner(), &owner);
                     assert_eq!(group.group(), raw);
                     assert!(group.imports().is_empty());
                 }
                 assert_eq!(
                     cached
+                        .data()
                         .recovery_products
                         .iter()
                         .map(|product| product.owner().clone())
@@ -34379,6 +34397,7 @@ None,
                 );
                 for old in &prior {
                     let retained = cached
+                        .data()
                         .recovery_products
                         .iter()
                         .find(|product| product.owner() == old.owner())

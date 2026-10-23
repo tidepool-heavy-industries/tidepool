@@ -4332,7 +4332,7 @@ fn seal_turn_outputs_with_validation(
     let package_selection = match (segment_originals, item_selection.as_ref()) {
         (Some(_), Some(selection)) => selection.clone(),
         (None, None) => {
-            physical_native_output.ordinary_package_selection(target, program, &certified)?
+            physical_native_output.ordinary_package_selection(target, program, certified.data())?
         }
         _ => {
             return Err(CompileError::ExtractFailed(
