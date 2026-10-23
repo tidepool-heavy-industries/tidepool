@@ -30726,7 +30726,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn source_selected_canonical_receipt_admits_support_without_native_products() {
         let directory = tempfile::tempdir().unwrap();
-        let (_original_request, native, receipt) =
+        let (original_request, native, receipt) =
             source_selected_receipt(directory.path(), true, None);
         let originals = native
             .artifact_view()
@@ -30766,7 +30766,13 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 &directory.path().join("canonical-request"),
                 SOURCE_TEST_PRODUCER,
             )
-            .unwrap();
+            .unwrap()
+            .with_source_search_context(
+                original_request
+                    .source_search_include
+                    .as_deref()
+                    .expect("source fixture retains its actual include context"),
+            );
         let mut wire = read_receipt(&receipt);
         wire.as_array_mut().unwrap()[2] = text(&request.request_sha256);
         wire.as_array_mut().unwrap()[3] = text(hex(&request.semantic_sha256));
