@@ -4878,11 +4878,14 @@ impl RequestCompilerInputs {
             .rows()
             .any(|row| changed_native_owners.contains(&row.original.descriptor.owner))
         {
-            NativeInputSelection::receive(
+            // TYPE admission only adds exact canonical bindings. The support's
+            // closed permission rows and their CompilerRole/PrivateInput
+            // classifications survive unchanged; reindex their direct choices.
+            NativeInputSelection::from_normalized_rows(
                 support.projection(),
                 &metadata,
                 support.artifacts(),
-                support.native_availability(),
+                support.native_availability().clone(),
                 support.native_offers(),
             )?
         } else {
