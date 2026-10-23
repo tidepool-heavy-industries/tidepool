@@ -3316,7 +3316,7 @@ mod authored_tests {
             let view = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .expect("independent join scope requires the complete native input closure");
-            let branch = ExactDeclarationContext::from_authenticated_execution(
+            let branch = ExactDeclarationContext::retained_execution_fixture(
                 producer,
                 &view,
                 context.compiler_input_projection().clone(),

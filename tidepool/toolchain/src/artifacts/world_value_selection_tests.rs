@@ -336,10 +336,10 @@ fn real_cached_home_world_item_admits_its_package_roots() {
         unit: "main".into(),
         module: "CachedPackageWorldHome".into(),
     };
-    // This fixture needs the issued native/instance support for a protected
-    // compiler import. It does not publish authored source or grant lexical scope.
+    // Borrow the actual output's retained compiler inputs for a protected
+    // import. Retained facts confer no completed-output or source authority.
     let primary = Arc::new(
-        crate::declaration_context::ExactDeclarationContext::from_authenticated_execution_support(
+        crate::declaration_context::ExactDeclarationContext::retained_execution_support_fixture(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                 &compiled_home
                     .producer_identity
