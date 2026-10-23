@@ -2225,6 +2225,8 @@ impl<'a> NativeDependencySupport<'a> {
             })
     }
 
+    /// Candidate issuances for this exact artifact and ordinal. Their retained
+    /// dependency closures stay with the corresponding issued offers.
     pub(crate) fn groups(
         &self,
     ) -> impl Iterator<Item = crate::artifact_inventory::NativeGroupBinding> + '_ {
