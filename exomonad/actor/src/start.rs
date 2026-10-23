@@ -1189,6 +1189,71 @@ mod tests {
         let public_scope = source_owner.scope();
         descendant.placement.lexical_scope = public_scope;
         let selected_projections = descendant.source_imports.declaration_projections().unwrap();
+        // Enter the same actor boundary used before initial World birth. A
+        // fenced prerequisite must refuse before selecting any facade or
+        // advancing the target scope's compiler-view epoch.
+        {
+            use crate::resident_workbench::generation_admission::{
+                BootstrapWorld, SourceDependency,
+            };
+            let prerequisite = grandchild.mint_notebook_scope_with_lease(None).unwrap();
+            let probe = grandchild
+                .mint_notebook_scope_with_lease(Some(prerequisite.clone()))
+                .unwrap();
+            let world = BootstrapWorld::new(None);
+            world.adopt_scope(probe.clone()).unwrap();
+            let mut captured = descendant.clone();
+            captured.placement.lexical_scope = probe.scope();
+            captured.source_dependency = SourceDependency::World(world);
+            let before = grandchild
+                .public_visibility_snapshot_in(probe.scope())
+                .unwrap();
+            let before_view = grandchild.compile_view_in(probe.scope()).unwrap();
+            assert!(before_view.exact_declaration_context().is_none());
+            assert!(before_view.persistent_imports().specs().is_empty());
+            let requests = tidepool_extract_cmd::extract_spawn_count();
+            let fence = prerequisite.source_admission().fence().unwrap();
+            let refused =
+                crate::resident_workbench::adopt_initial_actor_facades(&mut grandchild, &captured);
+            assert!(matches!(
+                refused,
+                Err(crate::ResidentActorWorkbenchError::SourceAdmission(
+                    tidepool_runtime::session::SourceAdmissionError::Closed { .. }
+                ))
+            ));
+            assert_eq!(
+                grandchild
+                    .public_visibility_snapshot_in(probe.scope())
+                    .unwrap(),
+                before
+            );
+            let refused_view = grandchild.compile_view_in(probe.scope()).unwrap();
+            assert!(before_view.is_current_for(&refused_view));
+            assert!(refused_view.exact_declaration_context().is_none());
+            assert!(refused_view.persistent_imports().specs().is_empty());
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+            fence.reopen(prerequisite.original_source()).unwrap();
+            crate::resident_workbench::adopt_initial_actor_facades(&mut grandchild, &captured)
+                .unwrap();
+            let after = grandchild
+                .public_visibility_snapshot_in(probe.scope())
+                .unwrap();
+            assert_eq!(after.epoch, before.epoch + 1);
+            assert!(grandchild
+                .compile_view_in(probe.scope())
+                .unwrap()
+                .exact_declaration_context()
+                .is_some());
+            crate::resident_workbench::adopt_initial_actor_facades(&mut grandchild, &captured)
+                .unwrap();
+            assert_eq!(
+                grandchild
+                    .public_visibility_snapshot_in(probe.scope())
+                    .unwrap(),
+                after
+            );
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+        }
         let initialized = grandchild
             .with_source_compiler_transaction(
                 source_owner.original_source().clone(),

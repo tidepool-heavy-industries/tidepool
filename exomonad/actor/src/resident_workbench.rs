@@ -12641,7 +12641,7 @@ where
     }
 }
 
-fn adopt_initial_actor_facades<H, O>(
+pub(crate) fn adopt_initial_actor_facades<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
 ) -> Result<(), ResidentActorWorkbenchError>
@@ -12651,8 +12651,11 @@ where
 {
     let facades = context.source_imports.declaration_projections()?;
     if !facades.is_empty() {
-        session
-            .adopt_initial_notebook_facades(context.placement.lexical_scope, facades)
+        context
+            .source_dependency()
+            .with_open_admission(|| {
+                session.adopt_initial_notebook_facades(context.placement.lexical_scope, facades)
+            })?
             .map_err(ResidentError::Session)?;
     }
     Ok(())

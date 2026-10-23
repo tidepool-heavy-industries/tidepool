@@ -699,6 +699,7 @@ mod tests {
             .current_exact_context_in(replacement.scope())
             .is_none());
 
+        let reopened_context = reopened.lib().current_exact_context_in(restored).unwrap();
         let source = include_str!("fixtures/inherited-facade-subset-consumer.hs")
             .replace("DECLARATION_FACADE_MODULE", narrowed.module_name());
         let invocation = CompileInvocation {
@@ -719,7 +720,7 @@ mod tests {
                             crate::prepare_runtime_targets_in_context(
                                 owner,
                                 &invocation,
-                                Arc::clone(narrowed.context()),
+                                Arc::clone(&reopened_context),
                                 |_, _, _| {},
                                 report,
                             )
@@ -759,7 +760,7 @@ mod tests {
                                     source: &refused_source,
                                     ..invocation
                                 },
-                                Arc::clone(narrowed.context()),
+                                Arc::clone(&reopened_context),
                                 |_, _, _| {},
                                 report,
                             )
