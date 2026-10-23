@@ -18,7 +18,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Bits (xor)
-import Data.List (sortOn, isInfixOf, isPrefixOf, nub, permutations, stripPrefix, tails)
+import Data.List (sort, sortOn, isInfixOf, isPrefixOf, isSuffixOf, nub, permutations, stripPrefix, tails)
 import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -156,7 +156,8 @@ import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor,
 import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse, retainTypeInterfaceCaptures
   , newPreparedOriginalInterfaceArtifactsWithPrior, writeCertifiedSegmentProducts, withStagedOriginalBindings, StagedProductFailure(..)
   , bindWorldStageInputs, withWorldStageCompilation, newPreparedWorldInterfaceArtifacts
-  , withWorldStageInputs, stageWorldProducts, pendingWorldNative, completeWorldProducts)
+  , withWorldStageInputs, stageWorldProducts, pendingWorldNative, completeWorldProducts
+  , stagedOriginalOutputFiles, publishStagedOriginalProducts, CertifiedOriginalProducts, certifiedOriginalProducts)
 import Tidepool.ExecutionProjection (ProjectionContext(..))
 import Tidepool.PreparedStg (newPreparedBodyCache, pmModule, pmIdentityResolver)
 import Tidepool.DiagJson (InputRejection(..))
@@ -2532,6 +2533,45 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                               pendingProducts <- stageWorldProducts originals captureDirectory inputs
                                 (withWorldStageInputs (Just inputs) rawProducts)
                               let staged = pendingWorldNative pendingProducts
+                                  certificates = [path | (path,_) <- stagedOriginalOutputFiles staged
+                                    , ".finalized.certificate.cbor" `isSuffixOf` path]
+                                  receiptDirectory = work </> ".exact-compilations"
+                                  receiptSnapshot = do
+                                    entries <- listDirectory work
+                                    if ".exact-compilations" `elem` entries
+                                      then do
+                                        names <- sort <$> listDirectory receiptDirectory
+                                        forM names $ \entry -> do
+                                          bytes <- BS.readFile (receiptDirectory </> entry </> "receipt.cbor")
+                                          pure (entry,bytes)
+                                      else pure []
+                              when (null certificates)
+                                (fail "World stage lacks a genuine canonical certificate corruption control")
+                              beforeCertificates <- listDirectory captureDirectory
+                              when ("certified-products.cbor" `elem` beforeCertificates)
+                                (fail "World stage published its certificate before completion")
+                              forM_ certificates $ \path ->
+                                bracket (BS.readFile path) (BS.writeFile path) $ \owned ->
+                                  forM_ [Nothing,Just (BS.singleton 0)] $ \replacement -> do
+                                    before <- receiptSnapshot
+                                    case replacement of
+                                      Nothing -> removeFile path
+                                      Just bytes -> BS.writeFile path bytes
+                                    (refused,diagnostics) <- captureDiagnostics
+                                      (try (publishStagedOriginalProducts prepared staged)
+                                        :: IO (Either IOException CertifiedOriginalProducts))
+                                    after <- receiptSnapshot
+                                    files <- listDirectory captureDirectory
+                                    unless (case refused of
+                                        Left failure -> before == after
+                                          && "certified-products.cbor" `notElem` files
+                                          && case replacement of
+                                            Nothing -> path `isInfixOf` show failure
+                                            Just bytes -> "fresh exact output changed before publication" `isInfixOf` show failure
+                                              && length (counterValues ("hash_bytes.observed_file." ++ digest bytes) diagnostics) == 1
+                                        Right _ -> False)
+                                      (fail "corrupt World canonical output published authority or missed its actual observation")
+                                    BS.writeFile path owned
                               selected <- withStagedOriginalBindings prepared (Just staged) projection
                               repeated <- withStagedOriginalBindings prepared (Just staged) selected
                               unless (projectionCurrentOriginals selected == projectionCurrentOriginals repeated)
@@ -2563,6 +2603,12 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                               -- Product bytes alone do not advance the compiler cursor.
                               withCompiledWorldStage stage (\_ _ -> pure ())
                               completedProducts <- completeWorldProducts pendingProducts Set.empty [] []
+                              published <- publishStagedOriginalProducts prepared staged
+                              publishedBytes <- BS.readFile (captureDirectory </> "certified-products.cbor")
+                              unless (not (null (certifiedOriginalProducts published))
+                                  && lookup (captureDirectory </> "certified-products.cbor")
+                                    (stagedOriginalOutputFiles staged) == Just (digest publishedBytes))
+                                (fail "restored World stage did not publish its genuine original certificate")
                               stale <- try (withCompiledWorldStage stage (\_ _ -> pure ()))
                                 :: IO (Either InputRejection ())
                               repeatedFinish <- try (void (completeWorldProducts pendingProducts Set.empty [] [])) :: IO (Either InputRejection ())
