@@ -36,7 +36,6 @@ pub use execution_evidence::{
 mod published_source;
 mod source_admission;
 mod source_dependency;
-pub(crate) use source_dependency::SourceDependencyBasis;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 use source_admission::ReceiptSourceClaims;
@@ -46,6 +45,7 @@ pub(crate) use source_admission::{
 pub use source_admission::{
     SourceAdmissionBoundary, SourceAdmissionFailure, SourceAdmissionRefusal, SourceLexicalClaim,
 };
+pub(crate) use source_dependency::SourceDependencyBasis;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExactImportWitnessRefusal {
@@ -12114,6 +12114,36 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
 
 /// One move-only compiler prefix. Runtime settlement authority remains outside
 /// this owner; it carries only actual input and source-output evidence.
+#[derive(Debug, thiserror::Error)]
+pub enum WorldProgramCursorFailure {
+    #[error("World prefix belongs to another request")]
+    ForeignRequest,
+    #[error("World prefix has another accounting owner")]
+    ForeignOperation,
+    #[error("World stage {actual} lacks its immediate predecessor {expected}")]
+    StageOrder { expected: usize, actual: usize },
+    #[error("World stage {stage} output does not match reserved item {item}")]
+    WrongItemOutput { stage: usize, item: usize },
+    #[error("World executable stage {stage} sealed {actual} of {expected} items")]
+    IncompleteStage {
+        stage: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("World program sealed {actual} of {expected} stages")]
+    IncompleteProgram { expected: usize, actual: usize },
+    #[error("World original stage has {actual} items; expected one")]
+    OriginalItemCount { actual: usize },
+}
+
+impl From<WorldProgramCursorFailure> for CompileError {
+    fn from(error: WorldProgramCursorFailure) -> Self {
+        compiler_evidence_failure(
+            crate::certified_products::CertificationError::WorldProgramCursor(error),
+        )
+    }
+}
+
 pub(crate) struct WorldProgramContinuation {
     request: Arc<crate::compiler_world::native_demand::WorldNativeDemandCompletion>,
     primary: WorldPrimaryInputs,
@@ -12176,14 +12206,62 @@ impl WorldProgramContinuation {
         }
     }
 
+    pub(crate) fn open_next(
+        self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+        validation: &mut PackageInterfaceValidation,
+        #[cfg(test)] observe: &mut dyn FnMut(&mut DecodedWorldSourceReceipt<'_>),
+    ) -> Result<PendingWorldStage, CompileError> {
+        #[allow(unused_mut)]
+        let mut decoded = decode_world_source_receipt(program, self.next_stage)?;
+        #[cfg(test)]
+        observe(&mut decoded);
+        self.open_decoded(decoded, produced, validation)
+    }
+
+    fn open_decoded(
+        self,
+        decoded: DecodedWorldSourceReceipt<'_>,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<PendingWorldStage, CompileError> {
+        let segment = decoded.issue_segment_originals(None, produced, validation, self)?;
+        Ok(if segment.stage.identity().original_owner().is_some() {
+            PendingWorldStage::Original(PendingWorldOriginalStage { segment })
+        } else {
+            PendingWorldStage::Executable(PendingWorldExecutableStage {
+                segment,
+                items: Vec::new(),
+            })
+        })
+    }
+
+    pub(crate) fn complete(
+        self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+    ) -> Result<(), CompileError> {
+        self.ensure_program(program)?;
+        if self.next_stage != program.stages().len() {
+            return Err(WorldProgramCursorFailure::IncompleteProgram {
+                expected: program.stages().len(),
+                actual: self.next_stage,
+            }
+            .into());
+        }
+        crate::host_work::checkpoint()?;
+        Ok(())
+    }
+
     fn ensure_program(
         &self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
     ) -> Result<(), CompileError> {
-        if !Arc::ptr_eq(&self.request, program.native_demand_completion())
-            || !Arc::ptr_eq(self.request.operation(), &program.validation().inventory)
-        {
-            return Err(failure("World native prefix belongs to another request"));
+        if !Arc::ptr_eq(&self.request, program.native_demand_completion()) {
+            return Err(WorldProgramCursorFailure::ForeignRequest.into());
+        }
+        if !Arc::ptr_eq(self.request.operation(), &program.validation().inventory) {
+            return Err(WorldProgramCursorFailure::ForeignOperation.into());
         }
         Ok(())
     }
@@ -12202,9 +12280,11 @@ impl WorldProgramContinuation {
             .map_err(|error| compiler_evidence_failure(error.into()))?;
         let initial = Arc::new(initial);
         if self.next_stage != initial.stage().index() {
-            return Err(failure(
-                "World stage inputs lack their actual immediate predecessor",
-            ));
+            return Err(WorldProgramCursorFailure::StageOrder {
+                expected: self.next_stage,
+                actual: initial.stage().index(),
+            }
+            .into());
         }
         let prior = PriorProgramSourceWitness {
             support: self.program.program_support.as_ref(),
@@ -12352,7 +12432,7 @@ impl WorldProgramSegment {
         &self.package_products
     }
 
-    pub(crate) fn planned_declaration(
+    fn planned_declaration(
         &mut self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
         stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
@@ -12422,7 +12502,7 @@ impl WorldProgramSegment {
             self.originals.operation(),
             self.continuation.request.operation(),
         ) {
-            return Err(failure("World native prefix has another accounting owner"));
+            return Err(WorldProgramCursorFailure::ForeignOperation.into());
         }
         match self.native_prefix() {
             Some(prior) => self.artifacts().with_prior_world_target(
@@ -12442,7 +12522,7 @@ impl WorldProgramSegment {
             facts: self.inputs.program_facts(&self.continuation.program),
         }
     }
-    pub(crate) fn admit_program_support(
+    fn admit_program_support(
         &mut self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
         output: &IssuedOriginalOutput,
@@ -12464,7 +12544,7 @@ impl WorldProgramSegment {
             self.originals.operation(),
             self.continuation.request.operation(),
         ) {
-            return Err(failure("World native prefix has another accounting owner"));
+            return Err(WorldProgramCursorFailure::ForeignOperation.into());
         }
         let mut continuation = self.continuation.pending_successor();
         let fragment = crate::artifact_inventory::CompilerSourceSupport::world_stage_fragment(
@@ -12579,19 +12659,7 @@ impl WorldProgramSegment {
         Ok(continuation)
     }
 
-    #[cfg(test)]
-    pub(crate) fn admit_value_interface(
-        &mut self,
-        value: Arc<CertifiedValueInterface>,
-    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        self.continuation.primary = self
-            .continuation
-            .primary
-            .with_program_value_interface(value)?;
-        Ok(Arc::clone(self.continuation.primary.context()))
-    }
-
-    pub(crate) fn admit_native_item(
+    fn admit_native_item(
         &mut self,
         program: &crate::compiler_world::CheckedWorldCellProgram,
         products: &Arc<crate::artifacts::SealedTurnProducts>,
@@ -12614,16 +12682,205 @@ impl WorldProgramSegment {
         Ok(Arc::clone(self.continuation.primary.context()))
     }
 
-    pub(crate) fn finish(mut self) -> (WorldProgramContinuation, WorldStageSourceAdmission) {
+    fn seal(
+        mut self,
+        items: SealedWorldStageItems,
+    ) -> Result<(WorldProgramContinuation, SealedWorldStage), CompileError> {
+        crate::host_work::checkpoint()?;
         self.continuation.next_stage = self.stage.index() + 1;
-        (
+        Ok((
             self.continuation,
-            WorldStageSourceAdmission {
-                source: self.source,
-                text: self.source_text,
-                aliases: self.aliases,
+            SealedWorldStage {
+                stage: self.stage,
+                source: WorldStageSourceAdmission {
+                    source: self.source,
+                    text: self.source_text,
+                    aliases: self.aliases,
+                },
+                items,
             },
-        )
+        ))
+    }
+}
+
+pub(crate) enum PendingWorldStage {
+    Original(PendingWorldOriginalStage),
+    Executable(PendingWorldExecutableStage),
+}
+
+impl PendingWorldStage {
+    pub(crate) fn segment(&self) -> &WorldProgramSegment {
+        match self {
+            Self::Original(stage) => stage.segment(),
+            Self::Executable(stage) => stage.segment(),
+        }
+    }
+}
+
+pub(crate) struct PendingWorldOriginalStage {
+    segment: WorldProgramSegment,
+}
+
+impl PendingWorldOriginalStage {
+    pub(crate) fn segment(&self) -> &WorldProgramSegment {
+        &self.segment
+    }
+
+    pub(crate) fn seal(
+        mut self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+    ) -> Result<(WorldProgramContinuation, SealedWorldStage), CompileError> {
+        let [ordinal] = self.segment.stage.ordinals() else {
+            return Err(WorldProgramCursorFailure::OriginalItemCount {
+                actual: self.segment.stage.ordinals().len(),
+            }
+            .into());
+        };
+        let ordinal = *ordinal;
+        let stage = Arc::clone(&self.segment.stage);
+        let planned = self.segment.planned_declaration(program, &stage)?;
+        let output = IssuedOriginalOutput::from_segment_originals(&self.segment.originals)?;
+        let context = self
+            .segment
+            .admit_program_support(program, &output, produced)?;
+        let context = crate::checked_cell::CellProgramItemContext {
+            context,
+            source_lexical: self.segment.source_lexical().to_vec(),
+        };
+        self.segment.seal(SealedWorldStageItems::Original {
+            ordinal,
+            planned,
+            context,
+        })
+    }
+}
+
+pub(crate) struct PendingWorldExecutableStage {
+    segment: WorldProgramSegment,
+    items: Vec<SealedWorldExecutableItem>,
+}
+
+impl PendingWorldExecutableStage {
+    pub(crate) fn segment(&self) -> &WorldProgramSegment {
+        &self.segment
+    }
+
+    pub(crate) fn admit_item(
+        &mut self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        output: crate::artifacts::ProgramNativeOutput,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+    ) -> Result<(), CompileError> {
+        self.segment.continuation.ensure_program(program)?;
+        let ordinal = self
+            .segment
+            .stage
+            .ordinals()
+            .get(self.items.len())
+            .copied()
+            .ok_or_else(|| {
+                CompileError::from(WorldProgramCursorFailure::IncompleteStage {
+                    stage: self.segment.stage.index(),
+                    expected: self.segment.stage.ordinals().len(),
+                    actual: self.items.len() + 1,
+                })
+            })?;
+        let products = output.sealed_products_shared()?;
+        if products.typed_entry().is_none_or(|entry| {
+            !entry.matches_world_item(
+                program,
+                ordinal,
+                output.target(),
+                &self.segment.source.generated_source_owner(),
+            )
+        }) {
+            return Err(WorldProgramCursorFailure::WrongItemOutput {
+                stage: self.segment.stage.index(),
+                item: ordinal,
+            }
+            .into());
+        }
+        let item = program
+            .item(ordinal)
+            .ok_or_else(|| failure("World executable lacks its reserved item"))?;
+        let produced = produced.for_item(ordinal)?;
+        let value = if item.binders().is_empty() {
+            None
+        } else {
+            Some(produced.current_interface(item.generation())?.clone())
+        };
+        let context = self
+            .segment
+            .admit_native_item(program, products, &produced, value)?;
+        let context = crate::checked_cell::CellProgramItemContext {
+            context,
+            source_lexical: self.segment.source_lexical().to_vec(),
+        };
+        self.items.push(SealedWorldExecutableItem {
+            ordinal,
+            output,
+            context,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn seal(self) -> Result<(WorldProgramContinuation, SealedWorldStage), CompileError> {
+        if self.items.len() != self.segment.stage.ordinals().len() {
+            return Err(WorldProgramCursorFailure::IncompleteStage {
+                stage: self.segment.stage.index(),
+                expected: self.segment.stage.ordinals().len(),
+                actual: self.items.len(),
+            }
+            .into());
+        }
+        self.segment
+            .seal(SealedWorldStageItems::Executable(self.items))
+    }
+}
+
+pub(crate) struct SealedWorldStage {
+    stage: Arc<crate::compiler_world::CheckedWorldCellStage>,
+    source: WorldStageSourceAdmission,
+    items: SealedWorldStageItems,
+}
+
+impl SealedWorldStage {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Arc<crate::compiler_world::CheckedWorldCellStage>,
+        WorldStageSourceAdmission,
+        SealedWorldStageItems,
+    ) {
+        (self.stage, self.source, self.items)
+    }
+}
+
+pub(crate) enum SealedWorldStageItems {
+    Original {
+        ordinal: usize,
+        planned: crate::checked_cell::PlannedCheckedDeclaration,
+        context: crate::checked_cell::CellProgramItemContext,
+    },
+    Executable(Vec<SealedWorldExecutableItem>),
+}
+
+pub(crate) struct SealedWorldExecutableItem {
+    ordinal: usize,
+    output: crate::artifacts::ProgramNativeOutput,
+    context: crate::checked_cell::CellProgramItemContext,
+}
+
+impl SealedWorldExecutableItem {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        usize,
+        crate::artifacts::ProgramNativeOutput,
+        crate::checked_cell::CellProgramItemContext,
+    ) {
+        (self.ordinal, self.output, self.context)
     }
 }
 
@@ -12735,7 +12992,7 @@ pub(crate) fn assert_completed_nominal_program_support(
 
 #[cfg(test)]
 pub(crate) fn assert_world_repeated_source_refusals(
-    program: &crate::compiler_world::CheckedWorldCellProgram,
+    program: &Arc<crate::compiler_world::CheckedWorldCellProgram>,
     prior: &crate::artifact_inventory::CertifiedTargetNativeInputs,
 ) {
     use sha2::Digest;
@@ -12769,8 +13026,16 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 &mut validation,
                 WorldProgramContinuation::begin(program),
             ) {
-                Err(CompileError::ExtractFailed(detail)) if detail ==
-                    "exact declaration context: World stage inputs lack their actual immediate predecessor" => {}
+                Err(CompileError::CompilerEvidence(error))
+                    if matches!(
+                        error.as_ref(),
+                        crate::certified_products::CertificationError::WorldProgramCursor(
+                            WorldProgramCursorFailure::StageOrder {
+                                expected: 0,
+                                actual: 1
+                            }
+                        )
+                    ) => {}
                 Err(other) => panic!("later stage refused for another reason: {other:?}"),
                 Ok(_) => panic!("later stage admitted without its actual prefix"),
             }
@@ -12778,7 +13043,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
         let first = &program.stages()[0];
         let end = first.ordinals().last().expect("actual first stage") + 1;
         let stage_produced = produced.for_segment(0..end).unwrap();
-        let mut segment = decode_world_source_receipt(program, 0)
+        let segment = decode_world_source_receipt(program, 0)
             .unwrap()
             .issue_segment_originals(
                 None,
@@ -12845,215 +13110,99 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 "another accounting owner cannot consume the World baseline"
             );
         }
-        // This helper checks source-receipt continuation with its own physical
-        // issuer. The prepared executable items own their advanced TYPE prefix.
-        let output = IssuedOriginalOutput::from_segment_physical(&segment.originals);
-        segment
-            .admit_program_support(program, &output, &stage_produced)
-            .unwrap();
-        for ordinal in first.ordinals() {
-            let crate::checked_cell::CheckedPlannedCellSlot::Bind { value } =
-                &program.reservation().slots()[*ordinal]
-            else {
-                panic!("mixed fixture begins with a real binding");
-            };
-            segment
-                .admit_value_interface(produced.current_interface(*value).unwrap().clone())
-                .unwrap();
-        }
-        if matches!(observation, Observation::Unchanged) {
-            let support = segment
-                .continuation
-                .program
-                .program_support
-                .as_ref()
-                .unwrap();
-            // This executable stage computes only Int7. Its non-generated
-            // dependencies contribute canonical interfaces, not produced bodies
-            // or authored lexical permission. The generated executable is not a
-            // retained source row.
-            assert!(
-                !support.imports.is_empty(),
-                "actual canonical support is nonempty"
-            );
-            for (owner, row) in support.imports.iter() {
-                assert!(
-                    row.physical_product.is_none(),
-                    "interface-only stage support has no completed native producer"
-                );
-                let entry = support
-                    .compiler_support
-                    .implementation_entry(owner)
-                    .unwrap();
-                assert!(
-                    matches!(entry.payload, ArtifactPayload::Canonical(_)),
-                    "interface-only support retains its canonical compiler role"
-                );
-            }
-        }
-        let (continuation, first_source) = segment.finish();
-        let mut next = decode_world_source_receipt(program, 1).unwrap();
-        let repeated = next
-            .source
-            .evidence
-            .modules
-            .iter()
-            .position(|module| {
-                continuation
-                    .program
-                    .program_support
-                    .as_ref()
-                    .unwrap()
-                    .source_original(&identity(&module.unit, &module.module))
-                    .is_some()
-            })
-            .expect("actual mixed history repeats source support");
-        assert!(next.source.evidence.modules.iter().any(|module| {
-            module.product == crate::cache::ProductAvailability::Ready
-                && first_source.source.evidence.modules.iter().any(|prior| {
-                    prior.unit == module.unit
-                        && prior.module == module.module
-                        && prior.product == crate::cache::ProductAvailability::InterfaceOnly
-                })
-        }));
+        drop(segment);
         let changed = tempfile::tempdir().unwrap();
-        let module = &mut next.source.evidence.modules[repeated];
-        match observation {
-            Observation::Unchanged => {}
-            Observation::ChangedSource => {
-                let mut bytes = std::fs::read(&module.source).unwrap();
-                bytes.extend_from_slice(b"\n-- changed source observation\n");
-                let path = changed.path().join("Changed.hs");
-                std::fs::write(&path, &bytes).unwrap();
-                module.source = path.clone();
-                next.source
-                    .evidence
-                    .sources
-                    .push(crate::cache::SourceEvidence {
-                        path,
-                        sha256: hex(&sha2::Sha256::digest(&bytes).into()),
-                    });
-            }
-            Observation::ChangedImport => {
-                let imported = module
-                    .imports
-                    .iter_mut()
-                    .find(|edge| edge.selected.is_none())
-                    .expect("actual support imports a package");
-                imported.qualifier =
-                    crate::cache::ImportQualifier::OtherUnit("foreign-package".into());
-                next.source
-                    .evidence
-                    .resolutions
-                    .push(crate::cache::ResolutionEvidence {
-                        qualifier: imported.qualifier.clone(),
-                        module: imported.module.clone(),
-                        boot: imported.boot,
-                        selected: None,
-                        candidates: vec![],
-                    });
-            }
-            Observation::Boot => {
-                module.boot = true;
-                module.product = crate::cache::ProductAvailability::Boot;
-                next.source
-                    .edges
-                    .iter_mut()
-                    .find(|edge| {
-                        edge.owner.unit == module.unit && edge.owner.module == module.module
-                    })
-                    .unwrap()
-                    .boot = true;
-            }
-        }
-        next.source.evidence_bytes = serde_json::to_vec(&next.source.evidence).unwrap();
-        let stage_produced = produced.for_segment(1..1).unwrap();
-        let result =
-            next.issue_segment_originals(None, &stage_produced, &mut validation, continuation);
-        match (observation, result) {
-            (Observation::Unchanged, Ok(mut next)) => {
-                let authored_ordinal = *next.stage.ordinals().first().unwrap();
-                let authored_owner = next.stage.identity().original_owner()
-                    .expect("the actual declaration stage has its Original owner").clone();
-                let authored_produced = produced
-                    .for_segment(authored_ordinal..authored_ordinal)
-                    .unwrap();
-                let output = IssuedOriginalOutput::from_segment_originals(&next.originals)
-                    .expect("actual authored stage owns its source publication");
-                next.admit_program_support(program, &output, &authored_produced)
-                    .unwrap();
-                let produced_rows = {
-                    let initial_inputs = next.inputs.compiler_inputs();
-                    let support = next.continuation.program.program_support.as_ref().unwrap();
-                    let carried = support.clone();
-                    let mut rows = Vec::new();
-                    for (owner, row) in support.imports.iter() {
-                        let Some(receipt) = &row.physical_product else { continue };
-                        let Some(physical) = output.produced_source(owner).unwrap() else {
-                            assert!(Arc::ptr_eq(initial_inputs.prior_nominal_source_product(owner).unwrap().unwrap(), receipt),
-                                "carried canonical SOURCE keeps its prior physical issuer");
-                            continue;
-                        };
-                        assert!(Arc::ptr_eq(receipt, &physical));
-                        let entry = support.compiler_support.implementation_entry(owner).unwrap();
-                        assert!(row.matches_domain_entry(entry));
-                        assert!(initial_inputs.produced_source(entry).unwrap().is_none(),
-                            "incoming stage inputs cannot claim its new Source production");
-                        assert!(Arc::ptr_eq(
-                            carried.imports[owner].physical_product.as_ref().unwrap(), receipt,
-                        ), "ordinary support extension preserves the exact completed issuer");
-                        rows.push((Arc::clone(receipt), Arc::clone(entry)));
-                    }
-                    rows
-                };
-                assert!(!produced_rows.is_empty(),
-                    "actual authored stage owns produced Source proofs");
-                assert!(produced_rows.iter().any(|(_, entry)|
-                    entry.descriptor.owner == authored_owner),
-                    "the actual authored Original retains its physical issuer, independently of protected dependency production or lexical permission");
-                let (continuation, _) = next.finish();
-                let following = &program.stages()[2];
-                let first = *following.ordinals().first().unwrap();
-                let end = following.ordinals().last().unwrap() + 1;
-                let following_produced = produced.for_segment(first..end).unwrap();
-                let following = decode_world_source_receipt(program, following.index()).unwrap()
-                    .issue_segment_originals(None, &following_produced, &mut validation, continuation)
-                    .expect("actual following stage receives authored Source production");
-                let prior_source_observations = following
-                    .originals
-                    .receipt()
-                    .modules
-                    .iter()
-                    .flat_map(|module| &module.groups)
-                    .flat_map(|group| &group.globals)
-                    .filter_map(|global| match &global.owner {
-                        crate::certified_products::ReceiptImportOwner::Source {
-                            module_version: None,
-                            ..
-                        } => Some(global.owner.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                stage_type_anchor_tests::assert_actual_available_prior_source_inputs(
-                    &following.continuation,
-                    &following.inputs,
-                    following.originals.source_selection(),
-                    &prior_source_observations,
-                );
-                let inputs = following.inputs.compiler_inputs();
-                let mut consumed_rows = 0;
-                for (receipt, entry) in &produced_rows {
-                    if !inputs.projection().roles().iter().any(|role| {
-                        role.original() == Some(entry.descriptor.id)
-                    }) {
-                        continue;
-                    }
-                    consumed_rows += 1;
-                    assert!(Arc::ptr_eq(inputs.produced_source(entry).unwrap().unwrap(), receipt),
-                        "later Source use borrows the actual prior stage completion");
+        let mut first_evidence = None;
+        let mut controls = 0;
+        let result = crate::artifacts::prepare_world_cell_program_observing_source_receipts(
+            Arc::clone(program),
+            &mut |next| {
+                if next.binding.stage.index() == 0 {
+                    first_evidence = Some(next.source.evidence.clone());
+                    return;
                 }
-                assert!(consumed_rows > 0, "next stage observes produced Source provenance");
-            }
+                if next.binding.stage.index() != 1 {
+                    return;
+                }
+                controls += 1;
+                let first = first_evidence.as_ref().unwrap();
+                let repeated =
+                    next.source
+                        .evidence
+                        .modules
+                        .iter()
+                        .position(|module| {
+                            first.modules.iter().any(|prior| {
+                                prior.unit == module.unit && prior.module == module.module
+                            })
+                        })
+                        .expect("actual mixed history repeats source support");
+                assert!(next.source.evidence.modules.iter().any(|module| {
+                    module.product == crate::cache::ProductAvailability::Ready
+                        && first.modules.iter().any(|prior| {
+                            prior.unit == module.unit
+                                && prior.module == module.module
+                                && prior.product == crate::cache::ProductAvailability::InterfaceOnly
+                        })
+                }));
+                let module = &mut next.source.evidence.modules[repeated];
+                match observation {
+                    Observation::Unchanged => {}
+                    Observation::ChangedSource => {
+                        let mut bytes = std::fs::read(&module.source).unwrap();
+                        bytes.extend_from_slice(b"\n-- changed source observation\n");
+                        let path = changed.path().join("Changed.hs");
+                        std::fs::write(&path, &bytes).unwrap();
+                        module.source = path.clone();
+                        next.source
+                            .evidence
+                            .sources
+                            .push(crate::cache::SourceEvidence {
+                                path,
+                                sha256: hex(&sha2::Sha256::digest(&bytes).into()),
+                            });
+                    }
+                    Observation::ChangedImport => {
+                        let imported = module
+                            .imports
+                            .iter_mut()
+                            .find(|edge| edge.selected.is_none())
+                            .expect("actual support imports a package");
+                        imported.qualifier =
+                            crate::cache::ImportQualifier::OtherUnit("foreign-package".into());
+                        next.source
+                            .evidence
+                            .resolutions
+                            .push(crate::cache::ResolutionEvidence {
+                                qualifier: imported.qualifier.clone(),
+                                module: imported.module.clone(),
+                                boot: imported.boot,
+                                selected: None,
+                                candidates: vec![],
+                            });
+                    }
+                    Observation::Boot => {
+                        module.boot = true;
+                        module.product = crate::cache::ProductAvailability::Boot;
+                        next.source
+                            .edges
+                            .iter_mut()
+                            .find(|edge| {
+                                edge.owner.unit == module.unit && edge.owner.module == module.module
+                            })
+                            .unwrap()
+                            .boot = true;
+                    }
+                }
+                next.source.evidence_bytes = serde_json::to_vec(&next.source.evidence).unwrap();
+            },
+        );
+        assert_eq!(
+            controls, 1,
+            "control reaches actual second-stage authentication"
+        );
+        match (observation, result) {
+            (Observation::Unchanged, Ok(_)) => {}
             (Observation::ChangedSource | Observation::ChangedImport,
                 Err(CompileError::CompilerEvidence(error))) if matches!(error.as_ref(),
                     crate::certified_products::CertificationError::Mismatch("same-program source original changed")) => {}
@@ -13182,7 +13331,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
     /// groups and native permission are projected through the demanded owner;
     /// no `ExactCompilationRequest` or finite baseline is manufactured.
     // boundary: see CELL-PREPARATION-BOUNDARY.md
-    pub(crate) fn issue_segment_originals(
+    fn issue_segment_originals(
         self,
         candidates: Option<&crate::module_candidates::CandidateSet>,
         produced: &crate::checked_cell::ProducedValueTypeInterfaces,
@@ -24135,7 +24284,9 @@ mod tests {
             crate::certified_products::NativeDemandPacket::decode(&bytes, &validation.inventory)
                 .unwrap();
         let mut source_packet: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        let Value::Array(fields) = &mut source_packet else { unreachable!() };
+        let Value::Array(fields) = &mut source_packet else {
+            unreachable!()
+        };
         fields[1] = Value::Integer(0u64.into());
         let mut source_bytes = Vec::new();
         ciborium::ser::into_writer(&source_packet, &mut source_bytes).unwrap();

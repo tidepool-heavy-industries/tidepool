@@ -2802,6 +2802,8 @@ pub enum ArtifactIdentityStage {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
+    #[error("World program cursor refused: {0}")]
+    WorldProgramCursor(#[source] crate::declaration_context::WorldProgramCursorFailure),
     #[error("input native decision for {owner:?} refused: {reason:?}")]
     InputDecision {
         owner: crate::declaration_join::ExactModuleIdentity,
