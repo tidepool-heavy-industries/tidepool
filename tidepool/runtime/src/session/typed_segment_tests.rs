@@ -1484,6 +1484,7 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
     enum Scenario {
         Complete,
         CompleteObservation,
+        Abort,
         FenceBeforeCommit,
         RevokedScope,
         RevokedOwner,
@@ -1491,6 +1492,7 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
     for scenario in [
         Scenario::Complete,
         Scenario::CompleteObservation,
+        Scenario::Abort,
         Scenario::FenceBeforeCommit,
         Scenario::RevokedScope,
         Scenario::RevokedOwner,
@@ -1615,6 +1617,18 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
                 ));
                 assert_eq!(session.observed(), [1, 2]);
             }
+            Scenario::Abort => {
+                let aborted = session
+                    .resident
+                    .abort(hole.cont_id(), "retire checked owner".into());
+                assert!(matches!(aborted, Err(ResidentError::Run(_))));
+                assert_eq!(session.observed(), [1]);
+                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+                assert!(session
+                    .resident
+                    .freeze_private_execution(&execution)
+                    .is_err());
+            }
             Scenario::FenceBeforeCommit => {
                 let fenced = Arc::new(std::sync::Mutex::new(None));
                 let observed_fence = fenced.clone();
@@ -1697,8 +1711,21 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
                     "revocation must refuse before the second effect"
                 );
                 assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+                // Refusal leaves the continuation parked; explicit retirement
+                // must release its captured owner without executing it.
+                assert!(session
+                    .resident
+                    .abort(hole.cont_id(), "retire refused owner".into())
+                    .is_err());
             }
         }
+        drop(hole);
+        drop(reservation);
+        drop(compiled);
+        drop(prefix);
+        drop(checked);
+        drop(execution);
+        assert_eq!(session.resident.outstanding_custody(), 0);
     }
 }
 

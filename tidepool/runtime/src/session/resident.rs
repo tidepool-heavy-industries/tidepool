@@ -10796,6 +10796,52 @@ mod custody_release_tests {
     }
 
     #[test]
+    fn exact_reserved_binding_lease_survives_observation_eviction_then_releases() {
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let source = session.adopt_initial_notebook_scope(scope).unwrap();
+        let dependency = bind_fixture(&mut session, &source, scope, 600);
+        session.state.save_observation(dependency, &[]);
+        // The future observation has no dependency edges yet. Its issuing
+        // owner carries both the reserved ID and exact already-selected roots.
+        let reserved = SessionVarId::from_extract(601);
+        assert!(session.state.bindings().get(reserved).is_none());
+        let lease = Arc::new(session.state.lease_binding_ids([reserved, dependency]));
+        let shared = Arc::clone(&lease);
+        let actual = bind_fixture(&mut session, &source, scope, 601);
+        assert_eq!(actual, reserved);
+        session.state.save_observation(actual, &[dependency.var()]);
+        for generation in 602..611 {
+            let id = bind_fixture(&mut session, &source, scope, generation);
+            session.state.save_observation(id, &[]);
+        }
+        major_collect(&mut session);
+        for id in [actual, dependency] {
+            let entry = session
+                .state
+                .bindings()
+                .get(id)
+                .expect("exact leased observation");
+            let handle = entry.value.handle.raw();
+            assert!(session
+                .state
+                .prepared_mut()
+                .unwrap()
+                .inspect_retained(handle)
+                .is_ok());
+        }
+        assert_eq!(session.outstanding_custody(), 1);
+        drop(lease);
+        assert_eq!(session.outstanding_custody(), 1);
+        assert!(session.state.bindings().get(actual).is_some());
+        drop(shared);
+        assert_eq!(session.outstanding_custody(), 0);
+        assert!(session.state.bindings().get(actual).is_none());
+        assert!(session.state.bindings().get(dependency).is_none());
+        major_collect(&mut session);
+    }
+
+    #[test]
     fn foreign_custody_never_enters_destination() {
         let mut source = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
         let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
