@@ -2,15 +2,17 @@
 
 module WorkerResponseCases where
 
-import Control.Exception (AsyncException(..), IOException, bracket, catch, finally, throwIO, try)
-import Control.Monad (unless, void, forM_)
+import Control.Exception (AsyncException(..), IOException, SomeException, bracket, catch, finally, throwIO, try)
+import Control.Monad (unless, void, forM_, replicateM)
+import Control.Concurrent (ThreadId, MVar, forkFinally, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Tidepool.DependencyPlan (sourceDependencyQuery, nativeDependencyQuery, exchangeSourceDependencies, exchangeNativeDependencies)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
-import Data.Word (Word32, Word64)
-import Data.List (isPrefixOf)
-import Data.IORef (newIORef, atomicModifyIORef')
-import System.Directory (createDirectory, getTemporaryDirectory, listDirectory, removeFile, removeDirectoryRecursive)
+import Data.Word (Word8, Word32, Word64)
+import Data.List (isPrefixOf, isInfixOf, sort)
+import Data.IORef (newIORef, readIORef, writeIORef, atomicModifyIORef')
+import System.Directory (createDirectory, doesFileExist, getTemporaryDirectory, listDirectory, removeFile, removeDirectoryRecursive)
 import System.Environment (lookupEnv, setEnv)
 import System.Exit (ExitCode(..))
 import System.IO (Handle, hClose, hFlush, openTempFile, stdin, stdout, stderr)
@@ -18,7 +20,7 @@ import System.Process (ProcessHandle, CreateProcess(..), StdStream(..), createPr
 import System.IO.Error (isFullError)
 import System.Timeout (timeout)
 import System.Posix.Files (setFileMode)
-import GHC.Conc (getNumCapabilities)
+import GHC.Conc (getNumCapabilities, ThreadStatus(..), BlockReason(..), threadStatus)
 import GHC.Clock (getMonotonicTimeNSec)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, compileBoundRequest)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..))
@@ -31,7 +33,7 @@ import Tidepool.GhcPipeline
 import System.Posix.Resource
   ( Resource(..), ResourceLimit(..), ResourceLimits(..), getResourceLimit, setResourceLimit )
 import GHC.IO.Handle (hDuplicate)
-import Tidepool.WorkerServer (WorkerResponse(..), runWorkerLoop, NativeDemandReply(..), exchangeNativeDemand, requireNativeDemandOwner)
+import Tidepool.WorkerServer (WorkerResponse(..), runWorkerLoop, NativeDemandReply(..), exchangeNativeDemand, requireNativeDemandOwner, borrowSourceDemand, exchangeSourceDemand)
 import Tidepool.RequestCompletion
   ( captureCompletion, flattenCompletion, finishCompletion )
 
@@ -43,6 +45,7 @@ successReport = BSC.pack "{\"version\":2,\"outcome\":\"success\",\"diagnostics\"
 
 workerChild :: Bool -> FilePath -> IO ()
 workerChild oneFreeFd scratch = do
+  stale <- newIORef Nothing
   setEnv "TMPDIR" scratch
   if oneFreeFd
     then do
@@ -50,12 +53,73 @@ workerChild oneFreeFd scratch = do
       runWorkerLoop $ \transaction -> do
         limited <- atomicModifyIORef' first (\isFirst -> (False, isFirst))
         if limited
-          then withOneFreeFd (transaction handler `catch` catchResourceExhaustion)
-          else transaction handler `catch` catchThreadKilled
-    else runWorkerLoop (\transaction -> transaction handler `catch` catchThreadKilled)
+          then withOneFreeFd (transaction (handler stale) `catch` catchResourceExhaustion)
+          else transaction (handler stale) `catch` catchThreadKilled
+    else runWorkerLoop (\transaction -> transaction (handler stale) `catch` catchThreadKilled)
   where
-    handler _ native _ args = captureCompletion $ do
+    handler stale _ native _ args = captureCompletion $ do
       case args of
+        ["source-concurrent"] -> do
+          exchange <- maybe (fail "missing SOURCE exchange") pure native
+          borrowed <- borrowSourceDemand exchange 3
+          writeIORef stale (Just borrowed)
+          -- Original API stays handler-only, even with a live SOURCE borrow.
+          direct <- childResult (exchangeNativeDemand exchange 3 "foreign-thread")
+          expectFailure "NativeDemandWrongThread" direct
+          jobs <- mapM (startChild . exchangeSourceDemand borrowed . sourcePayload) ["left","right","left"]
+          forM_ jobs $ \(_,done) -> takeMVar done >>= either throwIO (\reply ->
+            unless (case reply of NativeResolved body -> body == "observed"; _ -> False)
+              (fail "concurrent SOURCE reply changed"))
+          actual <- exchangeSourceDependencies borrowed (sourceDependencyQuery [])
+          unless (null actual) (fail "empty actual SOURCE query acquired rows")
+        ["source-stale"] -> do
+          old <- readIORef stale >>= maybe (fail "missing retained SOURCE borrow") pure
+          childResult (exchangeSourceDemand old (sourcePayload "stale")) >>= expectFailure "NativeDemandClosed"
+          exchange <- maybe (fail "missing next SOURCE exchange") pure native
+          borrowed <- borrowSourceDemand exchange 4
+          newer <- borrowSourceDemand exchange 5
+          childResult (exchangeSourceDemand borrowed (sourcePayload "old-stage")) >>= expectFailure "NativeDemandClosed"
+          _ <- exchangeSourceDemand newer (sourcePayload "current")
+          pure ()
+        ["source-kind"] -> do
+          exchange <- maybe (fail "missing SOURCE kind exchange") pure native
+          _ <- exchangeNativeDependencies exchange 0 (nativeDependencyQuery [])
+          -- Echo the real native encoder back as a body, then try it through
+          -- the borrowed SOURCE edge. No duplicate native query may be sent.
+          encoded <- exchangeNativeDemand exchange 0 "request-native-encoding"
+          bytes <- case encoded of NativeResolved body -> pure body; _ -> fail "missing native encoding"
+          borrowed <- borrowSourceDemand exchange 0
+          childResult (exchangeSourceDemand borrowed bytes) >>= expectFailure "SOURCE borrow requires"
+          pure ()
+        ["source-semantic"] -> do
+          exchange <- maybe (fail "missing semantic SOURCE exchange") pure native
+          borrowed <- borrowSourceDemand exchange 0
+          childResult (exchangeSourceDependencies borrowed (sourceDependencyQuery [])) >>= expectFailure "NativeReplyCorrupt"
+          actual <- exchangeSourceDependencies borrowed (sourceDependencyQuery [])
+          unless (null actual) (fail "corrupt semantic reply acquired rows")
+        ["source-cancel"] -> do
+          exchange <- maybe (fail "missing cancellation SOURCE exchange") pure native
+          borrowed <- borrowSourceDemand exchange 0
+          (active,activeDone) <- startChild (exchangeSourceDemand borrowed (sourcePayload "blocked-read"))
+          -- Parent creates this only after observing the entire first frame.
+          let awaitTrigger = do
+                ready <- doesFileExist (scratch ++ "/cancel-source")
+                unless ready (threadDelay 1000 >> awaitTrigger)
+          awaitTrigger
+          (waiting,waitingDone) <- startChild (exchangeSourceDemand borrowed (sourcePayload "blocked-gate"))
+          blocked <- timeout 1000000 (awaitGateWait waiting)
+          unless (blocked == Just ()) (fail "SOURCE gate waiter never blocked on its actual gate")
+          killThread waiting
+          takeMVar waitingDone >>= expectFailure "thread killed"
+          killThread active
+          takeMVar activeDone >>= expectFailure "thread killed"
+          childResult (exchangeSourceDemand borrowed (sourcePayload "after-cancel")) >>= expectFailure "NativeDemandClosed"
+          removeFile (scratch ++ "/cancel-source")
+        ["source-partial"] -> do
+          exchange <- maybe (fail "missing partial SOURCE exchange") pure native
+          borrowed <- borrowSourceDemand exchange 0
+          childResult (exchangeSourceDemand borrowed (sourcePayload "partial")) >>= expectFailure "truncated frame"
+          childResult (exchangeSourceDemand borrowed (sourcePayload "after-partial")) >>= expectFailure "NativeDemandClosed"
         ["native-exchange"] -> do
           exchange <- maybe (fail "exchange-capable request lost its active channel") pure native
           requireNativeDemandOwner exchange (BS.replicate 32 2) (BS.replicate 32 3) (BS.replicate 32 4)
@@ -102,6 +166,40 @@ workerChild oneFreeFd scratch = do
         ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (replicate 64 '1' ++ ".7") WorldRetainedAtAdmission)
         ["source-free-rejected-capture-failure"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
         _ -> DiagnosticResponse []
+
+-- Protocol fixtures use semantically inert payloads for transport scheduling;
+-- actual DependencyPlan encoders are checked independently in the same run.
+sourcePayload :: BS.ByteString -> BS.ByteString
+sourcePayload label = BS.singleton 0x83 <> cborText "TPDEPENDENCYQUERY1" <> BS.singleton 0 <> cborText label
+
+-- Fixed short test strings form an independent wire oracle, not a second
+-- production dependency codec.
+cborText :: BS.ByteString -> BS.ByteString
+cborText body
+  | BS.length body < 24 = BS.singleton (0x60 + fromIntegral (BS.length body)) <> body
+  | otherwise = error "SOURCE protocol fixture text is no longer short"
+
+awaitGateWait :: ThreadId -> IO ()
+awaitGateWait thread = threadStatus thread >>= \status -> case status of
+  ThreadBlocked BlockedOnMVar -> pure ()
+  ThreadFinished -> fail "SOURCE gate waiter finished before cancellation"
+  ThreadDied -> fail "SOURCE gate waiter died before cancellation"
+  _ -> threadDelay 1000 >> awaitGateWait thread
+
+startChild :: IO a -> IO (ThreadId, MVar (Either SomeException a))
+startChild action = do
+  done <- newEmptyMVar
+  thread <- forkFinally action (putMVar done)
+  pure (thread,done)
+
+childResult :: IO a -> IO (Either SomeException a)
+childResult action = startChild action >>= takeMVar . snd
+
+expectFailure :: String -> Either SomeException a -> IO ()
+expectFailure expected result = case result of
+  Left failure | expected `isInfixOf` show failure -> pure ()
+  Left failure -> fail ("unexpected child failure: " ++ show failure)
+  Right _ -> fail ("child unexpectedly succeeded: " ++ expected)
 
 check :: FilePath -> IO ()
 check scratch = do
@@ -263,6 +361,125 @@ checkNativeExchangeFailures scratch = do
         hClose output
   leftovers <- listDirectory scratch
   unless (null leftovers) (fail "malformed native exchange retained capture files")
+
+-- The subprocess owns real request channels. No test constructor can issue an
+-- exchange or borrow independently of the active handler.
+checkSourceBorrowing :: FilePath -> IO ()
+checkSourceBorrowing scratch = withSourceChild scratch $ \input output child -> do
+  beginSource input "source-concurrent"
+  payloads <- replicateM 3 $ do
+    (stage,number,payload) <- readDemand output
+    unless (stage == 3) (fail "concurrent SOURCE stage changed")
+    replyDemand input stage number 0 "observed"
+    pure (number,payload)
+  unless (sort (map fst payloads) == [1,2,3]
+      && sort (map snd payloads) == sort (map sourcePayload ["left","right","left"]))
+    (fail "concurrent SOURCE frames were interleaved, lost, or duplicated")
+  (stage,number,actualSource) <- readDemand output
+  unless (stage == 3 && number == 4 && actualSource == dependencyPacket "TPDEPENDENCYQUERY1" 0)
+    (fail "actual DependencyPlan SOURCE encoder was not accepted")
+  replyDemand input stage number 0 (dependencyPacket "TPDEPENDENCYREPLY1" 0)
+  sourceTerminal output
+  beginSource input "source-stale"
+  (currentStage,currentNumber,current) <- readDemand output
+  unless (currentStage == 5 && currentNumber == 1 && current == sourcePayload "current")
+    (fail "stale request/stage borrow wrote a frame")
+  replyDemand input currentStage currentNumber 0 "observed"
+  sourceTerminal output
+  beginSource input "source-kind"
+  (nativeStage,nativeNumber,actualNative) <- readDemand output
+  unless (nativeStage == 0 && nativeNumber == 1 && actualNative == dependencyPacket "TPDEPENDENCYQUERY1" 1)
+    (fail "actual DependencyPlan native encoder changed")
+  replyDemand input nativeStage nativeNumber 0 (dependencyPacket "TPDEPENDENCYREPLY1" 1)
+  (echoStage,echoNumber,echo) <- readDemand output
+  unless (echoStage == 0 && echoNumber == 2 && echo == "request-native-encoding")
+    (fail "native query echo control changed")
+  replyDemand input echoStage echoNumber 0 actualNative
+  sourceTerminal output
+  beginSource input "source-semantic"
+  forM_ [(1,"malformed-semantic-reply"),(2,dependencyPacket "TPDEPENDENCYREPLY1" 0)] $ \(expectedNumber,body) -> do
+    (semanticStage,semanticNumber,query) <- readDemand output
+    unless (semanticStage == 0 && semanticNumber == expectedNumber && query == dependencyPacket "TPDEPENDENCYQUERY1" 0)
+      (fail "fully framed semantic refusal corrupted the transport")
+    replyDemand input semanticStage semanticNumber 0 body
+  sourceTerminal output
+  BS.hPut input (BS.singleton 0)
+  hFlush input
+  ended <- exact output 1
+  unless (ended == BS.singleton 1) (fail "SOURCE borrowing lost END")
+  hClose input
+  status <- waitForProcess child
+  unless (status == ExitSuccess) (fail "SOURCE borrowing child did not exit cleanly")
+
+checkSourceBorrowCancellation :: FilePath -> IO ()
+checkSourceBorrowCancellation scratch = forM_ ["source-cancel","source-partial"] $ \mode ->
+  withSourceChild scratch $ \input output child -> do
+    beginSource input mode
+    (_,_,payload) <- readDemand output
+    unless (payload == sourcePayload (if mode == "source-cancel" then "blocked-read" else "partial"))
+      (fail "SOURCE cancellation/partial case lost its initial full frame")
+    if mode == "source-cancel"
+      then writeFile (scratch ++ "/cancel-source") "cancel"
+      else BS.hPut input (BS.singleton 5 <> BS.take 10 sourceHeader) >> hFlush input >> hClose input
+    -- A blocked read and a blocked gate waiter must both settle; poison must
+    -- prevent any retry or terminal frame after either partial wire history.
+    finished <- timeout 10000000 (waitForProcess child)
+    unless (case finished of Just (ExitFailure _) -> True; _ -> False)
+      (fail ("SOURCE cancellation/partial frame did not retire within safeguard: " ++ mode))
+    emitted <- BS.hGet output 1
+    unless (BS.null emitted) (fail "poisoned SOURCE borrow wrote retry or terminal bytes")
+
+sourceHeader :: BS.ByteString
+sourceHeader = "TPNDX001" <> BS.replicate 32 1 <> BS.replicate 32 2
+  <> BS.replicate 32 3 <> BS.replicate 32 4 <> put64 999999999999999999
+
+dependencyPacket :: BS.ByteString -> Word64 -> BS.ByteString
+dependencyPacket tag origin = BS.singleton 0x83 <> cborText tag <> BS.pack [fromIntegral origin,0x80]
+
+beginSource :: Handle -> BS.ByteString -> IO ()
+beginSource input label = do
+  BS.hPut input (BS.singleton 6 <> sourceHeader <> frame "." <> put32 1 <> frame label)
+  hFlush input
+
+readDemand :: Handle -> IO (Word64,Word64,BS.ByteString)
+readDemand output = do
+  header <- exact output 161
+  unless (BS.take 145 header == BS.singleton 4 <> sourceHeader)
+    (fail "SOURCE demand lost its exact request binding")
+  payload <- readFrame output
+  pure (number (BS.take 8 (BS.drop 145 header)),number (BS.drop 153 header),payload)
+  where number = BS.foldr (\byte total -> fromIntegral byte .|. (total `shiftL` 8)) 0
+
+replyDemand :: Handle -> Word64 -> Word64 -> Word8 -> BS.ByteString -> IO ()
+replyDemand input stage number outcome body = do
+  BS.hPut input (BS.singleton 5 <> sourceHeader <> put64 stage <> put64 number <> BS.singleton outcome <> frame body)
+  hFlush input
+
+sourceTerminal :: Handle -> IO ()
+sourceTerminal output = do
+  tag <- exact output 1
+  code <- word32 <$> exact output 4
+  out <- readFrame output
+  err <- readFrame output
+  unless (tag == BS.singleton 0 && code == 0 && out == successReport && BS.null err)
+    (fail ("SOURCE exchange did not finish successfully: " ++ show (tag,code,out,err)))
+
+withSourceChild :: FilePath -> (Handle -> Handle -> ProcessHandle -> IO a) -> IO a
+withSourceChild scratch use = do
+  executable <- lookupEnv "TIDEPOOL_TEST_WORKER_RESPONSE_CHILD" >>= maybe
+    (fail "missing declared worker-response child executable") pure
+  bracket (createProcess (proc executable ["--worker",scratch])
+      {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit})
+    (\(_,_,_,child) -> terminateProcess child >> void (waitForProcess child)) $
+    \(inputHandle,outputHandle,_,child) -> do
+      input <- maybe (fail "missing SOURCE stdin") pure inputHandle
+      output <- maybe (fail "missing SOURCE stdout") pure outputHandle
+      BS.hPut input (BS.singleton 1)
+      hFlush input
+      ack <- exact output 1
+      unless (ack == BS.singleton 1) (fail "SOURCE child lost BEGIN")
+      completed <- timeout 10000000 (use input output child)
+      maybe (fail "SOURCE protocol control timed out") pure completed
 
 checkPartialAcquisition :: FilePath -> IO ()
 checkPartialAcquisition scratch = do

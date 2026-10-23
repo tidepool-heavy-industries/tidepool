@@ -5,12 +5,16 @@
 module Tidepool.WorkerServer
   ( WorkerResponse(..), RequestHandler, runWorkerLoop, runDirectRequest
   , NativeDemandExchange, NativeDemandReply(..), exchangeNativeDemand, requireNativeDemandOwner
+  , SourceDemandBorrow, borrowSourceDemand, exchangeSourceDemand
   ) where
 
 import Control.Exception (Exception, SomeException, mask, throwIO, try, finally, onException)
-import Control.Concurrent (ThreadId, myThreadId)
+import Control.Concurrent (ThreadId, myThreadId, MVar, newMVar, withMVar)
+import qualified Codec.CBOR.Decoding as D
+import Codec.CBOR.Read (deserialiseFromBytes)
+import qualified Data.ByteString.Lazy as BL
 import Data.IORef (IORef, newIORef, readIORef, writeIORef, atomicModifyIORef')
-import Control.Monad (replicateM, unless, when, forM_)
+import Control.Monad (replicateM, unless, when)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -41,6 +45,11 @@ type RequestHandler = PhaseSink -> Maybe NativeDemandExchange -> FilePath -> [St
 -- compiler authority; the bound request checks them against its actual inputs.
 data NativeDemandExchange = NativeDemandExchange !BS.ByteString !ThreadId !Handle !Handle
   !(IORef Bool) !(IORef (Word64,Maybe Word64,Integer,Bool))
+  !(MVar ()) !(IORef (Maybe Word64))
+
+-- Issued only on the request handler. Compiler tasks borrow SOURCE observation
+-- at this fixed stage; executable acquisition still requires the handler.
+data SourceDemandBorrow = SourceDemandBorrow !NativeDemandExchange !Word64
 
 data NativeDemandReply = NativeResolved BS.ByteString | NativeRefused BS.ByteString
 
@@ -52,22 +61,58 @@ data NativeDemandAccessFailure
 instance Exception NativeDemandAccessFailure
 
 requireNativeDemandOwner :: NativeDemandExchange -> BS.ByteString -> BS.ByteString -> BS.ByteString -> IO ()
-requireNativeDemandOwner exchange@(NativeDemandExchange header _ _ _ _ _) admission world inputs = do
+requireNativeDemandOwner exchange@(NativeDemandExchange header _ _ _ _ _ _ _) admission world inputs = do
   requireNativeExchangeOpen exchange
   unless (BS.length admission == 32 && BS.length world == 32 && BS.length inputs == 32
       && BS.take 96 (BS.drop 40 header) == admission <> world <> inputs) $
     fail "worker: native demand owner differs from admitted World inputs"
 
 requireNativeExchangeOpen :: NativeDemandExchange -> IO ()
-requireNativeExchangeOpen (NativeDemandExchange _ issuing _ _ open _) = do
+requireNativeExchangeOpen (NativeDemandExchange _ issuing _ _ open _ _ _) = do
   actual <- myThreadId
   active <- readIORef open
   unless active (throwIO NativeDemandClosed)
   unless (actual == issuing) (throwIO (NativeDemandWrongThread issuing actual))
 
 exchangeNativeDemand :: NativeDemandExchange -> Word64 -> BS.ByteString -> IO NativeDemandReply
-exchangeNativeDemand exchange@(NativeDemandExchange header _ input protocol _ state) stage payload = mask $ \restore -> do
+exchangeNativeDemand exchange@(NativeDemandExchange _ _ _ _ _ _ gate _) stage payload = do
   requireNativeExchangeOpen exchange
+  withMVar gate $ \_ -> requireNativeExchangeOpen exchange >> exchangeDemandLocked exchange stage payload
+
+borrowSourceDemand :: NativeDemandExchange -> Word64 -> IO SourceDemandBorrow
+borrowSourceDemand exchange@(NativeDemandExchange _ _ _ _ _ _ gate borrowing) stage = do
+  requireNativeExchangeOpen exchange
+  withMVar gate $ \_ -> do
+    requireNativeExchangeOpen exchange
+    previous <- readIORef borrowing
+    when (maybe False (> stage) previous) (fail "worker: SOURCE borrow stage regressed")
+    writeIORef borrowing (Just stage)
+    pure (SourceDemandBorrow exchange stage)
+
+exchangeSourceDemand :: SourceDemandBorrow -> BS.ByteString -> IO NativeDemandReply
+exchangeSourceDemand (SourceDemandBorrow exchange@(NativeDemandExchange _ _ _ _ open _ gate borrowing) stage) payload = do
+  -- The capability cannot send a native acquisition query. Full semantic
+  -- decoding remains with the existing Rust dependency owner.
+  case deserialiseFromBytes sourceEnvelope (BL.fromStrict (BS.take 64 payload)) of
+    Left _ -> fail "worker: SOURCE borrow requires a SOURCE dependency query"
+    Right _ -> pure ()
+  withMVar gate $ \_ -> do
+    active <- readIORef open
+    allowed <- readIORef borrowing
+    unless (active && allowed == Just stage) (throwIO NativeDemandClosed)
+    exchangeDemandLocked exchange stage payload
+  where
+    sourceEnvelope = do
+      count <- D.decodeListLen
+      label <- D.decodeString
+      origin <- D.decodeWord64
+      unless (count == 3 && label == T.pack "TPDEPENDENCYQUERY1" && origin == 0)
+        (fail "not a SOURCE query")
+
+-- The gate covers the reservation, complete frame exchange, and commit. A
+-- reserved failure poisons before the gate opens, even after partial output.
+exchangeDemandLocked :: NativeDemandExchange -> Word64 -> BS.ByteString -> IO NativeDemandReply
+exchangeDemandLocked exchange@(NativeDemandExchange header _ input protocol _ state _ _) stage payload = mask $ \restore -> do
   reserved <- atomicModifyIORef' state $ \old@(sequenceNumber,previous,spent,busy) ->
     if busy || sequenceNumber == maxBound || maybe False (> stage) previous
         || spent + 331 + toInteger (BS.length payload) > maxResponsePayloadBytes
@@ -76,7 +121,7 @@ exchangeNativeDemand exchange@(NativeDemandExchange header _ input protocol _ st
                charged = spent + 331 + toInteger (BS.length payload)
            in ((next,Just stage,charged,True),Just (next,maxResponsePayloadBytes - charged))
   (sequenceNumber,remaining) <- maybe (fail "worker: invalid or over-budget native demand") pure reserved
-  let poison = case exchange of NativeDemandExchange _ _ _ _ open _ -> writeIORef open False
+  let poison = case exchange of NativeDemandExchange _ _ _ _ open _ _ _ -> writeIORef open False
   restore (do
     BS.hPut protocol (BS.singleton 4 <> header <> putU64LE stage <> putU64LE sequenceNumber <> frame payload)
     hFlush protocol
@@ -94,19 +139,33 @@ exchangeNativeDemand exchange@(NativeDemandExchange header _ input protocol _ st
       ((number,previous,spent + toInteger count,False),()))
     pure (if outcome == 0 then NativeResolved body else NativeRefused body)) `onException` poison
 
-nativeRemaining :: NativeDemandExchange -> IO Integer
-nativeRemaining exchange@(NativeDemandExchange _ _ _ _ _ state) = do
-  requireNativeExchangeOpen exchange
-  (_,_,_,busy) <- readIORef state
-  when busy (fail "worker: terminal response while native reply outstanding")
-  nativeCaptureBudget exchange
-
 -- Capture cleanup must still close/remove its files after malformed exchange
 -- framing poisoned the channel. This observation does not authorize a response.
 nativeCaptureBudget :: NativeDemandExchange -> IO Integer
-nativeCaptureBudget (NativeDemandExchange _ _ _ _ _ state) = do
+nativeCaptureBudget (NativeDemandExchange _ _ _ _ _ state gate _) = withMVar gate $ \_ -> do
   (_,_,spent,_) <- readIORef state
   pure (max 0 (maxResponsePayloadBytes - spent))
+
+-- Compiler tasks have settled before this transition. Revocation and terminal
+-- output share the wire gate: a queued borrower must recheck and write nothing.
+withNativeTerminal :: Maybe NativeDemandExchange -> IO () -> (Integer -> IO a) -> IO a
+withNativeTerminal Nothing _ action = action maxResponsePayloadBytes
+withNativeTerminal (Just exchange@(NativeDemandExchange _ _ _ _ open state gate borrowing)) poisoned action =
+  withMVar gate $ \_ -> do
+    writeIORef borrowing Nothing
+    active <- readIORef open
+    unless active poisoned
+    requireNativeExchangeOpen exchange
+    (_,_,spent,busy) <- readIORef state
+    when busy (fail "worker: terminal response while native reply outstanding")
+    action (max 0 (maxResponsePayloadBytes - spent)) `finally` writeIORef open False
+
+
+closeNativeExchange :: NativeDemandExchange -> IO ()
+closeNativeExchange (NativeDemandExchange _ _ _ _ open _ gate borrowing) =
+  withMVar gate $ \_ -> do
+    writeIORef borrowing Nothing
+    writeIORef open False
 
 
 data OutputChannels = OutputChannels Handle Handle
@@ -155,8 +214,10 @@ runWorkerLoop withTransaction = withOutputChannels $ \channels@(OutputChannels p
           thread <- myThreadId
           open <- newIORef True
           state <- newIORef (0,Nothing,0,False)
-          let exchange = NativeDemandExchange header thread stdin protocol open state
-          serve (Just exchange) `finally` writeIORef open False
+          gate <- newMVar ()
+          borrowing <- newIORef Nothing
+          let exchange = NativeDemandExchange header thread stdin protocol open state gate borrowing
+          serve (Just exchange) `finally` closeNativeExchange exchange
         other -> throwIO (userError ("worker: unknown request command " ++ show other))
       where
         serve native = do
@@ -166,25 +227,22 @@ runWorkerLoop withTransaction = withOutputChannels $ \channels@(OutputChannels p
           let captureBudget = maybe (pure maxResponsePayloadBytes) nativeCaptureBudget native
           (completed, captured) <- captureOutputWithin captureBudget channels
             (handler (phaseSink channels) native cwd argv)
-          forM_ native $ \(NativeDemandExchange _ _ _ _ open _) -> do
-            healthy <- readIORef open
-            unless healthy (finishCompletion completed >> fail "worker: native exchange poisoned")
-          budget <- maybe (pure maxResponsePayloadBytes) nativeRemaining native
-          (code, out, err) <- renderCapturedWithin budget channels completed captured
-          when (toInteger (BS.length out) + toInteger (BS.length err) > budget) $
-            fail "worker: terminal response exceeds cumulative native exchange budget"
-          emitPhase (phaseSink channels) WritingResponse
-          BS.hPut protocol (maybe BS.empty (const (BS.singleton 0)) native
-            <> encodeResponse (exitCodeToInt code) out err)
-          hFlush protocol
-          emitPhase (phaseSink channels) ResponseWritten
-          unless (null (completionFailures completed)) $
-            finishCompletion completed >> pure ()
-          case captured of
-            UnavailableCapture -> finishCompletion completed >> fail "worker capture unavailable"
-            _ -> do
-              case native of Just (NativeDemandExchange _ _ _ _ open _) -> writeIORef open False; Nothing -> pure ()
-              requests channels handler
+          withNativeTerminal native
+            (finishCompletion completed >> fail "worker: native exchange poisoned") $ \budget -> do
+            (code, out, err) <- renderCapturedWithin budget channels completed captured
+            when (toInteger (BS.length out) + toInteger (BS.length err) > budget) $
+              fail "worker: terminal response exceeds cumulative native exchange budget"
+            emitPhase (phaseSink channels) WritingResponse
+            BS.hPut protocol (maybe BS.empty (const (BS.singleton 0)) native
+              <> encodeResponse (exitCodeToInt code) out err)
+            hFlush protocol
+            emitPhase (phaseSink channels) ResponseWritten
+            unless (null (completionFailures completed)) $
+              finishCompletion completed >> pure ()
+            case captured of
+              UnavailableCapture -> finishCompletion completed >> fail "worker capture unavailable"
+              _ -> pure ()
+          requests channels handler
 
 -- Direct CLI shares capture, release assessment and terminal rendering with the
 -- framed owner. Main's callback includes its outer compiler-scope release.

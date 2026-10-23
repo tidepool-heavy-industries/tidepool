@@ -21,7 +21,8 @@ module Tidepool.DependencyPlan
 
 import Control.Exception (Exception, throwIO)
 import Control.Monad (foldM, forM_, replicateM, unless, when)
-import Data.IORef
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.List (sortOn)
@@ -36,7 +37,8 @@ import Codec.CBOR.Write (toStrictByteString)
 import Tidepool.ExactScope (WorldOriginalReference, worldOriginalReferenceOwner, worldOriginalReferenceBindings)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.CertifiedProducts (encodeReceiptIdentity)
-import Tidepool.WorkerServer (NativeDemandExchange, NativeDemandReply(..), exchangeNativeDemand)
+import Tidepool.WorkerServer (NativeDemandExchange, NativeDemandReply(..), exchangeNativeDemand
+  , SourceDemandBorrow, borrowSourceDemand, exchangeSourceDemand)
 
 data DependencyOrigin = SourceDefinition | NativeOriginal deriving (Eq,Ord,Show)
 originTag :: DependencyOrigin -> Word64
@@ -73,10 +75,10 @@ nativeDependencyRetained (NativeDependencyReply _ retained) = retained
 data DecodedDependencyReply = DecodedDependencyReply
   !(Map.Map SymbolIdentity BS.ByteString) ![RetainedOccurrence]
 
-exchangeSourceDependencies :: NativeDemandExchange -> Word64 -> SourceDependencyQuery
+exchangeSourceDependencies :: SourceDemandBorrow -> SourceDependencyQuery
   -> IO (Map.Map NativeOriginalUse SourceDependencyReply)
-exchangeSourceDependencies exchange stage (SourceDependencyQuery uses) = do
-  decoded <- exchangeNativeDemand exchange stage (encodeDependencyUses SourceDefinition uses)
+exchangeSourceDependencies exchange (SourceDependencyQuery uses) = do
+  decoded <- exchangeSourceDemand exchange (encodeDependencyUses SourceDefinition uses)
     >>= readDependencyReply SourceDefinition uses
   pure (Map.map (\(DecodedDependencyReply _ retained) -> SourceDependencyReply retained) decoded)
 
@@ -90,24 +92,25 @@ exchangeNativeDependencies exchange stage (NativeDependencyQuery uses) = do
 data DependencyTerminal = DependencyTerminal !DependencyOrigin !NativeOriginalUse !RetainedOccurrence
   deriving (Eq,Ord)
 
--- Mutable only during the issuing compiler operation. The exchange enforces
--- its thread/lifetime and request owner; the stage is supplied by that owner.
-data CompilerDependencyBasis = CompilerDependencyBasis !NativeDemandExchange !Word64
-  !(IORef (Map.Map NativeOriginalUse SourceDependencyReply))
+-- Compiler tasks share this operation's SOURCE-only borrow. The basis gate
+-- covers discovery through publication; lock order is basis then transport.
+data CompilerDependencyBasis = CompilerDependencyBasis !SourceDemandBorrow
+  !(MVar ()) !(IORef (Map.Map NativeOriginalUse SourceDependencyReply))
 data FrozenDependencyBasis = FrozenDependencyBasis [DependencyTerminal]
   (Map.Map SymbolIdentity (Set.Set ((BS.ByteString,BS.ByteString),Word64)))
 
 newCompilerDependencyBasis :: NativeDemandExchange -> Word64 -> IO CompilerDependencyBasis
-newCompilerDependencyBasis exchange stage = CompilerDependencyBasis exchange stage <$> newIORef Map.empty
+newCompilerDependencyBasis exchange stage = do
+  borrowed <- borrowSourceDemand exchange stage
+  CompilerDependencyBasis borrowed <$> newMVar () <*> newIORef Map.empty
 
 captureSourceDependencies :: CompilerDependencyBasis -> [NativeOriginalUse] -> IO ()
-captureSourceDependencies (CompilerDependencyBasis exchange stage state) uses = do
+captureSourceDependencies (CompilerDependencyBasis exchange gate state) uses = withMVar gate $ \_ -> do
   known <- readIORef state
   let pending = Set.toAscList (Set.fromList uses `Set.difference` Map.keysSet known)
   unless (null pending) $ do
-    reply <- exchangeSourceDependencies exchange stage (sourceDependencyQuery pending)
-    let combined = Map.union known reply
-    writeIORef state combined
+    reply <- exchangeSourceDependencies exchange (sourceDependencyQuery pending)
+    writeIORef state (Map.union known reply)
 
 sourceTerminals :: Map.Map NativeOriginalUse SourceDependencyReply -> [DependencyTerminal]
 sourceTerminals replies = [DependencyTerminal SourceDefinition use occurrence
@@ -121,7 +124,7 @@ nativeDependencyTerminals replies uses = fmap concat $ mapM select (Set.toAscLis
       Just reply -> pure [DependencyTerminal NativeOriginal use occurrence | occurrence <- nativeDependencyRetained reply]
 
 freezeDependencyBasis :: CompilerDependencyBasis -> IO FrozenDependencyBasis
-freezeDependencyBasis (CompilerDependencyBasis _ _ state) = do
+freezeDependencyBasis (CompilerDependencyBasis _ gate state) = withMVar gate $ \_ -> do
   terminals <- sourceTerminals <$> readIORef state
   let choices = Map.fromListWith Set.union
         [(identity,Set.singleton (binding,generation))

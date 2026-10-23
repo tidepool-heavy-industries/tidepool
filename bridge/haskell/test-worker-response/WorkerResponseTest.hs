@@ -5,7 +5,7 @@ import System.Directory (createDirectory, getTemporaryDirectory, removeFile, rem
 import System.IO (openTempFile, hClose)
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 import WorkerResponseCases
-  ( check, checkNativeExchangeFailures, checkPartialAcquisition, checkSourceFreeCleanup, checkCompilerClusterReuse
+  ( check, checkSourceBorrowing, checkSourceBorrowCancellation, checkNativeExchangeFailures, checkPartialAcquisition, checkSourceFreeCleanup, checkCompilerClusterReuse
   , checkCompilerClusterCleanup, checkCompilerClusterCancellation )
 
 main :: IO ()
@@ -14,6 +14,8 @@ main = runTests tests
 tests :: TestTree
 tests = testGroup "worker-response"
   [ testCase "response bounds async unwind and next request" (withScratch check)
+  , testCase "SOURCE borrow serializes tasks and rejects foreign thread stale request stage and native queries" (withScratch checkSourceBorrowing)
+  , testCase "SOURCE borrow cancellation and partial replies poison without deadlock" (withScratch checkSourceBorrowCancellation)
   , testCase "native exchange rejects stale framing and cumulative exhaustion" (withScratch checkNativeExchangeFailures)
   , testCase "source-free cleanup failure suppresses Ready" (withScratch checkSourceFreeCleanup)
   , testCase "partial FD acquisition unwinds and recovers" (withScratch checkPartialAcquisition)
