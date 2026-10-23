@@ -936,6 +936,18 @@ fn assert_world_completed_output_keeps_actual_producer(
             unreachable!()
         };
         assert!(offered_product.same_admission_and_transport(&product));
+        let physical = stage
+            .issued_artifacts()
+            .observed_payload(&offer.original())
+            .expect("the actual physical cohort retains produced B separately from its prefix");
+        let ArtifactPayload::Original(physical_product) = &physical.payload else {
+            unreachable!()
+        };
+        assert!(physical_product.same_admission_and_transport(&product));
+        assert!(
+            Arc::ptr_eq(physical, offer.original_acquisition()),
+            "the physical B scope and its own receipt carry the same acquired entry"
+        );
         assert!(!offer.same_issuance(prior_offer));
         assert!(
             stage
