@@ -181,13 +181,8 @@ fn source_import(
     product: &CertifiedRecoveryProduct,
     ordinal: u32,
 ) -> crate::certified_products::PendingImportOwner {
-    let product = crate::certified_products::finalize_original_for_inventory(
-        product.clone(),
-        &mut PackageInterfaceValidation::default(),
-    )
-    .expect("fixture native import has authenticated original groups");
     let definitions =
-        crate::certified_products::original_native_group_definitions(&product, ordinal)
+        crate::certified_products::original_native_group_definitions(product, ordinal)
             .expect("fixture native import names an issued original group");
     let binding = match &definitions.bindings()[0] {
         tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
