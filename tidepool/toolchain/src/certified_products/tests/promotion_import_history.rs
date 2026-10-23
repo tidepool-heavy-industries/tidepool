@@ -439,7 +439,7 @@ fn check_actual_retained_core_promotion_history() {
         .original_native()
         .groups
         .iter()
-        .flat_map(|group| &group.imports)
+        .flat_map(|group| group.imports().iter())
         .filter_map(|import| match import {
             ReceiptImportOwner::Source {
                 unit,
@@ -754,7 +754,7 @@ fn check_actual_retained_core_promotion_history() {
             .original_native()
             .groups
             .iter()
-            .flat_map(|group| &group.imports)
+            .flat_map(|group| group.imports().iter())
             .filter_map(|import| match import {
                 ReceiptImportOwner::Source {
                     unit,
@@ -827,7 +827,7 @@ fn check_actual_retained_core_promotion_history() {
             .groups
             .iter()
             .flat_map(|group| {
-                group.imports.iter().filter_map(|import| match import {
+                group.imports().iter().filter_map(|import| match import {
                     ReceiptImportOwner::Source {
                         unit,
                         module,
@@ -838,7 +838,7 @@ fn check_actual_retained_core_promotion_history() {
                         && module == &helper.owner().module
                         && version == &helper.owner().module_version =>
                     {
-                        Some((group.original_ordinal, *original_ordinal))
+                        Some((group.group().original_ordinal(), *original_ordinal))
                     }
                     _ => None,
                 })
