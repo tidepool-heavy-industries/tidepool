@@ -1148,14 +1148,17 @@ fn assert_physical_selection(
     let current = physical.current_interface(51)?.artifact_id();
     let later = physical.current_interface(52)?.artifact_id();
     assert!(certified
+        .data()
         .value_interfaces
         .iter()
         .any(|interface| interface.artifact_id() == input));
     assert!(certified
+        .data()
         .value_interfaces
         .iter()
         .any(|interface| interface.artifact_id() == current));
     assert!(!certified
+        .data()
         .value_interfaces
         .iter()
         .any(|interface| interface.artifact_id() == later));
@@ -1214,14 +1217,12 @@ fn assert_physical_selection(
     };
     assert!(!certified
         .compiler_inputs()
-        .expect("first compiler owner")
         .role_projection()
         .snapshot_roles()
         .contains_key(&owner));
     assert_eq!(
         second
             .compiler_inputs()
-            .expect("second compiler owner")
             .role_projection()
             .snapshot_roles()
             .get(&owner)

@@ -69,7 +69,13 @@ pub(super) fn issued_original(
         None,
     )
     .unwrap();
-    let original = certified.recovery_products.iter().next().unwrap().clone();
+    let original = certified
+        .data()
+        .recovery_products
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
     assert!(original.original_native().matches_original(&original));
     assert_eq!(original.module_interface().interface_bytes(), &[interface]);
     original
