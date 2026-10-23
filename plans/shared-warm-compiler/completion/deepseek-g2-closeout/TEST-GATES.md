@@ -25,7 +25,7 @@ Do not add counts from different checkpoints into one passing suite.
    typed segment World semantics22, publication histories32 and the separately
    registered `runtime_world_segment_component_tests`3. The former finite runtime
    entrypoints are deleted; use each current target's declared count.
-   HOME/PACKAGE owner/lifetime component4, source membership2, closed runtime vacancy1 and abort composition
+   HOME/PACKAGE owner/lifetime component5, source membership2, closed runtime vacancy1 and abort composition
    complement the required authored notebook history; they do not replace it.
 5. Ordinary query/discovery/status; successful/frozen/cancelled/caller-loss default
    reload and explicit force refusal; uncertain END; package/source and historical
@@ -42,13 +42,42 @@ Do not add counts from different checkpoints into one passing suite.
 Named target declarations own their filters/counts. Do not narrow them by adding
 an exact filter. Direct libtest recipes must supply their owned-resident resources
 and expected nonzero count. Source rosters are expected counts; retain the linked
-runner's actual discovery and execution results. Resolve the unnamed HOME/PACKAGE,
-source-membership and reload subsets to concrete existing selectors before calling
-the joined gate complete; do not substitute similarly named tests.
+runner's actual discovery and execution results. The concrete component and reload
+subsets are listed below; do not substitute similarly named tests.
 
 The revised `fat_iface_exact_test` has 11 independent leaves. Its lifecycle group
 selects7; the historical three-term pattern now selects9. Run the full11 for this
 fixture migration. The group name is not an individual test count.
+
+## Component and reload selectors
+
+The codegen component runs these existing leaves through `just test-lib
+tidepool-codegen`, with repeated `--exact` and `--expected-count 7`:
+
+- `prepared_program::machine::native_slots::tests::empty_world_parent_retains_package_choice_through_child_abort_and_live_closure`
+- `prepared_program::machine::native_slots::tests::home_caf_choice_survives_child_retirement_without_crossing_fork_domains`
+- `prepared_program::machine::native_slots::tests::linked_dependencies_select_instances_while_unrelated_roots_preserve_reuse`
+- `prepared_program::machine::native_slots::tests::native_slot_commit_refuses_failed_admission_conflicts_and_detached_group`
+- `prepared_program::machine::native_slots::tests::home_literal_reuse_checks_original_producer_owner_ordinal_and_bytes`
+- `binding_table::source_selections::tests::prepared_snapshot_does_not_retain_retired_live_domain`
+- `binding_table::source_selections::tests::live_domain_memberships_match_recomputed_scope_views`
+
+This replaces historical `package_slots` names and the older four-leaf native
+subset. The current native subset has five leaves; membership remains two.
+
+The host owns five separate reload targets, each declaring its single exact test,
+owned-resident compiler resources and jobs1. Run with `just test-native`:
+
+- `//exomonad/host:facade_reload_default_publication_test`
+- `//exomonad/host:facade_reload_frozen_source_test`
+- `//exomonad/host:facade_reload_cancellation_test`
+- `//exomonad/host:facade_reload_caller_loss_test`
+- `//exomonad/host:facade_reload_force_refusal_test`
+
+These cover ordinary publication, frozen candidate execution, cancellation before
+publication, lost caller reply after publication, and unsupported force refusal
+followed by ordinary reload. The frozen Persona coherent-reload case remains a
+separate joined-workflow check.
 
 ## Required behavioral controls
 
