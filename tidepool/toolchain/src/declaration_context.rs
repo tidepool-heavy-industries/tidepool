@@ -23151,6 +23151,7 @@ mod tests {
                         .with_published_source_originals(&selection)
                         .unwrap();
                     let expected = context.semantic_sha256();
+                    let expected_facts = context.snapshot();
                     let original = context
                         .compiler_input_roles()
                         .iter()
@@ -23251,6 +23252,27 @@ mod tests {
                                 context = context.extend(&[], &[], vec![]).unwrap();
                             }
                         }
+                        let observed_facts = context.snapshot();
+                        proptest::prop_assert_eq!(
+                            &observed_facts.input_decisions,
+                            &expected_facts.input_decisions,
+                            "reimport preserves issued input decisions",
+                        );
+                        proptest::prop_assert_eq!(
+                            &observed_facts.native_availability,
+                            &expected_facts.native_availability,
+                            "reimport preserves native permission facts",
+                        );
+                        proptest::prop_assert_eq!(
+                            &observed_facts.offers,
+                            &expected_facts.offers,
+                            "reimport preserves retained native offers",
+                        );
+                        proptest::prop_assert_eq!(
+                            &observed_facts.roles,
+                            &expected_facts.roles,
+                            "reimport preserves exact published roles",
+                        );
                         proptest::prop_assert_eq!(context.semantic_sha256(), expected);
                         proptest::prop_assert!(context
                             .compiler_input_roles()
