@@ -524,31 +524,7 @@ impl SessionLib {
                 &self.extra_include,
                 settlement,
             )?);
-            let source_roots = lexical
-                .iter()
-                .find(|lexical| lexical.owner == root)
-                .ok_or_else(|| invalid("recovered root lacks lexical edges".into()))?
-                .imports
-                .clone();
-            let mut reachable = BTreeSet::new();
-            let mut pending = source_roots.clone();
-            while let Some(owner) = pending.pop() {
-                if reachable.insert(owner.clone()) {
-                    let source = lexical
-                        .iter()
-                        .find(|lexical| lexical.owner == owner)
-                        .ok_or_else(|| invalid("recovered lexical surface is not closed".into()))?;
-                    pending.extend(source.imports.clone());
-                }
-            }
-            let source_surface = render::AdmittedDeclarationSurface {
-                roots: source_roots,
-                lexical: lexical
-                    .iter()
-                    .filter(|lexical| reachable.contains(&lexical.owner))
-                    .cloned()
-                    .collect(),
-            };
+            let source_surface = evidence.source_surface().clone();
             let imports = graph
                 .workbench_imports(generation)
                 .map_err(|error| invalid(error.to_string()))?;

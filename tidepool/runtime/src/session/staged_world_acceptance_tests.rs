@@ -12,7 +12,7 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .finish();
     let _tracing = tracing::subscriber::set_default(subscriber);
-    let mut session = SemanticSession::new();
+    let mut session = SemanticSession::durable();
     // The independent oracle uses ordinary values, not compiler graph identities
     // or the implementation of either captured helper.
     let expected = ghc_trace(
@@ -57,9 +57,11 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
                         }),
                         "protected TextFormat remains a compiler dependency at item {index}"
                     );
-                    let source = declaration.shared_source_lexical_surface(&[]).unwrap();
+                    let source = declaration
+                        .extend_source_surface(&Default::default())
+                        .unwrap();
                     assert!(
-                        !source.roots.iter().any(|imported| {
+                        !source.roots().iter().any(|imported| {
                             imported.unit == "main" && imported.module == "Tidepool.TextFormat"
                         }),
                         "compiler support must not become a lexical root at item {index}"
@@ -217,4 +219,126 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
         .unwrap();
     assert_eq!(session.observed(), [11, 12, 13, 9, 50, 51]);
     session.assert_no_compiler_since_last_effect();
+
+    session
+        .execute_observed(
+            "staged_world_cold_original",
+            "stagedColdAnswer :: Int -> Int\nstagedColdAnswer value = Carrier.carrierBaseline value + 1\nsegmentRecord (stagedColdAnswer 51)",
+            CellDeclarationExpectation::Total(1),
+            SemanticChecks::None,
+            &imports,
+            None,
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(session.observed(), [11, 12, 13, 9, 50, 51, 52]);
+
+    let mut cold = session.reopen_without_authored_source();
+    for name in ["stagedSeed", "stagedPlain", "stagedText"] {
+        assert!(
+            cold.resident
+                .current_binding_in(cold.public, name)
+                .is_none(),
+            "cold recovery must not reconstruct the lost heap binding {name}"
+        );
+    }
+    assert_eq!(cold.observed(), [11, 12, 13, 9, 50, 51, 52]);
+    cold.execute(
+        "staged_world_cold_consumer",
+        "segmentRecord (stagedColdAnswer 52)",
+        0,
+    )
+    .unwrap();
+    assert_eq!(cold.observed(), [11, 12, 13, 9, 50, 51, 52, 53]);
+    cold.assert_no_compiler_since_last_effect();
+}
+
+impl SemanticSession {
+    fn reopen_without_authored_source(self) -> Self {
+        let Self {
+            resident,
+            public_source,
+            recipe,
+            effects,
+            recovery,
+            trace,
+            compiler_counts,
+            cancel_after_record,
+            _root: root,
+            ..
+        } = self;
+        let recovery = recovery.expect("cold history starts with durable publication");
+        let authority = recovery.owner.clone();
+        drop(resident);
+        drop(public_source);
+        drop(recipe);
+        drop(recovery);
+        let authored = root.path().join("Tidepool/Session");
+        assert!(
+            authored.is_dir(),
+            "the history must have written real source"
+        );
+        std::fs::remove_dir_all(&authored).unwrap();
+
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::reopen(authority);
+        let mut includes = effects.include_paths().to_vec();
+        includes.push(root.path().join("support"));
+        let recipe = InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            includes,
+        );
+        let mut lib = SessionLib::open(
+            SessionId(1011),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
+        let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = persistent
+            .recover_public_scope(&semantic_recovery_owner())
+            .unwrap();
+        // Restored bytes carry the exact declaration selection. A fresh live
+        // notebook lease owns this machine's source admission and World setup.
+        let public_source = persistent
+            .adopt_initial_notebook_scope_with_source(public, None)
+            .unwrap();
+        let mut resident = ResidentSession::from_persistent_for_test(
+            frunk::hlist![ProbeHandler {
+                trace: trace.clone(),
+                raw_result: None,
+                compiler_counts: compiler_counts.clone(),
+                cancel_after_record: cancel_after_record.clone(),
+            }],
+            QuietOutput,
+            persistent,
+        );
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: public,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        bootstrap_world_for(&mut resident, &recipe, &public_source);
+        assert!(
+            !authored.exists(),
+            "World setup must use retained declarations"
+        );
+        Self {
+            resident,
+            public,
+            public_source,
+            recipe,
+            trace,
+            compiler_counts,
+            history_compiler_census: None,
+            cancel_after_record,
+            effects,
+            recovery: Some(recovery),
+            _root: root,
+        }
+    }
 }

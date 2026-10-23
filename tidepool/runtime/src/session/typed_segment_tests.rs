@@ -63,7 +63,16 @@ struct SemanticSession {
     history_compiler_census: Option<(u64, Vec<CompilerModeObservation>)>,
     cancel_after_record: Arc<CaptureMutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
     effects: TestEffectSurface,
+    recovery: Option<crate::session::recovery_test_fixture::RecoveryFixture>,
     _root: tempfile::TempDir,
+}
+
+fn semantic_recovery_owner() -> RecoveryPublicOwner {
+    RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/semantic-history").unwrap(),
+        1,
+    )
+    .unwrap()
 }
 
 impl SemanticSession {
@@ -72,6 +81,17 @@ impl SemanticSession {
     }
 
     fn with_raw_result(raw_result: Option<Arc<CaptureMutex<Vec<String>>>>) -> Self {
+        Self::with_raw_result_and_recovery(raw_result, false)
+    }
+
+    fn durable() -> Self {
+        Self::with_raw_result_and_recovery(None, true)
+    }
+
+    fn with_raw_result_and_recovery(
+        raw_result: Option<Arc<CaptureMutex<Vec<String>>>>,
+        durable: bool,
+    ) -> Self {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("support")).unwrap();
@@ -95,13 +115,22 @@ impl SemanticSession {
             effects.row().to_owned(),
             includes,
         );
-        let lib = SessionLib::open(
+        let mut lib = SessionLib::open(
             SessionId(1010),
             root.path(),
             ModuleEnv::standalone_default(),
         )
         .unwrap()
         .with_validation_include(recipe.include.clone());
+        let recovery = durable.then(|| {
+            let recovery =
+                crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+            tidepool_testing::with_settlement(|settlement| {
+                recovery.attach_root(&mut lib, settlement)
+            })
+            .unwrap();
+            recovery
+        });
         let trace = Arc::new(CaptureMutex::new(Vec::new()));
         let compiler_counts = Arc::new(CaptureMutex::new(Vec::new()));
         let cancel_after_record = Arc::new(CaptureMutex::new(None));
@@ -122,6 +151,14 @@ impl SemanticSession {
         );
         let public_source = resident.mint_notebook_scope_with_lease(None).unwrap();
         let public = public_source.scope();
+        if recovery.is_some() {
+            assert!(matches!(
+                resident
+                    .initialize_durable_public_scope(semantic_recovery_owner(), public)
+                    .unwrap(),
+                PublicManifestCommit::Durable
+            ));
+        }
         resident
             .set_run_context(SessionRunContext {
                 lexical_scope: public,
@@ -139,6 +176,7 @@ impl SemanticSession {
             history_compiler_census: None,
             cancel_after_record,
             effects,
+            recovery,
             _root: root,
         }
     }
@@ -265,6 +303,7 @@ impl SemanticSession {
             &mut self.resident,
             &self.public_source,
             &self.recipe,
+            self.recovery.as_ref().map(|_| semantic_recovery_owner()),
             label,
             source,
             declarations,
@@ -290,6 +329,7 @@ fn execute_semantic_cell(
     resident: &mut ProbeSession,
     public_source: &Arc<crate::session::RuntimeLexicalScopeLease>,
     recipe: &InputRecipe,
+    durable_owner: Option<RecoveryPublicOwner>,
     label: &str,
     source: &str,
     declarations: CellDeclarationExpectation,
@@ -305,7 +345,10 @@ fn execute_semantic_cell(
     let execution = Arc::new(source_action_with_original(
         resident,
         original.clone(),
-        |resident, _| resident.begin_private_execution(public),
+        |resident, _| match &durable_owner {
+            Some(owner) => resident.begin_durable_private_execution(owner, public),
+            None => resident.begin_private_execution(public),
+        },
     )?);
     let result = (|| {
         let mut specification = (*fixture_cell_recipe(recipe, source, imports)).clone();
@@ -506,7 +549,10 @@ fn execute_semantic_cell(
         }
         let intent = resident.freeze_private_execution(&execution)?;
         source_action_with_original(resident, original.clone(), |resident, report| {
-            let publication = resident.restage_ephemeral_execution_publication(intent)?;
+            let publication = match &durable_owner {
+                Some(owner) => resident.restage_execution_publication(owner.clone(), intent)?,
+                None => resident.restage_ephemeral_execution_publication(intent)?,
+            };
             let ticket = match publication {
                 ExecutionPublication::Bindings(base) => base.stage()?,
                 ExecutionPublication::Declarations(base) => {
@@ -524,11 +570,12 @@ fn execute_semantic_cell(
                     accepted.stage()?
                 }
             };
+            let committed = resident
+                .attempt_public_manifest(ticket, &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)?;
             assert!(matches!(
-                resident
-                    .attempt_public_manifest(ticket, &PublicationDecision::new())
-                    .map(crate::session::settled_manifest_attempt)?,
-                PublicManifestCommit::Ephemeral
+                (durable_owner.as_ref(), committed),
+                (Some(_), PublicManifestCommit::Durable) | (None, PublicManifestCommit::Ephemeral)
             ));
             Ok::<_, crate::session::SessionError>(())
         })?;
@@ -949,7 +996,7 @@ fn cancellation_after_real_effect_preserves_receipt_and_allows_new_intent() {
         .resident
         .with_invocation_cancel(cancel, |resident| {
             execute_semantic_cell(
-                resident, &session.public_source, &session.recipe,
+                resident, &session.public_source, &session.recipe, None,
                 "cancel_after_effect",
                 "cancelledValue <- segmentRecord 1 >> pure (2 :: Int); segmentRecord cancelledValue",
                 CellDeclarationExpectation::Total(0), SemanticChecks::None,

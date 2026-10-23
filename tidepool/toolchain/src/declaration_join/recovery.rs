@@ -32,6 +32,7 @@ pub struct RecoveredDeclarationTip {
     exports: Vec<DeclarationExport>,
     instances: InstanceInventory,
     family_closure: Vec<ExportIdentity>,
+    source_surface: AdmittedDeclarationSurface,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,53 +71,9 @@ impl RecoveredDeclarationTip {
     pub fn family_closure(&self) -> &[ExportIdentity] {
         &self.family_closure
     }
-}
-
-/// Recover one original or joined interface without compiling or replaying
-/// declaration source. The existing inspection owner fences the current
-/// compiler producer against every retained product's certified producer.
-pub fn certify_recovered_declaration_tip(
-    recovery_root: &Path,
-    products: &[crate::recovery_artifacts::RecoveryArtifactRef],
-    module_interfaces: &[crate::recovery_artifacts::RecoveryModuleInterfaceRef],
-    joins: &[crate::recovery_artifacts::RecoveryJoinRef],
-    selection: RecoveryDeclarationSelection,
-    includes: &[PathBuf],
-    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
-) -> Result<RecoveredDeclarationTip, CompileError> {
-    certify_recovered_declaration_tip_with_value_interfaces(
-        recovery_root,
-        products,
-        module_interfaces,
-        joins,
-        &[],
-        selection,
-        includes,
-        settlement,
-    )
-}
-
-pub fn certify_recovered_declaration_tip_with_value_interfaces(
-    recovery_root: &Path,
-    products: &[crate::recovery_artifacts::RecoveryArtifactRef],
-    module_interfaces: &[crate::recovery_artifacts::RecoveryModuleInterfaceRef],
-    joins: &[crate::recovery_artifacts::RecoveryJoinRef],
-    values: &[crate::recovery_artifacts::RecoveryValueInterfaceRef],
-    mut selection: RecoveryDeclarationSelection,
-    includes: &[PathBuf],
-    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
-) -> Result<RecoveredDeclarationTip, CompileError> {
-    let context = Arc::new(
-        ExactDeclarationContext::capture_recovery_with_value_interfaces(
-            recovery_root,
-            products,
-            module_interfaces,
-            joins,
-            values,
-            std::mem::take(&mut selection.lexical),
-        )?,
-    );
-    certify_recovered_declaration_tip_in_context(context, selection, includes, settlement)
+    pub fn source_surface(&self) -> &AdmittedDeclarationSurface {
+        &self.source_surface
+    }
 }
 
 /// Certify durable selectors against an already authenticated scoped inventory.
@@ -135,6 +92,11 @@ pub fn certify_recovered_declaration_tip_in_context(
             .any(|node| node.owner == selection.root)
     {
         return Err(contract("recovered root lacks a certified lexical owner"));
+    }
+    if context.lexical_graph() != selection.lexical {
+        return Err(contract(
+            "recovered lexical selectors differ from the exact retained context",
+        ));
     }
     if matches!(selection.origin, RecoveryDeclarationOrigin::Join)
         && !context
@@ -237,6 +199,47 @@ pub fn certify_recovered_declaration_tip_in_context(
             "recovered interface differs from its durable selectors",
         ));
     }
+    // The exact retained graph owns adjacency. Interface inventory validates
+    // the selected tip; neither available artifacts nor graph keys select a
+    // replacement SOURCE surface.
+    let roots = context
+        .lexical_graph()
+        .iter()
+        .find(|node| node.owner == selection.root)
+        .expect("certified lexical owner checked")
+        .imports
+        .clone();
+    let mut reachable = BTreeSet::new();
+    let mut pending = roots.clone();
+    while let Some(owner) = pending.pop() {
+        if reachable.insert(owner.clone()) {
+            let node = context
+                .lexical_graph()
+                .iter()
+                .find(|node| node.owner == owner)
+                .ok_or_else(|| contract("recovered lexical surface is not closed"))?;
+            pending.extend(node.imports.iter().cloned());
+        }
+    }
+    let source_surface = AdmittedDeclarationSurface {
+        roots,
+        lexical: context
+            .lexical_graph()
+            .iter()
+            .filter(|node| reachable.contains(&node.owner))
+            .cloned()
+            .collect(),
+        source_originals: context
+            .compiler_source_support()
+            .projection()
+            .snapshot_roles()
+            .iter()
+            .filter_map(|(owner, role)| {
+                (role.original().is_some() && context.source_scope().admits(owner))
+                    .then(|| owner.clone())
+            })
+            .collect(),
+    };
     Ok(RecoveredDeclarationTip {
         origin,
         context,
@@ -245,6 +248,7 @@ pub fn certify_recovered_declaration_tip_in_context(
         exports: inventory.exports,
         instances: inventory.instances,
         family_closure: families,
+        source_surface,
     })
 }
 
