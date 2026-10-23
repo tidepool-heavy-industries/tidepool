@@ -96,7 +96,7 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-The current joined validation candidate is `186ec14118`; last settled is `791f7498a4`;
+The current joined validation candidate is `4a1958226c`; last settled is `f7588c7e2e`;
 see `STATE.md` for exact compile/execution evidence and pending gates.
 Adversarial closeout found a demand/catalog identity conflation and surviving
 test-only transport and SOURCE-authority issuers. The demand repair is integrated;
@@ -107,6 +107,11 @@ preserve refusal controls and execute the repaired join before completion. The a
 World history now passes initial capture/declaration/publication, then fails at
 retained-value reuse through an authored native declaration. This is a distinct
 boundary under direct root investigation; G2/G3 remain unqualified.
+Finite-path retirement remains open across Rust, Haskell and tests. Removing the
+unused runtime entry points alone did not retire the legacy ownership variants
+or compiler transport. `STATE.md` records the three implementation owners and
+the live ordinary/parser paths that must survive. Test-only consumers are not
+grounds to keep obsolete authority issuers.
 Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`.
 
 Warm validation checkout: /srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020.

@@ -3,7 +3,7 @@
 Updated 2026-10-23. **Adversarial closeout is open; G2/G3 are unqualified.**
 Root: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
 `integration/g2-domain-runtime-20261023`. Accepted scope: `LIVE-COMPLETION.md`.
-Last settled validation pin: `791f7498a4`; next candidate: `186ec14118`.
+Last settled validation pin: `f7588c7e2e`; current warm candidate: `4a1958226c`.
 These are bounded review checkpoints, not a release.
 
 ## Integrated boundaries
@@ -33,6 +33,34 @@ optional captured-product fallback, unchecked stage attachment and the native
 origin/version/availability cross-product. The unused
 `from_certified_continuation` route is also deleted. Test-only alternatives are
 not fully removed: the following migrations are still open.
+
+## Finite-path retirement is incomplete
+
+The live actor notebook is World-only. The former finite notebook entry points
+and their implementation are deleted (`23128ec4fa`, 1,513 removed lines).
+Ordinary native sealing now requires the completed output witness and receipt;
+the unreachable finite segment branches and fallback reads are deleted. The
+test-only unsealed native-output constructor is also deleted; its tests now
+exercise data capture and assembly without claiming execution authority.
+
+That is not a complete purge. Tests still construct finite checked cells, and
+unused public DTOs and the old `check_cell` / `--cell` transport remain. Keeping
+these because tests consume them would preserve the obsolete architecture.
+Three coordinated workers now own the remaining retirement:
+
+- `audit_tranche_phases`: toolchain finite ownership variants/issuers, runtime
+  specification DTO, and callers. Replace one-variant ownership wrappers with
+  the actual World owner. Migrate meaningful tests without a fake World issuer.
+- `audit_tranche_scope_tests`: obsolete Rust `check_cell`, extractor `--cell`
+  transport and tests. Retired modes must refuse; live wire tags must not shift.
+- `finite_haskell_retirement`: matching Haskell operation, finite cell/item
+  recipe branches and exclusive tests. Retain the live parser and World helpers.
+
+Preserve parser-only `--cell-plan` and ordinary native compilation for bootstrap,
+unprepared installers and packaged Original entries. Those are distinct live
+consumers, not the deleted notebook path. `ProgramNativeOutputOrigin::Ordinary`
+now names that distinction. Cross-language compilation and independent joined
+review are required before claiming retirement complete.
 
 ## Adversarial findings and disposition
 
@@ -64,6 +92,24 @@ Each repaired join receives another independent bounded adversarial review.
 
 ## Evidence and pending checks
 
+- At **`c27c53a877`**, toolchain production/cfg compiled; **10 tests executed,
+  6 passed and 4 failed**, with cleanup confirmed. Actual retained-Core promotion,
+  three-item selection/sealing, historical native permission, custody and two
+  transport controls passed. Failures were invalid test owner/demand premises;
+  repairs are integrated, preserving the production refusal boundaries.
+- At **`f7588c7e2e`**, the 17-consumer compilation attempt failed on two cfg
+  type errors in those repaired history assertions. **Zero tests executed.**
+  Runtime/actor cfg artifacts were rebuilt, but this is not a passing joined
+  compile claim. `96c43de6ff` fixes the two errors.
+- **`4a1958226c`** includes that repair, accepted ordinary-sealer specialization,
+  native capture test migration and the actual three-item counter/refusal checks.
+  The warm validator is compiling 17 consumers and then running 18 focused cases.
+  Results are pending. Synthetic SOURCE fixture deletion `915d7ccb79` remains
+  held until the actual replacement histories and lower-owner controls pass.
+  Positive NEW package additions through full item selection are not covered by
+  the current three-item workload; it only observes stage-owned package witnesses.
+  The lower reconciliation control is retained. No equivalence claim covers that
+  unexecuted branch, and it does not justify a fake SOURCE authority factory.
 - Last full production/cfg compile: **25 consumers passed at `051e6b7e1c`**.
   Later changes do not inherit a new full25 passing claim.
 - At **`cf62ac30f1`**, matched Haskell worker and toolchain production/cfg
@@ -77,8 +123,8 @@ Each repaired join receives another independent bounded adversarial review.
   three physical-row lifetime/merge controls. Remaining failures: an invalid
   historical-value component setup, empty-output lexical expectation, and a
   string oracle for an actual typed Original conflict. The latter two repairs
-  and further source-backed test migrations are integrated at `186ec14118`.
-  New and changed tests still require execution at that candidate.
+  and further source-backed test migrations were integrated afterward; the
+  current candidate and pending work are recorded above.
 - Earlier evidence includes four transport controls across recorded checkpoints
   and FatIface11/sourceboot4 at9db5. Newly changed owners require current checks.
 
