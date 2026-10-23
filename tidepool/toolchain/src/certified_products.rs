@@ -10158,6 +10158,10 @@ fn fixture_finalized_product_inner(
         encode_home_witness(&witness).unwrap(),
         binding,
     );
+    let finalized = match product.execution_source() {
+        Some(graph) => finalized.with_execution_source(Arc::clone(graph)).unwrap(),
+        None => finalized,
+    };
     certify_original_draft_with_validation(finalized, &mut PackageInterfaceValidation::default())
         .unwrap()
 }
@@ -10181,11 +10185,18 @@ pub(crate) fn fixture_finalized_product_with_source(
 #[cfg(test)]
 pub(crate) fn fixture_finalized_product_with_requirements_and_source(
     product: crate::recovery_artifacts::OriginalDraft,
-    producer: [u8;32],
-    requirements: Option<BTreeMap<(String,String),[u8;32]>>,
-    canonical_source_sha256: [u8;32],
+    producer: [u8; 32],
+    requirements: Option<BTreeMap<(String, String), [u8; 32]>>,
+    canonical_source_sha256: [u8; 32],
 ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
-    fixture_finalized_product_inner(product, producer, requirements, None, None, Some(canonical_source_sha256))
+    fixture_finalized_product_inner(
+        product,
+        producer,
+        requirements,
+        None,
+        None,
+        Some(canonical_source_sha256),
+    )
 }
 
 /// Current-source admission issued only by the physical product certifier.
@@ -14786,10 +14797,18 @@ pub(crate) fn certify_products_with_validation(
                 issuance_work.copied_product_bytes += product_bytes.len() as u64;
                 let binding = validate_module_binding(&witness, canonical_interface, interface, package_bytes, Some(source_sha))?;
                 validation.inventory.charge(product_bytes.len())?;
-                let admission = OriginalSourceAdmission::admit(&owner, canonical_interface, Arc::clone(&completed_source))?;
+                let admission = if origin == ProductOrigin::RetainedCore {
+                    None
+                } else {
+                    Some(OriginalSourceAdmission::admit(&owner, canonical_interface, Arc::clone(&completed_source))?)
+                };
                 let product = crate::recovery_artifacts::OriginalDraft::from_finalized_certification(
                     owner, product_bytes.to_vec(), certification, binding,
-                ).with_source_admission(admission).map_err(|_| CertificationError::Mismatch("original current source"))?;
+                );
+                let product = match admission {
+                    Some(admission) => product.with_source_admission(admission).map_err(|_| CertificationError::Mismatch("original current source"))?,
+                    None => product,
+                };
                 let product = match execution_source {
                     Some(graph) => product.with_execution_source_with_validation(Arc::clone(graph), validation).map_err(|_| CertificationError::Mismatch("execution source owner"))?,
                     None => product,
