@@ -1665,19 +1665,23 @@ pub struct CheckedValueArtifact {
     original_interface_prototype: Option<Arc<ExactHostBindingPrototype>>,
 }
 
-impl PartialEq for CheckedValueArtifact {
-    fn eq(&self, other: &Self) -> bool {
-        self.interface == other.interface
-            && Arc::ptr_eq(&self.row, &other.row)
-            && self.authority == other.authority
-            && self.certified_interface == other.certified_interface
-            && self.compiler_support == other.compiler_support
-            && self.source_lexical == other.source_lexical
-            && self.template_imports == other.template_imports
-            && self.original_interface_prototype == other.original_interface_prototype
+impl CheckedValueArtifact {
+    /// Reuse the same issued checked value, including its actual compiler inputs.
+    /// Equal interface bytes from another row never replace this authority.
+    pub fn same_issued_value_authority(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+            || (self.interface == other.interface
+                && Arc::ptr_eq(&self.row, &other.row)
+                && self.authority == other.authority
+                && self.certified_interface == other.certified_interface
+                && self
+                    .compiler_support
+                    .same_selected_acquisitions(&other.compiler_support)
+                && self.source_lexical == other.source_lexical
+                && self.template_imports == other.template_imports
+                && self.original_interface_prototype == other.original_interface_prototype)
     }
 }
-impl Eq for CheckedValueArtifact {}
 
 /// Type-only issuance purpose. Neither purpose grants runtime value transfer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

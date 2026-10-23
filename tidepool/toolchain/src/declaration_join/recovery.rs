@@ -23,7 +23,7 @@ pub struct RecoveryDeclarationSelection {
 
 /// Exact declaration facts recovered from verified artifacts and a fresh
 /// compiler inventory. No authored source or publication receipt is recreated.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct RecoveredDeclarationTip {
     origin: RecoveredDeclarationOrigin,
     context: Arc<ExactDeclarationContext>,
@@ -45,6 +45,24 @@ enum RecoveredDeclarationOrigin {
 }
 
 impl RecoveredDeclarationTip {
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        self.same_tip_facts(other) && self.context.same_recorded_facts(&other.context)
+    }
+
+    pub fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.same_tip_facts(other) && self.context.same_authenticated_context(&other.context)
+    }
+
+    fn same_tip_facts(&self, other: &Self) -> bool {
+        self.origin == other.origin
+            && self.root == other.root
+            && self.interface_sha256 == other.interface_sha256
+            && self.exports == other.exports
+            && self.instances == other.instances
+            && self.family_closure == other.family_closure
+            && self.source_surface == other.source_surface
+    }
+
     /// Present only after the original module's compiler inventory matches
     /// the complete introduced export delta for this authenticated generation.
     pub fn authored_generation(&self) -> Option<u64> {

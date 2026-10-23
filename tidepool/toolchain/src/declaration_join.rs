@@ -161,7 +161,7 @@ fn validate_instance_inventory(inventory: &InstanceInventory) -> Result<(), Comp
 
 /// The original declaration module from the same exact-source validation
 /// workflow. No worker or inventory scratch path is retained by this value.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CertifiedAuthoredDeclaration {
     product: CertifiedRecoveryProduct,
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
@@ -504,7 +504,7 @@ impl PublicationComposition {
 }
 
 /// One accepted facade and the exact context issued for its publication.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct PublicationComposition {
     join: Arc<AcceptedJoin>,
     context: Arc<ExactDeclarationContext>,
@@ -512,6 +512,18 @@ pub struct PublicationComposition {
 }
 
 impl PublicationComposition {
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        self.join.same_recorded_facts(&other.join)
+            && self.context.same_recorded_facts(&other.context)
+            && self.source_surface == other.source_surface
+    }
+
+    pub fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.join.same_selected_acquisitions(&other.join)
+            && self.context.same_authenticated_context(&other.context)
+            && self.source_surface == other.source_surface
+    }
+
     pub fn join(&self) -> &Arc<AcceptedJoin> {
         &self.join
     }
@@ -730,6 +742,34 @@ fn source_lexical_surface_inner(
 }
 
 impl CertifiedAuthoredDeclaration {
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        self.same_declaration_facts(other)
+            && self
+                .compiler_support
+                .same_recorded_facts(&other.compiler_support)
+    }
+
+    pub fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.same_declaration_facts(other)
+            && self.product.same_admission_and_transport(&other.product)
+            && self
+                .compiler_support
+                .same_selected_acquisitions(&other.compiler_support)
+    }
+
+    fn same_declaration_facts(&self, other: &Self) -> bool {
+        self.product.same_durable_artifact(&other.product)
+            && self.lexical_exports == other.lexical_exports
+            && self.introduced_exports == other.introduced_exports
+            && self.instances == other.instances
+            && self.family_closure == other.family_closure
+            && self.source_sha256 == other.source_sha256
+            && self.toolchain_identity_sha256 == other.toolchain_identity_sha256
+            && self.original_imports == other.original_imports
+            && self.source_scope == other.source_scope
+            && self.source_roots == other.source_roots
+    }
+
     pub(crate) fn compiler_source_support(
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
@@ -1250,13 +1290,13 @@ pub struct DeclarationJoinOutcome {
     pub decision: JoinDecision,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum CertifiedDeclarationJoin {
     Accepted(AcceptedJoin),
     Rejected(RejectedJoin),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct AcceptedJoin {
     // The accepted interface and its input edges are issued once together.
     // Retained input custody cannot become additional dependency authority.
@@ -1305,6 +1345,28 @@ pub struct MaterializedDeclarationJoin {
 }
 
 impl AcceptedJoin {
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        self.same_join_facts(other)
+            && self
+                .compiler_support
+                .same_recorded_facts(&other.compiler_support)
+            && self.context.same_recorded_facts(&other.context)
+    }
+
+    pub fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.same_join_facts(other)
+            && self
+                .compiler_support
+                .same_selected_acquisitions(&other.compiler_support)
+            && self.context.same_authenticated_context(&other.context)
+    }
+
+    fn same_join_facts(&self, other: &Self) -> bool {
+        self.input == other.input
+            && self.outcome == other.outcome
+            && self.interface == other.interface
+    }
+
     pub(crate) fn compiler_source_support(
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
