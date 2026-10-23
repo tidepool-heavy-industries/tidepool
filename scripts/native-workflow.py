@@ -221,6 +221,7 @@ def main(argv=None):
             "//tidepool/toolchain:compile_fail_checked_cell_request_inventory_is_issued",
             "//tidepool/toolchain:compile_fail_native_group_issuer_is_not_artifact",
             "//tidepool/toolchain:compile_fail_native_group_issuer_fields_are_private",
+            "//tidepool/toolchain:compile_fail_display_requires_completed_original",
             "//tidepool/runtime:compile_fail_compiler_cell_requires_settled",
             "//tidepool/runtime:compile_fail_compiler_cell_program_requires_runtime_settlement",
             "//tidepool/runtime:compile_fail_compiler_renderer_requires_settled",

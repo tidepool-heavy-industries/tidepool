@@ -2023,6 +2023,17 @@ rust_compile_fail(
 )
 
 rust_compile_fail(
+    name = "compile_fail_display_requires_completed_original",
+    source = "tests/compile_fail/display_requires_completed_original.rs",
+    control = "tests/compile_pass/display_requires_completed_original.rs",
+    expected = "tests/compile_fail/display_requires_completed_original.stderr",
+    dependencies = {
+        "tidepool_toolchain": ":tidepool_toolchain",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
     name = "compile_fail_native_group_issuer_fields_are_private",
     source = "tests/compile_fail/native_group_issuer_fields_are_private.rs",
     control = "tests/compile_pass/native_group_issuer_fields_are_private.rs",

@@ -1084,6 +1084,7 @@ def compile_fail_cases(package, library):
         "checked_cell_request_inventory_is_issued": (),
         "native_group_issuer_is_not_artifact": (),
         "native_group_issuer_fields_are_private": (),
+        "display_requires_completed_original": (),
         "compiler_cell_requires_settled": (),
         "compiler_cell_program_requires_runtime_settlement": (),
         "compiler_renderer_requires_settled": (),
