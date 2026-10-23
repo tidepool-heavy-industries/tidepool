@@ -46,16 +46,18 @@ import Test.QuickCheck.Random (mkQCGen)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT)
 import GHC (getSession, setSession, setContext, InteractiveImport(..), simpleImportDecl, exprType, TcRnExprMode(TM_Inst)
   , Ghc, GhcPs, ParsedModule(..), Target(..), guessTarget, setTargets, depanal, parseModule
-  , ms_mod_name, ms_hspp_opts)
+  , ms_mod_name, ms_hspp_opts, ms_textual_imps, ms_srcimps)
 import GHC.Data.FastString (mkFastString)
+import GHC.Data.Strict qualified as Strict
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Parser qualified as Parser
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.Parser.Annotation (getLocA)
 import GHC.LanguageExtensions.Type (Extension(ImplicitPrelude))
 import GHC.Hs (HsModule(..), ImportDecl(..), ImportDeclQualifiedStyle(..), ImportListInterpretation(..), IE(..), IEWrappedName(..))
 import GHC.Types.Name.Reader (rdrNameOcc)
-import GHC.Types.SrcLoc (GenLocated(..), mkRealSrcLoc, unLoc)
+import GHC.Types.SrcLoc (GenLocated(..), SrcSpan(..), mkRealSrcLoc, unLoc, getLoc, getBufSpan)
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
 import GHC.Data.ShortText qualified as PackageText
 import GHC.Unit.Env (ue_setUnits)
@@ -202,6 +204,21 @@ bufferedImportSyntaxBoundaries = withTiming $ withScratch $ \work ->
             (fail "buffered driver lost ordered syntax or distinct duplicate occurrence identities")
           pure parsed
     forM_ variations (void . check)
+    collision <- check (render ""
+      [ "{-# LINE 901 \"same-logical-import.hs\" #-}\n" ++ first
+      , "{-# LINE 901 \"same-logical-import.hs\" #-}\n" ++ first
+      , second
+      ])
+    let repeated = [getLocA (ideclName (unLoc declaration))
+          | declaration <- hsmodImports (unLoc (pm_parsed_source collision))
+          , unLoc (ideclName (unLoc declaration)) == mkModuleName "Data.List"]
+    unless (case repeated of
+        [left,right] -> sameLogicalImportSpan left right
+          && case (getBufSpan left,getBufSpan right) of
+            (Strict.Just before,Strict.Just after) -> before /= after
+            _ -> False
+        _ -> False)
+      (fail "LINE duplicate control lacks equal logical and distinct physical driver import spans")
     parsed <- check baseline
     let flags = ms_hspp_opts (pm_mod_summary parsed)
         path = work </> "InMemoryImportRoot.hs"
@@ -345,11 +362,34 @@ bufferedParsedImports work source = do
     [value] -> pure value
     _ -> liftIO (fail "in-memory import target has no unique actual GHC summary")
   parsed <- parseModule summary
+  liftIO (assertDriverImportSpans parsed)
   captured <- liftIO (parseCapturedImports (ms_hspp_opts summary) path source)
   unchanged <- liftIO (readFile path)
   liftIO $ unless (unchanged == diskTrap)
     (fail "in-memory import control replaced its invalid disk discriminator")
   pure (captured,parsed)
+
+-- The full parser and summary parser consume the same preprocessed buffer.
+-- Matching logical coordinates alone cannot distinguish a LINE duplicate.
+assertDriverImportSpans :: ParsedModule -> IO ()
+assertDriverImportSpans parsed =
+  forM_ (hsmodImports (unLoc (pm_parsed_source parsed))) $ \located -> do
+    let declaration = unLoc located
+        driverName = ideclName declaration
+        driverSpan = getLocA driverName
+        summary = pm_mod_summary parsed
+        consumed = if ideclSource declaration == IsBoot then ms_srcimps summary else ms_textual_imps summary
+        matching = [name | (_,name) <- consumed, unLoc name == unLoc driverName
+          , sameLogicalImportSpan (getLoc name) driverSpan
+          , case (getBufSpan (getLoc name),getBufSpan driverSpan) of
+              (Strict.Just before,Strict.Just after) -> before == after
+              _ -> False]
+    unless (length matching == 1)
+      (fail "actual driver import lacks one summary occurrence with the same present physical span")
+
+sameLogicalImportSpan :: SrcSpan -> SrcSpan -> Bool
+sameLogicalImportSpan (RealSrcSpan left _) (RealSrcSpan right _) = left == right
+sameLogicalImportSpan _ _ = False
 
 parseCapturedImports :: DynFlags -> FilePath -> String -> IO CapturedImportSyntax
 parseCapturedImports flags path source =
