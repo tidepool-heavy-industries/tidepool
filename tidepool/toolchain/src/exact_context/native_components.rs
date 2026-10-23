@@ -182,7 +182,7 @@ pub(super) mod tests {
     ) {
         use crate::artifact_inventory::{ArtifactPayload, CompilerSourceSupport};
         use crate::declaration_context::{ExactDeclarationContext, RecoveredArtifactAcquisition};
-        use crate::linked_native::NativeCodeGrant;
+        use crate::linked_native::{NativeCodeGrant, NativeGrantSelector, NativeOccurrenceId};
         assert_eq!(targets.len(), 2);
         let first_support = CompilerSourceSupport::empty()
             .with_linked_native_target(&targets[0])
@@ -401,52 +401,148 @@ pub(super) mod tests {
             .find_map(|(identity, record)| {
                 record.facts().package_receipts.iter().enumerate().find_map(
                     |(receipt_index, receipt)| {
-                        receipt
-                            .occurrences
-                            .iter()
-                            .enumerate()
-                            .find_map(|(row_index, row)| {
-                                let original = *row.children.first()?;
-                                receipt
-                                    .occurrences
-                                    .iter()
-                                    .find(|other| other.occurrence != original)
-                                    .map(|other| {
-                                        (*identity, receipt_index, row_index, other.occurrence)
-                                    })
+                        receipt.occurrences.iter().enumerate().find_map(|(row_index, row)| {
+                            let parent = &packages[&row.product];
+                            row.children.iter().enumerate().find_map(|(slot, original)| {
+                                let required = &parent.code().globals()[slot].identity;
+                                let original_row = receipt.occurrences.iter()
+                                    .find(|row| row.occurrence == *original)?;
+                                let original_product = &packages[&original_row.product];
+                                receipt.occurrences.iter().find(|other| {
+                                    let candidate = &packages[&other.product];
+                                    other.occurrence != *original
+                                        && candidate.code().owner().unit == required.unit
+                                        && candidate.code().owner().module == required.module
+                                        && candidate.defining_interface().sha256()
+                                            == original_product.defining_interface().sha256()
+                                        && candidate.code().owner().compiler_sha256
+                                            == parent.code().owner().compiler_sha256
+                                        && candidate.code().owner().profile_sha256
+                                            == parent.code().owner().profile_sha256
+                                        && !candidate.code().exported_values()
+                                            .any(|(identity, _)| identity == required)
+                                }).map(|other| (*identity, receipt_index, row_index, slot,
+                                    *original, other.occurrence))
                             })
+                        })
                     },
                 )
             })
-            .expect("actual package closure must have two distinct admitted occurrence choices");
-        let (identity, receipt_index, row_index, replacement) = crossing;
-        let mut crossed = second_snapshot.clone();
-        let mut facts = crossed.native_closures[&identity].facts().as_ref().clone();
-        let receipt = Arc::make_mut(&mut facts.package_receipts[receipt_index]);
-        let selected = &mut receipt.occurrences[row_index].children[0];
-        assert_ne!(*selected, replacement);
-        *selected = replacement;
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&facts, &mut bytes).unwrap();
-        crossed.native_closures.insert(
-            identity,
-            ImmutableNativeAcquiredClosureRecordRef(Arc::new(NativeAcquiredClosureRecord {
-                facts: Arc::new(facts),
-                bytes: bytes.into(),
-                cid: OnceLock::new(),
-            })),
+            .expect("actual package closure must retain a same-interface sibling without the demanded export");
+        let (identity, receipt_index, row_index, slot, original, replacement) = crossing;
+        let original_record = &second_snapshot.native_closures[&identity];
+        let original_facts = original_record.facts();
+        let mut original_bytes = Vec::new();
+        ciborium::ser::into_writer(original_facts.as_ref(), &mut original_bytes).unwrap();
+        assert_eq!(
+            original_bytes.as_slice(),
+            original_record.0.bytes.as_ref(),
+            "unchanged closure facts preserve their captured record bytes"
         );
-        let mut writer = Materializer::new(&store);
-        let crossed = writer.materialize_context(None, &crossed).unwrap();
-        install(&store, writer.finish().unwrap());
-        let crossed = hydrate_context(&store, crossed.root()).unwrap();
-        let refusal = inventory
-            .context_for_expected_snapshot(crossed.root(), &crossed)
-            .unwrap_err();
+        let receipt = &original_facts.package_receipts[receipt_index];
+        let parent = &packages[&receipt.occurrences[row_index].product];
+        let required = &parent.code().globals()[slot].identity;
+        let product_at = |occurrence| {
+            let row = receipt
+                .occurrences
+                .iter()
+                .find(|row| row.occurrence == occurrence)
+                .unwrap();
+            &packages[&row.product]
+        };
+        let original_product = product_at(original);
+        let replacement_product = product_at(replacement);
+        assert_eq!(
+            original_product.code().owner().unit,
+            replacement_product.code().owner().unit
+        );
+        assert_eq!(
+            original_product.code().owner().module,
+            replacement_product.code().owner().module
+        );
+        assert_eq!(
+            original_product.defining_interface().sha256(),
+            replacement_product.defining_interface().sha256()
+        );
+        assert!(original_product
+            .code()
+            .exported_values()
+            .any(|(identity, _)| identity == required));
+        assert!(!replacement_product
+            .code()
+            .exported_values()
+            .any(|(identity, _)| identity == required));
+
+        // The snapshot writer owns each changed record's CID. The recorded
+        // closure key remains untrusted input; the asserted semantic refusals
+        // must precede the final inner closure commitment check.
+        let refuse_corrupted_closure = |facts: NativeAcquiredClosureFacts| {
+            let mut crossed = second_snapshot.clone();
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&facts, &mut bytes).unwrap();
+            crossed.native_closures.insert(
+                identity,
+                ImmutableNativeAcquiredClosureRecordRef(Arc::new(NativeAcquiredClosureRecord {
+                    facts: Arc::new(facts),
+                    bytes: bytes.into(),
+                    cid: OnceLock::new(),
+                })),
+            );
+            let mut writer = Materializer::new(&store);
+            let crossed = writer.materialize_context(None, &crossed).unwrap();
+            install(&store, writer.finish().unwrap());
+            let crossed = hydrate_context(&store, crossed.root()).unwrap();
+            inventory
+                .context_for_expected_snapshot(crossed.root(), &crossed)
+                .unwrap_err()
+        };
+
+        let mut wrong_export = original_facts.as_ref().clone();
+        let receipt = Arc::make_mut(&mut wrong_export.package_receipts[receipt_index]);
+        assert_eq!(receipt.occurrences[row_index].children[slot], original);
+        receipt.occurrences[row_index].children[slot] = replacement;
+        let refusal = refuse_corrupted_closure(wrong_export);
         assert!(
             matches!(&refusal, crate::CompileError::ExtractFailed(detail)
-            if detail.contains("package selected edge changed its exact occurrence")),
-            "crossed package receipt refusal: {refusal:?}"
+            if detail == "native acquisition: selected package does not export the demanded identity"),
+            "same defining interface cannot supply a sibling's missing export: {refusal:?}"
+        );
+
+        // Retain the genuine receipt and products, changing only the recorded
+        // selector. Receipt acquisition still chooses the original valid export.
+        let receipt = &original_facts.package_receipts[receipt_index];
+        let parent = NativeOccurrenceId::Package {
+            stage_id: receipt.stage_id,
+            occurrence: receipt.occurrences[row_index].occurrence,
+        };
+        let expected = NativeGrantSelector::Code(NativeOccurrenceId::Package {
+            stage_id: receipt.stage_id,
+            occurrence: original,
+        });
+        let changed = NativeGrantSelector::Code(NativeOccurrenceId::Package {
+            stage_id: receipt.stage_id,
+            occurrence: replacement,
+        });
+        let mut wrong_selector = original_facts.as_ref().clone();
+        let row = wrong_selector
+            .occurrences
+            .iter_mut()
+            .find(|row| row.occurrence == parent)
+            .unwrap();
+        let mut selectors = row.imports.to_vec();
+        assert_eq!(selectors[slot], expected);
+        assert_ne!(expected, changed);
+        selectors[slot] = changed;
+        row.imports = selectors.into();
+        assert_eq!(
+            wrong_selector.package_receipts,
+            original_facts.package_receipts
+        );
+        let refusal = refuse_corrupted_closure(wrong_selector);
+        assert!(
+            matches!(&refusal, crate::CompileError::ExtractFailed(detail)
+            if detail == "native acquisition: recorded slot differs from its exact acquired selector"),
+            "recorded slot cannot replace its receipt's exact occurrence: {refusal:?}"
         );
 
         // Bytes remain on disk and in the acquisition's retained cache. Omitting
