@@ -11822,9 +11822,11 @@ mod authored_publication_tests {
         let first = resident.state.bindings().get(first_id).unwrap();
         let identity = first.value.identity.clone();
         let handle = first.value.handle;
-        assert!(resident.state.bindings().lease_count(first_id) > 0);
+        let first_leases = resident.state.bindings().lease_count(first_id);
+        assert!(first_leases > 0);
         drop(compiled);
         drop(reservation);
+        let mut latest_capture = None;
         for index in 1..11 {
             let reservation = source_action(&mut resident, &original, |resident, _| {
                 resident.admit_checked_item(prefix.clone(), checked.checked_item(index).unwrap())
@@ -11846,8 +11848,42 @@ mod authored_publication_tests {
                 )
             })
             .unwrap();
+            let entry = resident
+                .state
+                .bindings()
+                .get(SessionVarId::from_extract(bound[0].var_id))
+                .unwrap();
+            latest_capture = Some((entry.value.identity.clone(), entry.module.gen.0));
         }
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 11);
+        let (latest_identity, latest_generation) = latest_capture.unwrap();
+        assert!(!held
+            .actual_retained_imports()
+            .any(|(identity, generation)| identity == &latest_identity
+                && generation == latest_generation));
+        {
+            let latest = prefix.snapshot();
+            assert!(latest
+                .actual_retained_imports()
+                .any(|(identity, generation)| identity == &latest_identity
+                    && generation == latest_generation));
+            let original_interface = held
+                .interfaces()
+                .find(|interface| interface.module() == SessionModule::val(generation))
+                .unwrap();
+            let shared_interface = latest
+                .interfaces()
+                .find(|interface| interface.module() == SessionModule::val(generation))
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                original_interface.checked_artifact(),
+                shared_interface.checked_artifact()
+            ));
+        }
+        assert_eq!(
+            resident.state.bindings().lease_count(first_id),
+            first_leases
+        );
         assert!(resident.current_binding_in(scope, &first_name).is_none());
         let exact = resident
             .state
