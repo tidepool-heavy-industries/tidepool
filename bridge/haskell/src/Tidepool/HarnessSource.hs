@@ -8,25 +8,29 @@ import Control.Monad (foldM, when)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Maybe (fromMaybe)
+import Data.IORef (newIORef, readIORef, modifyIORef')
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import System.IO (IOMode(ReadMode), hGetContents, withFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (FileStatus, deviceID, fileID, getFileStatus)
 import System.Posix.Types (DeviceID, FileID)
-import Tidepool.ExtractRequest (WorkerRequest(..), RequestOperation(..), admitRequestOperation)
+import Tidepool.ExtractRequest
+  ( AdmittedWorkerRequest, RequestSourceRole(..)
+  , admittedOutputDirectory, admittedSourceFiles, traverseAdmittedSources )
 
 -- | Prepend the harness language profile to scratch input copies. Inspection
 -- requests profile every singleton fallback and their optional batch source;
 -- other modes compile only the first input. Putting the profile in source
 -- keeps it visible to GHC downsweep and source-based cache keys. Caller files
 -- are never modified; diagnostics are shifted by the inserted line.
-spliceHarnessProfilePragma :: WorkerRequest -> IO WorkerRequest
-spliceHarnessProfilePragma args = case requestFiles args of
-  [] -> pure args
-  (file : rest) -> do
-    protected <- requestSourceIdentities ((file : rest) ++ maybe [] (:[]) (requestInspectTypeBatch args))
-    let outDir = fromMaybe (takeDirectory file </> takeBaseName file ++ "_cbor") (requestOutDir args)
+spliceHarnessProfilePragma :: AdmittedWorkerRequest -> IO AdmittedWorkerRequest
+spliceHarnessProfilePragma request = case admittedSourceFiles request of
+  [] -> pure request
+  file : rest -> do
+    protected <- requestSourceIdentities (file : rest)
+    copies <- newIORef Map.empty
+    let outDir = fromMaybe (takeDirectory file </> takeBaseName file ++ "_cbor") (admittedOutputDirectory request)
         profileCopy directory sourcePath = do
           let scratchPath = directory </> takeFileName sourcePath
           rejectSourceAlias protected scratchPath
@@ -37,25 +41,19 @@ spliceHarnessProfilePragma args = case requestFiles args of
           createDirectoryIfMissing True directory
           writeFile scratchPath (harnessProfilePragmaLine ++ "\n" ++ source)
           pure scratchPath
-    if admitRequestOperation args /= Right InspectionOperation
-      then do
-        scratchPath <- profileCopy outDir file
-        pure args { requestFiles = scratchPath : rest }
-      else do
-        (_, files) <- foldM
-          (\(copies, paths) (index, sourcePath) -> do
-            copy <- case Map.lookup sourcePath copies of
+        replace role sourcePath = case role of
+          AdditionalSource -> pure sourcePath
+          PrimarySource -> profileCopy outDir sourcePath
+          InspectionBatchSource -> profileCopy (outDir </> "inspection-type-batch") sourcePath
+          InspectionSource index -> do
+            previous <- Map.lookup sourcePath <$> readIORef copies
+            case previous of
               Just existing -> pure existing
-              Nothing -> profileCopy (outDir </> "inspection-query-" ++ show index) sourcePath
-            pure (Map.insert sourcePath copy copies, copy : paths))
-          (Map.empty, []) (zip [0 :: Int ..] (file : rest))
-        batch <- case requestInspectTypeBatch args of
-          Nothing -> pure Nothing
-          Just sourcePath -> Just <$> profileCopy (outDir </> "inspection-type-batch") sourcePath
-        pure args
-          { requestFiles = reverse files
-          , requestInspectTypeBatch = batch
-          }
+              Nothing -> do
+                copy <- profileCopy (outDir </> "inspection-query-" ++ show index) sourcePath
+                modifyIORef' copies (Map.insert sourcePath copy)
+                pure copy
+    traverseAdmittedSources replace request
 
 -- | Harness language extensions. A cross-language consistency test pins this
 -- to the runtime-owned canonical eval dialect.
