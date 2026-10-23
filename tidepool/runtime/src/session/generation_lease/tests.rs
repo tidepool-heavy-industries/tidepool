@@ -910,15 +910,32 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
         .certified_authored_at(Generation(1))
         .is_some());
     let projection = prefix.snapshot();
-    assert_eq!(projection.view().unwrap().library(), Some(committed.module));
+    let current = session
+        .capture_inspection_world_in(private, &recipe.reference, &source_owner, |_| false)
+        .unwrap();
+    let crate::session::inspection::InspectionWorldInputs::Published(current_world) =
+        current.inputs
+    else {
+        panic!("declaration adoption must publish its actual successor World");
+    };
+    assert!(Arc::ptr_eq(projection.world(), &current_world));
+    assert_ne!(
+        projection.world().logical_id(),
+        original.world().logical_id()
+    );
+    let prepared = prefix
+        .admission()
+        .prepared_declaration(reservation.item())
+        .unwrap();
     let canonical = session.compile_view_in(private).unwrap();
+    assert_eq!(canonical.library(), Some(committed.module));
     assert_eq!(
-        projection.view().unwrap().library_import_module(),
-        canonical.library_import_module()
+        canonical.library_import_module(),
+        Some(prepared.projection.module_name())
     );
     assert_eq!(
-        projection.view().unwrap().exact_declaration_context(),
-        canonical.exact_declaration_context()
+        canonical.exact_declaration_context(),
+        Some(prepared.projection.context())
     );
     assert!(
         crate::session::world_cell_test_support::state_source_action(
