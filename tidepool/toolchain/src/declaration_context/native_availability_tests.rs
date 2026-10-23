@@ -4531,6 +4531,169 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
 }
 
 #[test]
+fn program_offer_only_append_refreshes_empty_native_candidates() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeArtifactDemand};
+
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let native = product("OfferOnlyCandidate", 206);
+    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
+    let canonical = Arc::new(ArtifactEntry::canonical(
+        native.module_interface().unwrap().clone(),
+    ));
+    let inventory = ArtifactInventory::default();
+    let views = ["OfferOnlyLeft", "OfferOnlyRight"].map(|marker| {
+        inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![
+                    entry.clone(),
+                    Arc::new(ArtifactEntry::canonical(
+                        product(marker, 207).module_interface().unwrap().clone(),
+                    )),
+                ],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap()
+    });
+    let offers = views.each_ref().map(|view| {
+        let offer = IssuedNativeOffer::issue(entry.descriptor.id, view, None).unwrap();
+        assert!(!offer.is_full());
+        assert!(offer.proof().is_none());
+        offer
+    });
+    assert_ne!(
+        offers[0], offers[1],
+        "the two Empty offers have distinct exact carrier scopes"
+    );
+    let original_role = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+    let type_role = CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap();
+    for old in 0..2 {
+        let current = 1 - old;
+        let empty = RequestNativeAvailability::issue_checked(
+            &original_role,
+            &views[old],
+            std::slice::from_ref(&offers[old]),
+        )
+        .unwrap();
+        assert!(empty
+            .issued_row(entry.descriptor.id)
+            .unwrap()
+            .issued_ordinals()
+            .is_empty());
+        let custody = views[current].retain_custody(&views[old]).unwrap();
+        let prior_support =
+            recover_fixture_compiler_support(type_role.clone(), custody, [offers[old].clone()])
+                .unwrap()
+                .retain_normalized_availability(&empty)
+                .unwrap();
+        assert!(!offers[old].matches_direct_canonical_binding(
+            entry.descriptor.id,
+            canonical.descriptor.id,
+            prior_support.artifacts(),
+        ));
+        assert!(offers[current].matches_direct_canonical_binding(
+            entry.descriptor.id,
+            canonical.descriptor.id,
+            prior_support.artifacts(),
+        ));
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&prior_support)
+                .unwrap()
+                .admit_producer(producer.sha256())
+                .unwrap(),
+        );
+        let captured = context
+            .capture_world_primary_compiler_inputs(producer.sha256())
+            .unwrap();
+        let owner = &entry.descriptor.owner;
+        let prior_row = captured.native_availability(entry.descriptor.id).unwrap();
+        assert_eq!(prior_row.mode, NativeTransportMode::IssuedGroups);
+        assert!(prior_row.issued_ordinals().is_empty());
+        assert_eq!(
+            captured
+                .native_selection
+                .candidates
+                .require_unique(owner)
+                .unwrap(),
+            None
+        );
+        let incoming = recover_fixture_compiler_support(
+            type_role.clone(),
+            views[current].clone(),
+            [offers[current].clone()],
+        )
+        .unwrap();
+        assert!(incoming.native_availability().rows().next().is_none());
+        let delta = captured
+            .source_support
+            .append_program_fragment(&incoming)
+            .unwrap();
+        assert!(
+            delta.changed_owners.is_empty(),
+            "the TYPE binding is unchanged"
+        );
+        assert!(
+            delta
+                .support
+                .native_availability()
+                .same_acquisition(captured.source_support.native_availability()),
+            "only offer custody changes; normalized row ownership stays exact"
+        );
+        assert_eq!(delta.support.native_offers().len(), 2);
+        assert!(delta.support.native_offers()[0].same_issuance(&offers[old]));
+        assert!(delta.support.native_offers()[1].same_issuance(&offers[current]));
+
+        let advanced = captured
+            .advance_program_support(&context, &incoming)
+            .unwrap();
+        let cold = advanced
+            .context
+            .capture_world_primary_compiler_inputs(producer.sha256())
+            .unwrap();
+        assert_eq!(
+            advanced.inputs.native_selection.candidates.0,
+            cold.native_selection.candidates.0
+        );
+        assert_eq!(
+            advanced.inputs.native_selection.availability,
+            cold.native_selection.availability
+        );
+        assert_eq!(
+            advanced
+                .inputs
+                .native_selection
+                .candidates
+                .require_unique(owner)
+                .unwrap(),
+            Some(entry.descriptor.id),
+            "the new exact Empty offer supplies direct affinity without granting groups"
+        );
+        let row = advanced
+            .inputs
+            .native_availability(entry.descriptor.id)
+            .unwrap();
+        assert_eq!(row.mode, NativeTransportMode::IssuedGroups);
+        assert!(row.issued_ordinals().is_empty());
+        assert!(!row.permits(7) && !row.permits(9001));
+        assert!(advanced
+            .inputs
+            .artifacts()
+            .selected_native_groups()
+            .is_empty());
+        assert_eq!(
+            NativeCompilerTransport::lower_metadata(&advanced.inputs)
+                .unwrap()
+                .entries,
+            NativeCompilerTransport::lower_metadata(&cold)
+                .unwrap()
+                .entries
+        );
+    }
+}
+
+#[test]
 fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
     use crate::artifact_inventory::{
         IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
