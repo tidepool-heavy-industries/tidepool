@@ -769,27 +769,56 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
     _ -> fail "checked command has another binder inventory"
   consumerSource <- T.unpack . TE.decodeUtf8 <$> BS.readFile consumerPath
   let submittedImports = "import Tidepool.Command.Types (Command)\nimport Tidepool.Session.Val.G7 (cmd)\n"
-  template <- either fail pure (replaceTemplateMarker submittedImports preambleImportMarker consumerSource)
+      inferredImports = "import Tidepool.Session.Val.G7 (cmd)\n"
+  inferredSource <- either fail pure
+    (replaceTemplateMarker "import Tidepool.Command.Types (Command)\n" "" consumerSource
+      >>= replaceTemplateMarker "__result :: Command\n" "")
   flags <- defaultParserDynFlags
-  authored <- analyzeCellWithFlags flags template (submittedImports ++ "cmd") >>= either (fail . show) pure
-  rendering <- either fail pure $ replaceImportRendering preambleImportMarker
-    (appendImportRendering (locatedImportsRendering (prologueImports (cellPlanPrologue authored)))
-      (literalImportRendering preambleImportMarker)) (literalImportRendering template)
-  writeFile consumerPath (importRenderingSource rendering)
-  protected <- either fail pure
-    (captureProtectedTemplateImports flags template >>= renderProtectedTemplateImports 0)
-  recipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
-    protected template rendering consumerPath "CheckedCommandConsumer" >>= either fail pure
+  let receiptDirectory = work </> ".exact-compilations"
+      receipts = doesDirectoryExist receiptDirectory >>= \exists ->
+        if exists then listDirectory receiptDirectory else pure []
   withResidentPipelineSelected includes $ \compile ->
-    forM_ [(value,GeneralCompile),(alias,GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing
-        [CompletedValueImport "main" "Tidepool.Session.Val.G7" aliasPath (digest valueBytes) [("cmd",identifier)]]))]
-      $ \(input,purpose) -> do
-        capture <- admitCheckedScope base includes [input]
-        checked <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose capture)
-          (Just scope {ssExactScope=Just (scopeManifestPath capture)}) consumerPath includes Nothing
-        unless (fmap renderType (crResultType checked) == Just "Command") $
-          fail "dependency-ordered command value injection changed its captured type"
-  putStrLn "checked command value: complete type closure, delayed injection and missing/changed-owner refusal passed"
+    forM_ [(True,consumerSource,submittedImports),(False,inferredSource,inferredImports)] $
+      \(explicitType,source,imports) -> do
+        template <- either fail pure (replaceTemplateMarker imports preambleImportMarker source)
+        authored <- analyzeCellWithFlags flags template (imports ++ "cmd") >>= either (fail . show) pure
+        rendering <- either fail pure $ replaceImportRendering preambleImportMarker
+          (appendImportRendering (locatedImportsRendering (prologueImports (cellPlanPrologue authored)))
+            (literalImportRendering preambleImportMarker)) (literalImportRendering template)
+        writeFile consumerPath (importRenderingSource rendering)
+        protected <- either fail pure
+          (captureProtectedTemplateImports flags template >>= renderProtectedTemplateImports 0)
+        recipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
+          protected template rendering consumerPath "CheckedCommandConsumer" >>= either fail pure
+        forM_ [(value,GeneralCompile),(alias,GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing
+            [CompletedValueImport "main" "Tidepool.Session.Val.G7" aliasPath (digest valueBytes) [("cmd",identifier)]]))]
+          $ \(input,purpose) -> do
+            capture <- admitCheckedScope base includes [input]
+            before <- receipts
+            checked <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose capture)
+              (Just scope {ssExactScope=Just (scopeManifestPath capture)}) consumerPath includes Nothing
+            unless (fmap renderType (crResultType checked) == Just "Command") $
+              fail "dependency-ordered command value injection changed its captured type"
+            after <- receipts
+            receiptPath <- case Set.toList (Set.fromList after `Set.difference` Set.fromList before) of
+              [directory] -> pure (receiptDirectory </> directory </> "receipt.cbor")
+              _ -> fail "checked command did not publish exactly one completion receipt"
+            receiptBytes <- BS.readFile receiptPath
+            (exactRows,roles) <- case deserialiseFromBytes decodeTerm (BSL.fromStrict receiptBytes) of
+              Right (remaining,TList [TString "TPEXACTCOMPILE",TString "4",_,_,_,_,_,_,TList rows,_,TList homeRoles])
+                | BSL.null remaining -> pure (rows,homeRoles)
+              _ -> fail "checked command completion receipt has another layout"
+            let expectedEdge = TList [TString "none",TString "Tidepool.Command.Types",TBool False,TString "main"]
+                expectedRole = TList [TString "none",TString "Tidepool.Command.Types",TBool False,TString "main",TInt 1]
+            rootEdges <- case [edges
+                | TList [TString "main",TString "CheckedCommandConsumer",TBool False,TList edges] <- exactRows] of
+              [edges] -> pure edges
+              _ -> fail "checked command completion did not retain exactly one root SOURCE row"
+            unless (rootEdges == [expectedEdge | explicitType]
+                && roles == [expectedRole | explicitType]) $
+              fail ("checked value completion confused SOURCE imports with retained TYPE custody: "
+                ++ show (explicitType,rootEdges,roles))
+  putStrLn "checked command value: SOURCE/type distinction, complete type closure, delayed injection and missing/changed-owner refusal passed"
 
 -- Direct source imports have set semantics. Their fresh/retained provenance and
 -- authored order must not change the row installed for a completed original.
