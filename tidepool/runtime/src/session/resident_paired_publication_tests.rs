@@ -1817,3 +1817,164 @@ fn paired_ephemeral_ticket_keeps_attached_manifest_and_admission_mode() {
     .is_err());
     assert_eq!(recovery.state(), before);
 }
+
+#[test]
+fn paired_ephemeral_foreign_runtime_ticket_never_claims() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let make = || {
+        let lib = SessionLib::open(
+            SessionId(4482),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+        let mut resident =
+            ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+        let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: source.scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        bootstrap_world_for(&mut resident, &recipe, &source);
+        (resident, source)
+    };
+    let (mut first, source) = make();
+    let public = source.scope();
+    // The actual published World issues an unchanged completed frontier.
+    let admission = begin_ephemeral_execution(&mut first, &source);
+    let intent = first.freeze_private_execution(&admission).unwrap();
+    let ticket = ephemeral_binding_stage(&mut first, &source, intent.clone());
+    let (mut second, second_source) = make();
+    let second_public = second_source.scope();
+    let second_admission = begin_ephemeral_execution(&mut second, &second_source);
+    second.freeze_private_execution(&second_admission).unwrap();
+    assert_eq!(
+        first.public_visibility_snapshot_in(public),
+        second.public_visibility_snapshot_in(second_public)
+    );
+    assert_eq!(
+        first.state.lib().log.publication_revision(),
+        second.state.lib().log.publication_revision()
+    );
+    let decision = PublicationDecision::new();
+    assert!(matches!(
+        second.attempt_public_manifest(ticket, &decision).unwrap(),
+        crate::session::PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
+    ));
+    assert_eq!(decision.phase(), PublicationPhase::Running);
+    assert!(source_action_with_original(
+        &mut second,
+        second_source.original_source().clone(),
+        |resident, _| { resident.restage_ephemeral_execution_publication(intent) }
+    )
+    .is_err());
+}
+
+#[test]
+fn paired_foreign_staged_ticket_never_claims_publication() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+    let mut lib = SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
+    let mut first =
+        ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+    let source = first.mint_notebook_scope_with_lease(None).unwrap();
+    let public = source.scope();
+    let owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/foreign-stage").unwrap(),
+        1,
+    )
+    .unwrap();
+    first
+        .initialize_durable_public_scope(owner.clone(), public)
+        .unwrap();
+    first
+        .set_run_context(SessionRunContext {
+            lexical_scope: public,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(&mut first, &recipe, &source);
+    let private = begin_execution(&mut first, &source, &owner);
+    let intent = first.freeze_private_execution(&private).unwrap();
+    let ExecutionPublication::Bindings(base) =
+        restage_execution(&mut first, &source, owner.clone(), intent.clone())
+    else {
+        panic!("actual unchanged World publishes bindings");
+    };
+    let ticket = base.stage().unwrap();
+    let mut second_lib =
+        SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(recipe.include.clone());
+    tidepool_testing::with_settlement(|settlement| {
+        recovery.attach(
+            &mut second_lib,
+            crate::session::recovery_store::RecoveryDomainId::Session(SessionId(986)),
+            settlement,
+        )
+    })
+    .unwrap();
+    let mut second =
+        ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(second_lib));
+    let second_source = second.mint_notebook_scope_with_lease(None).unwrap();
+    let second_public = second_source.scope();
+    second
+        .initialize_durable_public_scope(owner.clone(), second_public)
+        .unwrap();
+    second
+        .set_run_context(SessionRunContext {
+            lexical_scope: second_public,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(&mut second, &recipe, &second_source);
+    let second_private = begin_execution(&mut second, &second_source, &owner);
+    second.freeze_private_execution(&second_private).unwrap();
+    assert_eq!(
+        private.admitted_public().unwrap(),
+        second_private.admitted_public().unwrap()
+    );
+    assert_eq!(
+        first.public_visibility_snapshot_in(private.private_scope()),
+        second.public_visibility_snapshot_in(second_private.private_scope())
+    );
+    let decision = PublicationDecision::new();
+    assert!(matches!(
+        second.attempt_public_manifest(ticket, &decision).unwrap(),
+        crate::session::PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
+    ));
+    assert_eq!(decision.phase(), PublicationPhase::Running);
+    let ExecutionPublication::Bindings(base) =
+        restage_execution(&mut first, &source, owner, intent)
+    else {
+        panic!("original unchanged World still owns its binding publication");
+    };
+    assert!(matches!(
+        first
+            .attempt_public_manifest(base.stage().unwrap(), &decision)
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+}
