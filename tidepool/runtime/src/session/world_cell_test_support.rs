@@ -100,6 +100,151 @@ impl InputRecipe {
     }
 }
 
+pub(in crate::session) fn state_source_action<T>(
+    state: &mut PersistentSession,
+    original: Arc<RuntimeOriginalSource>,
+    action: impl FnOnce(&mut PersistentSession) -> T,
+) -> T {
+    if crate::CompilerTransactionOrigin::current().is_some() {
+        state
+            .source_transaction
+            .as_ref()
+            .expect("fixture borrows its actual source transaction")
+            .admit_original(&original, None)
+            .unwrap();
+        return action(state);
+    }
+    let settled = state
+        .with_source_compiler_transaction(
+            original,
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |state, _| action(state),
+        )
+        .unwrap();
+    assert!(settled.close().resources_retired());
+    settled.into_outcome().action
+}
+
+/// Bootstrap the actual public World before beginning a substrate fixture's
+/// private execution. The captured source owner, compiler END and installation
+/// are the same production transitions used by resident callers.
+pub(in crate::session) fn begin_state_fixture_execution(
+    state: &mut PersistentSession,
+    public: ScopeId,
+    recipe: &InputRecipe,
+) -> Arc<PrivateExecutionAdmission> {
+    let source = state.retain_lexical_scope(public).unwrap();
+    bootstrap_state_world_for(state, recipe, &source);
+    let original = source.original_source().clone();
+    let settled = state
+        .with_source_compiler_transaction(
+            original,
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |state, _| state.begin_private_execution(public),
+        )
+        .unwrap();
+    assert!(settled.close().resources_retired());
+    Arc::new(settled.into_outcome().action.unwrap())
+}
+
+pub(in crate::session) fn bootstrap_state_world_for(
+    state: &mut PersistentSession,
+    recipe: &InputRecipe,
+    source: &Arc<RuntimeLexicalScopeLease>,
+) {
+    let original = source.original_source().clone();
+    let admitted = state
+        .capture_inspection_world_in(source.scope(), &recipe.reference, &original, |_| false)
+        .unwrap();
+    let settled = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, _| {
+                crate::session::run_admitted_compiler_world(owner, admitted, || {
+                    Ok(Some(recipe.sources.clone()))
+                })
+            },
+        )
+        .unwrap();
+    assert!(settled.close().resources_retired());
+    let completed = crate::session::finish_admitted_compiler_world(settled).unwrap();
+    assert!(state.install_inspection_world_if_current(&completed, &recipe.reference, &original));
+}
+
+pub(in crate::session) fn plan_state_fixture_specification_for(
+    state: &mut PersistentSession,
+    execution: Arc<PrivateExecutionAdmission>,
+    specification: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+) -> Result<Arc<RuntimeCellAdmission>, WorldInspectionError> {
+    let original = execution
+        .original_source()
+        .map_err(crate::RuntimeError::from)?;
+    let settled = state
+        .with_source_compiler_transaction(
+            original.clone(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |state, _| state.prepare_private_execution_snapshot(execution.clone()),
+        )
+        .map_err(crate::RuntimeError::from)?;
+    assert!(settled.close().resources_retired());
+    let snapshot = settled
+        .into_outcome()
+        .action
+        .map_err(crate::RuntimeError::from)?;
+    let settled = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, _| {
+                turn::prepare_world_cell_plan_admitted(owner, snapshot.world(), specification, None)
+            },
+        )
+        .map_err(crate::RuntimeError::from)?;
+    let plan = turn::finish_world_cell_plan_admitted(settled)?;
+    let settled = state
+        .with_source_compiler_transaction(
+            original,
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |state, _| {
+                state.admit_world_planned_cell_with_snapshot(execution, snapshot, plan, None)
+            },
+        )
+        .map_err(crate::RuntimeError::from)?;
+    assert!(settled.close().resources_retired());
+    settled
+        .into_outcome()
+        .action
+        .map_err(crate::RuntimeError::from)
+        .map_err(Into::into)
+}
+
+pub(in crate::session) fn world_recipe(
+    specification: &tidepool_toolchain::checked_cell::CellRecipe,
+) -> Arc<tidepool_extract_cmd::WorldCellRecipe> {
+    Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+        source: specification.cell_source().to_owned(),
+        template: specification.template_source().to_owned(),
+        turn_templates: specification.turn_templates().to_vec(),
+    })
+}
+
 pub(in crate::session) fn source_action_with_original<H, O, T>(
     resident: &mut ResidentSession<H, O>,
     original: Arc<crate::session::RuntimeOriginalSource>,
