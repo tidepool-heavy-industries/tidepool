@@ -3,9 +3,10 @@
 Updated 2026-10-23. **Adversarial closeout is open; G2/G3 are unqualified.**
 Root: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
 `integration/g2-domain-runtime-20261023`. Accepted scope: `LIVE-COMPLETION.md`.
-Last settled validation pin: `2de0e83ee2`: 17 consumers compiled; nine tests
-executed, five passed and four failed. The broader Rust/Haskell retirement is
-integrated through `26244edfb3`; generated targets and joined checks are pending.
+Last settled validation pin: `831d96eea1`: 32 requested consumers stopped on a
+GHC compile error; zero tests ran. Repair candidate `65e2eb4ae0` is queued for
+the same joined compile and focused execution. The previous `2de0e83ee2` pin
+compiled 17 consumers and executed nine tests: five passed and four failed.
 These are bounded review checkpoints, not a release.
 
 ## Integrated boundaries
@@ -60,12 +61,17 @@ fixture families are not covered by that bounded deletion claim.
 
 Remaining closeout work:
 
-- Regenerate Haskell components from the current pinned Cabal metadata and
-  compile both language consumers. Rust checked-value authority tests are
-  registered as two actual resident cases in `59cbcc346a`.
-- Repair the four failing ownership controls without weakening authorization.
-- Finish generator-test/orphan-fixture cleanup and independently inspect the
-  joined route, including test-only callers and generated build declarations.
+- Compile both language consumers at the repaired joined revision. Fresh pinned
+  Cabal metadata and Rust generated targets are integrated; 74 registration and
+  source-participation checks pass. Two actual checked-value authority cases
+  retain their resident compiler resources.
+- Execute the four repaired ownership controls. The joined materialization
+  bypass now checks actual issuance, with shared-owner and competing-owner cases;
+  the other repairs distinguish root permission and compiler roles from custody.
+- Finish independent review of the last scaffold retirement and restore two
+  still-useful real-compiler regression contracts through World preparation:
+  qualified equality under the custom Prelude, and authored versus imported
+  missing-record warnings. Do not restore the deleted finite entry point.
 - Execute the changed controls and current production paths before claiming
   migration completion. Source integration alone is insufficient.
 
@@ -105,6 +111,20 @@ Each repaired join receives another independent bounded adversarial review.
 
 ## Evidence and pending checks
 
+- At **`831d96eea1`**, the **32-consumer compile failed** at the first Haskell
+  error: activation-preview parsing still called a local signature-decoder alias
+  deleted with the old cell branch. **Zero tests executed.** Independent review
+  also found a dangling old-recipe variable and malformed layout in the retained
+  generated-scaffold consumer. `65e2eb4ae0` calls the existing signature decoder
+  directly and removes the obsolete planned-Original parameter, branch and owner
+  variant instead of retaining a constant-`Nothing` compatibility path. Live
+  template and activation-preview graph/occurrence checks remain. The same
+  joined compile and focused tests are pending on that repair.
+- The bounded joined Rust source audit found no surviving finite notebook route.
+  Its two coverage findings are being ported to actual World preparation. The
+  Haskell source audit found the scaffold compile defect above; other traced
+  World/ordinary routes and 627 generated source paths remained connected.
+  Source audits do not establish execution or qualification.
 - At **`2de0e83ee2`**, **17 consumers compiled** and **nine tests executed:
   five passed, four failed**, with cleanup confirmed. Actual promotion and its
   0→1→0 history/refusal tail, three-item ordered sealing, typed cycle refusal,
