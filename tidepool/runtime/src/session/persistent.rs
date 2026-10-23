@@ -1058,7 +1058,7 @@ impl PersistentSession {
         }
         if let ResolvedNativeInputs::Scoped(inputs) = &resolved.inputs {
             inputs
-                .validate_live(self)
+                .validate_native_values(self, resolved.instantiation.retained_values())
                 .map_err(|error| PreparedRuntimeError::CheckedInputs(Box::new(error)))?;
         }
         let plan = resolved.instantiation.plan();

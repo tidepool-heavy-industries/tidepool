@@ -398,7 +398,7 @@ fn same_import_destinations(left: &[ScopedNativeSlot], right: &[ScopedNativeSlot
                 (
                     ScopedNativeSlot::Retained { value: left, .. },
                     ScopedNativeSlot::Retained { value: right, .. },
-                ) => left.id == right.id && left.handle == right.handle,
+                ) => left.handle == right.handle,
                 _ => false,
             })
 }

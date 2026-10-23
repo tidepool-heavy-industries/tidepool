@@ -212,9 +212,10 @@ impl ScopedResolvedInputs {
         Ok(next)
     }
 
-    pub(in crate::session) fn validate_live(
+    pub(in crate::session) fn validate_native_values<'a>(
         &self,
         session: &PersistentSession,
+        values: impl Iterator<Item = &'a Arc<ScopedResolvedValue>>,
     ) -> Result<(), SessionError> {
         session.validate_lexical_scope_lease(self.scope.scope(), &self.scope)?;
         let reachable = session
@@ -222,7 +223,7 @@ impl ScopedResolvedInputs {
             .scope_reachable_binding_ids(session.scope_tree(), self.scope.scope())
             .into_iter()
             .collect();
-        for value in self.values.values() {
+        for value in values {
             value.validate(session, &reachable)?;
         }
         Ok(())
