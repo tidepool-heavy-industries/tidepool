@@ -1,6 +1,6 @@
 # Compiler work and authority map
 
-This map was checked against joined source `0197741519` (2026-10-22).
+This map was checked against joined source `f5e8cb121a` (2026-10-22).
 The linked-code, physical-stage, acquired-prefix, source-scope and Context9
 consumer tranche is joined in source; G2 remains unqualified. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
@@ -171,9 +171,9 @@ of reconstructing them from module names, generation labels or retained catalogs
   between selected nonchecked HOME imports and the consumed SOURCE census. SOURCE
   wire evidence and `exactImports` are unchanged; checked TYPE custody retains its
   independent issuer. The detached import-intent parser/selection route is removed.
-  This boundary is source-reviewed and its checked-value control executes at this
-  checkpoint; broader actual-driver, ordinary CPP and carried-World histories
-  remain execution obligations. Relevant
+  This boundary is source-reviewed, with checked-value and carried-World TYPE
+  controls executed at their recorded revisions. Broader ordinary and runtime
+  histories remain execution obligations. Relevant
   controls include `moduleHeaderCompilation`, `generatedScaffoldImports`,
   `checkedCommandValue` and `worldCarriedImportTypes`; migrated callers and linked
   test executables alone do not establish their passing behavior.
