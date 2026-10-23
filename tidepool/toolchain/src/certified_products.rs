@@ -26557,30 +26557,60 @@ pub(crate) mod tests {
             // availability before the dependent output is admitted.
             let private = full.then(|| {
                 let output_inventory = ArtifactInventory::default();
+                let canonical = Arc::new(ArtifactEntry::canonical(
+                    dependency.module_interface().clone(),
+                ));
+                let produced = vec![canonical.clone(), entry.clone()];
                 let output_artifacts = output_inventory
                     .admit_shared_with_demand(
                         &output_inventory.empty_view(),
-                        vec![entry.clone()],
+                        produced.clone(),
                         NativeArtifactDemand::ScopeInterfaces,
                     )
                     .unwrap();
-                let output_projection =
-                    CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
                 let mut output_validation = PackageInterfaceValidation::default();
-                let output_selection = CertifiedSourceSelection::from_compiler_projection(
-                    &output_projection,
-                    &output_artifacts.metadata_snapshot(),
-                    &output_validation.inventory,
-                )
-                .unwrap();
-                let issued = output_inventory
+                let mut output_selection = CertifiedSourceSelection::new_product_ingress();
+                output_selection
+                    .admit_current(
+                        dependency.owner(),
+                        ProductOrigin::Cached,
+                        dependency.module_interface(),
+                        &output_validation.inventory,
+                    )
+                    .unwrap();
+                output_selection
+                    .bind_produced_originals(
+                        &IssuedGroupCandidates::bind(Arc::from([]), &[dependency.clone()])
+                            .unwrap(),
+                    )
+                    .unwrap();
+                // Custody alone cannot stand in for the current producer's
+                // canonical and Original acquisitions at stage completion.
+                let missing_producer = output_inventory
                     .bind_segment(
                         &output_artifacts,
                         vec![],
                         &output_selection,
                         &mut output_validation,
                     )
+                    .err()
+                    .expect("retained output bytes cannot issue the canonical producer");
+                assert!(matches!(missing_producer, crate::CompileError::ExtractFailed(ref detail)
+                    if detail == "artifact inventory: compiler output lacks its actual canonical producer or matching carried row"));
+                let acquired = output_artifacts.entries();
+                for actual in &produced {
+                    assert!(acquired.iter().any(|held| Arc::ptr_eq(held, actual)),
+                        "stage completion receives the exact admitted producer acquisition");
+                }
+                let issued = output_inventory
+                    .bind_segment(
+                        &output_artifacts,
+                        produced,
+                        &output_selection,
+                        &mut output_validation,
+                    )
                     .unwrap();
+                assert!(issued.captured_stage().issued_artifacts().selected_native_groups().is_empty());
                 issued.captured_stage().compiler_inputs().as_ref().clone()
             });
             let (context, private) = if interface_only {
@@ -26759,7 +26789,9 @@ pub(crate) mod tests {
                 .filter(|entry| entry.descriptor.owner == current_entry.descriptor.owner)
                 .collect::<Vec<_>>();
             assert_eq!(produced.len(), 2);
-            assert!(produced.iter().any(|entry| Arc::ptr_eq(entry, &current_entry)));
+            assert!(produced
+                .iter()
+                .any(|entry| Arc::ptr_eq(entry, &current_entry)));
             let issued = inventory
                 .bind_segment(&output, produced, &selection, &mut validation)
                 .unwrap();
