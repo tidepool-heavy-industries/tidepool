@@ -396,17 +396,15 @@ impl SessionCompileView {
         inputs: &super::prepared::RuntimeCompileInputs,
     ) -> Result<Self, crate::CompileError> {
         if !inputs.projections().is_empty() {
-            let mut context = match &self.projection.exact_context {
-                Some(context) => (**context).clone(),
-                None => ExactDeclarationContext::new(&[], &[], Vec::new())?,
-            };
-            let mut lexical = Vec::new();
-            let mut joins = Vec::new();
+            let mut context = self
+                .projection
+                .exact_context
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(ExactDeclarationContext::empty);
             for projection in inputs.projections() {
-                lexical.extend_from_slice(projection.context().lexical_graph());
-                joins.push(projection.receipt().clone());
+                context = context.admit_publication(projection.composition())?;
             }
-            context = context.extend_lexical_joins(&joins, &lexical)?;
             Arc::make_mut(&mut self.projection).exact_context = Some(Arc::new(context));
         }
         if let Some(annotations) = inputs.annotations() {
@@ -841,7 +839,7 @@ mod tests {
             b"immutable-source-b",
             &imports,
             &inputs,
-                None,
+            None,
             super::super::NameScope::Current,
         );
         assert!(!original_pin.same_view(&source_changed));
@@ -851,7 +849,7 @@ mod tests {
             b"immutable-source-a",
             &SourceImports::from_specs(["Data.Text qualified as Other"]),
             &inputs,
-                None,
+            None,
             super::super::NameScope::Current,
         );
         assert!(!original_pin.same_view(&import_changed));

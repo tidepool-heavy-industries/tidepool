@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tidepool_repr::Generation;
 use tidepool_toolchain::declaration_join::{
     certify_declaration_join, AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin,
-    DeclarationExport, DeclarationJoinSpec, ExactDeclarationContext, ExactLexicalNode,
-    ExactModuleIdentity, ExportIdentity, InstanceInventory, ModuleSnapshot, ReservedJoin,
+    DeclarationExport, DeclarationJoinSpec, ExactDeclarationContext, ExactModuleIdentity,
+    ExportIdentity, InstanceInventory, ModuleSnapshot, PublicationComposition, ReservedJoin,
 };
 
 use super::render::AdmittedDeclarationSurface;
@@ -18,19 +18,21 @@ use super::{DeclarationRetraction, SessionError, SessionLib};
 /// implementation closure. Clones retain the same issued interface and bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertifiedDeclarationProjection {
-    receipt: Arc<AcceptedJoin>,
-    context: Arc<ExactDeclarationContext>,
+    composition: PublicationComposition,
 }
 
 impl CertifiedDeclarationProjection {
     pub fn module_name(&self) -> &str {
-        &self.receipt.reserved().module
+        &self.composition.join().reserved().module
     }
     pub fn context(&self) -> &Arc<ExactDeclarationContext> {
-        &self.context
+        self.composition.context()
     }
     pub fn receipt(&self) -> &Arc<AcceptedJoin> {
-        &self.receipt
+        self.composition.join()
+    }
+    pub(crate) fn composition(&self) -> &PublicationComposition {
+        &self.composition
     }
 }
 
@@ -86,11 +88,11 @@ impl PreparedAuthoredDeclaration {
                 unit: owner.unit.clone(),
                 module: owner.module.clone(),
             },
-            context: self.projection.context.clone(),
+            context: self.projection.context().clone(),
             surface: self.surface.clone(),
-            exports: self.projection.receipt.exports().to_vec(),
-            instances: self.projection.receipt.instances().clone(),
-            families: self.projection.receipt.family_closure().to_vec(),
+            exports: self.projection.receipt().exports().to_vec(),
+            instances: self.projection.receipt().instances().clone(),
+            families: self.projection.receipt().family_closure().to_vec(),
         }
     }
 }
@@ -134,25 +136,15 @@ pub(super) fn prepare_authored_projection(
     families.extend_from_slice(evidence.family_closure());
     families.sort();
     families.dedup();
-    let surface = super::paired_publication::extend_admitted_surface(
-        &evidence,
-        baseline
+    let surface = evidence.extend_source_surface(
+        &baseline
             .map(|prior| prior.surface.clone())
             .unwrap_or_default(),
     )?;
-    let mut lexical = surface.lexical.clone();
-    lexical.push(ExactLexicalNode {
-        owner: owner.clone(),
-        imports: surface.roots.clone(),
-    });
-    let context = match baseline {
-        Some(prior) => {
-            (*prior.context)
-                .clone()
-                .extend(std::slice::from_ref(&evidence), &[], lexical)?
-        }
-        None => ExactDeclarationContext::new(std::slice::from_ref(&evidence), &[], lexical)?,
-    };
+    let context = baseline
+        .map(|prior| (*prior.context).clone())
+        .unwrap_or_else(ExactDeclarationContext::empty)
+        .admit_authored_publication(std::slice::from_ref(&evidence), &surface)?;
     let projection = issue_projection(
         &context, &owner, &surface, &exports, &instances, &families, includes, root, settlement,
     )?;
@@ -188,8 +180,8 @@ pub(super) fn issue_projection(
     exports.sort_by(|left, right| left.head.cmp(&right.head));
     let encoded = serde_json::to_vec(&(
         context.semantic_sha256(),
-        &surface.roots,
-        &surface.lexical,
+        surface.roots(),
+        surface.lexical_graph(),
         &exports,
         instances,
         families,
@@ -235,21 +227,6 @@ pub(super) fn issue_projection(
             )))
         }
     };
-    let mut lexical = surface.lexical.clone();
-    lexical.push(ExactLexicalNode {
-        owner: ExactModuleIdentity {
-            unit: receipt.reserved().unit.clone(),
-            module: receipt.reserved().module.clone(),
-        },
-        imports: surface.roots.clone(),
-    });
-    let context = Arc::new(ExactDeclarationContext::new(
-        &[],
-        std::slice::from_ref(&receipt),
-        lexical,
-    )?);
-    Ok(Arc::new(CertifiedDeclarationProjection {
-        receipt,
-        context,
-    }))
+    let composition = context.with_joined_publication(&receipt, surface)?;
+    Ok(Arc::new(CertifiedDeclarationProjection { composition }))
 }

@@ -12,9 +12,9 @@ use tidepool_repr::{Generation, SessionModule, SessionVarId};
 use tidepool_toolchain::compiler_world::PrivateCompilerProgress;
 use tidepool_toolchain::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin, DeclarationExport,
-    DeclarationWrite, ExactDeclarationContext, ExactLexicalNode, ExactModuleIdentity,
-    ExportIdentity, ExportNamespace, InstanceInventory, JoinDecision, JoinRejection,
-    ModuleSnapshot, RejectedJoin, ReservedJoin,
+    DeclarationWrite, ExactDeclarationContext, ExactModuleIdentity, ExportIdentity,
+    ExportNamespace, InstanceInventory, JoinDecision, JoinRejection, ModuleSnapshot,
+    PublicationComposition, RejectedJoin, ReservedJoin,
 };
 
 use super::persistent::PersistentSession;
@@ -153,7 +153,7 @@ pub struct AcceptedDeclarationPublication {
 /// compiler request or a renamed interface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PublicationEvidence {
-    NewJoin(Arc<AcceptedJoin>),
+    NewJoin(PublicationComposition),
     ReusedProjection {
         generation: Generation,
         projection: Arc<super::CertifiedDeclarationProjection>,
@@ -161,17 +161,24 @@ pub(crate) enum PublicationEvidence {
 }
 
 impl PublicationEvidence {
+    pub(super) fn composition(&self) -> &PublicationComposition {
+        match self {
+            Self::NewJoin(composition) => composition,
+            Self::ReusedProjection { projection, .. } => projection.composition(),
+        }
+    }
+
     pub(super) fn receipt(&self) -> &Arc<AcceptedJoin> {
         match self {
-            Self::NewJoin(receipt) => receipt,
+            Self::NewJoin(composition) => composition.join(),
             Self::ReusedProjection { projection, .. } => projection.receipt(),
         }
     }
 
     pub(super) fn matches_generation(&self, generation: Generation) -> bool {
         match self {
-            Self::NewJoin(receipt) => {
-                receipt.reserved().module == SessionModule::lib(generation).module_name()
+            Self::NewJoin(composition) => {
+                composition.join().reserved().module == SessionModule::lib(generation).module_name()
             }
             Self::ReusedProjection {
                 generation: selected,
@@ -343,18 +350,6 @@ fn paired_version(base: &PublicManifestBase) -> String {
         "public_view": base.semantic.public_view.version_fact(), "private_view": base.semantic.private_view.version_fact(),
     })).expect("paired baseline contains serializable identities");
     blake3::hash(&bytes).to_hex().to_string()
-}
-
-pub(super) fn extend_admitted_surface(
-    authored: &CertifiedAuthoredDeclaration,
-    mut prior: AdmittedDeclarationSurface,
-) -> Result<AdmittedDeclarationSurface, SessionError> {
-    let addition = authored.shared_source_lexical_surface(&prior.lexical)?;
-    prior.roots.extend(addition.roots);
-    prior.roots.sort();
-    prior.roots.dedup();
-    prior.lexical = addition.lexical;
-    Ok(prior)
 }
 
 pub(super) fn exact_retractions(
@@ -1002,7 +997,7 @@ impl PersistentSession {
             .map(|tip| tip.surface.clone())
             .unwrap_or_default();
         for write in &intent.writes {
-            surface = extend_admitted_surface(&write.evidence, surface)?;
+            surface = write.evidence.extend_source_surface(&surface)?;
         }
         Ok(CapturedDeclarationPublication {
             public,
@@ -1250,7 +1245,6 @@ impl DeclarationPublicationBase {
         selection: PublicationSelection,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<CertifiedDeclarationPublication, SessionError> {
-        let mut lexical = self.surface.lexical.clone();
         let authored = self
             .intent
             .writes
@@ -1267,24 +1261,12 @@ impl DeclarationPublicationBase {
                     "empty declaration intent uses binding-only publication",
                 )
             })?;
-        for identity in self
-            .current_public
-            .iter()
-            .map(|tip| tip.owner.clone())
-            .chain(self.intent.private_base.iter().map(|tip| tip.owner.clone()))
-            .chain(authored.iter().map(|certificate| module_owner(certificate)))
-            .collect::<BTreeSet<_>>()
-        {
-            lexical.push(ExactLexicalNode {
-                owner: identity,
-                imports: Vec::new(),
-            });
-        }
-        let context = if let Some(public) = &self.public_context {
-            (**public).clone().extend(&authored, &[], lexical)?
-        } else {
-            ExactDeclarationContext::new(&authored, &[], lexical)?
-        };
+        let context = self
+            .public_context
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(ExactDeclarationContext::empty)
+            .admit_authored_publication(&authored, &self.surface)?;
         let scratch = Arc::new(tempfile::tempdir()?);
         let join_inputs = context.declaration_join_inputs(Arc::clone(&scratch))?;
         let anchor = |identity: &ExactModuleIdentity| -> Result<ModuleSnapshot, SessionError> {
@@ -1353,12 +1335,16 @@ impl DeclarationPublicationBase {
             &self.session_root,
             settlement,
         )? {
-            CertifiedDeclarationJoin::Accepted(receipt) => Ok(
-                CertifiedDeclarationPublication::Accepted(AcceptedDeclarationPublication {
-                    base: self,
-                    receipt: PublicationEvidence::NewJoin(Arc::new(receipt)),
-                }),
-            ),
+            CertifiedDeclarationJoin::Accepted(receipt) => {
+                let composition =
+                    context.with_joined_publication(&Arc::new(receipt), &self.surface)?;
+                Ok(CertifiedDeclarationPublication::Accepted(
+                    AcceptedDeclarationPublication {
+                        base: self,
+                        receipt: PublicationEvidence::NewJoin(composition),
+                    },
+                ))
+            }
             CertifiedDeclarationJoin::Rejected(receipt) => Ok(
                 CertifiedDeclarationPublication::Rejected(RejectedDeclarationPublication {
                     base: self,
@@ -1387,31 +1373,7 @@ impl AcceptedDeclarationPublication {
         let base = &self.base;
         let receipt = self.receipt.clone();
         let mut public = base.public.clone();
-        let context = if let Some(projection) = receipt.projection() {
-            projection.context().clone()
-        } else {
-            let lexical = std::iter::once(ExactLexicalNode {
-                owner: ExactModuleIdentity {
-                    unit: receipt.reserved().unit.clone(),
-                    module: receipt.reserved().module.clone(),
-                },
-                imports: base.surface.roots.clone(),
-            })
-            .chain(base.surface.lexical.iter().cloned())
-            .collect();
-            Arc::new(match &base.public_context {
-                Some(public) => (**public).clone().extend(
-                    &[],
-                    std::slice::from_ref(receipt.receipt()),
-                    lexical,
-                )?,
-                None => ExactDeclarationContext::new(
-                    &[],
-                    std::slice::from_ref(receipt.receipt()),
-                    lexical,
-                )?,
-            })
-        };
+        let context = receipt.composition().context().clone();
         let binding_custody = receipt.native_binding_custody_requirements()?;
         let error_path = public.path.clone();
         let mut prepared_context = None;
@@ -1605,7 +1567,6 @@ impl AcceptedDeclarationPublication {
             joined: JoinedDeclaration {
                 turn,
                 evidence: receipt,
-                context,
                 surface: base.surface.clone(),
             },
         };
@@ -1634,7 +1595,7 @@ impl SessionLib {
                 && self.tips.contains_key(&ticket.public_scope)
                 && self.source_selections_preserved(
                     ticket.public_scope,
-                    Some(&declaration.joined.context),
+                    Some(declaration.joined.evidence.composition().context()),
                 )
                 && declaration
                     .joined
@@ -1654,7 +1615,7 @@ impl SessionLib {
             .ok_or(SessionError::StaleStagedDeclaration)?;
         tip.tip = declaration.generation;
         tip.exact_context = Some(recovery::ScopedCompilerContext::new(
-            declaration.joined.context.clone(),
+            declaration.joined.evidence.composition().context().clone(),
         ));
         let log = self
             .log
@@ -1848,6 +1809,10 @@ mod tests {
             ));
             assert_eq!(decision.phase(), PublicationPhase::Published);
             assert_eq!(session.lib().scope_tip(public), published_generation);
+            assert!(Arc::ptr_eq(
+                &session.lib().current_exact_context_in(public).unwrap(),
+                projection.composition().context(),
+            ));
             assert_eq!(
                 session.lib().import_line_in(public).unwrap(),
                 format!("import {}", projection.module_name())
@@ -3258,18 +3223,12 @@ mod tests {
         );
         // Obtain a real protected rejection from the same owned closure. Only
         // the expected inventory is wrong; no runtime validation is bypassed.
-        let context = ExactDeclarationContext::new(
-            &[authored.clone()],
-            &[],
-            vec![ExactLexicalNode {
-                owner: ExactModuleIdentity {
-                    unit: authored.product().owner().unit.clone(),
-                    module: authored.product().owner().module.clone(),
-                },
-                imports: Vec::new(),
-            }],
-        )
-        .unwrap();
+        let surface = authored
+            .extend_source_surface(&AdmittedDeclarationSurface::default())
+            .unwrap();
+        let context = ExactDeclarationContext::empty()
+            .admit_authored_publication(std::slice::from_ref(&authored), &surface)
+            .unwrap();
         let scratch = Arc::new(tempfile::tempdir().unwrap());
         let join_inputs = context.declaration_join_inputs(scratch.clone()).unwrap();
         let original = join_inputs

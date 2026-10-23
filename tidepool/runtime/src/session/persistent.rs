@@ -4294,8 +4294,7 @@ impl PersistentSession {
                     public
                         .world
                         .prepare_declaration_publication(
-                            declaration.joined.evidence.receipt(),
-                            &declaration.joined.context,
+                            declaration.joined.evidence.composition(),
                             imports.source_lines(),
                         )
                         .map_err(SessionError::from)
@@ -9698,12 +9697,9 @@ impl PersistentSession {
         }
         let source = source
             .map(|selection| {
-                let context = tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
-                    &[],
-                    &[],
-                    Vec::new(),
-                )?
-                .with_published_source_originals(&selection)?;
+                let context =
+                    tidepool_toolchain::declaration_join::ExactDeclarationContext::empty()
+                        .with_published_source_originals(&selection)?;
                 Ok::<_, SessionError>(super::notebook_generation::PreparedGenerationSource {
                     selection,
                     context: super::recovery::ScopedCompilerContext::new(Arc::new(context)),

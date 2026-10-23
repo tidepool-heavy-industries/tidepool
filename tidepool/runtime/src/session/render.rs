@@ -368,7 +368,6 @@ enum DeclarationSlot {
 pub(crate) struct JoinedDeclaration {
     pub turn: DeclTurn,
     pub evidence: super::paired_publication::PublicationEvidence,
-    pub context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     pub surface: AdmittedDeclarationSurface,
 }
 
@@ -381,13 +380,7 @@ pub(crate) struct RecoveredDeclaration {
     pub surface: AdmittedDeclarationSurface,
 }
 
-/// Explicit source-surface roots and their compiler-resolved import graph.
-/// Implementation requirements and synthetic Join ancestry do not select roots.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub(crate) struct AdmittedDeclarationSurface {
-    pub roots: Vec<tidepool_toolchain::declaration_join::ExactModuleIdentity>,
-    pub lexical: Vec<tidepool_toolchain::declaration_join::ExactLexicalNode>,
-}
+pub(crate) use tidepool_toolchain::declaration_join::AdmittedDeclarationSurface;
 
 /// Prepared reserved slots contain only the newly admitted range. The existing
 /// declaration graph stays in its sole owner until the range is confirmed.
@@ -689,7 +682,9 @@ impl DeclLog {
         generation: Generation,
     ) -> Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>> {
         match self.turns.get(&generation)? {
-            DeclarationSlot::Joined(joined) => Some(joined.context.clone()),
+            DeclarationSlot::Joined(joined) => {
+                Some(joined.evidence.composition().context().clone())
+            }
             DeclarationSlot::CertifiedAuthored { prepared, .. } => {
                 Some(prepared.projection.context().clone())
             }
@@ -940,7 +935,9 @@ impl DeclLog {
             .into_iter()
             .filter_map(|(item, generation)| match item {
                 ExportItem::Value { name } => Some((name, generation)),
-                ExportItem::Pattern { .. } | ExportItem::Type { .. } | ExportItem::Class { .. } => None,
+                ExportItem::Pattern { .. } | ExportItem::Type { .. } | ExportItem::Class { .. } => {
+                    None
+                }
             })
             .collect::<BTreeMap<_, _>>();
         for (name, generation, ty) in types {
@@ -1139,7 +1136,9 @@ pub(super) fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -
         prefix.to_string()
     } else {
         if let Some(rewritten) = filter_import_list_entries(imp, |entry| {
-            !all_session_heads.iter().any(|item| item_matches_import_entry(item, entry))
+            !all_session_heads
+                .iter()
+                .any(|item| item_matches_import_entry(item, entry))
         }) {
             return rewritten;
         }
