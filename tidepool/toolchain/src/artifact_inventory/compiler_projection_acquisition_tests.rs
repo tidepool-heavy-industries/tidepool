@@ -78,12 +78,6 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
             &observations[index]
         ));
     }
-    assert_completed_output_keeps_actual_producer_with_private_equal_offer(
-        &fixture,
-        supports[0],
-        offers[0],
-        owner,
-    );
     let owners = BTreeSet::from([owner.clone()]);
     let checked_inputs = acquisitions.map(|entry| {
         [
@@ -480,6 +474,27 @@ fn assert_fresh_dependency_permission_boundary(
         helper,
         expected_group,
         false,
+    );
+}
+
+#[test]
+fn completed_output_keeps_actual_producer_with_private_equal_offer() {
+    let fixture = crate::artifacts::test_support::prepare_source_publication_entry_fixture()
+        .expect("the actual compiler issues the prior completed source observation");
+    let context = fixture
+        .entry
+        .products()
+        .original_execution_context()
+        .unwrap();
+    let support = context.compiler_source_support();
+    let owner = &fixture.helper.descriptor.owner;
+    let offer = support
+        .native_offers()
+        .iter()
+        .find(|offer| offer.original() == fixture.helper.descriptor.id)
+        .expect("the completed cohort carries its helper's actual native offer");
+    assert_completed_output_keeps_actual_producer_with_private_equal_offer(
+        &fixture, support, offer, owner,
     );
 }
 

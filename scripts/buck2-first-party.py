@@ -2022,6 +2022,7 @@ tidepool_buildscript_run(
             ]
             toolchain_source_admission_cases = [
                 'artifact_inventory::compiler_projection::acquisition_tests::authored_promotion_preserves_actual_offered_acquisition',
+                'artifact_inventory::compiler_projection::acquisition_tests::completed_output_keeps_actual_producer_with_private_equal_offer',
                 'artifact_inventory::tests::bound_projection_rebinding_preserves_issuing_none_override',
                 'artifact_inventory::tests::independent_native_admission_does_not_inherit_global_source_witness',
                 'artifact_inventory::tests::source_witness_histories_follow_selected_issuer',
