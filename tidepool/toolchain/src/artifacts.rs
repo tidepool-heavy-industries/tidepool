@@ -2158,7 +2158,7 @@ impl SelectedModuleCandidateOffer {
             DecodeLimits::default(),
         )?;
         let mut output = ProgramNativeOutput {
-            origin: ProgramNativeOutputOrigin::Finite,
+            origin: ProgramNativeOutputOrigin::Ordinary,
             directory: directory.to_path_buf(),
             target,
             program,
@@ -2223,7 +2223,7 @@ pub(crate) struct ProgramNativeOutput {
 
 #[derive(Clone)]
 enum ProgramNativeOutputOrigin {
-    Finite,
+    Ordinary,
     World {
         program: Arc<crate::compiler_world::CheckedWorldCellProgram>,
         ordinal: usize,
@@ -2233,7 +2233,7 @@ enum ProgramNativeOutputOrigin {
 impl std::fmt::Debug for ProgramNativeOutputOrigin {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Finite => formatter.write_str("Finite"),
+            Self::Ordinary => formatter.write_str("Ordinary"),
             Self::World { ordinal, .. } => formatter
                 .debug_struct("World")
                 .field("ordinal", ordinal)
@@ -3207,7 +3207,7 @@ impl AdmittedNativeTargetProducts {
     }
 }
 
-/// The native target issuer shared by physical finite and held-World outputs.
+/// The native target issuer shared by ordinary and held-World outputs.
 /// Its inputs have already passed their owning source and product admission.
 #[allow(clippy::too_many_arguments)]
 fn admit_native_target_products(
@@ -5123,7 +5123,7 @@ fn compile_invocation_inner(
                     .artifact_view
                     .retain_custody(native_inputs.artifacts())?;
                 let completed = native_inputs.linked_native_target().ok_or_else(|| {
-                    CompileError::ExtractFailed("finite target lacks its issued completion".into())
+                    CompileError::ExtractFailed("ordinary target lacks its issued completion".into())
                 })?;
                 inherited_completion_support =
                     inherited_completion_support.with_linked_native_target(completed)?;
@@ -7693,7 +7693,7 @@ mod module_product_tests {
         let initial = if mixed {
             let producer = PathBuf::from(
                 std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
-                    .expect("the rooted case owns its initial finite producer output"),
+                    .expect("the rooted case owns its initial ordinary producer output"),
             )
             .join("initial-published-source");
             std::fs::create_dir(&producer).unwrap();
@@ -7728,7 +7728,7 @@ mod module_product_tests {
                         module: "StageInputG".into(),
                     },
                 )
-                .expect("the same finite output issues its published source selection");
+                .expect("the same ordinary output issues its published source selection");
             let context =
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
                     .unwrap()
@@ -7743,7 +7743,7 @@ mod module_product_tests {
                 .native_availability()
                 .rows()
                 .find(|row| row.original_owner().module == "StageInputG")
-                .expect("finite producer retained its own Original availability");
+                .expect("ordinary producer retained its own Original availability");
             let crate::artifact_inventory::ArtifactPayload::Original(product) =
                 &row.target_original(row.original_owner()).unwrap().payload
             else {
