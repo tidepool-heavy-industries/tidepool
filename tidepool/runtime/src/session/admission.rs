@@ -4507,8 +4507,7 @@ impl PersistentSession {
                     let successor = prefix.program.declaration_item_successor(
                         &predecessor,
                         item,
-                        prepared.projection.receipt(),
-                        prepared.projection.context(),
+                        prepared.projection.composition(),
                         import_lines,
                         delta
                             .iter()
