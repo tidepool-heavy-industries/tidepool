@@ -26,10 +26,16 @@ establish different facts.
   correspondence and lineage DATA. No source, TYPE or native authority.
 - Private `ImportSyntax.Internal`: representations used only by actual syntax
   and authority issuers. No public generic origin retagger.
-- `ImportAdmission`: opaque staged owner consuming existing scope, interface
-  and checked-cell issuers. Lower modules must not import it.
-- GhcPipeline orchestrates transitions using borrowed compiler environments.
-  The owner retains neither HscEnv nor a whole dependency graph.
+- `ImportAdmission`: opaque public stages and their read-only projections.
+  Hidden `ImportAdmission.Internal` contains trusted issuer representations.
+- Private GhcPipeline transitions invoke the existing scope, source and World
+  validators and immediately issue the next stage from their actual results.
+  They do not accept a detached source selection or an authority-asserting
+  callback. Keep those validators beside their compiler operations; enforcing
+  the stage contract does not require moving all their policy dependencies.
+- Compiler environments are borrowed during transitions. Retained admission
+  stores neither HscEnv nor a whole dependency graph. Audit imports of Internal
+  as the narrow trusted construction boundary; public callers cannot update it.
 
 | High-level stage | Evidence |
 |---|---|
@@ -45,6 +51,18 @@ references, not complete snapshots at every stage. Do not spread generative
 parameters into persistence. Ordinary-authored and generated ingress are
 explicitly different; absent generated evidence refuses. Every generated
 auxiliary with special origins has its own root admission.
+
+Import correspondence proves only the import sequence. The actual driver parse
+must also belong to the captured target contents, full Module identity, source
+path, GHC summary fingerprint, effective policy and request/stage/attempt.
+Parse once after the actual downsweep: protected-source qualification needs
+that result before planning/loading. Retain it in Resolved and reuse it through
+all three frontend routes, checking their actual summaries against its owner.
+Delete discarded early parses and later reparses rather than postponing required
+qualification. Prepared owns the exact refined input; successful typechecking
+issues Completed. An earlier root receipt is pending and cannot feed a terminal
+writer. Reusing an immutable recipe in a fresh attempt remains valid; mixing
+issued stages from different attempts does not.
 
 The lower AST bundles are only `DriverImportSyntax` and
 `RefinedImportSyntax`; do not create a second Scoped state lattice.
