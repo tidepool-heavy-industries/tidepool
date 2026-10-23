@@ -5804,6 +5804,48 @@ impl CertifiedSourceSelection {
         }
     }
 
+    /// Fresh and prior-stage compiler rows borrow their exact physical issuer.
+    /// Equal facts in private request availability do not compete with it.
+    pub(crate) fn completed_compiler_output_offer(
+        &self,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+    ) -> CertResult<Option<&crate::artifact_inventory::IssuedNativeOffer>> {
+        let Some(ReceiptSourceSelection::Native { interface, native }) = self
+            .modules
+            .get(&(owner.unit.clone(), owner.module.clone()))
+        else {
+            return Ok(None);
+        };
+        if matches!(native.origin, ReceiptNativeOrigin::Input) {
+            return Ok(None);
+        }
+        let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+            return Err(CertificationError::Mismatch(
+                "compiler output lacks physical completion",
+            ));
+        };
+        let offer = receipt.own_offer();
+        let entry = offer.original_acquisition();
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(CertificationError::Mismatch(
+                "compiler output issuer original payload",
+            ));
+        };
+        if entry.descriptor.id != native.original_artifact_id()?
+            || offer.original() != entry.descriptor.id
+            || receipt.row().original_artifact_id() != entry.descriptor.id
+            || product.owner() != &native.owner
+            || crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(
+                product.module_interface(),
+            ) != *interface
+        {
+            return Err(CertificationError::Mismatch(
+                "compiler output exact physical issuer",
+            ));
+        }
+        Ok(Some(offer))
+    }
+
     /// Encoding bases borrow immutable facts without acquiring input choices.
     pub(crate) fn native_fact_base(
         &self,

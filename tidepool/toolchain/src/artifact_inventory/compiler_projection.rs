@@ -3011,42 +3011,36 @@ impl CompilerSourceSupport {
                 .ok_or_else(|| failure("completed output lacks its exact canonical binding"))?;
             let row = if let Some(original) = role.original() {
                 let mut candidates = Vec::new();
-                for offer in selection
-                    .issued_native_availability()
-                    .flat_map(|row| row.offers())
+                let offer = selection
+                    .completed_compiler_output_offer(owner)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
+                    .ok_or_else(|| failure("completed output lacks its actual physical issuer"))?;
+                if offer.original() != original
+                    || !offer.matches_direct_canonical_binding(
+                        original,
+                        role.interface(),
+                        artifacts,
+                    )
                 {
-                    if offer.original() != original
-                        || !offer.matches_direct_canonical_binding(
-                            original,
-                            role.interface(),
-                            artifacts,
-                        )
+                    return Err(failure(
+                        "completed output differs from its actual canonical carrier",
+                    ));
+                }
+                for carrier in offer
+                    .artifact_carriers()
+                    .iter()
+                    .filter(|carrier| carrier.artifact == original)
+                {
+                    let state = offer
+                        .custody_lease()
+                        .inventory
+                        .0
+                        .lock()
+                        .expect("inventory lock");
+                    if ResolvedCompilerRole::validate_original_pair(&state, canonical, *carrier)
+                        .is_ok()
                     {
-                        continue;
-                    }
-                    for carrier in offer
-                        .artifact_carriers()
-                        .iter()
-                        .filter(|carrier| carrier.artifact == original)
-                    {
-                        let state = offer
-                            .custody_lease()
-                            .inventory
-                            .0
-                            .lock()
-                            .expect("inventory lock");
-                        if ResolvedCompilerRole::validate_original_pair(&state, canonical, *carrier)
-                            .is_err()
-                        {
-                            continue;
-                        }
-                        if !candidates.iter().any(
-                            |(prior_carrier, prior): &(ArtifactBinding, &IssuedNativeOffer)| {
-                                prior_carrier == carrier && prior.same_issuance(offer)
-                            },
-                        ) {
-                            candidates.push((*carrier, offer));
-                        }
+                        candidates.push((*carrier, offer));
                     }
                 }
                 let [(carrier, offer)] = candidates.as_slice() else {
