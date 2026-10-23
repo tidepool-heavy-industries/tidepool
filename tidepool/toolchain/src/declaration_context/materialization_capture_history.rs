@@ -1421,11 +1421,13 @@ fn compiler_support_merge_keeps_preferred_physical_rows_after_donor_drop() {
         let second_request = second
             .prepare_compilation(&scratch.path().join("second"), &producer)
             .unwrap();
-        let (left, right, preferred, excluded) = if reverse {
-            (&second, &first, &first_request, &second_request)
+        let (left, left_request, right_request) = if reverse {
+            (&second, &second_request, &first_request)
         } else {
-            (&first, &second, &second_request, &first_request)
+            (&first, &first_request, &second_request)
         };
+        let preferred = right_request;
+        let excluded = left_request;
         let preferred_paths = preferred
             .artifacts
             .iter()
@@ -1437,9 +1439,10 @@ fn compiler_support_merge_keeps_preferred_physical_rows_after_donor_drop() {
             .collect::<Vec<_>>();
         let preferred_directory = preferred.materialization.directory().path().to_path_buf();
         let excluded_directory = excluded.materialization.directory().path().to_path_buf();
-        let support = left
+        let support = left_request
+            .compiler_inputs()
             .compiler_source_support()
-            .merge(right.compiler_source_support())
+            .merge(right_request.compiler_inputs().compiler_source_support())
             .unwrap();
         let merged = Arc::new(left.as_ref().clone().rebuild(|facts| {
             facts.compiler_support = support;
