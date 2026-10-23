@@ -31508,7 +31508,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let mut request = baseline
             .prepare_compilation(
                 &directory.path().join("request-23"),
-                ExtractCmd::new()
+                tidepool_extract_cmd::ExtractCmd::new()
                     .unwrap()
                     .bind()
                     .unwrap()
