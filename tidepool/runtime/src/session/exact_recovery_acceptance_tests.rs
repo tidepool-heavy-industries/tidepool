@@ -364,6 +364,11 @@ fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effe
             .unwrap(),
         PublicManifestCommit::Durable
     ));
+    let published = first.public_visibility_snapshot_in(public).unwrap();
+    assert_eq!(
+        published.epoch, 2,
+        "initialization plus one completed publication"
+    );
     let before = recovery.state();
     drop(world);
     // Even identical serialized session/scope counters cannot restore this
@@ -377,7 +382,7 @@ fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effe
         "equal numeric scope IDs do not transfer the runtime owner"
     );
     let snapshot = second.public_visibility_snapshot_in(recovered).unwrap();
-    assert_eq!(snapshot.epoch, 1);
+    assert_eq!(snapshot, published);
     assert!(snapshot.bindings.is_empty());
     assert!(snapshot.source_instances.is_empty());
     assert!(matches!(
