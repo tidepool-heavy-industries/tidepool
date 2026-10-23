@@ -827,7 +827,7 @@ mod tests {
     #[test]
     fn authored_certification_preserves_historical_canonical_custody() {
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection, IssuedNativeOffer,
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
         use crate::certified_products::{
             fixture_finalized_product,
@@ -854,7 +854,14 @@ mod tests {
         let old_view = inventory
             .admit_shared(&inventory.empty_view(), vec![old_entry.clone()])
             .unwrap();
-        let offer = IssuedNativeOffer::issue(old_entry.descriptor.id, &old_view, None).unwrap();
+        let old_issuer = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[old_entry.clone()]).unwrap(),
+            old_view.clone(),
+        )
+        .unwrap();
+        let offer = old_issuer
+            .issue_native_offer(&old_entry.descriptor.owner, None)
+            .unwrap();
         let current_entry = Arc::new(ArtifactEntry::original([1; 32], current.clone()).unwrap());
         let current_view = inventory
             .admit_shared(&inventory.empty_view(), vec![current_entry.clone()])
@@ -892,17 +899,20 @@ mod tests {
         )
         .unwrap();
         let products = [current, authored.clone()];
-        let issued = CompilerInputProjection::from_issued_entries(
-            &compiled
-                .entries()
-                .into_iter()
-                .filter(|entry| {
-                    matches!(
-                        &entry.payload,
-                        crate::artifact_inventory::ArtifactPayload::Original(_)
-                    )
-                })
-                .collect::<Vec<_>>(),
+        let compiled_originals = compiled
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.payload,
+                    crate::artifact_inventory::ArtifactPayload::Original(_)
+                )
+            })
+            .collect::<Vec<_>>();
+        let issued = CompilerInputProjection::from_issued_entries(&compiled_originals).unwrap();
+        let issuer = crate::declaration_context::issue_fixture_compiler_support(
+            issued.clone(),
+            compiled.clone(),
         )
         .unwrap();
         let selection =
@@ -914,27 +924,22 @@ mod tests {
             .unwrap();
         let originals = selection.selected_original_closure(&compiled).unwrap();
         let original_graph = originals.native_closure().capture_graph_selection();
-        let available = issued
-            .roles()
+        let available = compiled_originals
             .iter()
-            .filter_map(|role| role.original())
-            .map(|original| {
+            .map(|entry| {
                 let proof =
                     crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
-                        original, &compiled,
+                        entry.descriptor.id,
+                        &compiled,
                     )
                     .unwrap()
                     .unwrap();
-                IssuedNativeOffer::issue(original, &compiled, Some(proof)).unwrap()
+                issuer
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                    .unwrap()
             })
             .collect::<Vec<_>>();
-        let support = crate::declaration_context::recover_fixture_compiler_support(
-            issued.clone(),
-            compiled.clone(),
-            [],
-        )
-        .unwrap();
-        let narrowed = support
+        let narrowed = issuer
             .select_support_roots(issued.roles().iter().map(|role| role.interface()).collect())
             .unwrap()
             .finalize_namespace()
