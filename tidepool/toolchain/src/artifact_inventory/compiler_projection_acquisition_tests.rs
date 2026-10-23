@@ -681,6 +681,15 @@ fn assert_world_completed_output_keeps_actual_producer(
         CompilerTransactionClose, CompilerTransactionOrigin,
     };
 
+    let prior_acquisition = Arc::clone(prior_offer.original_acquisition());
+    let prior_graph = prior_offer
+        .proof()
+        .expect("actual A owns its checked native closure")
+        .selection
+        .graph_selection()
+        .clone();
+    assert!(!prior_graph.native_groups.is_empty());
+
     let root_owner = Arc::new(crate::artifacts::test_support::compiler_input_directory().unwrap());
     let helper_body = std::fs::read(fixture.includes[0].join("PublicationHelper.hs")).unwrap();
     let mut source_roots = vec![CapturedCompilerSourceRoot {
@@ -853,7 +862,7 @@ fn assert_world_completed_output_keeps_actual_producer(
             .host_admission_cancellation()
             .expect("actual post-END owner")
             .clone();
-        let (prepared, _checked, products, physical_stages, emissions, origin) = settled
+        let (prepared, checked, products, physical_stages, emissions, origin) = settled
             .into_outcome()
             .action
             .expect("the real World source grant completes the selected producer phase");
@@ -1040,14 +1049,82 @@ fn assert_world_completed_output_keeps_actual_producer(
             "the physical B scope and its own receipt carry the same acquired entry"
         );
         assert!(!offer.same_issuance(prior_offer));
-        assert!(
-            stage
-                .source_selection()
-                .issued_native_availability()
-                .flat_map(|row| row.offers())
-                .any(|offer| offer.same_issuance(prior_offer)),
-            "A remains privately held beside physical B"
+        // The completed World owns its cold request separately from each
+        // stage's narrowed native demand. Unused A stays with that actual
+        // request owner; requiring its offer in B's stage would over-deliver
+        // native permission that this source completion did not consume.
+        let request = checked.primary_inputs().inputs();
+        let retained_offer = request
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|offer| offer.same_issuance(prior_offer))
+            .expect("the actual completed request retains A's original offer issuance");
+        assert!(Arc::ptr_eq(
+            retained_offer.original_acquisition(),
+            &prior_acquisition,
+        ));
+        assert!(Arc::ptr_eq(
+            request
+                .artifacts()
+                .observed_payload(&prior_offer.original())
+                .unwrap(),
+            &prior_acquisition,
+        ));
+        assert_eq!(
+            retained_offer.proof().unwrap().selection.graph_selection(),
+            &prior_graph,
+            "the actual A offer retains its original scoped native closure",
         );
+        let retained_graph = request.artifacts().capture_graph_selection();
+        let retained_edges = request.artifacts().binding_dependencies();
+        // Private group custody belongs to the opaque offer above. The
+        // receiving view retains its exact carriers and their artifact edges.
+        for carrier in prior_offer.artifact_carriers() {
+            assert!(retained_graph.bindings.contains(carrier));
+            let proof = prior_graph
+                .selections
+                .iter()
+                .find(|proof| proof.selection == carrier.selection)
+                .unwrap();
+            assert!(retained_graph.selections.contains(proof));
+            for edge in &proof.dependencies {
+                if edge.0 == ArtifactBindingNode::Artifact(*carrier) {
+                    assert!(retained_edges.contains(edge));
+                }
+            }
+        }
+        let private_availability = request.private_native_availability();
+        assert!(private_availability.custody_contributions().iter().any(
+            |(original, contribution)| {
+                *original == prior_offer.original()
+                    && contribution.offer().same_issuance(prior_offer)
+                    && prior_graph
+                        .native_groups
+                        .iter()
+                        .all(|group| contribution.contains_group(*group))
+            }
+        ));
+        for artifacts in [
+            stage.compiler_inputs().issued_artifacts(),
+            continuation.compiler_source_support().artifacts(),
+        ] {
+            assert!(
+                artifacts
+                    .selected_native_groups()
+                    .iter()
+                    .all(|group| { group.artifact != prior_offer.original() }),
+                "private A must not become an executable native selection"
+            );
+            assert!(artifacts
+                .capture_graph_selection()
+                .roots
+                .iter()
+                .all(|root| {
+                    !matches!(root, ArtifactBindingNode::Group(group)
+                    if group.binding.artifact() == prior_offer.original())
+                }));
+        }
         let receiving = primary.as_ref().unwrap();
         assert_whole_selected_row(
             receiving.compiler_source_support(),
