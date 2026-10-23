@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 -- | The request-local GHC handoff used to inspect the prepared program before
 -- Tidepool commits to a cross-language execution schema.
 --
@@ -81,7 +83,9 @@ import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Env (plusNameEnv, emptyNameEnv, disjointNameEnv)
 import GHC.Unit.Types (Module, moduleUnit)
-import GHC.Unit.Module.Location (ModLocation(..))
+import GHC.Unit.Module.Location
+  ( ModLocation, pattern ModLocation
+  , ml_hs_file, ml_hi_file, ml_dyn_hi_file, ml_obj_file, ml_dyn_obj_file, ml_hie_file )
 import GHC.Unit.Module.ModIface (ModIface, mi_iface_hash, mi_final_exts)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
