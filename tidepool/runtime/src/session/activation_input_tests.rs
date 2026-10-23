@@ -1402,7 +1402,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     let source_code = compiled.code();
     let source = source_code.original_source().unwrap().unwrap();
     assert!(Arc::ptr_eq(
-        &source.execution_context(),
+        &source.execution().context().clone(),
         &compiled.original_execution_context().unwrap(),
     ));
     let raw = turn::CompiledTurn::from_prepared(
@@ -1763,7 +1763,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             &fixture.producer.asks,
         )
         .unwrap();
-    let compiler_context = compiler_source.execution_context();
+    let compiler_context = compiler_source.execution().context().clone();
     let site_metadata = &original.sites[&site];
     assert_eq!(site_metadata.inputs.len(), 2);
     let input_witness = site_metadata.input_type_witnesses[0].as_ref().unwrap();
@@ -1801,7 +1801,8 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             .execution
             .require_unique(site)
             .unwrap()
-            .context
+            .evidence
+            .context()
             .toolchain_identity_sha256(),
         producer
     );
@@ -1810,7 +1811,8 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             .execution
             .require_unique(site)
             .unwrap()
-            .context
+            .evidence
+            .context()
             .artifact_view()
             .descriptors()
             .is_empty(),
@@ -2049,14 +2051,18 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
                 // Independent list oracle: flatten captured identities, sort, dedup.
                 let mut expected = indices
                     .iter()
-                    .flat_map(|index| pool[*index].contexts().map(|context| context.identity))
+                    .flat_map(|index| {
+                        pool[*index]
+                            .contexts()
+                            .map(|context| context.evidence.identity())
+                    })
                     .collect::<Vec<_>>();
                 expected.sort();
                 expected.dedup();
                 let result = fold(&indices);
                 let actual = result
                     .contexts()
-                    .map(|context| context.identity)
+                    .map(|context| context.evidence.identity())
                     .collect::<Vec<_>>();
                 prop_assert_eq!(actual, expected);
                 let mut reversed = indices.clone();
@@ -2075,7 +2081,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
         .unwrap();
     let original_context = left.execution.contexts().next().unwrap();
     let duplicate = OriginalExecutionContexts::Unique(OriginalExecutionContext::capture(
-        Arc::clone(&original_context.context),
+        Arc::clone(&original_context.evidence),
     ));
     let mut repeated = left.execution.clone();
     repeated.merge(&duplicate);
@@ -2130,7 +2136,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
     let expected = parked.authenticated_inputs[&demanded]
         .execution
         .contexts()
-        .map(|context| context.identity)
+        .map(|context| context.evidence.identity())
         .collect::<Vec<_>>();
     assert_eq!(expected.len(), 2);
     let realm = destination.parked_realm(&activation).unwrap();
@@ -2745,13 +2751,13 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         .capture_activation_input(&activation, RealmId::ROOT, site)
         .unwrap();
     assert_eq!(
-        input.original_execution.semantic_sha256(),
+        input.original_execution.identity(),
         original.authenticated_inputs[&site]
             .execution
             .require_unique(site)
             .unwrap()
-            .context
-            .semantic_sha256()
+            .evidence
+            .identity()
     );
     drop(input);
     let fixture = InputFixture {
@@ -3077,7 +3083,13 @@ fn original_input_type_consumers_select_canonical_roles_over_native_custody() {
         SessionId(1793),
     );
     let code = fixture.producer.code();
-    let context = code.original_source().unwrap().unwrap().execution_context();
+    let context = code
+        .original_source()
+        .unwrap()
+        .unwrap()
+        .execution()
+        .context()
+        .clone();
     let (site, witness) = fixture
         .producer
         .asks
@@ -3836,7 +3848,15 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     let code = compiled.renderer.compiled.code();
     assert!(code.sites().is_empty(), "the genuine renderer is pure");
     let source = code.original_source().unwrap().unwrap();
-    assert!(Arc::ptr_eq(&source.execution_context(), &original_context));
+    assert!(Arc::ptr_eq(
+        &source.execution().context().clone(),
+        &original_context
+    ));
+    assert!(matches!(
+        source.execution(),
+        tidepool_toolchain::declaration_join::OriginalExecutionSource::PurePreview(display)
+            if Arc::ptr_eq(&display, compiled.proof().original_display_context())
+    ));
     assert!(
         source.project_type_interfaces(&[], &[]).is_err(),
         "a renderer cannot substitute its original display execution for an input type source"
@@ -4719,17 +4739,19 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
         .unwrap();
     assert!(earlier
         .original_execution
+        .context()
         .recovery_products()
         .iter()
         .all(|product| product.owner().module != display_owner));
     assert!(later
         .original_execution
+        .context()
         .recovery_products()
         .iter()
         .any(|product| product.owner().module == display_owner),
         "the original instance environment retains its defining native declaration, even when the request did not call Display");
-    let earlier_identity = earlier.original_execution.semantic_sha256();
-    let later_identity = later.original_execution.semantic_sha256();
+    let earlier_identity = earlier.original_execution.identity();
+    let later_identity = later.original_execution.identity();
     assert_ne!(earlier_identity, later_identity);
     let mut distinct = OriginalExecutionContexts::Unique(OriginalExecutionContext::capture(
         Arc::clone(&earlier.original_execution),
@@ -4875,11 +4897,13 @@ fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionar
     );
     assert!(earlier
         .original_execution
+        .context()
         .recovery_products()
         .iter()
         .all(|product| product.owner().module != family_owner));
     assert!(later
         .original_execution
+        .context()
         .recovery_products()
         .iter()
         .any(|product| product.owner().module == family_owner));
@@ -4937,6 +4961,7 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
     let binding = mounted.binding();
     let dictionary_owner = mounted
         .original_execution
+        .context()
         .artifact_view()
         .descriptors()
         .into_iter()
@@ -4990,7 +5015,7 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
 }
 
 #[test]
-fn activation_preview_type_only_original_context_is_unavailable_before_instance_probe() {
+fn activation_preview_keeps_completed_output_separate_from_type_only_input() {
     use tidepool_toolchain::activation_preview::OriginalDisplayContext;
     let fixture = ordinary_home_display_fixture(SessionId(1740));
     let mut resident = fixture.fresh();
@@ -5002,25 +5027,25 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
     assert!(type_only.lexical_graph().is_empty());
     assert_eq!(
         type_only.toolchain_identity_sha256(),
-        mounted.original_execution.toolchain_identity_sha256()
+        mounted
+            .original_execution
+            .context()
+            .toolchain_identity_sha256()
     );
-    let view = resident
-        .compile_view_in(resident.public_scope())
-        .unwrap()
-        .with_scoped_injection();
-    let admission = resident.admit_activation_preview(mounted, view).unwrap();
     let submissions = tidepool_extract_cmd::extract_spawn_count();
     let roots = resident.persistent_roots_count();
     let visibility = resident
         .public_visibility_snapshot_in(resident.public_scope())
         .unwrap();
-    let selected =
-        OriginalDisplayContext::issue(admission.input_interface().prototype(), &type_only)
-            .expect("genuine type-only authority may report missing original instance evidence");
-    assert!(
-        matches!(selected, None),
-        "type-only evidence cannot prove Opaque or select child display code"
-    );
+    let selected = OriginalDisplayContext::issue(
+        mounted.interface().prototype(),
+        mounted.original_execution.completed().unwrap(),
+    )
+    .expect("the actual output owns complete original evidence separately from TYPE input");
+    assert!(Arc::ptr_eq(
+        selected.execution_evidence(),
+        &mounted.original_execution
+    ));
     assert_eq!(
         tidepool_extract_cmd::extract_spawn_count(),
         submissions,

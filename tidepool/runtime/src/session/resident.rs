@@ -327,10 +327,7 @@ pub(super) struct CompiledProvenancePlan {
             [u8; 32],
         ),
     >,
-    original_execution: Option<(
-        Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-        [u8; 32],
-    )>,
+    execution_source: Option<tidepool_toolchain::declaration_join::OriginalExecutionSource>,
 }
 
 impl CompiledProvenancePlan {
@@ -359,9 +356,7 @@ impl CompiledProvenancePlan {
                     })
                     .map(|site| site.site),
             );
-            let original_execution = original_source.execution_context();
-            let execution_identity = original_execution.semantic_sha256();
-            provenance.original_execution = Some((original_execution, execution_identity));
+            provenance.execution_source = Some(original_source.execution());
             // Site observations and installed native custody can include
             // earlier entries. A typed target retains its exact issued closure.
             let mut selected_sites = code
@@ -418,14 +413,21 @@ impl CompiledProvenancePlan {
     }
 
     fn instantiate(&self, display_owners: &Arc<ActivationDisplayOwners>) -> Arc<ProgramProvenance> {
-        let execution = self.original_execution.as_ref().map(|(context, identity)| {
-            Arc::new(OriginalExecutionContext {
-                identity: *identity,
-                context: context.clone(),
-                display_owners: display_owners.clone(),
-                displays: Mutex::default(),
-            })
-        });
+        let execution = self
+            .execution_source
+            .as_ref()
+            .and_then(|source| match source {
+                tidepool_toolchain::declaration_join::OriginalExecutionSource::Original(
+                    evidence,
+                ) => Some(Arc::new(OriginalExecutionContext {
+                    evidence: evidence.clone(),
+                    display_owners: display_owners.clone(),
+                    displays: Mutex::default(),
+                })),
+                tidepool_toolchain::declaration_join::OriginalExecutionSource::PurePreview(_) => {
+                    None
+                }
+            });
         Arc::new(ProgramProvenance {
             sites: self.sites.clone(),
             fresh_completion_sites: self.fresh_completion_sites.clone(),
@@ -479,16 +481,15 @@ impl AuthenticatedInputContext {
 /// Compatible typed sites can travel through more than one original invocation.
 /// Composition retains those scopes; only a consumer of original instance
 /// visibility may demand a unique one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum OriginalExecutionContexts {
     Unique(Arc<OriginalExecutionContext>),
-    Ambiguous(BTreeMap<[u8; 32], Arc<OriginalExecutionContext>>),
+    Ambiguous(BTreeMap<[u8; 32], Vec<Arc<OriginalExecutionContext>>>),
 }
 
 #[derive(Debug)]
 struct OriginalExecutionContext {
-    identity: [u8; 32],
-    context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    evidence: Arc<tidepool_toolchain::declaration_join::OriginalExecutionEvidence>,
     display_owners: Arc<ActivationDisplayOwners>,
     displays: Mutex<BTreeMap<[u8; 32], Vec<OriginalDisplayCapture>>>,
 }
@@ -569,11 +570,10 @@ struct OriginalDisplayOwner {
 impl OriginalExecutionContext {
     #[cfg(test)]
     fn capture(
-        context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+        evidence: Arc<tidepool_toolchain::declaration_join::OriginalExecutionEvidence>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            identity: context.semantic_sha256(),
-            context,
+            evidence,
             display_owners: Arc::default(),
             displays: Mutex::default(),
         })
@@ -602,15 +602,16 @@ impl OriginalExecutionContext {
                 return Ok(capture.owner.clone());
             }
         }
-        let owner = match tidepool_toolchain::activation_preview::OriginalDisplayContext::issue(
-            prototype,
-            &self.context,
-        )? {
-            Some(display) => self.display_owners.intern(display),
+        let owner = match self.evidence.completed() {
+            Ok(complete) => self.display_owners.intern(
+                tidepool_toolchain::activation_preview::OriginalDisplayContext::issue(
+                    prototype, complete,
+                )?,
+            ),
             // Missing original evidence remains local to its exact provenance;
             // it cannot establish a shared negative instance observation.
-            None => Arc::new(OriginalDisplayOwner {
-                identity: self.identity,
+            Err(_) => Arc::new(OriginalDisplayOwner {
+                identity: self.evidence.identity(),
                 display: None,
                 renderers: Mutex::default(),
             }),
@@ -625,11 +626,23 @@ impl OriginalExecutionContext {
 
 impl PartialEq for OriginalExecutionContext {
     fn eq(&self, other: &Self) -> bool {
-        self.identity == other.identity
+        self.evidence.same_authenticated_execution(&other.evidence)
     }
 }
 
 impl Eq for OriginalExecutionContext {}
+
+impl PartialEq for OriginalExecutionContexts {
+    fn eq(&self, other: &Self) -> bool {
+        self.contexts().count() == other.contexts().count()
+            && self.contexts().all(|context| {
+                other
+                    .contexts()
+                    .any(|held| held.as_ref() == context.as_ref())
+            })
+    }
+}
+impl Eq for OriginalExecutionContexts {}
 
 impl OriginalExecutionContexts {
     fn contexts(&self) -> impl Iterator<Item = &Arc<OriginalExecutionContext>> {
@@ -637,25 +650,34 @@ impl OriginalExecutionContexts {
             Self::Unique(context) => (Some(context), None),
             Self::Ambiguous(contexts) => (None, Some(contexts)),
         };
-        unique
-            .into_iter()
-            .chain(ambiguous.into_iter().flat_map(|contexts| contexts.values()))
+        unique.into_iter().chain(
+            ambiguous
+                .into_iter()
+                .flat_map(|contexts| contexts.values().flatten()),
+        )
     }
 
     fn merge(&mut self, other: &Self) {
         for context in other.contexts() {
             match self {
-                Self::Unique(previous) if previous.identity == context.identity => {}
+                Self::Unique(previous) if previous.as_ref() == context.as_ref() => {}
                 Self::Unique(previous) => {
-                    *self = Self::Ambiguous(BTreeMap::from([
-                        (previous.identity, Arc::clone(previous)),
-                        (context.identity, Arc::clone(context)),
-                    ]));
+                    let mut contexts = BTreeMap::<_, Vec<_>>::new();
+                    contexts
+                        .entry(previous.evidence.identity())
+                        .or_default()
+                        .push(previous.clone());
+                    contexts
+                        .entry(context.evidence.identity())
+                        .or_default()
+                        .push(context.clone());
+                    *self = Self::Ambiguous(contexts);
                 }
                 Self::Ambiguous(contexts) => {
-                    contexts
-                        .entry(context.identity)
-                        .or_insert_with(|| Arc::clone(context));
+                    let bucket = contexts.entry(context.evidence.identity()).or_default();
+                    if !bucket.iter().any(|held| held.as_ref() == context.as_ref()) {
+                        bucket.push(context.clone());
+                    }
                 }
             }
         }
@@ -667,7 +689,11 @@ impl OriginalExecutionContexts {
             Self::Ambiguous(contexts) => {
                 Err(ResidentError::AmbiguousActivationInputOriginalContext {
                     site,
-                    contexts: contexts.keys().copied().collect(),
+                    contexts: contexts
+                        .values()
+                        .flatten()
+                        .map(|context| context.evidence.identity())
+                        .collect(),
                 })
             }
         }
@@ -789,11 +815,10 @@ impl ProgramProvenance {
             }
         }
         for (site, interfaces) in &other.authenticated_inputs {
-            if self
-                .authenticated_inputs
-                .get(site)
-                .is_some_and(|previous| previous.type_identity != interfaces.type_identity)
-            {
+            if self.authenticated_inputs.get(site).is_some_and(|previous| {
+                previous.type_identity != interfaces.type_identity
+                    || !previous.types.same_authenticated_context(&interfaces.types)
+            }) {
                 return Err(ProgramProvenanceError::AuthenticatedInputTypeContext {
                     site: *site,
                     existing: self.authenticated_inputs[site].type_identity,
@@ -1618,8 +1643,7 @@ pub struct RuntimeActivationInput {
     type_evidence: Arc<super::prepared::SiteTypeEvidence>,
     input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
     prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
-    original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-    original_execution_identity: [u8; 32],
+    original_execution: Arc<tidepool_toolchain::declaration_join::OriginalExecutionEvidence>,
     renderer_owner: Arc<OriginalDisplayOwner>,
     progress_type_witness: Option<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>>,
 }
@@ -1737,8 +1761,7 @@ static_assertions::assert_not_impl_any!(RuntimeActivationInputAdmission: Clone, 
 pub struct MountedActivationInput {
     original_source: Arc<super::RuntimeOriginalSource>,
     interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
-    original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-    original_execution_identity: [u8; 32],
+    original_execution: Arc<tidepool_toolchain::declaration_join::OriginalExecutionEvidence>,
     renderer_owner: Arc<OriginalDisplayOwner>,
     binding: SessionVarId,
     scope: ScopeId,
@@ -2261,7 +2284,7 @@ impl RuntimeActivationPreviewAdmission {
     }
 
     pub fn original_execution_digest(&self) -> [u8; 32] {
-        self.mounted.original_execution_identity
+        self.mounted.original_execution.identity()
     }
 
     pub fn original_display_context(
@@ -5941,7 +5964,7 @@ where
         let progress_type_witness = layout.progress().map(|witness| Arc::new(witness.clone()));
         let interfaces = parked.interfaces;
         let execution_owner = interfaces.execution.require_unique(site)?;
-        let original_execution = execution_owner.context.clone();
+        let original_execution = execution_owner.evidence.clone();
         let type_evidence = self
             .state
             .prepared()
@@ -5970,7 +5993,6 @@ where
             input_type_witness: Arc::new(input_type_witness),
             prototype,
             original_execution,
-            original_execution_identity: execution_owner.identity,
             renderer_owner,
             progress_type_witness,
         })
@@ -6617,7 +6639,6 @@ where
             original_source: owner.input.original_source,
             interface,
             original_execution: owner.input.original_execution,
-            original_execution_identity: owner.input.original_execution_identity,
             renderer_owner: owner.input.renderer_owner,
             binding,
             scope,
@@ -8382,13 +8403,13 @@ where
         let (generation, _) = self.state.reserve_value_generations(1)?;
         let owner_epoch = self.state.admission_owner().epoch();
         let mut hash = blake3::Hasher::new();
-        hash.update(b"TidepoolActivationPreview1");
+        hash.update(b"TidepoolActivationPreview2");
         hash.update(&owner_epoch.to_le_bytes());
         hash.update(&view_digest);
         hash.update(&generation.0.to_le_bytes());
         hash.update(&mounted.binding.raw().to_le_bytes());
         hash.update(&mounted.interface.admission_digest());
-        hash.update(&mounted.original_execution_identity);
+        hash.update(&mounted.original_execution.identity());
         hash.update(&mounted.run_context.principal.identity.to_le_bytes());
         hash.update(&mounted.run_context.principal.incarnation.to_le_bytes());
         hash.update(&mounted.run_context.resource_scope.0.to_le_bytes());

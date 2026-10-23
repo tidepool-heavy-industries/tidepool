@@ -11,7 +11,9 @@ use crate::checked_cell::{
     array, decode, encode_signature, hash, hex, read, read_table, row, string, text,
     CanonicalInputTypeWitness, ExactHostBindingInterface, ExactHostBindingPrototype,
 };
-use crate::declaration_context::ExactDeclarationContext;
+use crate::declaration_context::{
+    CompletedOriginalExecution, ExactDeclarationContext, OriginalExecutionEvidence,
+};
 use crate::CompileError;
 
 #[derive(Clone, Debug)]
@@ -28,6 +30,7 @@ pub struct ActivationPreviewSpecification {
 pub struct OriginalDisplayContext {
     identity: [u8; 32],
     declarations: Arc<ExactDeclarationContext>,
+    execution: Arc<OriginalExecutionEvidence>,
     witness: CanonicalInputTypeWitness,
     input_context: Arc<ExactDeclarationContext>,
 }
@@ -35,23 +38,25 @@ pub struct OriginalDisplayContext {
 impl OriginalDisplayContext {
     pub fn issue(
         prototype: &ExactHostBindingPrototype,
-        original: &ExactDeclarationContext,
-    ) -> Result<Option<Arc<Self>>, CompileError> {
-        if !validate_original_display_context(prototype, original)? {
-            return Ok(None);
-        }
+        original: CompletedOriginalExecution<'_>,
+    ) -> Result<Arc<Self>, CompileError> {
+        validate_original_display_context(prototype, &original)?;
         let declarations = Arc::new(original.original_display_projection(prototype.context())?);
         let witness = prototype
             .original_input_type()
             .expect("validated live input")
             .clone();
-        let identity = declarations.display_identity(witness.original_bytes());
-        Ok(Some(Arc::new(Self {
-            identity,
+        let mut identity = blake3::Hasher::new();
+        identity.update(b"TPEXACTDISPLAYEXECUTION1\0");
+        identity.update(&original.evidence().identity());
+        identity.update(&declarations.display_identity(witness.original_bytes()));
+        Ok(Arc::new(Self {
+            identity: *identity.finalize().as_bytes(),
             declarations,
+            execution: original.evidence().clone(),
             witness,
             input_context: prototype.context().clone(),
-        })))
+        }))
     }
 
     pub fn identity(&self) -> [u8; 32] {
@@ -59,6 +64,23 @@ impl OriginalDisplayContext {
     }
     pub fn declarations(&self) -> &Arc<ExactDeclarationContext> {
         &self.declarations
+    }
+    pub fn execution_evidence(&self) -> &Arc<OriginalExecutionEvidence> {
+        &self.execution
+    }
+    pub(crate) fn original_preview_interface_graph(
+        &self,
+    ) -> Result<
+        std::collections::BTreeMap<
+            crate::declaration_join::ExactModuleIdentity,
+            crate::declaration_context::TemplateInterfaceNode,
+        >,
+        CompileError,
+    > {
+        self.execution
+            .completed()
+            .map_err(CompileError::from)?
+            .original_preview_interface_graph()
     }
     pub fn matches_prototype(&self, prototype: &ExactHostBindingPrototype) -> bool {
         prototype.producer() == self.declarations.toolchain_identity_sha256()
@@ -76,8 +98,11 @@ impl PartialEq for OriginalDisplayContext {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other)
             || (self
-                .declarations
-                .same_display_observations(&other.declarations)
+                .execution
+                .same_authenticated_execution(&other.execution)
+                && self
+                    .declarations
+                    .same_display_observations(&other.declarations)
                 && self.witness == other.witness
                 && self.witness.original_bytes() == other.witness.original_bytes()
                 && self
@@ -97,7 +122,6 @@ pub enum ActivationPreviewDisposition {
 pub(crate) struct ActivationPreviewOffer {
     pub(crate) specification: ActivationPreviewSpecification,
     pub(crate) prototype: Arc<ExactHostBindingPrototype>,
-    pub(crate) original_execution: Arc<ExactDeclarationContext>,
     pub(crate) display_context: Arc<OriginalDisplayContext>,
 }
 
@@ -121,7 +145,6 @@ impl ActivationPreviewOffer {
             || self.prototype.original_input_type().is_none()
             || spec.original_context_digest != self.display_context.identity()
             || !self.display_context.matches_prototype(&self.prototype)
-            || self.original_execution != *self.display_context.declarations()
         {
             return Err(failure(
                 "pure activation preview has another input or recipe",
@@ -145,7 +168,7 @@ impl ActivationPreviewOffer {
             Value::Bytes(witness.original_bytes().to_vec()),
             original_interfaces,
             {
-                let target = self.original_execution.original_instance_target()?;
+                let target = self.display_context.execution_evidence().target();
                 array([text(&target.unit), text(&target.module)])
             },
         ]))
@@ -238,7 +261,6 @@ impl ActivationPreviewOffer {
             table: read_table(root, target)?,
             yield_sites_digest: crate::artifacts::yield_sites_metadata_digest(&sites)?,
             disposition,
-            original_execution: self.original_execution.clone(),
             display_context: self.display_context.clone(),
         }))
     }
@@ -249,14 +271,16 @@ impl ActivationPreviewOffer {
 /// a nominal input type does not require its owner's native code by itself.
 pub(crate) fn validate_original_display_context(
     prototype: &ExactHostBindingPrototype,
-    context: &ExactDeclarationContext,
-) -> Result<bool, CompileError> {
+    original: &CompletedOriginalExecution<'_>,
+) -> Result<(), CompileError> {
+    let context = original.context();
     if prototype.producer() != context.toolchain_identity_sha256() {
         return Err(failure(
             "activation preview has another original compiler producer",
         ));
     }
     let _ = context
+        .as_ref()
         .clone()
         .extend_interface_context(prototype.context())?;
     if prototype.original_input_type().is_none() {
@@ -264,19 +288,16 @@ pub(crate) fn validate_original_display_context(
             "activation preview requires original live input authority",
         ));
     }
-    Ok(matches!(
-        context.original_instance_environment(),
-        crate::declaration_context::OriginalInstanceEnvironment::Complete { .. }
-    ))
+    Ok(())
 }
 
 /// Reuse authored implementations from the original context without issuing
 /// additional native availability.
 pub(crate) fn original_native_declaration_inputs(
-    context: &ExactDeclarationContext,
+    display: &OriginalDisplayContext,
     producer: &[u8],
 ) -> Result<Option<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
-    context.original_instance_target()?;
+    let context = display.declarations();
     if context.toolchain_identity_sha256()
         != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
             .sha256()
@@ -296,7 +317,6 @@ pub struct ExactCompiledActivationPreview {
     table: DataConTable,
     yield_sites_digest: [u8; 32],
     disposition: ActivationPreviewDisposition,
-    original_execution: Arc<ExactDeclarationContext>,
     display_context: Arc<OriginalDisplayContext>,
 }
 
@@ -364,7 +384,7 @@ impl ExactCompiledActivationPreview {
         self.validate_yield_sites(sites)?;
         Ok(
             crate::declaration_context::ValidatedOriginalSource::pure_preview(
-                &self.original_execution,
+                &self.display_context,
             ),
         )
     }
@@ -376,7 +396,9 @@ impl ExactCompiledActivationPreview {
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         Ok(self
             .original_source(target, table, sites)?
-            .execution_context())
+            .execution()
+            .context()
+            .clone())
     }
 }
 

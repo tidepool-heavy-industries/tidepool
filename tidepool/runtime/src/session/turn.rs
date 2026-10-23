@@ -2073,8 +2073,7 @@ impl CompiledTurn {
         self.certification.as_ref()?.ordinary_original()
     }
 
-    /// Select compiler roles from this exact completed output, independently
-    /// of the wider native artifact custody retained by the turn.
+    /// Borrow selected retained facts without acquiring completion authority.
     pub fn original_execution_context(
         &self,
     ) -> Result<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, CompileError>
@@ -2084,14 +2083,40 @@ impl CompiledTurn {
             .as_ref()
             .and_then(|certification| certification.original_output.as_ref())
         {
-            return products.original_execution_context();
+            return Ok(products.original_execution_evidence()?.context().clone());
         }
         self.code()
             .original_source()?
-            .map(|source| source.execution_context())
+            .map(|source| source.execution().context().clone())
             .ok_or_else(|| {
                 CompileError::ExtractFailed("turn has no original compiler authority".into())
             })
+    }
+
+    /// The actual original output's execution and instance-census evidence.
+    pub fn original_execution_evidence(
+        &self,
+    ) -> Result<Arc<tidepool_toolchain::declaration_join::OriginalExecutionEvidence>, CompileError>
+    {
+        if let Some(products) = self
+            .certification
+            .as_ref()
+            .and_then(|certification| certification.original_output.as_ref())
+        {
+            return products.original_execution_evidence();
+        }
+        match self
+            .code()
+            .original_source()?
+            .map(|source| source.execution())
+        {
+            Some(tidepool_toolchain::declaration_join::OriginalExecutionSource::Original(
+                evidence,
+            )) => Ok(evidence),
+            _ => Err(CompileError::ExtractFailed(
+                "turn has no original output evidence".into(),
+            )),
+        }
     }
 
     /// Issue a published source selection only from this exact original bundle.
