@@ -5011,7 +5011,7 @@ pub(super) mod tests {
                     let before = raw.residency();
                     assert!(
                         matches!(
-                            raw.resolve_native_turn_in(scope, &code, plan, &|_| None),
+                            raw.resolve_native_turn_in(scope, &code, plan),
                             Err(PreparedRuntimeError::CertifiedTargetOwners)
                         ),
                         "raw compiler products carry no checked runtime source owner"
@@ -6556,6 +6556,47 @@ pub(super) mod tests {
             wire: TypeNodeId(0),
             inputs: vec![],
         });
+        {
+            let (mut engine, producer) = PreparedEngine::bootstrap_shared(
+                testing::prepare(wire.clone()).unwrap(),
+                64 * 1024,
+                None,
+            )
+            .unwrap();
+            let expected = engine.installed_program_sources(producer).clone();
+            let handle = engine.machine.retain_top(producer, ValueId(0)).unwrap();
+            assert!(engine.adopt(handle));
+            let entry = BindingEntry {
+                name: BindingName("producer".into()),
+                id: SessionVarId::from_extract(1),
+                module: SessionModule::val(Generation(1)),
+                value: BoundValue {
+                    handle,
+                    identity: producer_identity(),
+                },
+                type_display: None,
+                defining_expr: None,
+                scope: tidepool_codegen::scope::ScopeId::ROOT,
+            };
+            let mut index = BindingIndex::new();
+            index.on_bind(&entry);
+            let mut bindings = BindingTable::new();
+            bindings.bind(entry).unwrap();
+            let target = plain_import_consumer_program(false, Some(1));
+            assert!(target.sites().is_empty());
+            let wrapper = engine
+                .install(target, &bindings, &index, &|entry| {
+                    (entry.id == SessionVarId::from_extract(1) && entry.value.handle == handle)
+                        .then(|| expected.clone())
+                })
+                .unwrap();
+            assert_ne!(expected, NativeSourceCustody::default());
+            assert_eq!(
+                engine.installed_program_sources(wrapper),
+                &expected,
+                "site-free wrapper retains the actual producer's Unknown contribution"
+            );
+        }
         let mut state = super::super::PersistentSession::new(None, 64 * 1024);
         let source = state.mint_isolated_scope_with_lease().unwrap();
         let settled = state.with_source_compiler_transaction(
@@ -6596,26 +6637,6 @@ pub(super) mod tests {
                     Err(PreparedRuntimeError::MissingRetainedSource { id }) if id == SessionVarId::from_extract(1)
                 ));
                 assert_eq!(state.prepared().unwrap().residency(), before);
-                let actual_source = |input: super::super::persistent::ValidatedRetainedSourceRef<'_>| {
-                    if input.id() != SessionVarId::from_extract(1) {
-                        return None;
-                    }
-                    assert_eq!(input.handle(), handle);
-                    Some(expected.clone())
-                };
-                let target = plain_import_consumer_program(false, Some(1));
-                assert!(target.sites().is_empty());
-                let (wrapper, sources) = state
-                    .install_prepared_with_sources(target, None, &actual_source)
-                    .unwrap();
-                assert_eq!(
-                    sources, expected,
-                    "site-free wrapper retains its actual input's Unknown contribution"
-                );
-                assert_eq!(
-                    state.prepared().unwrap().installed_program_sources(wrapper),
-                    &expected
-                );
                 let engine = state.prepared_mut().unwrap();
                 let alias = engine.retain_handle_value(handle, RealmId::ROOT).unwrap();
                 assert!(engine.adopt(alias));
@@ -6624,7 +6645,7 @@ pub(super) mod tests {
                 assert!(
                     matches!(
                         state.install_prepared_with_sources(
-                            plain_import_consumer_program(false, Some(2)), None, &actual_source,
+                            plain_import_consumer_program(false, Some(2)), None,
                         ),
                         Err(PreparedRuntimeError::MissingRetainedSource { id }) if id == SessionVarId::from_extract(2)
                     ),
