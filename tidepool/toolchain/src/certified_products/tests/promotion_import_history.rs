@@ -913,20 +913,25 @@ fn assert_actual_selected_and_retained_history(
         .unwrap()
         .finalize_namespace()
         .unwrap();
-    let supports = [
-        ordinary
-            .compiler_source_support()
-            .source_support(&owners)
-            .unwrap(),
-        promoted_support,
-    ];
+    let ordinary_completed = ordinary.compiler_source_support();
+    let ordinary_support = ordinary_completed
+        .promote_issued_authored_originals(ordinary_completed, &owners)
+        .expect("ordinary source products select only their actual carried Original offers")
+        .source_support(&owners)
+        .unwrap()
+        .finalize_namespace()
+        .unwrap();
+    let supports = [ordinary_support, promoted_support];
     let acquisitions = [[&fixture.root, &fixture.helper], promoted];
     let native_edges =
         |support: &crate::artifact_inventory::CompilerSourceSupport, root, helper| {
             support
-                .artifacts()
-                .binding_dependencies()
-                .into_iter()
+                .native_availability()
+                .issued_row(root)
+                .expect("selected Original has actual issued native availability")
+                .offers()
+                .filter(|offer| offer.original_acquisition().descriptor.id == root)
+                .flat_map(|offer| offer.custody_snapshot().binding_dependencies().unwrap())
                 .filter(|(from, to, edge)| {
                     matches!((from, to, edge),
                 (ArtifactBindingNode::Group(parent), ArtifactBindingNode::Group(child),
@@ -943,7 +948,7 @@ fn assert_actual_selected_and_retained_history(
         );
         assert!(
             !edges.is_empty(),
-            "each real acquisition retains its nonempty source dependency"
+            "each real acquisition's offer retains its nonempty source dependency: {index}"
         );
         edges
     });
@@ -984,6 +989,18 @@ fn assert_actual_selected_and_retained_history(
             assert!(availability
                 .offers()
                 .any(|offer| Arc::ptr_eq(offer.original_acquisition(), entry)));
+            let issued = supports[index]
+                .native_availability()
+                .issued_row(entry.descriptor.id)
+                .unwrap();
+            for expected in issued.offers() {
+                assert!(
+                    availability
+                        .offers()
+                        .any(|offer| offer.same_issuance(expected)),
+                    "selection carries the actual offer rather than rebuilding its graph"
+                );
+            }
         }
         assert_eq!(
             context
@@ -1010,16 +1027,36 @@ fn assert_actual_selected_and_retained_history(
                 .collect::<BTreeSet<_>>(),
             retained,
         );
+        assert_eq!(
+            native_edges(
+                context.compiler_source_support(),
+                acquisitions[index][0].descriptor.id,
+                acquisitions[index][1].descriptor.id
+            ),
+            expected_edges[index],
+            "the selected offer preserves its exact issuing helper graph",
+        );
         for history in 0..2 {
             if expected_owners[history]
                 .iter()
                 .all(|owner| retained.contains(owner))
             {
-                assert_eq!(
-                    native_edges(&selected, acquisitions[history][0].descriptor.id, acquisitions[history][1].descriptor.id),
-                    expected_edges[history],
-                    "retaining another actual original cannot rebind a historical root's helper groups",
-                );
+                // Historical custody does not add executable Group roots to
+                // the current view. It retains each exact native witness.
+                for entry in acquisitions[history] {
+                    let ArtifactPayload::Original(expected) = &entry.payload else {
+                        unreachable!()
+                    };
+                    let retained = context
+                        .recovery_products()
+                        .iter()
+                        .find(|product| product.owner() == expected.owner())
+                        .expect("historical Original remains in certified custody");
+                    assert!(
+                        Arc::ptr_eq(retained.original_native(), expected.original_native()),
+                        "custody must retain the original dependency witness unchanged"
+                    );
+                }
             }
         }
     }
