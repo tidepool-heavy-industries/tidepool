@@ -71,18 +71,28 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
 
     for used in [false, true] {
         let (prepared, admission) = settle(|| {
-            let checked = prepare_checked(
-                &endpoint,
-                &world,
-                &source,
-                if used {
-                    include_str!("../../tests/fixtures/world-native/SelectionUsed.hs")
-                } else {
-                    include_str!("../../tests/fixtures/world-native/SelectionUnused.hs")
-                },
-                Some(operand.clone()),
-                &[(51, "currentSelection"), (52, "laterSelection")],
-            )?;
+            let values = &[(51, "currentSelection"), (52, "laterSelection")];
+            let checked = if used {
+                prepare_checked(
+                    &endpoint,
+                    &world,
+                    &source,
+                    include_str!("../../tests/fixtures/world-native/SelectionUsed.hs"),
+                    Some(operand.clone()),
+                    values,
+                )
+            } else {
+                // Availability alone supplies no lexical helper or value demand.
+                prepare_checked_with_template(
+                    &endpoint,
+                    &world,
+                    &source,
+                    include_str!("../../tests/fixtures/world-native/SelectionUnused.hs").into(),
+                    Some(operand.clone()),
+                    values,
+                    include_str!("../../tests/fixtures/world-native/CellTemplate.hs").into(),
+                )
+            }?;
             assert_eq!(checked.stages().len(), 1);
             assert_eq!(checked.stages()[0].ordinals(), &[0, 1]);
             let demand = checked.runtime_binding_demand();
@@ -93,7 +103,7 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
                 assert!(demand.existing().is_empty());
                 assert!(checked.stages()[0].demanded_rows().is_empty());
             }
-            assert_physical_selection(&checked, &operand)?;
+            assert_physical_selection(&checked, Some(operand.as_ref()))?;
             prepare_world_cell_program(checked)
         });
         let program = prepared
@@ -121,7 +131,7 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
             .collect::<Vec<_>>();
         assert!(
             !first_packages.is_empty(),
-            "World declaration item demands actual Data.Text package roots"
+            "World declaration item demands actual package roots"
         );
         assert!(
             first_target.acquired().len() > 0,
@@ -160,6 +170,32 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
         });
         assert_eq!(requires_operand, used);
     }
+}
+
+#[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_world_value_selection_test owns it"]
+fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand() {
+    let (prepared, admission) = settle(|| {
+        let (endpoint, world, source) = open_empty_world()?;
+        let checked = prepare_checked(
+            &endpoint,
+            &world,
+            &source,
+            include_str!("../../tests/fixtures/world-native/SelectionUnused.hs"),
+            None,
+            &[(51, "currentSelection"), (52, "laterSelection")],
+        )?;
+        assert_eq!(checked.stages().len(), 1);
+        assert_eq!(checked.stages()[0].ordinals(), &[0, 1]);
+        assert!(checked.runtime_binding_demand().existing().is_empty());
+        assert!(checked.runtime_binding_demand().prior_stage().is_empty());
+        assert_physical_selection(&checked, None)?;
+        prepare_world_cell_program(checked)
+    });
+    let program = prepared
+        .seal(&admission)
+        .expect("independent produced-value prefix reaches actual compiler END");
+    assert_eq!(program.items().len(), 2);
 }
 
 #[test]
@@ -904,10 +940,13 @@ fn prepare_checked(
     values: &[(u64, &str)],
 ) -> Result<Arc<CheckedWorldCellProgram>, CompileError> {
     let template = match operand.as_ref() {
-        // The actual operand owner exposes `input`; its source-less module
-        // remains an acquired interface rather than an authored source import.
-        Some(_) => include_str!("../../tests/fixtures/world-native/SelectionTemplate.hs"),
-        None => include_str!("../../tests/fixtures/world-native/CellTemplate.hs"),
+        Some(operand) => {
+            let symbol = operand.symbol();
+            include_str!("../../tests/fixtures/world-native/SelectionTemplate.hs")
+                .replace("{{OPERAND_MODULE}}", &symbol.module)
+                .replace("{{OPERAND_BINDER}}", &symbol.occurrence)
+        }
+        None => include_str!("../../tests/fixtures/world-native/CellTemplate.hs").into(),
     };
     prepare_checked_with_template(
         endpoint,
@@ -1002,7 +1041,7 @@ fn prepare_checked_with_template(
 
 fn assert_physical_selection(
     checked: &Arc<CheckedWorldCellProgram>,
-    operand: &CompilerWorldCellOperand,
+    operand: Option<&CompilerWorldCellOperand>,
 ) -> Result<(), CompileError> {
     let produced_owners = [51, 52].map(|generation| crate::declaration_join::ExactModuleIdentity {
         unit: "main".into(),
@@ -1045,15 +1084,46 @@ fn assert_physical_selection(
         &mut |_| {},
     )?;
     let segment = pending.segment();
-    let input = operand.checked_row().certified_interface().artifact_id();
-    assert!(
-        segment
-            .originals
-            .value_entries()
-            .iter()
-            .any(|entry| entry.descriptor.id == input),
-        "the actual operand owner retains its interface before item projection"
-    );
+    let input = operand.map(|operand| {
+        let artifact = operand.checked_row().certified_interface().artifact_id();
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: operand.symbol().unit.clone(),
+            module: operand.symbol().module.clone(),
+        };
+        let demanded = checked
+            .runtime_binding_demand()
+            .existing()
+            .contains(&operand.session_var());
+        assert_eq!(
+            segment
+                .originals
+                .captured_stage()
+                .compiler_inputs()
+                .role_projection()
+                .snapshot_roles()
+                .get(&owner)
+                .map(|role| role.interface()),
+            Some(artifact),
+            "the actual stage retains the operand TYPE even without value demand"
+        );
+        assert_eq!(
+            segment
+                .originals
+                .source_selection()
+                .interface_only_artifact(&owner),
+            Some(artifact),
+        );
+        assert_eq!(
+            segment
+                .originals
+                .value_entries()
+                .iter()
+                .any(|entry| entry.descriptor.id == artifact),
+            demanded,
+            "only an actually demanded operand is emitted as a captured value"
+        );
+        (owner, artifact, demanded)
+    });
     let relative = PathBuf::from("item-0");
     let path = checked
         .item(0)
@@ -1163,11 +1233,22 @@ fn assert_physical_selection(
     ));
     let current = physical.current_interface(51)?.artifact_id();
     let later = physical.current_interface(52)?.artifact_id();
-    assert!(certified
-        .data()
-        .value_interfaces
-        .iter()
-        .any(|interface| interface.artifact_id() == input));
+    if let Some((owner, artifact, demanded)) = &input {
+        assert_eq!(
+            certified.source_selection().interface_only_artifact(owner),
+            Some(*artifact),
+            "item projection preserves held operand TYPE availability"
+        );
+        assert_eq!(
+            certified
+                .data()
+                .value_interfaces
+                .iter()
+                .any(|interface| interface.artifact_id() == *artifact),
+            *demanded,
+            "item output and held input availability remain distinct"
+        );
+    }
     assert!(certified
         .data()
         .value_interfaces
@@ -1178,7 +1259,7 @@ fn assert_physical_selection(
         .value_interfaces
         .iter()
         .any(|interface| interface.artifact_id() == later));
-    for (generation, expected) in [(41, Some(input)), (51, Some(current)), (52, None)] {
+    for (generation, expected) in [(51, Some(current)), (52, None)] {
         let owner = crate::declaration_join::ExactModuleIdentity {
             unit: "main".into(),
             module: tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation))
