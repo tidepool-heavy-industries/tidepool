@@ -4949,6 +4949,13 @@ impl RequestCompilerInputs {
             .support
             .native_availability()
             .same_acquisition(self.source_support.native_availability())
+            && delta.support.native_offers().len() == self.source_support.native_offers().len()
+            && delta
+                .support
+                .native_offers()
+                .iter()
+                .zip(self.source_support.native_offers())
+                .all(|(current, previous)| current.same_issuance(previous))
             && delta.changed_owners.iter().all(|owner| {
                 delta.support.projection().snapshot_roles()[owner]
                     .original()
