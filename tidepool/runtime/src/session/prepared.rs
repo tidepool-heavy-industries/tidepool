@@ -4931,6 +4931,25 @@ pub(super) mod tests {
     use tidepool_repr::execution_schema::CertifiedGroup;
 
     #[test]
+    fn checked_input_refusal_preserves_its_typed_transition_cause() {
+        use super::super::{SessionError, SessionTransitionReason};
+        use std::error::Error;
+        let error = PreparedRuntimeError::CheckedInputs(Box::new(
+            SessionTransitionReason::PreparedValueChanged.into(),
+        ));
+        assert_eq!(error.stage(), PreparedFailureStage::Install);
+        assert_eq!(error.kind(), PreparedFailureKind::Rejected);
+        assert!(matches!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<SessionError>()),
+            Some(SessionError::TransitionRefused(
+                SessionTransitionReason::PreparedValueChanged
+            ))
+        ));
+    }
+
+    #[test]
     fn physical_current_source_requires_its_actual_runtime_output_owner() {
         tidepool_testing::eval_harness::require_extract();
         let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[

@@ -11381,6 +11381,100 @@ mod authored_publication_tests {
         compiled: super::super::turn::CompiledTurn,
     }
 
+    #[test]
+    fn checked_snapshot_retains_expired_observation_until_its_last_owner_drops() {
+        use super::super::turn::{consume_cell_program_item, TurnResult};
+        let CheckedCaptureFixture {
+            root: _root,
+            original,
+            mut resident,
+            execution,
+            checked,
+            prefix,
+            reservation,
+            bound,
+            compiled,
+        } = checked_capture_fixture_from(
+            SessionId(1012),
+            include_str!("fixtures/checked-observation-custody.hs"),
+        );
+        let scope = execution.private_scope();
+        let first_id = SessionVarId::from_extract(bound[0].var_id);
+        let first_name = bound[0].name.clone();
+        let generation = reservation.generation();
+        source_action(&mut resident, &original, |resident, report| {
+            resident.run_observation_with_sites(
+                compiled.code(),
+                &bound[0],
+                generation,
+                true,
+                report,
+            )
+        })
+        .unwrap();
+        let held = prefix.snapshot();
+        let first = resident.state.bindings().get(first_id).unwrap();
+        let identity = first.value.identity.clone();
+        let handle = first.value.handle;
+        assert!(resident.state.bindings().lease_count(first_id) > 0);
+        drop(compiled);
+        drop(reservation);
+        for index in 1..11 {
+            let reservation = source_action(&mut resident, &original, |resident, _| {
+                resident.admit_checked_item(prefix.clone(), checked.checked_item(index).unwrap())
+            })
+            .unwrap();
+            let TurnResult::Bind {
+                bound, compiled, ..
+            } = consume_cell_program_item(reservation.clone()).unwrap()
+            else {
+                panic!("observation history must contain actual checked bindings");
+            };
+            source_action(&mut resident, &original, |resident, report| {
+                resident.run_observation_with_sites(
+                    compiled.code(),
+                    &bound[0],
+                    reservation.generation(),
+                    true,
+                    report,
+                )
+            })
+            .unwrap();
+        }
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 11);
+        assert!(resident.current_binding_in(scope, &first_name).is_none());
+        let exact = resident
+            .state
+            .bindings()
+            .resolve_exact_prepared_in(resident.state.scope_tree(), scope, &identity, generation.0)
+            .expect("the scoped owner retains the exact expired observation");
+        assert_eq!(exact.id, first_id);
+        assert_eq!(exact.value.handle, handle);
+        assert!(matches!(
+            resident.state.prepared_mut().unwrap().inspect_retained(handle.raw()).unwrap(),
+            PreparedOuter::Constructor { fields, .. }
+                if matches!(fields.as_slice(), [PreparedResult::Scalar(23)])
+        ));
+        drop(prefix);
+        drop(checked);
+        resident.settle_dropped_custody();
+        assert!(resident.state.scope_tree().is_live(scope));
+        assert!(resident.state.bindings().get(first_id).is_some());
+        assert!(resident.state.bindings().lease_count(first_id) > 0);
+        drop(held);
+        resident.settle_dropped_custody();
+        assert!(resident.state.scope_tree().is_live(scope));
+        assert!(resident.state.bindings().get(first_id).is_none());
+        assert_eq!(resident.state.bindings().lease_count(first_id), 0);
+        assert!(resident.state.binding_provenance(first_id.raw()).is_none());
+        assert!(resident
+            .state
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_none());
+    }
+
     fn checked_capture_fixture(session: SessionId) -> CheckedCaptureFixture {
         checked_capture_fixture_from(
             session,
