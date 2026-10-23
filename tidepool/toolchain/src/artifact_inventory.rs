@@ -9171,14 +9171,22 @@ impl ArtifactView {
                 .chain(groups.values().copied().map(InventoryNodeKey::Group))
                 .collect::<BTreeSet<_>>()
         };
+        // Explicit custody seeds survive selection changes, including seeds
+        // that are also selected roots. Only displaced execution roots need
+        // conversion to custody; reclassifying existing seeds changes their
+        // exact retained identity on an otherwise idempotent merge.
         let custody = self
-            .roots()
+            .custody_roots()
             .iter()
-            .chain(self.custody_roots())
-            .chain(other.roots())
             .chain(other.custody_roots())
             .copied()
-            .filter(|node| !roots.contains(node))
+            .chain(
+                self.roots()
+                    .iter()
+                    .chain(other.roots())
+                    .copied()
+                    .filter(|node| !roots.contains(node)),
+            )
             .collect::<BTreeSet<_>>();
         timing.advance("retain_selection");
         let mut retained = self.retain_merged_selection(
@@ -9253,11 +9261,16 @@ impl ArtifactView {
         let roots = self.roots().iter().copied().collect::<BTreeSet<_>>();
         let joined = self.merge_validated_namespace(other, namespace.clone())?;
         let custody = joined
-            .roots()
+            .custody_roots()
             .iter()
             .copied()
-            .chain(joined.custody_roots().iter().copied())
-            .filter(|node| !roots.contains(node))
+            .chain(
+                joined
+                    .roots()
+                    .iter()
+                    .copied()
+                    .filter(|node| !roots.contains(node)),
+            )
             .collect::<BTreeSet<_>>();
         let retained = joined.inventory().retain(
             roots.into_iter().collect(),
@@ -22467,6 +22480,47 @@ mod tests {
         drop(second);
         assert_eq!(inventory.node_count(), 0);
     }
+    #[test]
+    fn compiler_merge_preserves_explicit_custody_overlapping_selected_roots() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let issued = inventory
+            .admit(&empty, vec![entry("Selected", &[])])
+            .unwrap();
+        let selected = issued.capture_graph_selection();
+        let retained = inventory.retain(
+            selected.roots.clone(),
+            selected.roots.clone(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let retained = issued.retain_projected_materializations(retained).unwrap();
+        let expected = retained.capture_graph_selection();
+        assert!(!expected.custody_roots.is_empty());
+        assert_eq!(expected.roots, expected.custody_roots);
+        let projection = CompilerInputProjection::from_issued_entries(&retained.entries()).unwrap();
+        let empty_projection = CompilerInputProjection::default();
+        for (left, left_roles, right, right_roles) in [
+            (&retained, &projection, &empty, &empty_projection),
+            (&empty, &empty_projection, &retained, &projection),
+            (&retained, &projection, &retained, &projection),
+        ] {
+            let (merged, roles, _) = left
+                .merge_compiler_inputs(left_roles, right, right_roles)
+                .unwrap();
+            assert_eq!(roles, projection);
+            assert_eq!(merged.capture_graph_selection(), expected);
+            assert_eq!(
+                merged.binding_dependencies(),
+                retained.binding_dependencies()
+            );
+        }
+        let custody = retained.retain_custody(&empty).unwrap();
+        assert_eq!(custody.capture_graph_selection(), expected);
+        let repeated = custody.retain_custody(&retained).unwrap();
+        assert_eq!(repeated.capture_graph_selection(), expected);
+    }
+
     #[test]
     fn custody_only_merge_preserves_exact_support_without_selecting_roots() {
         let inventory = ArtifactInventory::default();
