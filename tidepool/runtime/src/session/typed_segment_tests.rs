@@ -1549,6 +1549,11 @@ fn transitive_prior_home_chain_preserves_historical_and_produced_captures() {
         DependencyTerminalOrigin, WorldCellRuntimeInputOrigin,
     };
 
+    let subscriber = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
     let mut session = SemanticSession::new();
     session
         .execute(
