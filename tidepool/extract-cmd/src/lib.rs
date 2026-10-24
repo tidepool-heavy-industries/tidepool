@@ -39,6 +39,7 @@ pub use native_demand::{
     NativeDemand, NativeDemandControl, NativeDemandOwner, NativeDemandResolver, NativeReply,
 };
 mod package_source;
+mod service;
 mod process;
 mod request;
 mod resources;

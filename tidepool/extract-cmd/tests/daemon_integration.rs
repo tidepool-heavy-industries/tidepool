@@ -1359,18 +1359,16 @@ fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value =
-        serde_json::from_slice(&fs::read(compiler.join("lifecycle.json")).unwrap()).unwrap();
-    assert_eq!(report["cleanup_confirmed"], true);
+        serde_json::from_slice(&fs::read(compiler.join("owned-service.json")).unwrap()).unwrap();
+    assert_eq!(report["complete"], true);
     assert!(!Path::new(report["socket_path"].as_str().unwrap())
         .parent()
         .unwrap()
         .exists());
     assert!(!compiler.join("cache").exists());
     assert!(!poison.exists(), "inherited cache override was consumed");
-    let outcome: serde_json::Value =
-        serde_json::from_slice(&fs::read(compiler.join("owned-compiler-outcome.json")).unwrap())
-            .unwrap();
-    assert_eq!(outcome["cleanup"]["status"], "confirmed");
+    assert_eq!(report["schema"], 2);
+    assert_eq!(report["action"]["exit_code"], 0);
     let failed_compiler = root.join("failed-compiler");
     let failed = Command::new(&bin)
         .arg("--owned-daemon-run")
@@ -1391,11 +1389,11 @@ fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
         .output()
         .unwrap();
     assert_eq!(failed.status.code(), Some(101));
-    let failed_outcome: serde_json::Value = serde_json::from_slice(
-        &fs::read(failed_compiler.join("owned-compiler-outcome.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(failed_outcome["cleanup"]["status"], "confirmed");
+    let failed_outcome: serde_json::Value =
+        serde_json::from_slice(&fs::read(failed_compiler.join("owned-service.json")).unwrap())
+            .unwrap();
+    assert_eq!(failed_outcome["complete"], true);
+    assert_eq!(failed_outcome["action"]["exit_code"], 101);
     assert!(
         failed_compiler.join("cache").exists(),
         "failed child diagnostics must be retained"

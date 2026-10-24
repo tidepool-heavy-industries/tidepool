@@ -6,10 +6,10 @@
 //! or daemon cannot leave its expensive child behind.  Keep this here beside
 //! the one extractor launcher; callers must not reproduce process-tree policy.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::time::{Duration, Instant};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 const PR_SET_PDEATHSIG: std::os::raw::c_int = 1;
@@ -126,6 +126,198 @@ pub(crate) fn read_exact_until(
     Ok(())
 }
 
+/// Write a nonblocking control carrier against one absolute owner deadline.
+pub(crate) fn write_all_until(
+    writer: &mut (impl Write + AsRawFd),
+    mut bytes: &[u8],
+    deadline: Instant,
+) -> io::Result<()> {
+    while !bytes.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "compiler control write deadline exceeded",
+            ));
+        }
+        let mut descriptor = libc::pollfd {
+            fd: writer.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let ready = unsafe {
+            libc::poll(
+                &mut descriptor,
+                1,
+                remaining.min(Duration::from_millis(50)).as_millis().max(1) as _,
+            )
+        };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            continue;
+        }
+        match writer.write(bytes) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "compiler control carrier closed",
+                ))
+            }
+            Ok(n) => bytes = &bytes[n..],
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "compiler control write deadline exceeded",
+        ));
+    }
+    Ok(())
+}
+
+/// Bounded metadata probes share the ordinary child owner. File-backed
+/// captures avoid waiting on inherited pipe writers and are read only within
+/// the probe output budget after an actual reap.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "bounded synchronous compiler metadata probe"
+)]
+pub(crate) fn output_until(
+    command: &mut Command,
+    deadline: Instant,
+) -> io::Result<std::process::Output> {
+    use std::io::Seek;
+    use std::process::Stdio;
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    command
+        .stdout(Stdio::from(stdout.try_clone()?))
+        .stderr(Stdio::from(stderr.try_clone()?));
+    let mut child = OwnedChild(command.spawn()?);
+    let status = loop {
+        if let Some(reaped) = child.observe()? {
+            break reaped.status();
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "compiler metadata startup deadline exceeded",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    for (file, bytes) in [(&mut stdout, &mut output), (&mut stderr, &mut errors)] {
+        if file.metadata()?.len() > 64 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compiler metadata output exceeds 64 KiB budget",
+            ));
+        }
+        file.rewind()?;
+        file.take(64 * 1024 + 1).read_to_end(bytes)?;
+        if bytes.len() > 64 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compiler metadata output grew beyond budget",
+            ));
+        }
+    }
+    Ok(std::process::Output {
+        status,
+        stdout: output,
+        stderr: errors,
+    })
+}
+
+/// Observe an owned child until a fixed retirement deadline. An observation
+/// error or expiry retains uncertainty; process absence is never substituted.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "bounded synchronous child retirement"
+)]
+pub(crate) fn observe_child_until(
+    mut observe: impl FnMut() -> io::Result<Option<std::process::ExitStatus>>,
+    deadline: Instant,
+) -> crate::endpoint::CompilerWorkerRetirement {
+    use crate::endpoint::{CompilerIoCause, CompilerWorkerRetirement};
+    loop {
+        match observe() {
+            Ok(Some(status)) => return CompilerWorkerRetirement::Reaped(status),
+            Err(error) => {
+                return CompilerWorkerRetirement::WaitUnconfirmed(CompilerIoCause::from(&error))
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                return CompilerWorkerRetirement::WaitUnconfirmed(CompilerIoCause::from(
+                    &io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "owned child retirement remains unconfirmed",
+                    ),
+                ))
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+/// A registered child cannot escape through a normal early return. Drop uses
+/// the same bounded reap as explicit finalization; it grants no authority.
+pub(crate) struct OwnedChild(pub(crate) std::process::Child);
+pub(crate) struct OwnedChildReaped {
+    pid: u32,
+    status: std::process::ExitStatus,
+}
+impl OwnedChildReaped {
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+    pub(crate) fn status(&self) -> std::process::ExitStatus {
+        self.status
+    }
+}
+impl OwnedChild {
+    pub(crate) fn observe(&mut self) -> io::Result<Option<OwnedChildReaped>> {
+        self.0.try_wait().map(|status| {
+            status.map(|status| OwnedChildReaped {
+                pid: self.0.id(),
+                status,
+            })
+        })
+    }
+    pub(crate) fn terminate(
+        &mut self,
+        deadline: Instant,
+    ) -> (io::Result<()>, crate::CompilerWorkerRetirement) {
+        let termination = match self.0.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            _ => self.0.kill(),
+        };
+        let reap = observe_child_until(|| self.0.try_wait(), deadline);
+        (termination, reap)
+    }
+}
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let _ = self.terminate(Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT);
+    }
+}
+
 pub(crate) fn kill_process(pid: u32) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -145,45 +337,6 @@ pub(crate) fn kill_process(pid: u32) -> io::Result<()> {
             "worker cancellation requires Linux",
         ))
     }
-}
-
-/// Fence the currently owned descendant tree before an orderly daemon stop.
-/// PID reuse after reap cannot turn an unrelated process into our descendant.
-pub(crate) fn descendant_snapshot(pid: u32) -> io::Result<Vec<(u32, u64)>> {
-    let mut pending = vec![pid];
-    let mut snapshot = Vec::new();
-    while let Some(parent) = pending.pop() {
-        let tasks = match std::fs::read_dir(format!("/proc/{parent}/task")) {
-            Ok(tasks) => tasks,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        let mut children = std::collections::BTreeSet::new();
-        for task in tasks {
-            let path = task?.path().join("children");
-            let contents = match std::fs::read_to_string(path) {
-                Ok(contents) => contents,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            children.extend(contents.split_whitespace().map(str::to_owned));
-        }
-        for child in children {
-            let child = child
-                .parse::<u32>()
-                .map_err(|_| io::Error::other("invalid owned descendant PID"))?;
-            if let Some(start) = process_start_ticks(child)? {
-                snapshot.push((child, start));
-                pending.push(child);
-                if snapshot.len() > 1024 {
-                    return Err(io::Error::other(
-                        "owned compiler descendant snapshot exceeds bound",
-                    ));
-                }
-            }
-        }
-    }
-    Ok(snapshot)
 }
 
 pub(crate) fn process_start_ticks(pid: u32) -> io::Result<Option<u64>> {
@@ -289,7 +442,8 @@ mod tests {
                 &mut [0],
                 started + Duration::from_secs(1),
                 || cancelled.load(std::sync::atomic::Ordering::Acquire),
-            ).unwrap_err();
+            )
+            .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::Interrupted);
             assert!(started.elapsed() < Duration::from_millis(500));
             // EOF cannot explain the interruption: the peer remains owned.
@@ -309,7 +463,8 @@ mod tests {
             &mut bytes,
             Instant::now() + Duration::from_secs(1),
             || false,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
         assert_eq!(&bytes[..2], &[1, 2]);
     }
@@ -341,13 +496,17 @@ mod tests {
         for delay_before_poll in [true, false] {
             let (stream, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
             writer.write_all(&[1]).unwrap();
-            let mut reader = DelayedReadyPipe { stream, delay_before_poll };
+            let mut reader = DelayedReadyPipe {
+                stream,
+                delay_before_poll,
+            };
             let error = read_exact_until(
                 &mut reader,
                 &mut [0],
                 Instant::now() + Duration::from_millis(50),
                 || false,
-            ).unwrap_err();
+            )
+            .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         }
     }
@@ -372,7 +531,8 @@ mod tests {
                 &mut bytes,
                 started + Duration::from_millis(150),
                 || false,
-            ).unwrap_err();
+            )
+            .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::TimedOut);
             assert!(started.elapsed() < Duration::from_millis(500));
             drop(reader);
