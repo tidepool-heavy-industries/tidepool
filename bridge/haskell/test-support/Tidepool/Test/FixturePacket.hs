@@ -91,6 +91,8 @@ runPacketProducer producer packet = do
         AuthoredDeclarationProducer -> do
           runner <- lookupEnv "TIDEPOOL_AUTHORED_FIXTURE_RUNNER" >>= maybe
             (fail "authored fixture requires the declared owned libtest runner") pure
+          python <- lookupEnv "TIDEPOOL_TEST_PYTHON" >>= maybe
+            (fail "authored fixture requires the declared Python interpreter") pure
           inherited <- getEnvironment
           let resources = ["TIDEPOOL_EXTRACT", "TIDEPOOL_EXTRACT_WORKER"
                 , "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT"
@@ -104,7 +106,7 @@ runPacketProducer producer packet = do
               childEnvironment = filter ((`notElem`
                 ["LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES"])
                 . fst) inherited
-          readCreateProcessWithExitCode ((proc runner arguments) {env = Just childEnvironment}) ""
+          readCreateProcessWithExitCode ((proc python (runner : arguments)) {env = Just childEnvironment}) ""
         _ -> readProcessWithExitCode issuer
           ["--exact", packetProducerTest producer, "--ignored", "--nocapture"] ""
       unless (status == ExitSuccess) $

@@ -225,7 +225,7 @@ class ComponentProjectionTests(unittest.TestCase):
                                       version_range="-any")])
         rendered = G.render(self.metadata(production=[child], tests=[suite]))
         for name, expression, role in (
-            ("TIDEPOOL_AUTHORED_FIXTURE_RUNNER", "$(exe //build/rust:isolated_libtest)", "executable"),
+            ("TIDEPOOL_AUTHORED_FIXTURE_RUNNER", "$(location //build/rust:isolated_libtest_source)", "file"),
             ("TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT",
              "$(location //build/package:compiler_service_deployment)/compiler-deployment.json", "file"),
             ("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG",
@@ -234,7 +234,8 @@ class ComponentProjectionTests(unittest.TestCase):
             with self.subTest(resource=name):
                 self.assertIn(f'"{name}": "{expression}"', rendered)
                 self.assertIn(f"{name}:{role}", rendered)
-        self.assertIn('"//build/rust:isolated_libtest"', rendered)
+        self.assertIn('"//build/rust:isolated_libtest_source"', rendered)
+        self.assertNotIn('$(exe //build/rust:isolated_libtest)', rendered)
         self.assertIn('"//build/package:compiler_service_deployment"', rendered)
         # The outer suite still owns direct compiler inputs for its other leaves.
         self.assertIn('"TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)"', rendered)
@@ -445,6 +446,27 @@ PYPROBE
         self.assertNotEqual(record['cwd'], str(self.root))
         self.assertFalse(Path(record['cwd']).exists())
         self.assertEqual((self.fixtures / 'input').read_text(), 'immutable fixture')
+
+    def test_authored_runner_file_keeps_interpreter_and_arguments_separate(self):
+        runner = self.root / "nonexecutable runner.py"
+        runner.write_text("import json, pathlib, sys\n"
+                          "pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))\n")
+        self.binary.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+exec "$TIDEPOOL_TEST_PYTHON" "$TIDEPOOL_AUTHORED_FIXTURE_RUNNER" "$TEST_RECORD" "operand with spaces" "$@"
+''')
+        env = self.env | {
+            "TIDEPOOL_AUTHORED_FIXTURE_RUNNER": runner.name,
+            "TIDEPOOL_TEST_INPUT_PATHS": self.env["TIDEPOOL_TEST_INPUT_PATHS"]
+                + " TIDEPOOL_AUTHORED_FIXTURE_RUNNER:file",
+        }
+        result = self.run_wrapper(env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.record.read_text()),
+                         ["operand with spaces", "--pattern", "/canonical current source/"])
+        env["TIDEPOOL_AUTHORED_FIXTURE_RUNNER"] = sys.executable + " " + str(runner)
+        refused = self.run_wrapper(env)
+        self.assertNotEqual(refused.returncode, 0)
 
     def test_codec_issuer_does_not_require_or_inherit_compiler_authority(self):
         env = self.env | {

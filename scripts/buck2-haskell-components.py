@@ -433,13 +433,13 @@ def render(metadata=None):
             runtime.extend(["//tidepool/toolchain:candidate_fixture_issuer", "//build/package:compiler_deployment", "//build/package:tidepool_extract_runtime_libraries"])
         if name == "source_boot_product_reuse_test":
             env.update({
-                "TIDEPOOL_AUTHORED_FIXTURE_RUNNER": RuntimeInput(literal("$(exe //build/rust:isolated_libtest)"), RuntimeInputRole.EXECUTABLE),
+                "TIDEPOOL_AUTHORED_FIXTURE_RUNNER": RuntimeInput(literal("$(location //build/rust:isolated_libtest_source)"), RuntimeInputRole.FILE),
                 "TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT": RuntimeInput(literal("$(location //build/package:compiler_service_deployment)/compiler-deployment.json"), RuntimeInputRole.FILE),
                 "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": RuntimeInput(literal("$(location //build/package:compiler_service_deployment)/compiler-service-source.bin"), RuntimeInputRole.FILE),
                 "TIDEPOOL_TEST_REUSE_REPORT": RuntimeInput(literal("$(location //scripts:compiler_reuse_report)"), RuntimeInputRole.FILE),
                 "TIDEPOOL_TEST_REUSE_REPORT_TESTS": RuntimeInput(literal("$(location //scripts:compiler_reuse_report_test_source)"), RuntimeInputRole.FILE),
             })
-            runtime.extend(["//build/rust:isolated_libtest", "//build/package:compiler_service_deployment", "//scripts:compiler_reuse_report", "//scripts:compiler_reuse_report_test_source"])
+            runtime.extend(["//build/rust:isolated_libtest_source", "//build/package:compiler_service_deployment", "//scripts:compiler_reuse_report", "//scripts:compiler_reuse_report_test_source"])
         path_roles = " ".join(key + ":" + value.role.value for key, value in env.items())
         env_text = "{\n" + "\n".join("    " + literal(key) + ": " + value.expression + ","
                                     for key, value in env.items())
