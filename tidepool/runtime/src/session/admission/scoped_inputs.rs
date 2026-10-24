@@ -4,7 +4,9 @@ use super::super::prepared::{PreparedRuntimeError, RetainedNativeRequirement};
 use super::*;
 use tidepool_codegen::prepared_program::PreparedHandle;
 use tidepool_repr::SessionVarId;
-use tidepool_toolchain::checked_cell::{CheckedValueArtifact, ExactCheckedItem, ExactCompiledItem};
+use tidepool_toolchain::checked_cell::{
+    CellStageRetainedInput, CheckedValueArtifact, ExactCheckedItem, ExactCompiledItem,
+};
 use tidepool_toolchain::compiler_world::SelectedDependencyTerminal;
 use tidepool_toolchain::compiler_world::{DependencyTerminalOrigin, WorldCellRuntimeInputOrigin};
 use tidepool_toolchain::linked_native::{
@@ -324,24 +326,16 @@ impl ScopedResolvedInputs {
 
     fn authorize_for_cell_stage(
         &self,
-        item: &ExactCheckedItem,
+        execution: &ExactCompiledItem,
         admission_digest: [u8; 32],
         target: &Arc<LinkedNativeTarget>,
         requirement: &Arc<RetainedNativeRequirement>,
         witness: CellStageSlotWitness<'_>,
         value: &Arc<ScopedResolvedValue>,
     ) -> Result<AuthorizedRetainedValue, PreparedRuntimeError> {
+        let item = execution.item();
         let stage = item.world_selected_runtime_inputs().stage_first_ordinal();
-        let selected = item
-            .world_selected_runtime_inputs()
-            .inputs()
-            .iter()
-            .find(|selected| {
-                selected.session_var() == value.id
-                    && selected.defining_scope() == value.defining_scope.0
-                    && selected.generation() == witness.leaf().generation()
-                    && *selected.symbol() == *witness.leaf().identity()
-            })
+        let selected = execution.cell_stage_retained_input(witness.leaf())
             .ok_or_else(|| {
                 tracing::warn!(
                     target: "tidepool::runtime::retained_authorization",
@@ -362,24 +356,49 @@ impl ScopedResolvedInputs {
                 );
                 PreparedRuntimeError::certified_target_owners()
             })?;
-        let row = match (&value.evidence, selected.origin()) {
-            (
-                ScopedValueEvidence::Admitted { row, .. },
-                WorldCellRuntimeInputOrigin::BaseWorld | WorldCellRuntimeInputOrigin::CellOperand,
-            ) => {
-                let expected = selected
-                    .checked_row()
-                    .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
-                if !Arc::ptr_eq(expected, row) {
+        let row = match (selected, &value.evidence) {
+            (CellStageRetainedInput::StageSelected(selected), evidence) => {
+                if selected.session_var() != value.id
+                    || selected.defining_scope() != value.defining_scope.0
+                {
                     return Err(PreparedRuntimeError::certified_target_owners());
                 }
-                row
+                match (evidence, selected.origin()) {
+                    (
+                        ScopedValueEvidence::Admitted { row, .. },
+                        WorldCellRuntimeInputOrigin::BaseWorld
+                        | WorldCellRuntimeInputOrigin::CellOperand,
+                    ) => {
+                        let expected = selected
+                            .checked_row()
+                            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+                        if !Arc::ptr_eq(expected, row) {
+                            return Err(PreparedRuntimeError::certified_target_owners());
+                        }
+                        row
+                    }
+                    (
+                        ScopedValueEvidence::Produced { row, .. },
+                        WorldCellRuntimeInputOrigin::PriorStage { producer, consumer },
+                    ) => {
+                        if producer >= consumer || consumer > stage {
+                            return Err(PreparedRuntimeError::certified_target_owners());
+                        }
+                        row
+                    }
+                    _ => return Err(PreparedRuntimeError::certified_target_owners()),
+                }
             }
             (
+                CellStageRetainedInput::EarlierItem(selected),
                 ScopedValueEvidence::Produced { row, .. },
-                WorldCellRuntimeInputOrigin::PriorStage { producer, consumer },
             ) => {
-                if producer >= consumer || consumer > stage {
+                if selected.session_var() != value.id
+                    || selected.defining_scope() != value.defining_scope.0
+                    || selected.identity() != &value.identity
+                    || selected.generation() != value.generation
+                    || !Arc::ptr_eq(selected.checked_row(), row)
+                {
                     return Err(PreparedRuntimeError::certified_target_owners());
                 }
                 row
@@ -498,7 +517,7 @@ impl ScopedResolvedInputs {
             VerifiedRetainedSlotDemander::CurrentStage(witness)
             | VerifiedRetainedSlotDemander::PriorProgramStage(witness) => self
                 .authorize_for_cell_stage(
-                    item,
+                    execution,
                     admission_digest,
                     target,
                     requirement,
