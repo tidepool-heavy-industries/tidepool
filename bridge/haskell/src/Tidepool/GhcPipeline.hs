@@ -4,7 +4,7 @@
 
 module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..)
-  , PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules, pprCanonicalOriginalInputs, pprAcquiredCanonicalOriginals
+  , PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules, pprCompletedModuleInterface, pprCanonicalOriginalInputs, pprAcquiredCanonicalOriginals
   , CheckedPublicModuleResult, checkedPublicModuleIdentity, checkedPublicModuleEvidence
   , WorldModulePolicyFailure(..), WorldModulePolicy(..)
   , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprOriginalReferences, pprReuseContext
@@ -228,7 +228,7 @@ import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderC
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, nativeParsedModule, nativeImportSyntax, mapNativeModule, typecheckNativeModuleWithDiagnostics
   , resolveNativeAnnotations, annotateNativeModule)
-import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, homeInterfaceUsageOwners)
+import Tidepool.FinalizedModule (FinalizedModule, CompletedModuleInterface, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, homeInterfaceUsageOwners)
 import Tidepool.FinalizedModule.Internal (retainCompletedModuleInterface)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, LocalFinalizedAdmission, finalizedLocalAdmissions, localFinalizedInterface
@@ -503,6 +503,16 @@ pprProductInterfaces = ownedPprProductInterfaces
 
 pprFinalizedModules :: PreparedPipelineResult -> Map.Map ModuleName FinalizedModule
 pprFinalizedModules = ownedPprFinalizedModules
+
+-- Completion borrows only this sealed pipeline's successful phase. A caller
+-- cannot associate another HPT allocation with its finalized interface.
+pprCompletedModuleInterface :: PreparedPipelineResult -> ModuleName -> IO (Maybe CompletedModuleInterface)
+pprCompletedModuleInterface prepared name = forM (Map.lookup name (pprFinalizedModules prepared)) $ \original -> do
+  let environment = prHscEnv (pprPipelineResult prepared)
+      owner = mi_module (hm_iface (finalizedHomeModInfo original))
+      key = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+  home <- maybe (throwIO (InterfaceHydratedHomeMissing key)) pure (lookupHpt (hsc_HPT environment) name)
+  retainCompletedModuleInterface environment original home
 
 pprCanonicalOriginalInputs :: PreparedPipelineResult -> Maybe CanonicalOriginalInputs
 pprCanonicalOriginalInputs = ownedPprCanonicalOriginalInputs
@@ -3497,8 +3507,7 @@ retainWorldCellOriginal prepared completion (PrefixHomeInterfaces homes previous
         , isJust (lookupHpt retained (moduleName owner))]
   completedInterfaces <- forM selectedFinalized $ \product' -> do
     let owner = mi_module (hm_iface (finalizedHomeModInfo product'))
-    home <- maybe (throwIO WorldCellCorrupt) pure (lookupHpt retained (moduleName owner))
-    retainCompletedModuleInterface environment product' home
+    pprCompletedModuleInterface prepared (moduleName owner) >>= maybe (throwIO WorldCellCorrupt) pure
   allInputs <- captureCompletedInterfaceInputs environment importedInputs sessionRows completedInterfaces
   let retainedOwners =
         [(unitString (moduleUnit (mi_module (hm_iface home))),moduleNameString (moduleName (mi_module (hm_iface home))))

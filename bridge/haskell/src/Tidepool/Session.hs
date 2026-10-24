@@ -117,7 +117,6 @@ import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), addHomeModInfoToHpt, emptyHomeModInfoLinkable, lookupHpt )
 import GHC.Unit.Types (mkModule, unitString)
 import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleName, moduleNameString, moduleUnit)
-import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 
 import GHC.Utils.Fingerprint (fingerprint0)
 import GHC.Utils.Outputable (text, showSDocUnsafe)

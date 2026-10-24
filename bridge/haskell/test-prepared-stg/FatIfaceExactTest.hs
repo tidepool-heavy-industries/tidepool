@@ -91,10 +91,9 @@ import Tidepool.PreparedStg
 import Tidepool.ExecutionProjection (topBinders)
 import Tidepool.GhcPipeline
   ( withResidentCompilerScopes, scopedCompile, PipelineSelection(..), CompilePurpose(..)
-  , pprFinalizedModules, pprPipelineResult, prHscEnv )
+  , pprFinalizedModules, pprCompletedModuleInterface, pprPipelineResult, prHscEnv )
 import Tidepool.FinalizedModule
   ( finalizedHomeModInfo, captureFinalizedInterface, homeInterfaceUsageOwners )
-import Tidepool.FinalizedModule.Internal (retainCompletedModuleInterface)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -184,7 +183,7 @@ verifyHydratedOriginalOwners = do
         name = mkModuleName "HydratedOwnerFixture"
     writeSource (41 :: Int)
     withResidentCompilerScopes [work] $ \runScope -> do
-      (previous,firstBody) <- runScope (pure ()) $ \scope -> do
+      (previous,firstBody,firstCompleted) <- runScope (pure ()) $ \scope -> do
         prepared <- scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing path [work] Nothing
         original <- maybe (fail "actual compiler omitted finalization") pure (Map.lookup name (pprFinalizedModules prepared))
         let environment = prHscEnv (pprPipelineResult prepared)
@@ -227,13 +226,7 @@ verifyHydratedOriginalOwners = do
           _ -> fail "alias retention changed its selected owner set"
         installedCaptured <- either throwIO pure (hydratedClosureAsCapturedInputs (hydratedExactInputs installed))
         _ <- either fail pure (selectVerifiedExactInterfaceProducts installedCaptured [alias])
-        finalized <- retainCompletedModuleInterface environment original actualHome
-        otherFinalized <- case hydratedExactInterfaces first of
-          [(_,home)] -> retainCompletedModuleInterface environment original home
-          _ -> fail "finalization conflict premise lost its hydrated allocation"
-        duplicateRefusal <- try (captureCompletedInterfaceInputs environment closure [] [finalized,otherFinalized])
-        assert (case duplicateRefusal of Left InterfaceCompletedOwnerConflict{} -> True; _ -> False)
-          "one completion silently selected between independent finalized allocations"
+        finalized <- pprCompletedModuleInterface prepared name >>= maybe (fail "actual compiler omitted completed interface owner") pure
         completed <- captureCompletedInterfaceInputs environment closure [] [finalized,finalized]
         completionOwner <- retainInstalledInterfaceInputs fresh completed
         expectedIdentity <- evaluate actualHome >>= makeStableName
@@ -244,7 +237,7 @@ verifyHydratedOriginalOwners = do
           _ -> fail "finalization changed its selected owner set"
         completedCaptured <- either throwIO pure (hydratedClosureAsCapturedInputs completed)
         _ <- either fail pure (selectVerifiedExactInterfaceProducts completedCaptured [alias])
-        pure (closure,artifactSha256 body)
+        pure (closure,artifactSha256 body,finalized)
       writeFile path (unlines ["module HydratedOwnerFixture where", "__result :: Bool", "__result = False"])
       runScope (pure ()) $ \scope -> do
         changed <- scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing path [work] Nothing
@@ -252,7 +245,10 @@ verifyHydratedOriginalOwners = do
         let environment = prHscEnv (pprPipelineResult changed)
         body <- captureFinalizedInterface original
         assert (artifactSha256 body /= firstBody) "changed-byte refusal premise did not change the interface"
-        finalized <- retainCompletedModuleInterface environment original (finalizedHomeModInfo original)
+        finalized <- pprCompletedModuleInterface changed name >>= maybe (fail "changed compiler omitted completed interface owner") pure
+        duplicateRefusal <- try (captureCompletedInterfaceInputs environment previous [] [firstCompleted,finalized])
+        assert (case duplicateRefusal of Left InterfaceCompletedOwnerConflict{} -> True; _ -> False)
+          "one completion silently selected between independently finalized module owners"
         refused <- try (captureCompletedInterfaceInputs environment previous [] [finalized])
         assert (case refused of Left (InterfaceInputConflict key) -> key == ("main","HydratedOwnerFixture"); _ -> False)
           "finalization retained an old alias for changed interface bytes"

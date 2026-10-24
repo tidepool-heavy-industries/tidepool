@@ -2548,7 +2548,7 @@ hydrateWorldDeclarationInputs owner prior env facts = case worldLexicalDeclarati
           actual <- interfaceExports hydrated (worldTypeEntryInterface entry)
           let exports = normalizeDeclarationExports actual
           pure $ if exports == normalizeDeclarationExports (worldDeclarationExports offered)
-            then Right (hydrated,closure,Just (VerifiedWorldDeclarationSurface artifact exports (Map.elems entries) closure))
+            then Right (hydrated,closure,Just (VerifiedWorldDeclarationSurface artifact exports (Map.elems entries) (hydratedExactInputs ownerInputs)))
             else Left "world declaration exports differ from its selected exact interface"
 
 -- The Rust-issued primary role and acquired binding selected this row at cold
