@@ -472,6 +472,19 @@ unqualified, retains that original identity even if its old source changes or
 is absent. This demand check runs before frontend compilation; it is not a
 general guarantee about arbitrary Template Haskell or plugin execution.
 
+Native-authored declarations have a separate optimization boundary. The checked
+World stage issues their module policy; `RetainedUnfoldings` and every compiler
+reuse key consume the same `ModuleUnfoldingPolicy`. Adding resolved retained
+inputs must extend that policy, not replace it with a retained-name set.
+Ordinary executable definitions, including default methods, keep named calls
+through GHC's OPAQUE policy. Authored RULES and explicit specializations are
+suppressed inside this native boundary. Imported rules and constructor,
+dictionary and selector representation remain available; classification uses
+GHC Id details rather than generated name spelling. Rebinding must update both
+Core uses and preserved unfolding metadata. Tests must check exact selected
+dependency identity and effects as well as returned values, including defaults,
+newtype dictionaries, user pragmas, shadowing and warm reuse.
+
 ## Matched cell observation migration
 
 Cell observations use `TPCELLOBSERVATIONS` version 3: the five-section payload
