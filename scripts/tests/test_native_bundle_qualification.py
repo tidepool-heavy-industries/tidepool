@@ -3319,6 +3319,25 @@ class CatalogSourceTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 qualification.verify_registered_gc_roots(tools, [second], observation)
 
+    def test_frozen_source_verification_uses_owned_retention_and_loader_children(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        loader = tools / 'bin/fixture-loader'
+        loader.write_text('unexecuted loader fixture')
+        calls = []
+        def execute(command, **options):
+            self.assertTrue(callable(options['preexec_fn']))
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout='')
+        with self.nix_checks(nar, [pin]), \
+             patch.object(qualification.subprocess, 'run', side_effect=execute), \
+             patch.object(qualification, 'elf_interpreter', return_value=str(loader)):
+            self.assertEqual(qualification.verify_retained_catalog_sources(record, original, tools), original)
+            evidence=qualification.loader_evidence(self.root, {})
+        self.assertEqual(calls[0], [str(tools / 'bin/nix-store'), '--verify-path', str(original)])
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(evidence), 5)
+        self.assertTrue(all(command[:2]==[str(loader), '--list'] for command in calls[1:]))
+
     def test_retention_inventories_each_distinct_tree_and_rechecks_on_later_calls(self):
         original, tools, record, pin, nar = self.retained_fixture()
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run'), \

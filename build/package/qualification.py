@@ -1750,7 +1750,7 @@ def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path, *
             or original_inventory != expected):
         raise ValueError("retained catalog sources differ from the declared action snapshot")
     executable = str(tools / "bin/nix-store")
-    subprocess.run([executable, "--verify-path", str(original)], check=True, capture_output=True, timeout=60)
+    _package_subprocess([executable, "--verify-path", str(original)], check=True, capture_output=True, timeout=60)
     if value["nix_closure"] != nix_metadata(tools, [str(original)]):
         raise ValueError("retained catalog NAR registration changed")
     pins = value["gc_roots"]
@@ -2676,8 +2676,8 @@ def loader_evidence(root: Path, environment: dict) -> dict:
             evidence[name] = {"linkage": "static"}
             continue
         loader = nix_path(Path(interpreter))
-        result = subprocess.run([str(loader), "--list", str(path)], env=environment,
-                                text=True, capture_output=True, check=True, timeout=30)
+        result = _package_subprocess([str(loader), "--list", str(path)], env=environment,
+                                     text=True, capture_output=True, check=True, timeout=30)
         libraries = {}
         for match in re.finditer(r"(?:=>\s+)?(/[\S]+)\s+\(0x", result.stdout):
             selected = Path(match[1]).resolve(strict=True)
