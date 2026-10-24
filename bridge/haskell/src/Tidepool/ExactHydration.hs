@@ -492,7 +492,7 @@ admitCheckedValueInterface packages (VerifiedExactInterface artifact product' bo
     (Left "checked value interface lacks its authenticated package evidence")
   case product' of
     CompletedHomeInterface (SessionHomeInterface capture) -> do
-      _ <- checkCapturedSessionInterface artifact body packages capture
+      _ <- either (Left . show) Right (checkCapturedSessionInterface artifact body packages capture)
       pure (VerifiedExactInterface artifact product' body issuer)
     CompletedHomeInterface _ -> Left "checked value interface has another completed owner"
     DecodedTypeInterface iface -> pure (VerifiedExactInterface artifact
