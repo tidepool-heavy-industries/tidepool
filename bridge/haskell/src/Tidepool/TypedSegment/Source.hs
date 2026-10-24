@@ -17,7 +17,7 @@ import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import GHC (ParsedSource, ParsedModule(..), ModSummary(..), ModLocation(..))
+import GHC (ParsedSource, ParsedModule(..), ModSummary(..), ModLocation(..), ms_mod_name)
 import GHC.Parser.Annotation (getLocA)
 import GHC.Data.Strict qualified as Strict
 import GHC.Driver.Session (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset, xopt)
