@@ -3293,6 +3293,24 @@ impl PackageInterfaceCatalog<'_> {
                 .or_else(|| self.interfaces.get(&owner))
                 .filter(|witness| witness.sha256 == digest)
                 .ok_or_else(|| {
+                    tracing::debug!(
+                        target: "tidepool::artifacts::package_selection",
+                        ?owner,
+                        requested_sha256 = ?digest,
+                        current_sha256 = ?self.current.get(&owner).map(|witness| witness.sha256),
+                        inherited_sha256 = ?self.interfaces.get(&owner).map(|witness| witness.sha256),
+                        current_path = ?self.current.get(&owner).map(|witness| &witness.selected_path),
+                        inherited_path = ?self.interfaces.get(&owner).map(|witness| &witness.selected_path),
+                        demanding_groups = ?groups.iter().filter(|group| group.imports().iter().any(|import|
+                            matches!(import, certified_products::PendingImportOwner::Package { unit, module, interface_digest, .. }
+                                if (&owner.0, &owner.1, &digest) == (unit, module, interface_digest))))
+                            .map(|group| (group.owner(), group.group().original_ordinal(), group.origin()))
+                            .collect::<Vec<_>>(),
+                        target_demand = target_imports.iter().any(|import|
+                            matches!(import, certified_products::PendingImportOwner::Package { unit, module, interface_digest, .. }
+                                if (&owner.0, &owner.1, &digest) == (unit, module, interface_digest))),
+                        "selected target package interface unavailable",
+                    );
                     CompileError::ExtractFailed(
                         "target package demand lacks matching available interface".into(),
                     )
