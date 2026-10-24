@@ -482,7 +482,11 @@ fn native_demand_real_reentry_completion_keeps_scope_custody_rejection_and_unwin
 
 #[test]
 fn native_demand_prebound_plain_and_explicit_routes_refuse_reentry_without_poisoning() {
-    use tidepool_extract_cmd::{CompilerEndpoint, CompilerTransaction, ExtractRun, SpawnError};
+    use tidepool_extract_cmd::{
+        CompilerEndpoint, CompilerTransaction, CompilerTransactionClose,
+        CompilerTransactionClosePhase, CompilerTransactionCloseReason,
+        CompilerTransactionRetirement, ExtractRun, SpawnError,
+    };
     struct PreboundSession<'a> {
         plain: Option<CompilerEndpoint>,
         begin: Vec<CompilerEndpoint>,
@@ -544,64 +548,128 @@ fn native_demand_prebound_plain_and_explicit_routes_refuse_reentry_without_poiso
     let _environment = Environment::set();
     let scratch = tempfile::tempdir().unwrap();
     let fixture = fixture(scratch.path());
-    let plain_root = scratch.path().join("plain");
-    let plain_command = setup(&plain_root, &fixture, 20);
-    let plain = plain_command.bind_direct().unwrap();
-    let transaction_root = scratch.path().join("explicit");
-    let transaction_command = setup(&transaction_root, &fixture, 20);
-    let mut transaction = transaction_command
-        .bind_direct()
-        .unwrap()
-        .transaction()
-        .unwrap();
-    let begin_roots = [
-        scratch.path().join("begin-default"),
-        scratch.path().join("begin-workload"),
-    ];
-    let mut begin = begin_roots
-        .iter()
-        .map(|root| setup(root, &fixture, 20).bind_direct().unwrap())
-        .collect::<Vec<_>>();
-    let outer_root = scratch.path().join("outer");
-    let outer_command = setup(&outer_root, &fixture, 20);
-    let mut daemon = daemon(&outer_root, 5);
-    begin.push(outer_command.bind().unwrap());
-    let outcome = with_compiler_transaction(
-        |_| {},
-        || {
-            outer_command.bind().unwrap().execute_with_native_demand(
-                &outer_command,
-                PreboundSession {
-                    plain: Some(plain),
-                    begin,
-                    plain_command: &plain_command,
-                    transaction: &mut transaction,
-                    transaction_command: &transaction_command,
-                    calls: 0,
-                },
+    fn aborted_prebound_admissions(close: &CompilerTransactionClose) -> usize {
+        let CompilerTransactionClose::Unconfirmed(evidence) = close else {
+            panic!("only the prebound endpoint aborts may make close abnormal: {close:?}");
+        };
+        assert_eq!(
+            evidence.reason,
+            CompilerTransactionCloseReason::AdmissionAborted(
+                CompilerTransactionClosePhase::IdentityHandshake,
             )
-        },
-    );
-    assert!(!outcome.action.unwrap().success());
-    assert!(outcome.close.is_clean());
-    assert!(
-        !plain_root.join("worker-pids").exists(),
-        "prebound endpoint emitted no compile request"
-    );
-    assert!(
-        transaction.execute(&transaction_command).unwrap().success(),
-        "known-unsubmitted reentry must not poison the explicit transaction"
-    );
-    assert!(transaction.finish().is_clean());
-    for root in begin_roots {
-        assert!(
-            !root.join("worker-pids").exists(),
-            "refused BEGIN admitted a compiler worker"
         );
+        assert!(matches!(
+            &evidence.retirement,
+            CompilerTransactionRetirement::Direct(_)
+        ));
+        1 + evidence
+            .earlier
+            .iter()
+            .map(aborted_prebound_admissions)
+            .sum::<usize>()
     }
-    stop(&outer_root, &mut daemon);
-    assert_reaped(&transaction_root);
-    assert_reaped(&outer_root);
+    for abandoned_direct in [false, true] {
+        let case = scratch
+            .path()
+            .join(format!("abandoned-direct-{abandoned_direct}"));
+        let outer_root = case.join("outer");
+        let outer_command = setup(&outer_root, &fixture, 20);
+        let mut daemon = daemon(&outer_root, 5);
+        let plain_root = case.join("plain");
+        let plain_command = setup(&plain_root, &fixture, 20);
+        let plain = if abandoned_direct {
+            plain_command.bind_direct().unwrap()
+        } else {
+            outer_command.bind().unwrap()
+        };
+        let transaction_root = case.join("explicit");
+        let transaction_command = setup(&transaction_root, &fixture, 20);
+        let mut transaction = transaction_command
+            .bind_direct()
+            .unwrap()
+            .transaction()
+            .unwrap();
+        let begin_roots = [case.join("begin-default"), case.join("begin-workload")];
+        let mut begin = begin_roots
+            .iter()
+            .map(|root| {
+                let command = setup(root, &fixture, 20);
+                if abandoned_direct {
+                    command.bind_direct().unwrap()
+                } else {
+                    outer_command.bind().unwrap()
+                }
+            })
+            .collect::<Vec<_>>();
+        begin.push(outer_command.bind().unwrap());
+        let input = std::sync::Arc::new(tempfile::tempdir().unwrap());
+        let input_path = input.path().join("scope-input");
+        fs::write(&input_path, b"prebound scope custody").unwrap();
+        fs::write(
+            outer_root.join("input-at-end"),
+            input_path.as_os_str().as_bytes(),
+        )
+        .unwrap();
+        let weak = std::sync::Arc::downgrade(&input);
+        let outcome = with_compiler_transaction(
+            |_| {},
+            || {
+                assert!(tidepool_extract_cmd::retain_compiler_input_directory(input));
+                outer_command.bind().unwrap().execute_with_native_demand(
+                    &outer_command,
+                    PreboundSession {
+                        plain: Some(plain),
+                        begin,
+                        plain_command: &plain_command,
+                        transaction: &mut transaction,
+                        transaction_command: &transaction_command,
+                        calls: 0,
+                    },
+                )
+            },
+        );
+        assert!(!outcome.action.unwrap().success());
+        if abandoned_direct {
+            // Consuming these three Direct endpoints drops their prebound
+            // frontends. Request refusal does not prove those independent
+            // admissions retired. Any failed outer request adds another cause.
+            assert_eq!(aborted_prebound_admissions(&outcome.close), 3);
+        } else {
+            assert!(
+                outcome.close.is_clean(),
+                "reentry must not poison the outer request: {:?}",
+                outcome.close
+            );
+        }
+        assert_eq!(weak.upgrade().is_some(), abandoned_direct);
+        assert_eq!(
+            fs::read(outer_root.join("observed-input")).unwrap(),
+            b"prebound scope custody"
+        );
+        drop(outcome.close);
+        assert!(
+            weak.upgrade().is_none(),
+            "uncertain admissions retain exact scope inputs until close evidence drops"
+        );
+        assert!(
+            !plain_root.join("worker-pids").exists(),
+            "prebound endpoint emitted no compile request"
+        );
+        assert!(
+            transaction.execute(&transaction_command).unwrap().success(),
+            "known-unsubmitted reentry must not poison the explicit transaction"
+        );
+        assert!(transaction.finish().is_clean());
+        for root in begin_roots {
+            assert!(
+                !root.join("worker-pids").exists(),
+                "refused BEGIN admitted a compiler worker"
+            );
+        }
+        stop(&outer_root, &mut daemon);
+        assert_reaped(&transaction_root);
+        assert_reaped(&outer_root);
+    }
 }
 
 #[test]

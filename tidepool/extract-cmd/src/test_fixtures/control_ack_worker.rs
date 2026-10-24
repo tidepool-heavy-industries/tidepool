@@ -8,6 +8,14 @@ fn frame(input: &mut impl Read) -> Vec<u8> {
     bytes
 }
 
+fn observe_input_at_end(directory: &std::path::Path) {
+    if directory.join("input-at-end").exists() {
+        let path = std::fs::read_to_string(directory.join("input-at-end")).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        std::fs::write(directory.join("observed-input"), bytes).unwrap();
+    }
+}
+
 fn main() {
     let executable = std::env::current_exe().unwrap();
     let directory = executable.parent().unwrap();
@@ -141,6 +149,7 @@ fn main() {
         if first_worker && phase == 17 {
             std::process::exit(17);
         }
+        observe_input_at_end(directory);
         output.write_all(&[1]).unwrap();
         output.flush().unwrap();
     }
@@ -192,11 +201,7 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
         let mut command = [0];
         input.read_exact(&mut command).unwrap();
         if command == [0] {
-            if directory.join("input-at-end").exists() {
-                let path = std::fs::read_to_string(directory.join("input-at-end")).unwrap();
-                let bytes = std::fs::read(path).unwrap();
-                std::fs::write(directory.join("observed-input"), bytes).unwrap();
-            }
+            observe_input_at_end(directory);
             if phase == 16 {
                 stall(b"end");
             }
