@@ -269,26 +269,21 @@ fn assert_current_handles_are_target_bound(
     );
     let mut checked = 0;
     for acquired in linked.acquired() {
-        let NativeCodeGrant::Home {
-            binding,
-            current: Some(_),
-            ..
-        } = acquired.grant()
-        else {
+        let NativeCodeGrant::Home { binding, .. } = acquired.grant() else {
             continue;
         };
-        assert!(sources
+        if sources
             .physical_current_for(linked, &acquired)
-            .expect("receiving target handle retains Current")
-            .is_some());
+            .expect("receiving target retains its source receipt")
+            .is_none()
+        {
+            continue;
+        }
         let historical = linked
             .closure()
             .home(binding)
             .expect("same exact closure lends a historical handle");
-        assert!(matches!(
-            historical.grant(),
-            NativeCodeGrant::Home { current: None, .. }
-        ));
+        assert!(!linked.owns_acquired(&historical));
         assert!(
             sources.physical_current_for(linked, &historical).is_err(),
             "a historical handle cannot borrow receiving Current authority"

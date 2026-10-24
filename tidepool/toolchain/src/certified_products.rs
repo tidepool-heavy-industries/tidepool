@@ -4964,7 +4964,10 @@ impl<'a> CurrentProductRef<'a> {
                     },
                     operation,
                 )? {
-                    Some(support) => CurrentSourceDependency::External { origin: ExternalSourceDependencyOrigin::PriorProgramStage, support },
+                    Some(support) => CurrentSourceDependency::External {
+                        origin: ExternalSourceDependencyOrigin::PriorProgramStage,
+                        support,
+                    },
                     None => CurrentSourceDependency::Unavailable,
                 },
             );
@@ -5041,7 +5044,10 @@ impl<'a> CurrentProductRef<'a> {
                     },
                     operation,
                 )? {
-                    Some(support) => CurrentSourceDependency::External { origin: ExternalSourceDependencyOrigin::PriorProgramStage, support },
+                    Some(support) => CurrentSourceDependency::External {
+                        origin: ExternalSourceDependencyOrigin::PriorProgramStage,
+                        support,
+                    },
                     None => CurrentSourceDependency::Unavailable,
                 },
             );
@@ -5065,7 +5071,10 @@ impl<'a> CurrentProductRef<'a> {
                 owner,
                 operation,
             )? {
-                Some(support) => CurrentSourceDependency::External { origin: ExternalSourceDependencyOrigin::HistoricalInput, support },
+                Some(support) => CurrentSourceDependency::External {
+                    origin: ExternalSourceDependencyOrigin::HistoricalInput,
+                    support,
+                },
                 None => CurrentSourceDependency::Unavailable,
             },
         )

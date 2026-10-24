@@ -358,18 +358,37 @@ enum IssuedNativeSourceReceipt {
 }
 
 impl NativeSourceReceipts {
+    /// Merge immutable offer evidence without allowing one edge to change its
+    /// source class. Repeated historical anchors retain their exact supports.
     fn merge(&mut self, incoming: &Self) -> Result<(), CompileError> {
+        let same_class = |left: &NativeSourceCause, right: &NativeSourceCause| {
+            matches!(
+                (left, right),
+                (NativeSourceCause::Current, NativeSourceCause::Current)
+                    | (
+                        NativeSourceCause::PriorProgram,
+                        NativeSourceCause::PriorProgram
+                    )
+                    | (
+                        NativeSourceCause::Historical { .. },
+                        NativeSourceCause::Historical { .. }
+                    )
+                    | (
+                        NativeSourceCause::Unwitnessed,
+                        NativeSourceCause::Unwitnessed
+                    )
+            )
+        };
+        for (usage, causes) in &incoming.0 {
+            if self.0.get(usage).is_some_and(|held| {
+                held.iter()
+                    .any(|prior| causes.iter().any(|cause| !same_class(prior, cause)))
+            }) {
+                return Err(failure("conflicting native source receipt provenance"));
+            }
+        }
         for (usage, causes) in &incoming.0 {
             for cause in causes.iter() {
-                let class = |cause: &NativeSourceCause| match cause {
-                    NativeSourceCause::Current => 0,
-                    NativeSourceCause::PriorProgram => 1,
-                    NativeSourceCause::Historical { .. } => 2,
-                    NativeSourceCause::Unwitnessed => 3,
-                };
-                if self.0.get(usage).is_some_and(|held| held.iter().any(|prior| class(prior) != class(cause))) {
-                    return Err(failure("conflicting native source receipt provenance"));
-                }
                 self.insert(*usage, cause.clone());
             }
         }
@@ -826,7 +845,9 @@ impl<'a> ResolvedNativeTarget<'a> {
 }
 
 impl ResolvedNativeTarget<'_> {
-    pub(crate) fn entry_binding(&self) -> Option<NativeGroupBinding> { self.entry_binding }
+    pub(crate) fn entry_binding(&self) -> Option<NativeGroupBinding> {
+        self.entry_binding
+    }
     pub(crate) fn source_association(
         &self,
         group: NativeGroupBinding,
@@ -842,7 +863,10 @@ impl ResolvedNativeTarget<'_> {
             .any(|cause| matches!(cause, NativeSourceCause::Current))
         {
             Ok(ResolvedSourceAssociation::Current)
-        } else if causes.iter().all(|cause| matches!(cause, NativeSourceCause::PriorProgram)) {
+        } else if causes
+            .iter()
+            .all(|cause| matches!(cause, NativeSourceCause::PriorProgram))
+        {
             Ok(ResolvedSourceAssociation::PriorProgram)
         } else if causes
             .iter()

@@ -2381,8 +2381,10 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
             ));
         };
         match selection.sources.get(&binding) {
-            Some(crate::linked_native::TargetHomeSource::CurrentStage(group)
-                | crate::linked_native::TargetHomeSource::PriorProgramStage(group)) => {
+            Some(
+                crate::linked_native::TargetHomeSource::CurrentStage(group)
+                | crate::linked_native::TargetHomeSource::PriorProgramStage(group),
+            ) => {
                 if !group.same_issuance(product) {
                     return Err(CompileError::ExtractFailed(
                         "native source receipt names another physical row".into(),
@@ -4981,7 +4983,9 @@ fn compile_invocation_inner(
                     .artifact_view
                     .retain_custody(native_inputs.artifacts())?;
                 let completed = native_inputs.linked_native_target().ok_or_else(|| {
-                    CompileError::ExtractFailed("ordinary target lacks its issued completion".into())
+                    CompileError::ExtractFailed(
+                        "ordinary target lacks its issued completion".into(),
+                    )
                 })?;
                 inherited_completion_support =
                     inherited_completion_support.with_linked_native_target(completed)?;

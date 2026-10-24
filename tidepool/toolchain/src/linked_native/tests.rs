@@ -52,6 +52,98 @@ pub(crate) fn assert_actual_target_authentication(
     )
     .expect("actual acquired rows pass the same live/restore gate");
     assert_eq!(reissued.identity(), actual.identity());
+    for selected in target.acquired() {
+        for (index, import) in selected.imports().enumerate() {
+            let AcquiredNativeImport::Retained {
+                requirement,
+                binding,
+            } = import
+            else {
+                continue;
+            };
+            let index = u32::try_from(index).unwrap();
+            let NativeOccurrenceId::Home(demander) = selected.occurrence() else {
+                panic!("only HOME owns retained leaves")
+            };
+            let verified = target
+                .verify_retained_slot(&selected, index, binding, &requirement)
+                .expect("the actual target issues its selected retained slot witness");
+            let (owner, slot, selected_binding, leaf) = match verified {
+                VerifiedRetainedSlotDemander::CurrentStage(witness) => {
+                    assert!(matches!(
+                        target.sources[&demander],
+                        TargetHomeSource::CurrentStage(_)
+                    ));
+                    assert_eq!(witness.demander(), demander);
+                    (
+                        witness.owner(),
+                        witness.global_index(),
+                        witness.binding(),
+                        witness.leaf(),
+                    )
+                }
+                VerifiedRetainedSlotDemander::PriorProgramStage(witness) => {
+                    assert!(matches!(
+                        target.sources[&demander],
+                        TargetHomeSource::PriorProgramStage(_)
+                    ));
+                    assert_eq!(witness.demander(), demander);
+                    (
+                        witness.owner(),
+                        witness.global_index(),
+                        witness.binding(),
+                        witness.leaf(),
+                    )
+                }
+                VerifiedRetainedSlotDemander::HistoricalInput(witness) => {
+                    assert!(matches!(
+                        target.sources[&demander],
+                        TargetHomeSource::HistoricalInput
+                    ));
+                    assert_eq!(witness.demander(), demander);
+                    (
+                        witness.owner(),
+                        witness.global_index(),
+                        witness.binding(),
+                        witness.leaf(),
+                    )
+                }
+            };
+            assert!(std::ptr::eq(owner, &selected));
+            assert_eq!(
+                (slot, selected_binding, leaf),
+                (index, binding, &requirement)
+            );
+            let foreign = reissued
+                .get(selected.occurrence())
+                .unwrap()
+                .reborrow(&target.sources);
+            assert_eq!(foreign.code(), selected.code());
+            assert!(target.verify_retained_slot(&foreign, index, binding, &requirement).is_err(),
+                "equal-looking code and source map cannot replace the actual acquired closure issuance");
+            assert!(target
+                .verify_retained_slot(
+                    &selected,
+                    selected.imports().len().try_into().unwrap(),
+                    binding,
+                    &requirement
+                )
+                .is_err());
+            let mut crossed = binding;
+            crossed.selection.0[0] ^= 1;
+            assert!(target
+                .verify_retained_slot(&selected, index, crossed, &requirement)
+                .is_err());
+            let crossed = NativeRetainedRequirement::new(
+                requirement.identity().clone(),
+                requirement.generation() ^ 1,
+                requirement.type_artifact().copied(),
+            );
+            assert!(target
+                .verify_retained_slot(&selected, index, binding, &crossed)
+                .is_err());
+        }
+    }
 
     if let Some(package) = nodes
         .iter()
@@ -107,11 +199,25 @@ pub(crate) fn assert_actual_target_authentication(
             Arc::ptr_eq(selected.code().component(), repeated.code().component()),
             "distinct restoration roots share canonical immutable component owners"
         );
-        if let NativeCodeGrant::Home { current, .. } = selected.grant() {
-            assert!(
-                current.is_none(),
-                "restore cannot manufacture receiving-target Current correlation"
-            );
+        assert!(
+            !target.owns_acquired(&selected),
+            "restore cannot manufacture receiving-target source authority"
+        );
+        for (index, import) in selected.imports().enumerate() {
+            if let AcquiredNativeImport::Retained {
+                requirement,
+                binding,
+            } = import
+            {
+                assert!(target
+                    .verify_retained_slot(
+                        &selected,
+                        index.try_into().unwrap(),
+                        binding,
+                        &requirement
+                    )
+                    .is_err());
+            }
         }
     }
 

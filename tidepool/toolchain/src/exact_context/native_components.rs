@@ -182,7 +182,7 @@ pub(super) mod tests {
     ) {
         use crate::artifact_inventory::{ArtifactPayload, CompilerSourceSupport};
         use crate::declaration_context::{ExactDeclarationContext, RecoveredArtifactAcquisition};
-        use crate::linked_native::{NativeCodeGrant, NativeGrantSelector, NativeOccurrenceId};
+        use crate::linked_native::{AcquiredNativeImport, NativeGrantSelector, NativeOccurrenceId};
         assert_eq!(targets.len(), 2);
         let first_support = CompilerSourceSupport::empty()
             .with_linked_native_target(&targets[0])
@@ -304,11 +304,27 @@ pub(super) mod tests {
                 .ptr_eq(&receipt.snapshot().native_closures));
             for closure in held.acquired_native_closures().iter() {
                 for acquired in closure.acquired() {
-                    if let NativeCodeGrant::Home { current, .. } = acquired.grant() {
+                    for target in targets {
                         assert!(
-                            current.is_none(),
-                            "durable code cannot restore a fresh Current capture"
+                            !target.owns_acquired(&acquired),
+                            "durable code cannot restore receiving-target source authority"
                         );
+                        for (index, import) in acquired.imports().enumerate() {
+                            if let AcquiredNativeImport::Retained {
+                                requirement,
+                                binding,
+                            } = import
+                            {
+                                assert!(target
+                                    .verify_retained_slot(
+                                        &acquired,
+                                        index.try_into().unwrap(),
+                                        binding,
+                                        &requirement
+                                    )
+                                    .is_err());
+                            }
+                        }
                     }
                 }
             }

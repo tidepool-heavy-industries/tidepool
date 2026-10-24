@@ -109,7 +109,11 @@ pub(super) struct TargetGroupSelection {
 }
 
 #[derive(Clone, Copy)]
-enum RetainedTargetOrigin { CurrentStage, PriorProgramStage, HistoricalInput }
+enum RetainedTargetOrigin {
+    CurrentStage,
+    PriorProgramStage,
+    HistoricalInput,
+}
 enum IssuedBindingOrigin {
     CurrentStage,
     PriorProgramStage,
@@ -182,7 +186,11 @@ pub(super) fn select_target_group(
                     let CertifiedNativeGroupSupport::Issued(offer) = support else {
                         return Err(failure("target input group lacks issued availability"));
                     };
-                    (binding, offer.clone(), RetainedTargetOrigin::HistoricalInput)
+                    (
+                        binding,
+                        offer.clone(),
+                        RetainedTargetOrigin::HistoricalInput,
+                    )
                 }
             }
         }
@@ -225,7 +233,14 @@ pub(super) fn select_target_entry(
         .ok_or_else(|| failure("typed target entry is outside its physical output cohort"))?;
     let completed = current.completed_for_target(physical)?;
     let (binding, offer) = completed_target_group(&completed)?;
-    retain_target_group(state, physical, binding, offer, RetainedTargetOrigin::CurrentStage, incoming)
+    retain_target_group(
+        state,
+        physical,
+        binding,
+        offer,
+        RetainedTargetOrigin::CurrentStage,
+        incoming,
+    )
 }
 
 fn retain_target_group(
@@ -242,11 +257,14 @@ fn retain_target_group(
         binding,
         crate::certified_products::CertifiedNativeGroupSupport::Issued(&offer),
     )?;
-    let issued = support.describe(binding, match origin {
-        RetainedTargetOrigin::CurrentStage => IssuedBindingOrigin::CurrentStage,
-        RetainedTargetOrigin::PriorProgramStage => IssuedBindingOrigin::PriorProgramStage,
-        RetainedTargetOrigin::HistoricalInput => IssuedBindingOrigin::HistoricalOffer,
-    })?;
+    let issued = support.describe(
+        binding,
+        match origin {
+            RetainedTargetOrigin::CurrentStage => IssuedBindingOrigin::CurrentStage,
+            RetainedTargetOrigin::PriorProgramStage => IssuedBindingOrigin::PriorProgramStage,
+            RetainedTargetOrigin::HistoricalInput => IssuedBindingOrigin::HistoricalOffer,
+        },
+    )?;
     support.acquire(state, physical, incoming, &issued)?;
     let entry = Arc::clone(
         support
@@ -256,8 +274,12 @@ fn retain_target_group(
     );
     let mut sources = NativeSourceReceipts::default();
     match origin {
-        RetainedTargetOrigin::CurrentStage => copy_solved_offer_sources(&offer, &issued.closure, false, &mut sources)?,
-        RetainedTargetOrigin::PriorProgramStage => copy_solved_offer_sources(&offer, &issued.closure, true, &mut sources)?,
+        RetainedTargetOrigin::CurrentStage => {
+            copy_solved_offer_sources(&offer, &issued.closure, false, &mut sources)?
+        }
+        RetainedTargetOrigin::PriorProgramStage => {
+            copy_solved_offer_sources(&offer, &issued.closure, true, &mut sources)?
+        }
         RetainedTargetOrigin::HistoricalInput => {}
     }
     sources.insert(NativeSourceUse::Root(binding), issued.source.clone());
@@ -284,13 +306,19 @@ fn copy_solved_offer_sources(
     for (usage, causes) in frozen.entries.iter() {
         let reached = match usage {
             NativeSourceUse::Root(group) => closure.contains(&InventoryNodeKey::Group(*group)),
-            NativeSourceUse::Edge { parent, child } => closure.contains(&InventoryNodeKey::Group(*parent))
-                && closure.contains(&InventoryNodeKey::Group(*child)),
+            NativeSourceUse::Edge { parent, child } => {
+                closure.contains(&InventoryNodeKey::Group(*parent))
+                    && closure.contains(&InventoryNodeKey::Group(*child))
+            }
         };
         if reached {
             for cause in causes.iter() {
                 let cause = match cause {
-                    NativeSourceCause::Current | NativeSourceCause::PriorProgram if as_prior_program => NativeSourceCause::PriorProgram,
+                    NativeSourceCause::Current | NativeSourceCause::PriorProgram
+                        if as_prior_program =>
+                    {
+                        NativeSourceCause::PriorProgram
+                    }
                     other => other.clone(),
                 };
                 copied.insert(*usage, cause);
@@ -1172,7 +1200,11 @@ impl<'a> NativeSupportRef<'a> {
         Ok((carrier, canonical))
     }
 
-    fn describe(&self, group: NativeGroupBinding, origin: IssuedBindingOrigin) -> Result<IssuedNativeBinding, CompileError> {
+    fn describe(
+        &self,
+        group: NativeGroupBinding,
+        origin: IssuedBindingOrigin,
+    ) -> Result<IssuedNativeBinding, CompileError> {
         let entry = self
             .payloads
             .get(&group.binding.artifact())
@@ -1190,11 +1222,18 @@ impl<'a> NativeSupportRef<'a> {
             source: match origin {
                 IssuedBindingOrigin::CurrentStage => NativeSourceCause::Current,
                 IssuedBindingOrigin::PriorProgramStage => NativeSourceCause::PriorProgram,
-                IssuedBindingOrigin::HistoricalSelected(support) => NativeSourceCause::Historical { selected_at: group, support },
+                IssuedBindingOrigin::HistoricalSelected(support) => NativeSourceCause::Historical {
+                    selected_at: group,
+                    support,
+                },
                 IssuedBindingOrigin::HistoricalOffer => NativeSourceCause::Historical {
                     selected_at: group,
                     support: compiler_projection::SelectedNativeSupport::Acquired(Arc::from([
-                        self.offer.ok_or_else(|| failure("historical native binding lacks its issuing offer"))?.clone(),
+                        self.offer
+                            .ok_or_else(|| {
+                                failure("historical native binding lacks its issuing offer")
+                            })?
+                            .clone(),
                     ])),
                 },
             },
@@ -1429,10 +1468,15 @@ pub(super) fn bind_certified_input_demand(
         };
         let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let support = NativeSupportRef::checked(state, parent, chosen, support)?;
-        let issued = support.describe(chosen, match &issuer {
-            RootIssuer::Historical(selected) => IssuedBindingOrigin::HistoricalSelected(selected.clone()),
-            RootIssuer::Current => IssuedBindingOrigin::CurrentStage,
-        })?;
+        let issued = support.describe(
+            chosen,
+            match &issuer {
+                RootIssuer::Historical(selected) => {
+                    IssuedBindingOrigin::HistoricalSelected(selected.clone())
+                }
+                RootIssuer::Current => IssuedBindingOrigin::CurrentStage,
+            },
+        )?;
         let carrier = issued.carrier;
         let canonical_binding = issued.canonical;
         // An interface-only receiving role may retain the issued body's
@@ -3750,6 +3794,91 @@ mod normalized_dependency_tests {
             ),
             "authenticated historical graph cannot acquire the live producer's source cause"
         );
+
+        // Enter through the actual retained-target issuer. Earlier program
+        // reuse must shift all reached producer causes, including transitive
+        // edges, without keeping an unrelated sibling root.
+        let mut state = inventory.0.lock().expect("inventory lock");
+        let prior = retain_target_group(
+            &mut state,
+            &physical,
+            left,
+            offer.clone(),
+            RetainedTargetOrigin::PriorProgramStage,
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            prior.issued.source,
+            NativeSourceCause::PriorProgram
+        ));
+        assert_eq!(prior.sources.0.len(), 2);
+        assert!(prior
+            .sources
+            .0
+            .values()
+            .all(|causes| matches!(causes.as_ref(), [NativeSourceCause::PriorProgram])));
+        assert!(prior.sources.0.contains_key(&NativeSourceUse::Edge {
+            parent: left,
+            child
+        }));
+        assert!(!prior.sources.0.contains_key(&NativeSourceUse::Root(right)));
+        let current = retain_target_group(
+            &mut state,
+            &physical,
+            left,
+            offer.clone(),
+            RetainedTargetOrigin::CurrentStage,
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(current
+            .sources
+            .0
+            .values()
+            .all(|causes| matches!(causes.as_ref(), [NativeSourceCause::Current])));
+        let historical = retain_target_group(
+            &mut state,
+            &physical,
+            left,
+            offer.clone(),
+            RetainedTargetOrigin::HistoricalInput,
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(historical.sources.0.len(), 1);
+        assert!(matches!(
+            historical.issued.source,
+            NativeSourceCause::Historical { .. }
+        ));
+        let mut merged = prior.sources.clone();
+        merged.merge(&prior.sources).unwrap();
+        assert_eq!(
+            merged.0.len(),
+            prior.sources.0.len(),
+            "repeated exact offer receipt remains shared evidence"
+        );
+        assert!(
+            merged.merge(&current.sources).is_err(),
+            "the same exact use cannot change source provenance"
+        );
+        assert!(merged
+            .0
+            .values()
+            .all(|causes| matches!(causes.as_ref(), [NativeSourceCause::PriorProgram])));
+        assert!(
+            retain_target_group(
+                &mut state,
+                &physical,
+                left,
+                graph_only,
+                RetainedTargetOrigin::PriorProgramStage,
+                &mut BTreeMap::new(),
+            )
+            .is_err(),
+            "graph-only custody cannot issue a prior-program source receipt"
+        );
+        drop(state);
 
         // This representation control observes causes; it does not construct an offer.
         let acquired =

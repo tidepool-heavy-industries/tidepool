@@ -89,15 +89,11 @@ impl NativeAcquiredOccurrence {
             Self::Home(_) => None,
         }
     }
-    pub(super) fn grant<'a>(
-        &'a self,
-        current: Option<&'a Arc<PendingCertifiedGroup>>,
-    ) -> NativeCodeGrant<'a> {
+    pub(super) fn grant(&self) -> NativeCodeGrant<'_> {
         match self {
             Self::Home(node) => NativeCodeGrant::Home {
                 binding: node.grant.binding(),
                 product: node.grant.product(),
-                current,
             },
             Self::Package(node) => NativeCodeGrant::Package {
                 product: node.grant.product(),

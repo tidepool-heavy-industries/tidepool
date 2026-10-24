@@ -1013,8 +1013,12 @@ pub(crate) fn link_native_target(
         }
         use crate::linked_native::TargetHomeSource;
         let source = match row.source_association() {
-            super::ResolvedSourceAssociation::Current => TargetHomeSource::CurrentStage(Arc::clone(row.shared_group())),
-            super::ResolvedSourceAssociation::PriorProgram => TargetHomeSource::PriorProgramStage(Arc::clone(row.shared_group())),
+            super::ResolvedSourceAssociation::Current => {
+                TargetHomeSource::CurrentStage(Arc::clone(row.shared_group()))
+            }
+            super::ResolvedSourceAssociation::PriorProgram => {
+                TargetHomeSource::PriorProgramStage(Arc::clone(row.shared_group()))
+            }
             super::ResolvedSourceAssociation::Historical => TargetHomeSource::HistoricalInput,
         };
         current.insert(row.binding(), source);
@@ -1324,10 +1328,14 @@ pub(crate) fn link_native_target(
     )?;
     let current = Arc::new(current);
     let entry_occurrence = sources.entry_binding().map(NativeOccurrenceId::Home);
-    let entry_owner = entry_occurrence.map(|occurrence| {
-        closure.get(occurrence).map(|owner| owner.reborrow(&current))
-            .ok_or_else(|| failure("issued target lost its typed entry owner"))
-    }).transpose()?;
+    let entry_owner = entry_occurrence
+        .map(|occurrence| {
+            closure
+                .get(occurrence)
+                .map(|owner| owner.reborrow(&current))
+                .ok_or_else(|| failure("issued target lost its typed entry owner"))
+        })
+        .transpose()?;
     let target_imports = target_drafts
         .into_iter()
         .map(|draft| match draft {
@@ -1349,22 +1357,41 @@ pub(crate) fn link_native_target(
                 })
                 .ok_or_else(|| failure("issued target lost its package root")),
             DraftTarget::Retained(requirement) => {
-                let association = entry_owner.as_ref().map(|owner| {
-                    let mut matches = owner.imports().enumerate().filter_map(|(index, import)| match import {
-                        crate::linked_native::AcquiredNativeImport::Retained { requirement: expected, binding }
-                            if expected == requirement => Some((index, binding)),
-                        _ => None,
-                    });
-                    let (index, binding) = matches.next().ok_or_else(|| failure("typed entry does not own target retained capture"))?;
-                    if matches.next().is_some() {
-                        return Err(failure("typed entry has ambiguous target retained capture slots"));
-                    }
-                    let global_index = u32::try_from(index).map_err(|_| failure("typed entry retained slot index overflows"))?;
-                    Ok(crate::linked_native::LinkedEntryRetainedOwner { owner: owner.clone(), global_index, binding })
-                }).transpose()?;
-                Ok(LinkedNativeTargetImport::RetainedCapture(crate::linked_native::LinkedEntryRetainedCapture {
-                    requirement, entry_owner: association,
-                }))
+                let association = entry_owner
+                    .as_ref()
+                    .map(|owner| {
+                        let mut matches = owner.imports().enumerate().filter_map(
+                            |(index, import)| match import {
+                                crate::linked_native::AcquiredNativeImport::Retained {
+                                    requirement: expected,
+                                    binding,
+                                } if expected == requirement => Some((index, binding)),
+                                _ => None,
+                            },
+                        );
+                        let (index, binding) = matches.next().ok_or_else(|| {
+                            failure("typed entry does not own target retained capture")
+                        })?;
+                        if matches.next().is_some() {
+                            return Err(failure(
+                                "typed entry has ambiguous target retained capture slots",
+                            ));
+                        }
+                        let global_index = u32::try_from(index)
+                            .map_err(|_| failure("typed entry retained slot index overflows"))?;
+                        Ok(crate::linked_native::LinkedEntryRetainedOwner {
+                            owner: owner.clone(),
+                            global_index,
+                            binding,
+                        })
+                    })
+                    .transpose()?;
+                Ok(LinkedNativeTargetImport::RetainedCapture(
+                    crate::linked_native::LinkedEntryRetainedCapture {
+                        requirement,
+                        entry_owner: association,
+                    },
+                ))
             }
         })
         .collect::<Result<Vec<_>, CompileError>>()?;
