@@ -713,11 +713,15 @@ data CurrentOriginalInventory = CurrentOriginalInventory
     -- Kept with these immutable products through item output selection; both
     -- package demand and certification consume this same reconciliation.
   , currentReconciledOriginalProducts :: ReconciledOriginalProducts
-  , currentOriginalGroupMetadata :: Map.Map PriorHomeGroup ([IssuedConstructor], [Effect.YieldSite])
+  , currentOriginalMetadata :: Map.Map PriorHomeGroup ([IssuedConstructor], [Effect.YieldSite])
   , currentOriginalNames :: Map.Map Name SymbolIdentity
     -- Already admitted native originals are imports, never fresh emitted groups.
   , currentOriginalExternalNames :: Map.Map Name SymbolIdentity
   }
+
+currentOriginalGroupMetadata :: CurrentOriginalInventory
+  -> Map.Map PriorHomeGroup ([IssuedConstructor], [Effect.YieldSite])
+currentOriginalGroupMetadata = currentOriginalMetadata
 
 currentOriginalBinders :: CurrentOriginalInventory -> Set.Set SymbolIdentity
 currentOriginalBinders inventory = Set.fromList (Map.elems (currentOriginalExternalNames inventory))
@@ -796,7 +800,7 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
             , currentOriginalPackages = packages
             , currentOriginalFinalized = finalized
             , currentReconciledOriginalProducts = reconciled
-            , currentOriginalGroupMetadata = sealedMetadata
+            , currentOriginalMetadata = sealedMetadata
             , currentOriginalNames = preparedTopIdentityBindings (preparedProductModules productContext)
             , currentOriginalExternalNames = Map.filter (`Set.member` preparedExternalBinders productContext)
                 externalNames

@@ -970,12 +970,15 @@ data PreparedPackageTarget = PreparedPackageTarget
   , packageTargetGroups :: [ProjectedPackageGroup]
   , packageTargetImports :: [SymbolIdentity]
   , packageTargetHomeImports :: [(Text, Text, Word, [SymbolIdentity])]
-  , packageTargetCurrentHomeGroups :: Set (String, String, Word)
+  , targetCurrentHomeGroups :: Set (String, String, Word)
   , packageTargetPriorHomeImports :: Map PriorHomeGroup [SymbolIdentity]
   -- These are this target's reached uses, including uses with no package leaves.
   -- The stage-wide acquisition is not an executable root for every target.
   , packageTargetOriginalImports :: Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
   }
+
+packageTargetCurrentHomeGroups :: PreparedPackageTarget -> Set (String, String, Word)
+packageTargetCurrentHomeGroups = targetCurrentHomeGroups
 
 projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> Text
   -> ProjectionContext -> Map Module (Map Word32 ProjectedGroup) -> [ModuleCandidate]
