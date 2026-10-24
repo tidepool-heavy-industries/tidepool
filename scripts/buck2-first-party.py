@@ -1357,7 +1357,8 @@ RUNTIME_CHECKED_CAPTURE_CASES = ["session::resident::authored_publication_tests:
     "produced_native_capture_requires_its_actual_acquired_slot_and_row",
     "native_retained_resolution_visits_distinct_acquisitions_and_anchored_descendants",
     "checked_snapshot_retains_expired_observation_until_its_last_owner_drops",
-)]
+)] + ["session::admission::scoped_inputs::tests::"
+      "historical_native_authorization_requires_actual_stage_terminal_and_admitted_value"]
 RUNTIME_PARKED_CAPTURE_CASES = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
     "checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects",
     "historical_native_captures_bind_the_original_value_after_shadowing",
