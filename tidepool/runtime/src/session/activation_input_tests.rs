@@ -6965,23 +6965,25 @@ fn compile_activation_preview(
     {
         RendererAccess::Ready(renderer) => renderer,
         RendererAccess::Produce(mut producer) => {
-            let outcome = admission.source_lease().with_source_compiler_transaction(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                crate::CompilerTransactionCancellation::new(),
-                None,
-                |_| {},
-                |source_owner, settlement| {
-                    producer.begin_native().map_err(CompileError::from)?;
-                    turn::compile_activation_renderer(
-                        source_owner,
-                        &admission,
-                        template,
-                        budget,
-                        includes,
-                        settlement,
-                    )
-                },
-            );
+            let outcome = admission
+                .original_source()
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |source_owner, settlement| {
+                        producer.begin_native().map_err(CompileError::from)?;
+                        turn::compile_activation_renderer(
+                            source_owner,
+                            &admission,
+                            template,
+                            budget,
+                            includes,
+                            settlement,
+                        )
+                    },
+                );
             let outcome = outcome.map_err(|error| {
                 turn::ActivationRendererFailure::from(super::PreparedRuntimeError::from(error))
             })?;
