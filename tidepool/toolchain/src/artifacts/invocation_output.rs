@@ -1366,7 +1366,8 @@ mod tests {
                             .any(|(identity, exported)| identity == &global.identity
                                 && exported == *value));
                     }
-                    LinkedNativeTargetImport::RetainedCapture(requirement) => {
+                    LinkedNativeTargetImport::RetainedCapture(capture) => {
+                        let requirement = capture.requirement();
                         assert_eq!(requirement.identity(), &global.identity);
                         assert_eq!(Some(requirement.generation()), global.required_generation);
                     }

@@ -77,6 +77,7 @@ pub(super) struct CertifiedNativeDemandAcquisition {
     pub(super) entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     pub(super) bindings: BTreeMap<NativeGroupKey, VerifiedNativeBinding>,
     pub(super) offers: Vec<IssuedNativeOffer>,
+    pub(super) sources: NativeSourceReceipts,
 }
 
 /// An issued binding retains its exact carrier pair and acquisition closure.
@@ -107,6 +108,15 @@ pub(super) struct TargetGroupSelection {
     pub(super) sources: NativeSourceReceipts,
 }
 
+#[derive(Clone, Copy)]
+enum RetainedTargetOrigin { CurrentStage, PriorProgramStage, HistoricalInput }
+enum IssuedBindingOrigin {
+    CurrentStage,
+    PriorProgramStage,
+    HistoricalOffer,
+    HistoricalSelected(SelectedNativeSupport),
+}
+
 pub(super) fn select_target_group(
     state: &mut InventoryState,
     physical: &ArtifactView,
@@ -117,13 +127,13 @@ pub(super) fn select_target_group(
 ) -> Result<TargetGroupSelection, CompileError> {
     use crate::certified_products::{CertifiedNativeGroupSupport, ReceiptImportOwner};
     let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
-    let (binding, offer, current) = match reference {
+    let (binding, offer, origin) = match reference {
         ReceiptImportOwner::OriginalBinding { .. } => {
             let chosen = selection.target_original_group(reference, operation)?;
             (
                 chosen.binding(),
                 chosen.contribution().offer().clone(),
-                false,
+                RetainedTargetOrigin::HistoricalInput,
             )
         }
         ReceiptImportOwner::Source { .. } => {
@@ -142,11 +152,11 @@ pub(super) fn select_target_group(
                 crate::certified_products::TargetSourceOrigin::Current(current) => {
                     let completed = current.completed_for_target(physical)?;
                     let (binding, offer) = completed_target_group(&completed)?;
-                    (binding, offer, true)
+                    (binding, offer, RetainedTargetOrigin::CurrentStage)
                 }
                 crate::certified_products::TargetSourceOrigin::PriorProgram(completed) => {
                     let (binding, offer) = completed_target_group(&completed)?;
-                    (binding, offer, false)
+                    (binding, offer, RetainedTargetOrigin::PriorProgramStage)
                 }
                 crate::certified_products::TargetSourceOrigin::SelectedInput => {
                     if !selection.permits_native_group(key.artifact, product.owner(), ordinal) {
@@ -172,13 +182,13 @@ pub(super) fn select_target_group(
                     let CertifiedNativeGroupSupport::Issued(offer) = support else {
                         return Err(failure("target input group lacks issued availability"));
                     };
-                    (binding, offer.clone(), false)
+                    (binding, offer.clone(), RetainedTargetOrigin::HistoricalInput)
                 }
             }
         }
         _ => return Err(failure("target native reference kind")),
     };
-    retain_target_group(state, physical, binding, offer, current, incoming)
+    retain_target_group(state, physical, binding, offer, origin, incoming)
 }
 
 fn completed_target_group(
@@ -215,7 +225,7 @@ pub(super) fn select_target_entry(
         .ok_or_else(|| failure("typed target entry is outside its physical output cohort"))?;
     let completed = current.completed_for_target(physical)?;
     let (binding, offer) = completed_target_group(&completed)?;
-    retain_target_group(state, physical, binding, offer, true, incoming)
+    retain_target_group(state, physical, binding, offer, RetainedTargetOrigin::CurrentStage, incoming)
 }
 
 fn retain_target_group(
@@ -223,7 +233,7 @@ fn retain_target_group(
     physical: &ArtifactView,
     binding: NativeGroupBinding,
     offer: IssuedNativeOffer,
-    current: bool,
+    origin: RetainedTargetOrigin,
     incoming: &mut BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
 ) -> Result<TargetGroupSelection, CompileError> {
     let support = NativeSupportRef::checked(
@@ -232,7 +242,11 @@ fn retain_target_group(
         binding,
         crate::certified_products::CertifiedNativeGroupSupport::Issued(&offer),
     )?;
-    let mut issued = support.describe(binding)?;
+    let issued = support.describe(binding, match origin {
+        RetainedTargetOrigin::CurrentStage => IssuedBindingOrigin::CurrentStage,
+        RetainedTargetOrigin::PriorProgramStage => IssuedBindingOrigin::PriorProgramStage,
+        RetainedTargetOrigin::HistoricalInput => IssuedBindingOrigin::HistoricalOffer,
+    })?;
     support.acquire(state, physical, incoming, &issued)?;
     let entry = Arc::clone(
         support
@@ -241,29 +255,10 @@ fn retain_target_group(
             .ok_or_else(|| failure("target group lost its exact payload"))?,
     );
     let mut sources = NativeSourceReceipts::default();
-    if current {
-        let NativeOfferSourceReceipt::Solved(frozen) = &offer.0.custody.source_receipt else {
-            return Err(failure(
-                "target current group lost its solved source causes",
-            ));
-        };
-        for (usage, causes) in frozen.entries.iter() {
-            let reached = match usage {
-                NativeSourceUse::Root(group) => {
-                    issued.closure.contains(&InventoryNodeKey::Group(*group))
-                }
-                NativeSourceUse::Edge { parent, child } => {
-                    issued.closure.contains(&InventoryNodeKey::Group(*parent))
-                        && issued.closure.contains(&InventoryNodeKey::Group(*child))
-                }
-            };
-            if reached {
-                for cause in causes.iter() {
-                    sources.insert(*usage, cause.clone());
-                }
-            }
-        }
-        issued.source = NativeSourceCause::Current;
+    match origin {
+        RetainedTargetOrigin::CurrentStage => copy_solved_offer_sources(&offer, &issued.closure, false, &mut sources)?,
+        RetainedTargetOrigin::PriorProgramStage => copy_solved_offer_sources(&offer, &issued.closure, true, &mut sources)?,
+        RetainedTargetOrigin::HistoricalInput => {}
     }
     sources.insert(NativeSourceUse::Root(binding), issued.source.clone());
     Ok(TargetGroupSelection {
@@ -272,6 +267,37 @@ fn retain_target_group(
         entry,
         sources,
     })
+}
+
+/// Carry only reached provenance from the exact offer; prior-stage reuse shifts
+/// this cell's producers while historical dependency owners stay historical.
+fn copy_solved_offer_sources(
+    offer: &IssuedNativeOffer,
+    closure: &BTreeSet<InventoryNodeKey>,
+    as_prior_program: bool,
+    sources: &mut NativeSourceReceipts,
+) -> Result<(), CompileError> {
+    let NativeOfferSourceReceipt::Solved(frozen) = &offer.0.custody.source_receipt else {
+        return Err(failure("cell-stage group lost its solved source causes"));
+    };
+    let mut copied = NativeSourceReceipts::default();
+    for (usage, causes) in frozen.entries.iter() {
+        let reached = match usage {
+            NativeSourceUse::Root(group) => closure.contains(&InventoryNodeKey::Group(*group)),
+            NativeSourceUse::Edge { parent, child } => closure.contains(&InventoryNodeKey::Group(*parent))
+                && closure.contains(&InventoryNodeKey::Group(*child)),
+        };
+        if reached {
+            for cause in causes.iter() {
+                let cause = match cause {
+                    NativeSourceCause::Current | NativeSourceCause::PriorProgram if as_prior_program => NativeSourceCause::PriorProgram,
+                    other => other.clone(),
+                };
+                copied.insert(*usage, cause);
+            }
+        }
+    }
+    sources.merge(&copied)
 }
 
 impl IssuedNativeBinding {
@@ -392,6 +418,7 @@ enum CohortNativeRequirement {
     External {
         owner: ExactModuleIdentity,
         edge: NativeGroupEdge,
+        origin: crate::certified_products::ExternalSourceDependencyOrigin,
         support: crate::declaration_context::ChosenNativeGroupSupport,
     },
     Unavailable,
@@ -478,8 +505,9 @@ impl ClassifiedNativeCohort {
                                     child,
                                 }
                             }
-                            CurrentSourceDependency::Issued(support) => {
+                            CurrentSourceDependency::External { origin, support } => {
                                 CohortNativeRequirement::External {
+                                    origin,
                                     owner,
                                     edge: NativeGroupEdge {
                                         dependent_ordinal: ordinal,
@@ -495,6 +523,7 @@ impl ClassifiedNativeCohort {
                         ReceiptImportOwner::OriginalBinding { .. } => {
                             match current.available_original_group(reference, operation)? {
                                 Some(support) => CohortNativeRequirement::External {
+                                    origin: crate::certified_products::ExternalSourceDependencyOrigin::HistoricalInput,
                                     owner,
                                     edge: NativeGroupEdge {
                                         dependent_ordinal: ordinal,
@@ -574,6 +603,7 @@ pub(super) fn bind_classified_cohort(
         entries: BTreeMap::new(),
         bindings: BTreeMap::new(),
         offers: Vec::new(),
+        sources: NativeSourceReceipts::default(),
     };
     for &key in &cohort.available {
         cohort
@@ -595,6 +625,7 @@ pub(super) fn bind_classified_cohort(
                 CohortNativeRequirement::External {
                     owner,
                     edge,
+                    origin,
                     support,
                 } => {
                     let binding = support.binding();
@@ -606,7 +637,13 @@ pub(super) fn bind_classified_cohort(
                             support.contribution().offer(),
                         ),
                     )?;
-                    let issued = native.describe(binding)?;
+                    let issued = native.describe(binding, match origin {
+                        crate::certified_products::ExternalSourceDependencyOrigin::PriorProgramStage => IssuedBindingOrigin::PriorProgramStage,
+                        crate::certified_products::ExternalSourceDependencyOrigin::HistoricalInput => IssuedBindingOrigin::HistoricalOffer,
+                    })?;
+                    if matches!(origin, crate::certified_products::ExternalSourceDependencyOrigin::PriorProgramStage) {
+                        copy_solved_offer_sources(support.contribution().offer(), &issued.closure, true, &mut acquisition.sources)?;
+                    }
                     native.acquire(state, entries, &mut acquisition.entries, &issued)?;
                     acquisition
                         .offers
@@ -920,7 +957,7 @@ fn current_product_dependencies(
                     .own_group_support(binding)
                     .ok_or_else(|| failure("current child lost its own issued support"))?;
                 let support = NativeSupportRef::checked(state, parent, binding, support)?;
-                let issued = support.describe(binding)?;
+                let issued = support.describe(binding, IssuedBindingOrigin::CurrentStage)?;
                 support.acquire(state, entries, incoming, &issued)?;
                 if let Some(offer) = support.offer {
                     offers.push(offer.clone());
@@ -998,13 +1035,11 @@ fn current_product_dependencies(
             binding,
             crate::certified_products::CertifiedNativeGroupSupport::Issued(offer),
         )?;
-        let mut issued = support.describe(binding)?;
-        if let Some(selected) = catalog.selected_support(required_owner, binding) {
-            issued.source = NativeSourceCause::Historical {
-                selected_at: issued.binding,
-                support: selected.clone(),
-            };
-        }
+        let origin = match catalog.selected_support(required_owner, binding) {
+            Some(selected) => IssuedBindingOrigin::HistoricalSelected(selected.clone()),
+            None => IssuedBindingOrigin::HistoricalOffer,
+        };
+        let issued = support.describe(binding, origin)?;
         support.acquire(state, entries, incoming, &issued)?;
         offers.push(offer.clone());
         dependencies.push(ResolvedNativeDependency {
@@ -1137,7 +1172,7 @@ impl<'a> NativeSupportRef<'a> {
         Ok((carrier, canonical))
     }
 
-    fn describe(&self, group: NativeGroupBinding) -> Result<IssuedNativeBinding, CompileError> {
+    fn describe(&self, group: NativeGroupBinding, origin: IssuedBindingOrigin) -> Result<IssuedNativeBinding, CompileError> {
         let entry = self
             .payloads
             .get(&group.binding.artifact())
@@ -1152,16 +1187,17 @@ impl<'a> NativeSupportRef<'a> {
             carrier,
             canonical,
             closure: self.closure(group)?,
-            source: self
-                .offer
-                .cloned()
-                .map(|offer| NativeSourceCause::Historical {
+            source: match origin {
+                IssuedBindingOrigin::CurrentStage => NativeSourceCause::Current,
+                IssuedBindingOrigin::PriorProgramStage => NativeSourceCause::PriorProgram,
+                IssuedBindingOrigin::HistoricalSelected(support) => NativeSourceCause::Historical { selected_at: group, support },
+                IssuedBindingOrigin::HistoricalOffer => NativeSourceCause::Historical {
                     selected_at: group,
                     support: compiler_projection::SelectedNativeSupport::Acquired(Arc::from([
-                        offer,
+                        self.offer.ok_or_else(|| failure("historical native binding lacks its issuing offer"))?.clone(),
                     ])),
-                })
-                .unwrap_or(NativeSourceCause::Unwitnessed),
+                },
+            },
         })
     }
 
@@ -1393,13 +1429,10 @@ pub(super) fn bind_certified_input_demand(
         };
         let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let support = NativeSupportRef::checked(state, parent, chosen, support)?;
-        let mut issued = support.describe(chosen)?;
-        if let RootIssuer::Historical(selected) = &issuer {
-            issued.source = NativeSourceCause::Historical {
-                selected_at: issued.binding,
-                support: selected.clone(),
-            };
-        }
+        let issued = support.describe(chosen, match &issuer {
+            RootIssuer::Historical(selected) => IssuedBindingOrigin::HistoricalSelected(selected.clone()),
+            RootIssuer::Current => IssuedBindingOrigin::CurrentStage,
+        })?;
         let carrier = issued.carrier;
         let canonical_binding = issued.canonical;
         // An interface-only receiving role may retain the issued body's
@@ -1444,6 +1477,7 @@ pub(super) fn bind_certified_input_demand(
         entries: incoming,
         bindings: prebound,
         offers: retained_offers,
+        sources: NativeSourceReceipts::default(),
     })
 }
 
@@ -1470,6 +1504,7 @@ pub(super) fn bind_fresh_product_dependencies(
         entries: BTreeMap::new(),
         bindings: BTreeMap::new(),
         offers: Vec::new(),
+        sources: NativeSourceReceipts::default(),
     })
 }
 

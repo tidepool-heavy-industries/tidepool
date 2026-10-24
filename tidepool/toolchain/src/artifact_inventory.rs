@@ -330,6 +330,7 @@ thread_local! {
 #[derive(Clone, Debug)]
 enum NativeSourceCause {
     Current,
+    PriorProgram,
     Historical {
         selected_at: NativeGroupBinding,
         support: compiler_projection::SelectedNativeSupport,
@@ -357,6 +358,23 @@ enum IssuedNativeSourceReceipt {
 }
 
 impl NativeSourceReceipts {
+    fn merge(&mut self, incoming: &Self) -> Result<(), CompileError> {
+        for (usage, causes) in &incoming.0 {
+            for cause in causes.iter() {
+                let class = |cause: &NativeSourceCause| match cause {
+                    NativeSourceCause::Current => 0,
+                    NativeSourceCause::PriorProgram => 1,
+                    NativeSourceCause::Historical { .. } => 2,
+                    NativeSourceCause::Unwitnessed => 3,
+                };
+                if self.0.get(usage).is_some_and(|held| held.iter().any(|prior| class(prior) != class(cause))) {
+                    return Err(failure("conflicting native source receipt provenance"));
+                }
+                self.insert(*usage, cause.clone());
+            }
+        }
+        Ok(())
+    }
     fn insert(&mut self, key: NativeSourceUse, cause: NativeSourceCause) -> bool {
         let Some(held) = self.0.get(&key) else {
             self.0.insert(key, Arc::from([cause]));
@@ -372,6 +390,12 @@ impl NativeSourceReceipts {
                     return false;
                 }
                 held.push(NativeSourceCause::Current);
+            }
+            NativeSourceCause::PriorProgram => {
+                if held.iter().any(|cause| matches!(cause, NativeSourceCause::PriorProgram)) {
+                    return false;
+                }
+                held.push(NativeSourceCause::PriorProgram);
             }
             NativeSourceCause::Historical { selected_at, support: incoming } => {
                 if let Some(NativeSourceCause::Historical { support: prior, .. }) = held
@@ -783,6 +807,7 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ResolvedSourceAssociation {
     Current,
+    PriorProgram,
     Historical,
 }
 
@@ -801,6 +826,7 @@ impl<'a> ResolvedNativeTarget<'a> {
 }
 
 impl ResolvedNativeTarget<'_> {
+    pub(crate) fn entry_binding(&self) -> Option<NativeGroupBinding> { self.entry_binding }
     pub(crate) fn source_association(
         &self,
         group: NativeGroupBinding,
@@ -816,6 +842,8 @@ impl ResolvedNativeTarget<'_> {
             .any(|cause| matches!(cause, NativeSourceCause::Current))
         {
             Ok(ResolvedSourceAssociation::Current)
+        } else if causes.iter().all(|cause| matches!(cause, NativeSourceCause::PriorProgram)) {
+            Ok(ResolvedSourceAssociation::PriorProgram)
         } else if causes
             .iter()
             .all(|cause| matches!(cause, NativeSourceCause::Historical { .. }))
@@ -4913,6 +4941,7 @@ impl ArtifactInventory {
             entries,
             bindings,
             offers,
+            sources,
         }) = acquisition
         {
             // Exact historical terminals need no newly bound logical row, but
@@ -4920,6 +4949,7 @@ impl ArtifactInventory {
             acquired_payload_ids.extend(entries.keys().copied());
             selected.extend(entries);
             demanded_offers = offers;
+            source_receipts.merge(&sources)?;
             for (key, verified) in bindings {
                 if let Some(binding) = verified.binding() {
                     issued_causes.insert(key, (binding, verified.source_cause()));
@@ -5870,7 +5900,7 @@ fn native_groups_in_custody(
                     if let Some(sources) = sources.as_ref() {
                         for cause in causes.iter() {
                             match cause {
-                                NativeSourceCause::Current => {
+                                NativeSourceCause::Current | NativeSourceCause::PriorProgram => {
                                     if let Some(edge) = sources.issued.get(&NativeSourceUse::Edge {
                                         parent: key,
                                         child: required,

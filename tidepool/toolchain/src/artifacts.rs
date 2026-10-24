@@ -2294,12 +2294,17 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
         matches!(
             self.source_association,
             crate::artifact_inventory::ResolvedSourceAssociation::Current
+                | crate::artifact_inventory::ResolvedSourceAssociation::PriorProgram
         )
         .then_some(PhysicalCurrentNativeGroup { group: self.group })
     }
 }
 
 impl<'a> ResolvedNativeSourceProducts<'a> {
+    pub(crate) fn entry_binding(&self) -> Option<crate::artifact_inventory::NativeGroupBinding> {
+        self._resolved.entry_binding()
+    }
+
     pub fn linked_native_target(
         &self,
     ) -> Option<&'a Arc<crate::linked_native::LinkedNativeTarget>> {
@@ -2376,7 +2381,8 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
             ));
         };
         match selection.sources.get(&binding) {
-            Some(group) => {
+            Some(crate::linked_native::TargetHomeSource::CurrentStage(group)
+                | crate::linked_native::TargetHomeSource::PriorProgramStage(group)) => {
                 if !group.same_issuance(product) {
                     return Err(CompileError::ExtractFailed(
                         "native source receipt names another physical row".into(),
@@ -2384,7 +2390,10 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
                 }
                 Ok(Some(PhysicalCurrentNativeGroup { group }))
             }
-            None => Ok(None),
+            Some(crate::linked_native::TargetHomeSource::HistoricalInput) => Ok(None),
+            None => Err(CompileError::ExtractFailed(
+                "selected HOME occurrence lacks target source classification".into(),
+            )),
         }
     }
 

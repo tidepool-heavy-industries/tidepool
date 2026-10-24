@@ -4868,9 +4868,17 @@ impl<'a> CurrentProductImport<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExternalSourceDependencyOrigin {
+    PriorProgramStage,
+    HistoricalInput,
+}
 pub(crate) enum CurrentSourceDependency<'a> {
     Local(CurrentProductRef<'a>),
-    Issued(crate::declaration_context::ChosenNativeGroupSupport),
+    External {
+        origin: ExternalSourceDependencyOrigin,
+        support: crate::declaration_context::ChosenNativeGroupSupport,
+    },
     Unavailable,
 }
 
@@ -4956,7 +4964,7 @@ impl<'a> CurrentProductRef<'a> {
                     },
                     operation,
                 )? {
-                    Some(support) => CurrentSourceDependency::Issued(support),
+                    Some(support) => CurrentSourceDependency::External { origin: ExternalSourceDependencyOrigin::PriorProgramStage, support },
                     None => CurrentSourceDependency::Unavailable,
                 },
             );
@@ -5033,7 +5041,7 @@ impl<'a> CurrentProductRef<'a> {
                     },
                     operation,
                 )? {
-                    Some(support) => CurrentSourceDependency::Issued(support),
+                    Some(support) => CurrentSourceDependency::External { origin: ExternalSourceDependencyOrigin::PriorProgramStage, support },
                     None => CurrentSourceDependency::Unavailable,
                 },
             );
@@ -5057,7 +5065,7 @@ impl<'a> CurrentProductRef<'a> {
                 owner,
                 operation,
             )? {
-                Some(chosen) => CurrentSourceDependency::Issued(chosen),
+                Some(support) => CurrentSourceDependency::External { origin: ExternalSourceDependencyOrigin::HistoricalInput, support },
                 None => CurrentSourceDependency::Unavailable,
             },
         )

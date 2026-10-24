@@ -305,8 +305,63 @@ pub struct NativeAcquiredClosureFacts {
     pub occurrences: Vec<NativeOccurrenceFacts>,
     pub package_receipts: Vec<Arc<NativePackageReceiptFacts>>,
 }
-/// Current is receiving-target correlation, never part of persisted acquisition.
-pub(crate) type NativeTargetSources = BTreeMap<NativeGroupBinding, Arc<PendingCertifiedGroup>>;
+/// Receiving-target provenance is not persisted acquisition authority.
+#[derive(Clone, Debug)]
+pub(crate) enum TargetHomeSource {
+    CurrentStage(Arc<PendingCertifiedGroup>),
+    PriorProgramStage(Arc<PendingCertifiedGroup>),
+    HistoricalInput,
+}
+impl TargetHomeSource {
+    pub(crate) fn cell_stage_group(&self) -> Option<&Arc<PendingCertifiedGroup>> {
+        match self {
+            Self::CurrentStage(group) | Self::PriorProgramStage(group) => Some(group),
+            Self::HistoricalInput => None,
+        }
+    }
+}
+pub(crate) type NativeTargetSources = BTreeMap<NativeGroupBinding, TargetHomeSource>;
+
+/// A retained slot on code compiled in this cell, verified by its linked target.
+#[derive(Clone, Copy, Debug)]
+pub struct CellStageSlotWitness<'a> {
+    owner: &'a AcquiredNativeCode,
+    demander: NativeGroupBinding,
+    group: &'a Arc<PendingCertifiedGroup>,
+    global_index: u32,
+    binding: ArtifactBinding,
+    leaf: &'a NativeRetainedRequirement,
+}
+impl<'a> CellStageSlotWitness<'a> {
+    pub fn owner(&self) -> &'a AcquiredNativeCode { self.owner }
+    pub fn demander(&self) -> NativeGroupBinding { self.demander }
+    pub fn group(&self) -> &'a Arc<PendingCertifiedGroup> { self.group }
+    pub fn global_index(&self) -> u32 { self.global_index }
+    pub fn binding(&self) -> ArtifactBinding { self.binding }
+    pub fn leaf(&self) -> &'a NativeRetainedRequirement { self.leaf }
+}
+/// A retained slot inherited from a settled cell, verified by its linked target.
+#[derive(Clone, Copy, Debug)]
+pub struct HistoricalSlotWitness<'a> {
+    owner: &'a AcquiredNativeCode,
+    demander: NativeGroupBinding,
+    global_index: u32,
+    binding: ArtifactBinding,
+    leaf: &'a NativeRetainedRequirement,
+}
+impl<'a> HistoricalSlotWitness<'a> {
+    pub fn owner(&self) -> &'a AcquiredNativeCode { self.owner }
+    pub fn demander(&self) -> NativeGroupBinding { self.demander }
+    pub fn global_index(&self) -> u32 { self.global_index }
+    pub fn binding(&self) -> ArtifactBinding { self.binding }
+    pub fn leaf(&self) -> &'a NativeRetainedRequirement { self.leaf }
+}
+#[derive(Clone, Copy, Debug)]
+pub enum VerifiedRetainedSlotDemander<'a> {
+    CurrentStage(CellStageSlotWitness<'a>),
+    PriorProgramStage(CellStageSlotWitness<'a>),
+    HistoricalInput(HistoricalSlotWitness<'a>),
+}
 
 #[derive(Debug)]
 pub struct AcquiredNativeClosure {
@@ -495,7 +550,8 @@ impl AcquiredNativeCode {
             NativeOccurrenceId::Home(binding) => self
                 .sources
                 .as_ref()
-                .and_then(|sources| sources.get(&binding)),
+                .and_then(|sources| sources.get(&binding))
+                .and_then(TargetHomeSource::cell_stage_group),
             NativeOccurrenceId::Package { .. } => None,
         };
         self.node().grant(current)
@@ -572,7 +628,28 @@ pub enum LinkedNativeTargetImport {
         acquired: AcquiredNativeCode,
         value: ValueId,
     },
-    RetainedCapture(NativeRetainedRequirement),
+    RetainedCapture(LinkedEntryRetainedCapture),
+}
+/// Direct target captures retain their actual typed-entry slot association.
+#[derive(Clone, Debug)]
+pub struct LinkedEntryRetainedOwner {
+    pub(crate) owner: AcquiredNativeCode,
+    pub(crate) global_index: u32,
+    pub(crate) binding: ArtifactBinding,
+}
+impl LinkedEntryRetainedOwner {
+    pub fn owner(&self) -> &AcquiredNativeCode { &self.owner }
+    pub fn global_index(&self) -> u32 { self.global_index }
+    pub fn binding(&self) -> ArtifactBinding { self.binding }
+}
+#[derive(Clone, Debug)]
+pub struct LinkedEntryRetainedCapture {
+    pub(crate) requirement: NativeRetainedRequirement,
+    pub(crate) entry_owner: Option<LinkedEntryRetainedOwner>,
+}
+impl LinkedEntryRetainedCapture {
+    pub fn requirement(&self) -> &NativeRetainedRequirement { &self.requirement }
+    pub fn entry_owner(&self) -> Option<&LinkedEntryRetainedOwner> { self.entry_owner.as_ref() }
 }
 #[derive(Debug)]
 pub struct LinkedNativeTarget {
@@ -580,8 +657,57 @@ pub struct LinkedNativeTarget {
     pub(crate) imports: Arc<[LinkedNativeTargetImport]>,
     pub(crate) closure: Arc<AcquiredNativeClosure>,
     pub(crate) sources: Arc<NativeTargetSources>,
+    pub(crate) entry_occurrence: Option<NativeOccurrenceId>,
 }
 impl LinkedNativeTarget {
+    pub fn entry_occurrence(&self) -> Option<NativeOccurrenceId> { self.entry_occurrence }
+    pub fn get(&self, occurrence: NativeOccurrenceId) -> Option<AcquiredNativeCode> {
+        self.closure.get(occurrence).map(|code| code.reborrow(&self.sources))
+    }
+    pub fn verify_retained_slot<'a>(
+        &'a self,
+        owner: &'a AcquiredNativeCode,
+        global_index: u32,
+        binding: ArtifactBinding,
+        leaf: &'a NativeRetainedRequirement,
+    ) -> Result<VerifiedRetainedSlotDemander<'a>, CompileError> {
+        if !self.owns_acquired(owner) {
+            return Err(refusal("native source receipt belongs to another receiving target"));
+        }
+        let NativeOccurrenceId::Home(demander) = owner.occurrence() else {
+            return Err(refusal("retained native requirement owner is not HOME code"));
+        };
+        let NativeCodeGrant::Home { binding: grant_binding, product, .. } = owner.grant() else {
+            return Err(refusal("native source receipt is not HOME code"));
+        };
+        if grant_binding != demander {
+            return Err(refusal("native source receipt binding mismatch"));
+        }
+        let index = usize::try_from(global_index)
+            .map_err(|_| refusal("retained import index is out of range"))?;
+        match owner.imports().nth(index) {
+            Some(AcquiredNativeImport::Retained { requirement, binding: expected })
+                if expected == binding && &requirement == leaf => {}
+            _ => return Err(refusal("retained native requirement does not match owner slot")),
+        }
+        match self.sources.get(&demander)
+            .ok_or_else(|| refusal("selected HOME occurrence lacks target source classification"))? {
+            TargetHomeSource::CurrentStage(group) | TargetHomeSource::PriorProgramStage(group) => {
+                if !group.same_issuance(product) {
+                    return Err(refusal("native source receipt names another physical row"));
+                }
+                let witness = CellStageSlotWitness { owner, demander, group, global_index, binding, leaf };
+                Ok(match self.sources[&demander] {
+                    TargetHomeSource::CurrentStage(_) => VerifiedRetainedSlotDemander::CurrentStage(witness),
+                    TargetHomeSource::PriorProgramStage(_) => VerifiedRetainedSlotDemander::PriorProgramStage(witness),
+                    TargetHomeSource::HistoricalInput => unreachable!(),
+                })
+            }
+            TargetHomeSource::HistoricalInput => Ok(VerifiedRetainedSlotDemander::HistoricalInput(
+                HistoricalSlotWitness { owner, demander, global_index, binding, leaf }
+            )),
+        }
+    }
     pub(crate) fn owns_acquired(&self, selected: &AcquiredNativeCode) -> bool {
         Arc::ptr_eq(&self.closure, &selected.owner)
             && selected
