@@ -1343,10 +1343,18 @@ fn bindings_for_selected_groups(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum ModelSourceOrigin {
+    Current,
+    PriorProgram,
+    Missing,
+}
+
 proptest! {
     #![proptest_config(property_config())]
     #[test]
     fn selected_native_groups_match_independent_fixed_point(
+        prior_edges in proptest::collection::vec(any::<bool>(), GROUP_NODES * GROUP_ORDINALS.len()),
         extra_edges in proptest::collection::vec(0u8..16, GROUP_NODES * GROUP_ORDINALS.len()),
         generations in proptest::collection::vec(0u64..8, GROUP_NODES * GROUP_ORDINALS.len()),
     ) {
@@ -1433,46 +1441,71 @@ proptest! {
                 parent == (0, 11)
                     || (selected_missing && parent == (1, 11) && child == (3, 7))
             };
-            let mut receipts = NativeSourceReceipts::default();
-            receipts.insert(NativeSourceUse::Root(binding((0, 7))), NativeSourceCause::Current);
-            receipts.insert(NativeSourceUse::Root(binding((0, 11))), NativeSourceCause::Unwitnessed);
-            for (parent, children) in &edges {
-                for child in children {
-                    receipts.insert(NativeSourceUse::Edge {
-                        parent: binding(*parent), child: binding(*child),
-                    }, if edge_missing(*parent, *child) {
-                        NativeSourceCause::Unwitnessed
-                    } else {
-                        NativeSourceCause::Current
-                    });
+            let edge_origin = |parent: GroupState, child: GroupState| {
+                if edge_missing(parent, child) {
+                    ModelSourceOrigin::Missing
+                } else if prior_edges[(parent.0 * GROUP_ORDINALS.len() + child.0
+                    + usize::from(parent.1 == 11)) % prior_edges.len()] {
+                    ModelSourceOrigin::PriorProgram
+                } else {
+                    ModelSourceOrigin::Current
                 }
-            }
-            // Independent worklist over integer model states, with source
-            // absence as data. It does not call the production receipt merger.
-            let mut model = BTreeMap::<GroupState, BTreeSet<bool>>::new();
-            let mut pending = vec![((0, 7), false)];
-            while let Some((parent, missing)) = pending.pop() {
-                if !model.entry(parent).or_default().insert(missing) { continue; }
-                for child in edges.get(&parent).into_iter().flatten() {
-                    pending.push((*child, missing || edge_missing(parent, *child)));
-                }
-            }
-            let mut sources = NativeSourceTraversal {
-                issued: NativeSourceReceiptView::Operation(&receipts),
-                selected: NativeSourceReceipts::default(),
             };
-            let reached = native_groups_in_custody(&state, &view.lease.payloads, owned,
-                vec![binding((0, 7))], None, Some(&mut sources)).unwrap();
-            prop_assert_eq!(&reached, &exact_groups);
-            prop_assert!(!sources.selected.0.contains_key(&NativeSourceUse::Root(binding((0, 11)))));
-            for (logical, expected) in model {
-                let actual = sources.selected.0[&NativeSourceUse::Root(binding(logical))].iter()
-                    .map(|cause| match cause {
-                        NativeSourceCause::Current => false,
-                        NativeSourceCause::Unwitnessed | NativeSourceCause::Historical { support: compiler_projection::SelectedNativeSupport::Missing(_), .. } => true,
-                        NativeSourceCause::Historical { .. } => panic!("model has no live source acquisitions"),
-                    }).collect::<BTreeSet<_>>();
-                prop_assert_eq!(actual, expected, "logical source state {:?}", logical);
+            // Every generated graph exercises both root origins. Explicit
+            // modeled edge origins can differ from the parent and from other
+            // paths to the same descendant; missing evidence remains sticky.
+            for root_origin in [ModelSourceOrigin::Current, ModelSourceOrigin::PriorProgram] {
+                let mut receipts = NativeSourceReceipts::default();
+                receipts.insert(NativeSourceUse::Root(binding((0, 7))), match root_origin {
+                    ModelSourceOrigin::Current => NativeSourceCause::Current,
+                    ModelSourceOrigin::PriorProgram => NativeSourceCause::PriorProgram,
+                    ModelSourceOrigin::Missing => unreachable!(),
+                });
+                receipts.insert(NativeSourceUse::Root(binding((0, 11))), NativeSourceCause::Unwitnessed);
+                for (parent, children) in &edges {
+                    for child in children {
+                        receipts.insert(NativeSourceUse::Edge {
+                            parent: binding(*parent), child: binding(*child),
+                        }, match edge_origin(*parent, *child) {
+                            ModelSourceOrigin::Current => NativeSourceCause::Current,
+                            ModelSourceOrigin::PriorProgram => NativeSourceCause::PriorProgram,
+                            ModelSourceOrigin::Missing => NativeSourceCause::Unwitnessed,
+                        });
+                    }
+                }
+                // Independent worklist over integer model states, with the
+                // three source origins retained as data. It does not call the
+                // production receipt merger or traverse inventory bindings.
+                let mut model = BTreeMap::<GroupState, BTreeSet<ModelSourceOrigin>>::new();
+                let mut pending = vec![((0, 7), root_origin)];
+                while let Some((parent, origin)) = pending.pop() {
+                    if !model.entry(parent).or_default().insert(origin) { continue; }
+                    for child in edges.get(&parent).into_iter().flatten() {
+                        let child_origin = match origin {
+                            ModelSourceOrigin::Missing => ModelSourceOrigin::Missing,
+                            ModelSourceOrigin::Current | ModelSourceOrigin::PriorProgram => edge_origin(parent, *child),
+                        };
+                        pending.push((*child, child_origin));
+                    }
+                }
+                let mut sources = NativeSourceTraversal {
+                    issued: NativeSourceReceiptView::Operation(&receipts),
+                    selected: NativeSourceReceipts::default(),
+                };
+                let reached = native_groups_in_custody(&state, &view.lease.payloads, owned,
+                    vec![binding((0, 7))], None, Some(&mut sources)).unwrap();
+                prop_assert_eq!(&reached, &exact_groups);
+                prop_assert!(!sources.selected.0.contains_key(&NativeSourceUse::Root(binding((0, 11)))));
+                for (logical, expected) in model {
+                    let actual = sources.selected.0[&NativeSourceUse::Root(binding(logical))].iter()
+                        .map(|cause| match cause {
+                            NativeSourceCause::Current => ModelSourceOrigin::Current,
+                            NativeSourceCause::PriorProgram => ModelSourceOrigin::PriorProgram,
+                            NativeSourceCause::Unwitnessed | NativeSourceCause::Historical { support: compiler_projection::SelectedNativeSupport::Missing(_), .. } => ModelSourceOrigin::Missing,
+                            NativeSourceCause::Historical { .. } => panic!("model has no live historical acquisitions"),
+                        }).collect::<BTreeSet<_>>();
+                    prop_assert_eq!(actual, expected, "logical source state {:?}, root {:?}", logical, root_origin);
+                }
             }
         }
         prop_assert_eq!(&actual_groups, &reversed_view.native_requirements_with_groups_from_roots(&roots).unwrap().1);

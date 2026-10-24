@@ -114,6 +114,11 @@ enum RetainedTargetOrigin {
     PriorProgramStage,
     HistoricalInput,
 }
+#[derive(Clone, Copy)]
+enum CellStageReuse {
+    CurrentStage,
+    PriorProgramStage,
+}
 enum IssuedBindingOrigin {
     CurrentStage,
     PriorProgramStage,
@@ -274,12 +279,18 @@ fn retain_target_group(
     );
     let mut sources = NativeSourceReceipts::default();
     match origin {
-        RetainedTargetOrigin::CurrentStage => {
-            copy_solved_offer_sources(&offer, &issued.closure, false, &mut sources)?
-        }
-        RetainedTargetOrigin::PriorProgramStage => {
-            copy_solved_offer_sources(&offer, &issued.closure, true, &mut sources)?
-        }
+        RetainedTargetOrigin::CurrentStage => copy_solved_offer_sources(
+            &offer,
+            &issued.closure,
+            CellStageReuse::CurrentStage,
+            &mut sources,
+        )?,
+        RetainedTargetOrigin::PriorProgramStage => copy_solved_offer_sources(
+            &offer,
+            &issued.closure,
+            CellStageReuse::PriorProgramStage,
+            &mut sources,
+        )?,
         RetainedTargetOrigin::HistoricalInput => {}
     }
     sources.insert(NativeSourceUse::Root(binding), issued.source.clone());
@@ -296,7 +307,7 @@ fn retain_target_group(
 fn copy_solved_offer_sources(
     offer: &IssuedNativeOffer,
     closure: &BTreeSet<InventoryNodeKey>,
-    as_prior_program: bool,
+    reuse: CellStageReuse,
     sources: &mut NativeSourceReceipts,
 ) -> Result<(), CompileError> {
     let NativeOfferSourceReceipt::Solved(frozen) = &offer.0.custody.source_receipt else {
@@ -314,12 +325,14 @@ fn copy_solved_offer_sources(
         if reached {
             for cause in causes.iter() {
                 let cause = match cause {
-                    NativeSourceCause::Current | NativeSourceCause::PriorProgram
-                        if as_prior_program =>
-                    {
-                        NativeSourceCause::PriorProgram
+                    NativeSourceCause::Current => match reuse {
+                        CellStageReuse::CurrentStage => NativeSourceCause::Current,
+                        CellStageReuse::PriorProgramStage => NativeSourceCause::PriorProgram,
+                    },
+                    NativeSourceCause::PriorProgram => NativeSourceCause::PriorProgram,
+                    NativeSourceCause::Historical { .. } | NativeSourceCause::Unwitnessed => {
+                        cause.clone()
                     }
-                    other => other.clone(),
                 };
                 copied.insert(*usage, cause);
             }
@@ -670,7 +683,7 @@ pub(super) fn bind_classified_cohort(
                         crate::certified_products::ExternalSourceDependencyOrigin::HistoricalInput => IssuedBindingOrigin::HistoricalOffer,
                     })?;
                     if matches!(origin, crate::certified_products::ExternalSourceDependencyOrigin::PriorProgramStage) {
-                        copy_solved_offer_sources(support.contribution().offer(), &issued.closure, true, &mut acquisition.sources)?;
+                        copy_solved_offer_sources(support.contribution().offer(), &issued.closure, CellStageReuse::PriorProgramStage, &mut acquisition.sources)?;
                     }
                     native.acquire(state, entries, &mut acquisition.entries, &issued)?;
                     acquisition
@@ -3866,6 +3879,38 @@ mod normalized_dependency_tests {
             .0
             .values()
             .all(|causes| matches!(causes.as_ref(), [NativeSourceCause::PriorProgram])));
+        let current_right = retain_target_group(
+            &mut state,
+            &physical,
+            right,
+            offer.clone(),
+            RetainedTargetOrigin::CurrentStage,
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        let mut independent = prior.sources.clone();
+        independent.merge(&current_right.sources).unwrap();
+        assert_eq!(
+            independent.0.len(),
+            4,
+            "distinct selected uses may retain different source classes even with one shared child"
+        );
+        let historical_right = retain_target_group(
+            &mut state,
+            &physical,
+            right,
+            offer.clone(),
+            RetainedTargetOrigin::HistoricalInput,
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        let mut historical_anchors = historical.sources.clone();
+        historical_anchors.merge(&historical_right.sources).unwrap();
+        assert_eq!(
+            historical_anchors.0.len(),
+            2,
+            "distinct historical root anchors coexist as custody"
+        );
         assert!(
             retain_target_group(
                 &mut state,
@@ -3916,6 +3961,19 @@ mod normalized_dependency_tests {
         );
         assert!(
             matches!(&causes.0[&key][1], NativeSourceCause::Historical { selected_at, support: compiler_projection::SelectedNativeSupport::Acquired(_) } if *selected_at == right)
+        );
+        let mut historical_reuse = causes.clone();
+        historical_reuse.merge(&causes).unwrap();
+        assert_eq!(
+            historical_reuse.0[&key].len(),
+            2,
+            "merging repeated historical alternative anchors does not collapse their provenance"
+        );
+        assert!(
+            matches!(&historical_reuse.0[&key][0], NativeSourceCause::Historical { selected_at, support: compiler_projection::SelectedNativeSupport::Missing(_) } if *selected_at == left)
+        );
+        assert!(
+            matches!(&historical_reuse.0[&key][1], NativeSourceCause::Historical { selected_at, support: compiler_projection::SelectedNativeSupport::Acquired(_) } if *selected_at == right)
         );
         causes.insert(key, NativeSourceCause::Unwitnessed);
         assert_eq!(
