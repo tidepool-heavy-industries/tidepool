@@ -734,13 +734,18 @@ for name, complete in expected.items():
     if name == 'live-pending':
         assert decoded['daemon_reap']['status'] == 'pending'
         assert decoded['acquisition']['status'] == 'acquired'
-        malformed = dict(decoded, complete=True)
-        try:
-            codec.validate_owned_service_report(malformed, owner)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError('pending report claimed completed retirement')
+owner = fixtures / 'complete'
+complete = codec.read_owned_service_report(owner)
+pending_observation = codec.read_owned_service_report(fixtures / 'live-pending')['daemon_reap']
+pending = dict(complete, daemon_reap=pending_observation)
+incomplete = dict(pending, complete=False)
+assert codec.validate_owned_service_report(incomplete, owner) == incomplete
+try:
+    codec.validate_owned_service_report(pending, owner)
+except ValueError:
+    pass
+else:
+    raise AssertionError('pending daemon reap claimed completed retirement')
 print('8 Rust-published reports preserved by production Python reader')
 "#;
         let output = crate::process::command(
