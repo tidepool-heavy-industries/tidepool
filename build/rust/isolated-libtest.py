@@ -6,6 +6,7 @@ from enum import Enum
 from concurrent.futures import FIRST_COMPLETED, wait
 import os
 import hashlib
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -939,28 +940,17 @@ def diagnostic_summaries(artifact_root):
     summaries['transactions_truncated'] = transaction_count > len(transactions)
     def summarize_compiler(compiler):
         result = {'path': str(compiler), 'authority': False, 'issues': []}
-        if any((compiler / filename).exists() or (compiler / filename).is_symlink()
-               for filename in ('owned-compiler-outcome.json', 'lifecycle.json')):
+        marker = compiler / 'owned-service.json'
+        historical = any((compiler / filename).exists() or (compiler / filename).is_symlink()
+                         for filename in ('owned-compiler-outcome.json', 'lifecycle.json'))
+        if marker.exists() or marker.is_symlink() or historical:
             result['owned_cleanup_status'] = 'unknown'
-        for filename, key in (('owned-compiler-outcome.json', 'owned_compiler_outcome'),
-                              ('lifecycle.json', 'owned_compiler_lifecycle')):
-            path = compiler / filename
-            if path.exists() or path.is_symlink():
-                try:
-                    if path.is_symlink():
-                        raise ValueError('compiler diagnostic marker must not be a symlink')
-                    result[key] = read_json(path)
-                    if key == 'owned_compiler_outcome':
-                        cleanup = result[key].get('cleanup')
-                        result['owned_cleanup_status'] = (cleanup.get('status', 'unknown')
-                            if isinstance(cleanup, dict) else 'unknown')
-                        if not isinstance(result['owned_cleanup_status'], str):
-                            result['owned_cleanup_status'] = 'unknown'
-                            raise ValueError('owned compiler cleanup status is not a string')
-                except (OSError, ValueError, TypeError, AttributeError) as error:
-                    result['issues'].append(f'{path}: {error}')
-        if ('owned_compiler_outcome' in result) != ('owned_compiler_lifecycle' in result):
-            result['issues'].append(f'incomplete owned compiler markers: {compiler}')
+            try:
+                report = read_owned_service_report(compiler)
+                result['owned_service'] = report
+                result['owned_cleanup_status'] = 'confirmed' if report['complete'] else 'unconfirmed'
+            except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
+                result['issues'].append(f'{marker}: {error}')
         trace = compiler / 'compiler.jsonl'
         if not trace.exists():
             result['physical_compiler_timing'] = {
@@ -1165,10 +1155,8 @@ def diagnostic_summaries(artifact_root):
             if not candidate.is_dir():
                 continue
             markers = [(candidate / filename).exists() or (candidate / filename).is_symlink() for filename in
-                       ('owned-compiler-outcome.json', 'lifecycle.json')]
+                       ('owned-service.json', 'owned-compiler-outcome.json', 'lifecycle.json')]
             if any(markers):
-                if not all(markers):
-                    summaries['issues'].append(f'incomplete owned compiler markers: {candidate}')
                 if len(roots) < 8:
                     roots.append((candidate, 'native_test_control'))
                 else:
@@ -1261,6 +1249,24 @@ def process_cleanup_status(result, service_record=None):
     return 'confirmed' if confirmed is True else 'unconfirmed' if confirmed is False else 'unknown'
 
 
+_OWNED_SERVICE_READER = None
+
+
+def read_owned_service_report(owner):
+    """Consume the qualification owner's schema codec in source and frozen layouts."""
+    global _OWNED_SERVICE_READER
+    if _OWNED_SERVICE_READER is None:
+        directory = Path(__file__).resolve().parent
+        codec = directory / 'owned_service_report.py'
+        if not codec.is_file():
+            codec = directory.parent / 'package/owned_service_report.py'
+        spec = importlib.util.spec_from_file_location('isolated_libtest_owned_service_report', codec)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _OWNED_SERVICE_READER = module.read_owned_service_report
+    return _OWNED_SERVICE_READER(owner)
+
+
 def case_artifact_evidence(artifact_root, compiler_mode, record):
     """Capture diagnostic completeness and each resource owner on every exit path."""
     cleanup_complete = True
@@ -1270,17 +1276,27 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
         reports = sorted(path / 'hosted-outcome.json' for path in artifact_root.glob('hosted-campaign-*')
                          if path.is_dir() or path.is_symlink())
         if compiler_mode == 'owned-resident':
-            reports.append(artifact_root / 'compiler/owned-compiler-outcome.json')
+            reports.append(artifact_root / 'compiler/owned-service.json')
         cleanup_reports = []
         for report in reports:
             outcome = {}
             try:
                 if report.is_symlink() or report.parent.is_symlink():
                     raise ValueError('cleanup marker must not be a symlink')
-                outcome = json.loads(report.read_text())
-                status = outcome['cleanup']['status']
-                if not isinstance(status, str):
-                    raise ValueError('cleanup status is not a string')
+                if report.name == 'owned-service.json':
+                    outcome = read_owned_service_report(report.parent)
+                    status = 'confirmed' if outcome['complete'] else 'unconfirmed'
+                    record['owned_service_action_consistent'] = (
+                        outcome['action']['status'] == 'exited'
+                        and type(record.get('exit_code')) is int
+                        and outcome['action']['exit_code'] == record['exit_code'])
+                    if not record['owned_service_action_consistent']:
+                        stderr += f'\nowned service action differs from process result: {report}'
+                else:
+                    outcome = json.loads(report.read_text())
+                    status = outcome['cleanup']['status']
+                    if not isinstance(status, str):
+                        raise ValueError('cleanup status is not a string')
                 # This is a host-runtime admission fact, not a teardown receipt.
                 # The passing libtest and enclosing process/service cleanup are
                 # still mandatory; retain the original refusal evidence below.
@@ -1467,7 +1483,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     def finish(passed, stdout, stderr):
         cleanup_complete, hosted_runtime_not_started, evidence_complete, errors = case_artifact_evidence(
             artifact_root, compiler_mode, record)
-        passed = passed and cleanup_complete
+        passed = (passed and cleanup_complete
+                  and record.get('owned_service_action_consistent', True))
         record['acceptance_before_disposal'] = passed
         stderr += errors
         remove_artifacts = (passed and artifact_root is not None and evidence_complete

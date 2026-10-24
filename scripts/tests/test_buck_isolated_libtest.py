@@ -22,6 +22,28 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 
+def owned_service_report(owner, *, complete=True, code=0):
+    def observation(status, exit_code=None):
+        return {'status': status, 'exit_code': exit_code,
+                'success': exit_code == 0 if exit_code is not None else None,
+                'signal': None, 'failure': None}
+    return {'schema': 2, 'kind': 'owned-compiler-service', 'owner_directory': str(owner),
+            'operation': '01' * 32, 'daemon_epoch': '02' * 32, 'daemon_pid': 73,
+            'producer': '03' * 32, 'endpoint': '04' * 96, 'socket_path': str(owner / 'socket'),
+            'action': observation('exited', code), 'acquisition': {'status': 'not_configured'},
+            'daemon_reap': observation('reaped', 0), 'service_terminal': {
+                'epoch': [2] * 32, 'workers_retired': complete, 'socket_retired': True, 'failures': []},
+            'source_settlement': observation('not_configured'), 'artifact_retention': observation('removed'),
+            'settlement_failures': [], 'publication_failures': [], 'complete': complete}
+
+
+def write_owned_service_report(owner, **kwargs):
+    owner.chmod(0o700)
+    path = owner / 'owned-service.json'
+    path.write_text(json.dumps(owned_service_report(owner, **kwargs)))
+    path.chmod(0o600)
+
+
 def completed_process(*args, **kwargs):
     """Test executions explicitly acknowledge their mocked envelope teardown."""
     result = subprocess.CompletedProcess(*args, **kwargs)
@@ -476,16 +498,14 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(record['compiler_cleanup_status'], 'unknown')
 
     def test_nested_owned_compiler_receipts_gate_cleanup_independently_of_timing(self):
-        for status in ('confirmed', 'unconfirmed', 'failed'):
+        for status in ('confirmed', 'unconfirmed'):
             with self.subTest(status=status):
                 root = Path(self.tmp.name) / f'nested-owner-{status}'
                 record = {}
                 def run(args, timeout, environment=None):
                     compiler = root / 'owned-compiler-control-1/compiler'
                     compiler.mkdir(parents=True)
-                    (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({
-                        'cleanup': {'status': status}}))
-                    (compiler / 'lifecycle.json').write_text('{}')
+                    write_owned_service_report(compiler, complete=status == 'confirmed')
                     return completed_process(args, 0,
                         'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
                 with patch.object(runner, 'execute', side_effect=run):
@@ -493,11 +513,11 @@ class IsolatedLibtestTests(unittest.TestCase):
                         10, record, artifact_root=root)
                 self.assertEqual(passed, status == 'confirmed')
                 self.assertTrue(root.exists(), 'missing timing retains diagnostics even after confirmed cleanup')
-                self.assertEqual(record['compiler_cleanup_status'], status)
+                self.assertEqual(record['compiler_cleanup_status'], 'confirmed' if status == 'confirmed' else 'unconfirmed')
                 self.assertEqual(record['process_cleanup_status'], 'confirmed')
                 self.assertEqual(record['executed_test_count'], 1)
                 if status != 'confirmed':
-                    self.assertIn(f'owned compiler cleanup remains {status}', errors)
+                    self.assertIn('owned compiler cleanup remains unconfirmed', errors)
 
     def test_owned_lifecycle_with_missing_or_dangling_outcome_retains_unknown_cleanup(self):
         for nested in (False, True):
@@ -529,8 +549,7 @@ class IsolatedLibtestTests(unittest.TestCase):
     def test_compiler_cleanup_discovery_bounds_and_unsafe_paths_are_not_confirmed_subsets(self):
         def confirmed_owner(path):
             path.mkdir(parents=True)
-            (path / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
-            (path / 'lifecycle.json').write_text('{}')
+            write_owned_service_report(path)
         for kind in ('complete', 'root_limit', 'control_limit', 'child_limit',
                      'unsafe_control', 'unsafe_child', 'unsafe_compiler_root', 'unsafe_compiler_file'):
             with self.subTest(kind=kind):
@@ -729,7 +748,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                 str(root / 'compiler'), '--', str(self.binary), '--exact', 'suite::works', '--nocapture'])
             self.assertEqual(environment['TIDEPOOL_TEST_ARTIFACT_ROOT'], str(root))
             (root / 'compiler').mkdir()
-            (root / 'compiler/owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+            write_owned_service_report(root / 'compiler')
             return completed_process(args, 0,
                 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
         with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': str(frontend)}), \
@@ -737,6 +756,59 @@ class IsolatedLibtestTests(unittest.TestCase):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
                 10, artifact_root=root, compiler_mode='owned-resident')
         self.assertTrue(passed)
+
+    def test_owned_service_report_requires_matching_action_and_independent_retirement(self):
+        frontend = Path(self.tmp.name) / 'report-frontend'
+        frontend.write_text('declared compiler frontend')
+        for kind in ('valid', 'incomplete', 'different_action', 'action_not_started',
+                     'crossed_owner', 'symlink', 'truncated', 'legacy_pair'):
+            with self.subTest(kind=kind):
+                root = Path(self.tmp.name) / ('owned-report-' + kind)
+                record = {}
+                def run(args, timeout, environment=None):
+                    compiler = root / 'compiler'
+                    compiler.mkdir(mode=0o700)
+                    report = owned_service_report(compiler, complete=kind != 'incomplete')
+                    if kind == 'different_action':
+                        report['action'].update(exit_code=17, success=False)
+                    elif kind == 'action_not_started':
+                        report['action'].update(status='not_started', exit_code=None, success=None)
+                    elif kind == 'crossed_owner':
+                        report['owner_directory'] = str(compiler.parent / 'another-owner')
+                    marker = compiler / 'owned-service.json'
+                    if kind == 'legacy_pair':
+                        (compiler / 'owned-compiler-outcome.json').write_text(
+                            json.dumps({'schema': 1, 'cleanup': {'status': 'confirmed'}}))
+                        (compiler / 'lifecycle.json').write_text(
+                            json.dumps({'schema': 1, 'cleanup_confirmed': True}))
+                    elif kind == 'symlink':
+                        target = compiler / 'other-report.json'
+                        target.write_text(json.dumps(report))
+                        target.chmod(0o600)
+                        marker.symlink_to(target)
+                    else:
+                        marker.write_text('{partial' if kind == 'truncated' else json.dumps(report))
+                        marker.chmod(0o600)
+                    return completed_process(args, 0,
+                        'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': str(frontend)}), \
+                     patch.object(runner, 'execute', side_effect=run):
+                    passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                        10, record, artifact_root=root, compiler_mode='owned-resident')
+                self.assertEqual(passed, kind == 'valid')
+                self.assertTrue(root.exists())
+                self.assertEqual(record['executed_test_count'], 1)
+                self.assertEqual(record['process_cleanup_status'], 'confirmed')
+                if kind in ('different_action', 'action_not_started'):
+                    self.assertFalse(record['owned_service_action_consistent'])
+                    self.assertEqual(record['compiler_cleanup_status'], 'confirmed')
+                elif kind == 'incomplete':
+                    self.assertEqual(record['compiler_cleanup_status'], 'unconfirmed')
+                elif kind != 'valid':
+                    self.assertEqual(record['compiler_cleanup_status'], 'unknown')
+                if not passed:
+                    self.assertFalse(record['acceptance_before_disposal'])
+                    self.assertEqual(record['disposal']['status'], 'not_requested')
 
     def test_mixed_harness_selects_only_its_declared_mode_manifest(self):
         resources = self.owned_service_resources()
@@ -751,8 +823,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                 self.assertEqual('--owned-daemon-run' in args, mode == 'owned-resident')
                 if mode == 'owned-resident':
                     (root / 'compiler').mkdir()
-                    (root / 'compiler/owned-compiler-outcome.json').write_text(
-                        json.dumps({'cleanup': {'status': 'confirmed'}}))
+                    write_owned_service_report(root / 'compiler')
                 return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
             with self.subTest(mode=mode), patch.dict(os.environ, resources, clear=True), \
                  patch.object(runner, 'execute', side_effect=execute):
@@ -787,7 +858,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                 case = json.loads((root / 'case.json').read_text())
                 self.assertEqual(case['compiler_allowances'], record['compiler_allowances'])
                 (root / 'compiler').mkdir()
-                (root / 'compiler/owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+                write_owned_service_report(root / 'compiler')
                 return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
             with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': str(frontend)}), \
                  patch.object(runner, 'execute', side_effect=run):
@@ -806,7 +877,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             self.assertEqual(args[3:5], ['--workers', '2'])
             self.assertEqual(args[-5:], ['--', str(self.binary), '--exact', 'suite::works', '--nocapture'])
             (root / 'compiler').mkdir()
-            (root / 'compiler/owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+            write_owned_service_report(root / 'compiler')
             return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
         with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': str(frontend)}), \
              patch.object(runner, 'execute', side_effect=run):
@@ -1242,8 +1313,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         def run(args, timeout, environment=None):
             compiler = root / 'compiler'
             compiler.mkdir()
-            (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
-            (compiler / 'lifecycle.json').write_text(json.dumps({'pid': 73, 'producer': 'matched'}))
+            write_owned_service_report(compiler)
             rows = [
                 {'fields': {'execution_layer': 'transaction_wrapper', 'elapsed_ms': 10}},
                 {'fields': {'execution_layer': 'physical', 'physical_execution': '73:1', 'elapsed_ms': 9}},
@@ -1263,7 +1333,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertTrue(passed)
         self.assertFalse(root.exists())
         summary = record['diagnostic_summaries']
-        self.assertEqual(summary['owned_compiler_lifecycle']['pid'], 73)
+        self.assertEqual(summary['owned_service']['daemon_pid'], 73)
         timing = summary['physical_compiler_timing']
         self.assertTrue(timing['complete'])
         self.assertEqual(timing['physical_record_count'], 1)
@@ -1502,8 +1572,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                        'placement_ns': 40, 'encoding_ns': 50, 'worker_encoded_bytes': 60}
         rows = [{'fields': {'phase': 'compiler_queue', 'daemon_epoch': owner['daemon_epoch'], 'admission_id': owner['admission_id'], 'queue_ms': 0, 'compiler_workload': 'foreground', 'compiler_jobs': 2, 'compiler_capabilities': 2}}, {'fields': physical}, {'fields': preparation}, {'fields': preparation}]
         (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
-        (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
-        (compiler / 'lifecycle.json').write_text(json.dumps({'pid': 73, 'cleanup_confirmed': True}))
+        write_owned_service_report(compiler)
         with patch.object(runner, 'TRACE_RECORD_LIMIT', 1):
             summary = runner.diagnostic_summaries(root)
             record = {}
@@ -1562,10 +1631,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             for name in ('compiler', 'failed-compiler'):
                 compiler = control / name
                 compiler.mkdir(parents=True)
-                (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({
-                    'schema': 1, 'cleanup': {'status': 'confirmed'}}))
-                (compiler / 'lifecycle.json').write_text(json.dumps({
-                    'schema': 1, 'daemon_epoch': epoch, 'cleanup_confirmed': True}))
+                write_owned_service_report(compiler)
                 rows = [actual_queue, actual_queue]
                 for ordinal in (1, 2):
                     span = {'name': 'compile_request', 'execution_layer': 'physical',
@@ -1608,8 +1674,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         def run(args, timeout, environment=None):
             compiler = root / 'owned-compiler-control-73' / 'compiler'
             compiler.mkdir(parents=True)
-            (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
-            (compiler / 'lifecycle.json').write_text(json.dumps({'daemon_epoch': 'epoch'}))
+            write_owned_service_report(compiler)
             row = {'fields': {'message': 'close'}, 'span': {
                 'name': 'compile_request', 'execution_layer': 'physical',
                 'physical_execution': 'epoch:1:1', 'daemon_epoch': 'epoch', 'admission_id': 1}}
@@ -1644,7 +1709,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(summary['owned_compiler_roots'][0]['path'], str(incomplete))
         self.assertEqual(summary['owned_compiler_roots'][0]['owned_cleanup_status'], 'unknown')
         self.assertTrue(any('unsafe' in issue for issue in summary['issues']))
-        self.assertTrue(any('incomplete' in issue for issue in summary['issues']))
+        self.assertTrue(any('owned-service.json' in issue for issue in summary['issues']))
 
     def test_span_and_span_list_physical_context_retains_timing_once_per_row(self):
         root = Path(self.tmp.name) / 'span-artifacts'
@@ -1675,7 +1740,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                 def run(args, timeout, environment=None):
                     compiler = root / 'compiler'
                     compiler.mkdir()
-                    (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+                    write_owned_service_report(compiler)
                     if trace is not None:
                         (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in trace))
                     return completed_process(args, 0,

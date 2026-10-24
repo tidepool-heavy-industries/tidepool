@@ -13,25 +13,31 @@ struct PausedOwnedDaemon {
 
 impl PausedOwnedDaemon {
     fn pause(artifact_root: &Path) -> Self {
-        let lifecycle_path = artifact_root.join("compiler/lifecycle.json");
-        let lifecycle_bytes = std::fs::read(&lifecycle_path).unwrap();
-        let lifecycle: serde_json::Value = serde_json::from_slice(&lifecycle_bytes).unwrap();
-        assert_eq!(lifecycle["cleanup_confirmed"], false);
-        assert_eq!(lifecycle["execution"]["status"], "running");
+        let report_path = artifact_root.join("compiler/owned-service.json");
+        let report_bytes = std::fs::read(&report_path).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&report_bytes).unwrap();
+        assert_eq!(report["schema"], 2);
+        assert_eq!(report["kind"], "owned-compiler-service");
+        assert_eq!(
+            report["owner_directory"],
+            artifact_root.join("compiler").to_str().unwrap()
+        );
+        assert_eq!(report["complete"], false);
+        assert_eq!(report["action"]["status"], "running");
         let socket = std::env::var(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
             .expect("this case's runner selected its owned daemon socket");
-        assert_eq!(lifecycle["socket_path"], socket);
+        assert_eq!(report["socket_path"], socket);
         let (endpoint, _) = tidepool_toolchain::toolchain::bind_extract_endpoint().unwrap();
-        assert_eq!(lifecycle["endpoint"], endpoint.identity().to_hex());
-        assert_eq!(lifecycle["producer"], endpoint.identity().producer_hex());
-        let pid = u32::try_from(lifecycle["daemon_pid"].as_u64().unwrap()).unwrap();
+        assert_eq!(report["endpoint"], endpoint.identity().to_hex());
+        assert_eq!(report["producer"], endpoint.identity().producer_hex());
+        let pid = u32::try_from(report["daemon_pid"].as_u64().unwrap()).unwrap();
         assert_ne!(pid, std::process::id());
         let process = pidfd_open(
             Pid::from_raw(i32::try_from(pid).unwrap()).unwrap(),
             PidfdFlags::empty(),
         )
         .unwrap();
-        assert_eq!(std::fs::read(&lifecycle_path).unwrap(), lifecycle_bytes);
+        assert_eq!(std::fs::read(&report_path).unwrap(), report_bytes);
         let guard = Self {
             process,
             pid,

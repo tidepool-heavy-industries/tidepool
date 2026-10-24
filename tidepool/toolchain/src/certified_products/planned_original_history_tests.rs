@@ -83,9 +83,10 @@ fn assert_canonical_materialization_premises(context: &ExactDeclarationContext) 
     }
 }
 
-fn planned_product_sidecar(module: &str, body_tag: u8) -> Vec<u8> {
-    let groups = [7, 11]
-        .into_iter()
+fn planned_product_sidecar(module: &str, body_tag: u8, ordinals: &[u32]) -> Vec<u8> {
+    let groups = ordinals
+        .iter()
+        .copied()
         .map(|ordinal| {
             let mut wire = testing::wire_program();
             let tidepool_repr::execution_schema::Group::NonRecursive(top) = &mut wire.bindings[0]
@@ -395,8 +396,34 @@ pub(super) fn issue_planned_original_with_source_value(
     body_tag: u8,
     source_value: u8,
 ) -> PendingOriginal {
+    issue_planned_original_with_groups(
+        root,
+        module,
+        producer,
+        include,
+        source_tag,
+        body_tag,
+        source_value,
+        &[7, 11],
+    )
+}
+
+fn issue_planned_original_with_groups(
+    root: &Path,
+    module: SessionModule,
+    producer: &[u8],
+    include: &[PathBuf],
+    source_tag: u8,
+    body_tag: u8,
+    source_value: u8,
+    ordinals: &[u32],
+) -> PendingOriginal {
     let module_name = module.module_name();
-    let source = format!("module {module_name} where\nentry_7 = {source_value}\nentry_11 = 4\n");
+    let mut source = format!("module {module_name} where\n");
+    for ordinal in ordinals {
+        let value = if *ordinal == 7 { source_value } else { 4 };
+        source.push_str(&format!("entry_{ordinal} = {value}\n"));
+    }
     let source_root = root.join(format!("source-{source_tag}"));
     std::fs::create_dir(&source_root).unwrap();
     let input = source_root.join("module.hs");
@@ -453,15 +480,16 @@ pub(super) fn issue_planned_original_with_source_value(
     let authored =
         NativeAuthoredDeclarationAdmission::from_planned(&module, &source_admission).unwrap();
     let exact = (&request).product_admission(&source_admission);
-    let bytes = planned_product_sidecar(&module_name, body_tag);
+    let bytes = planned_product_sidecar(&module_name, body_tag, ordinals);
     let package_bytes =
         empty_package_bundle_for_interface(&module_name, &planned_interface(&module_name));
     let parsed = ParsedModuleProducts::decode(&bytes, &package_bytes).unwrap();
     let mut accepted = receipt(&bytes, &admitted, &source);
     accepted.module = module_name.clone();
     accepted.skinny_iface_sha256 = sha(&planned_interface(&module_name));
-    accepted.groups = [7, 11]
-        .into_iter()
+    accepted.groups = ordinals
+        .iter()
+        .copied()
         .map(|original_ordinal| AcceptedGroup {
             original_ordinal,
             globals: vec![],
@@ -517,6 +545,140 @@ pub(super) fn issue_planned_original_with_source_value(
         request,
         source: source_admission,
         certified,
+    }
+}
+
+#[test]
+fn raw_original_rebinding_refuses_each_exact_unearned_group() {
+    use crate::artifact_inventory::{
+        ArtifactEntry, ArtifactInventoryFailure, NativeAdmissionRefusal,
+    };
+    for original_ordinal in [7, 11] {
+        let root = tempfile::tempdir().unwrap();
+        let producer = [0x35; 32];
+        let canonical_producer = CanonicalProducerIdentity::from_producer_bytes(&producer).sha256();
+        let include = [root.path().to_path_buf()];
+        let issued = issue_planned_original_with_groups(
+            root.path(),
+            SessionModule::lib(Generation(7)),
+            &producer,
+            &include,
+            1,
+            1,
+            3,
+            &[original_ordinal],
+        )
+        .complete_native_availability(&producer);
+        let selection = issued.certified.source_selection();
+        let product = &issued.certified.data().recovery_products[0];
+        let expected_original = ArtifactEntry::original_artifact_id(canonical_producer, product);
+        let expected_canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
+        assert_eq!(
+            product
+                .original_native()
+                .groups
+                .iter()
+                .map(|group| group.group.original_ordinal())
+                .collect::<Vec<_>>(),
+            vec![original_ordinal]
+        );
+        let selected = selection
+            .selected_original_closure(issued.completed_output().artifacts())
+            .unwrap();
+        assert_eq!(selected.products().len(), 1);
+        assert_eq!(selected.products()[0].owner(), product.owner());
+        let sibling = issue_planned_original_with_groups(
+            root.path(),
+            SessionModule::lib(Generation(7)),
+            &producer,
+            &include,
+            2,
+            2,
+            3,
+            &[original_ordinal],
+        )
+        .complete_native_availability(&producer);
+        let raw = crate::declaration_context::certified_product_artifact_view(
+            canonical_producer,
+            &[
+                product.clone(),
+                sibling.certified.data().recovery_products[0].clone(),
+            ],
+            &[],
+            None,
+        )
+        .unwrap();
+        let raw_graph = raw.capture_graph_selection();
+        let raw_binding = |id| {
+            raw_graph
+                .namespace
+                .iter()
+                .find(|binding| binding.artifact == id)
+                .copied()
+        };
+        assert!(raw_binding(expected_original).is_some());
+        assert!(raw_binding(expected_canonical).is_some());
+        let key = crate::artifact_inventory::NativeGroupKey {
+            artifact: expected_original,
+            original_ordinal,
+        };
+        let NativeGroupCandidates::IssuedAvailability(candidates) = selection
+            .native_group_candidates(key, product.owner())
+            .unwrap()
+        else {
+            panic!("the completed singleton retains its issued group");
+        };
+        assert_eq!(candidates.len(), 1);
+        let candidate = *candidates.first().unwrap();
+        let Some(CertifiedNativeGroupSupport::Issued(offer)) =
+            selection.native_group_support(key, product.owner(), candidate)
+        else {
+            panic!("the singleton retains its exact issuer");
+        };
+        assert!(offer.matches_direct_canonical_binding(
+            expected_original,
+            expected_canonical,
+            issued.completed_output().artifacts()
+        ));
+        assert!(!offer.matches_direct_canonical_binding(
+            expected_original,
+            expected_canonical,
+            &raw
+        ));
+        assert!(!raw.contains_acquired_native_group(candidate));
+        let projection = selection.compiler_projection(&raw).unwrap();
+        assert_eq!(
+            projection
+                .snapshot_roles()
+                .values()
+                .filter_map(crate::artifact_inventory::CompilerInputRole::original)
+                .collect::<Vec<_>>(),
+            vec![expected_original]
+        );
+        let result = selection.selected_original_closure(&raw);
+        assert!(
+            matches!(result, Err(CertificationError::OriginalClosure(ref error))
+                if matches!(error.as_ref(), crate::CompileError::ArtifactInventory(error)
+                    if matches!(error.failure,
+                        ArtifactInventoryFailure::NativeGroupUnavailable {
+                            artifact, original_ordinal: refused_ordinal,
+                        } if artifact == expected_original && refused_ordinal == original_ordinal)
+                    && matches!(&error.native_refusal,
+                        Some(NativeAdmissionRefusal::InputNoCompatibleCandidate {
+                            selected_original, canonical, selected_canonical,
+                        }) if *selected_original == raw_binding(expected_original)
+                            && *canonical == expected_canonical
+                            && *selected_canonical == raw_binding(expected_canonical)))),
+            "raw singleton group {original_ordinal} must retain its exact issuer refusal: {result:?}"
+        );
+        let retained = issued
+            .completed_output()
+            .artifacts()
+            .retain_custody(&raw)
+            .unwrap();
+        let selected = selection.selected_original_closure(&retained).unwrap();
+        assert_eq!(selected.products().len(), 1);
+        assert_eq!(selected.products()[0].owner(), product.owner());
     }
 }
 
