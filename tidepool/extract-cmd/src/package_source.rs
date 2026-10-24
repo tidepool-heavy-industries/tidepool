@@ -280,7 +280,7 @@ impl ConfiguredSource {
         let roots = objects.iter().map(|value| {
             let value=value.as_str().ok_or_else(||invalid("invalid declared acquisition root"))?;
             if !seen.insert(value) {return Err(invalid("duplicate declared acquisition root"));}
-            let path = Path::new(&value);
+            let path = Path::new(value);
             if nix_object(path)? != path { return Err(invalid("acquisition root is not a top-level Nix object")); }
             Ok(serde_json::json!({"path": owner.join("package-source/gc-roots").join(crate::endpoint::hex(&digest(value.as_bytes()))), "store_path":value}))
         }).collect::<io::Result<Vec<_>>>()?;
@@ -856,7 +856,7 @@ impl AcquisitionFailure {
 }
 impl std::fmt::Display for AcquisitionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(f)
+        std::fmt::Display::fmt(&self.error, f)
     }
 }
 impl std::error::Error for AcquisitionFailure {

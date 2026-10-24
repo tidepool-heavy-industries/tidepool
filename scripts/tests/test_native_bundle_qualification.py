@@ -4527,6 +4527,21 @@ class CompilerServicePackageTests(unittest.TestCase):
             self.assertEqual(state['status'], 'retained-unknown')
             self.assertTrue(state['roots'])
 
+    def test_failure_diagnostics_retain_exact_large_argv_and_bounded_stderr(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            command = ['/nix/bin/nix-store', '--query', *['/nix/store/' + str(index) + '-' + 'x' * 100 for index in range(200)]]
+            failure = subprocess.CalledProcessError(23, command, stderr=b'nix diagnostic' * 1000)
+            primary, publication = qualification._retain_package_failure(SimpleNamespace(owner_directory=owner), failure)
+            evidence = owner / 'package-provider.failure.json'
+            diagnostic = json.loads(evidence.read_text())
+            self.assertEqual(diagnostic['argv'], command)
+            self.assertEqual(diagnostic['returncode'], 23)
+            self.assertEqual(len(diagnostic['stderr']), 4096)
+            self.assertIn('sha256=' + qualification.sha256(evidence), primary)
+            self.assertFalse(publication)
+            self.assertLess(len(primary), 17000)
+
     def test_provider_failure_preserves_primary_cleanup_and_publication_failures(self):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
             acquire = provider.acquire_args()
