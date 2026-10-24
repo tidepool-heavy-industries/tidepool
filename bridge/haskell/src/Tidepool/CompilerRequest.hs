@@ -51,7 +51,8 @@ import Tidepool.CompilerProducts
   , prepareOriginalProductsWithCacheAndReuse, prepareOriginalProductsWithWorklist
   , prepareCompilerProjectionContext, requireOriginalExecutableGlobals, admitCurrentOriginalProducts, retainPreparedPackageTargets
   , preparedCurrentOriginalInventory, preparedProductInventory, currentOriginalBinders
-  , currentOriginalBindingsExcept, currentReconciledOriginalProducts )
+  , currentOriginalBindingsExcept, currentReconciledOriginalProducts
+  , currentOriginalGroupMetadata, lookupStageGroupMetadata )
 import Tidepool.DiagJson (InputRejection(..), SourceRejection(..))
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), ExactInterfaceOperations, OriginalInterfaceArtifacts)
 import Tidepool.ImportAdmission (compilationScope)
@@ -64,10 +65,11 @@ import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability
   , projectSelectedCandidateWithHostBindings, candidateGlobals, candidateBindingIdentities
   , finalizePreparedCandidate
-  , preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedModuleProductOutcomes
+  , preparedModuleProductOutcomes
   , preparedRootIdentity, PreparedPackageTarget, projectPreparedPackageTarget
   , packageTargetProgram, packageTargetConstructors, packageTargetGroups, projectedPackageModule, projectedPackageInterfaceSha256, projectedPackageEncoding
-  , projectedPackageConstructors, projectedPackageYieldSites )
+  , projectedPackageConstructors, projectedPackageYieldSites
+  , packageTargetCurrentHomeGroups, packageTargetPriorHomeImports )
 import Tidepool.HostBindingAuthority (HostBindingRepresentation, hostBindingRepresentationJsonAuthority)
 import Tidepool.ConstructorIdentity (IssuedConstructor)
 import qualified Tidepool.EffectSchema
@@ -591,12 +593,12 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
            ++ [binder | candidate <- candidates, group <- candidateGroups candidate
             , binder <- candidateGroupBinders group])]
     (originalModules,productContext,originalBindings,admittedOriginalBinders,
-      originalConstructors,originalSites,originalPackageGlobals,homeProductGroups) <- case intent of
+      originalGroupMetadata,originalPackageGlobals,homeProductGroups) <- case intent of
       PortableExecutable -> do
         unless (isNothing exactScope && null candidates && Map.null retainedGenerations
             && null hostBindings) $
           fail "portable output cannot consume retained native or host-binding inputs"
-        pure (modules,Nothing,Map.empty,Set.empty,[],[]
+        pure (modules,Nothing,Map.empty,Set.empty,Map.empty
           ,const (const (Right emptyOriginalExternalDemand)),Map.empty)
       NativeOriginals -> do
         (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
@@ -605,8 +607,6 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           (withWorldStageInputs prior rawProductContext)
         inventory <- maybe (fail "current original admission did not issue its inventory") pure
           (preparedCurrentOriginalInventory productContext)
-        originalConstructors <- project (preparedModuleProductConstructors (preparedProductInventory productContext))
-        originalSites <- project (preparedModuleProductYieldSites (preparedProductInventory productContext))
         let products = preparedProductInventory productContext
             homeProductGroups = Map.fromList
               [ (owner, Map.fromList
@@ -633,7 +633,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                   Nothing -> stagedOriginalExternalDemand priorNative identity)
                 (map globalIdentity globals ++ bindings)
         pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
-          originalConstructors,originalSites,originalPackageGlobals,homeProductGroups)
+          currentOriginalGroupMetadata inventory,originalPackageGlobals,homeProductGroups)
     let withOriginals context = context {projectionCurrentOriginals = originalBindings}
     finalProjections <- newIORef Map.empty
     finalDependencySelections <- newIORef Map.empty
@@ -800,16 +800,28 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
             , site <- pmYieldSites preparedModule'
             , Tidepool.EffectSchema.ysSite site `Set.member` admitted
             ]
-      allSites <- either (fail . ("conflicting executable site metadata: " ++) . show) pure
-        (Tidepool.EffectSchema.mergeYieldSites
-          (yieldSites ++ concatMap projectedPackageYieldSites packageGroups ++ originalSites))
-      sealedSites <- forM allSites $ \site -> do
+      selectedMetadata <- case packageTarget of
+        Nothing -> pure []
+        Just output -> do
+          current <- forM (Set.toAscList (packageTargetCurrentHomeGroups output)) $ \(unit,name,ordinal) ->
+            let coordinate = (T.pack unit,T.pack name,Nothing,ordinal)
+            in maybe (fail ("current original group lacks producer-sealed metadata: " ++ show coordinate)) pure
+              (Map.lookup coordinate originalGroupMetadata)
+          previous <- forM (Map.keys (packageTargetPriorHomeImports output)) $ \coordinate -> do
+            inputs <- maybe (fail "prior original group demand lacks World stage inputs") pure prior
+            either fail pure (lookupStageGroupMetadata inputs coordinate)
+          pure (current ++ previous)
+      -- Local/package sites are sealed in this phase. Imported original sites
+      -- retain the exact interface witnesses sealed by their producing stage.
+      targetSites <- forM (yieldSites ++ concatMap projectedPackageYieldSites packageGroups) $ \site -> do
         witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
           maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
         pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
+      sealedSites <- either (fail . ("conflicting executable site metadata: " ++) . show) pure
+        (Tidepool.EffectSchema.mergeYieldSites (targetSites ++ concatMap snd selectedMetadata))
       terminals <- readIORef finalDependencySelections >>= maybe
         (fail "closed recovery lacks its dependency selection") pure . Map.lookup (projectionEntry context)
-      pure (PreparedArtifact target program bytes (constructors ++ originalConstructors) sealedSites
+      pure (PreparedArtifact target program bytes (constructors ++ concatMap fst selectedMetadata) sealedSites
         packageTarget terminals)
     finalResults <- forM targets $ \target -> do
       let entry = projectionEntry (contextFor target)

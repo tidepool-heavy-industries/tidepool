@@ -10,7 +10,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , PreparedPackageTarget, projectPreparedPackageTarget
   , packageTargetName, packageTargetProgram, packageTargetConstructors, packageTargetGroups
-  , packageTargetImports, packageTargetHomeImports, packageTargetPriorHomeImports, packageTargetOriginalImports
+  , packageTargetImports, packageTargetHomeImports, packageTargetCurrentHomeGroups, packageTargetPriorHomeImports, packageTargetOriginalImports
   , ProjectedPackageGroup, projectPreparedPackageGroups
   , projectedPackageModule, projectedPackageDefiningVersion, projectedPackageInterfaceSha256, projectedPackageInterfaceBody, projectedPackageEncoding
   , projectedPackageConstructors, projectedPackageYieldSites
@@ -24,7 +24,7 @@ module Tidepool.ExecutionProjection
   , rawOriginalProductOwner, rawOriginalProductBinders, rawOriginalProductDemands
   , rawProjectionObservation, observeRawOriginalGroupWork
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
-  , preparedModuleProductOutcomes, preparedModuleProductEncodings, preparedModuleProductOmissions, preparedModuleProductConstructors, preparedModuleProductYieldSites
+  , preparedModuleProductOutcomes, preparedModuleProductEncodings, preparedModuleProductOmissions, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedModuleProductGroupMetadata
   , closeUnavailableOriginalGroups, closeUnavailableOriginalModules
   , PreparedProjection
   , prepareProjection
@@ -740,6 +740,19 @@ preparedModuleProductYieldSites (PreparedModuleProducts outcomes) = do
   either (Left . InvalidPreparedIdentity . ("conflicting original site metadata: " <>) . Text.pack . show)
     Right (Effect.mergeYieldSites selected)
 
+-- | Keep the metadata at the same original-group boundary as its executable
+-- body. Aggregate validation still checks conflicts across the fresh inventory.
+preparedModuleProductGroupMetadata :: PreparedModuleProducts
+  -> Either ProjectionError (Map (Text, Text, Word) ([IssuedConstructor], [Effect.YieldSite]))
+preparedModuleProductGroupMetadata products@(PreparedModuleProducts outcomes) = do
+  _ <- preparedModuleProductConstructors products
+  _ <- preparedModuleProductYieldSites products
+  pure (Map.fromList
+    [ ((Text.pack (unitString (moduleUnit owner)), Text.pack (moduleNameString (moduleName owner)),
+          fromIntegral (projectedOriginalOrdinal (projectedGroupWire evidence))),
+        (projectedGroupConstructors evidence, projectedGroupYieldSites evidence))
+    | (owner, Right groups, _) <- outcomes, evidence <- groups ])
+
 -- | Find every projected original group that transitively imports an
 -- unavailable original binder. Dependency edges are identities emitted by
 -- actual 'GlobalDecl's; retained-generation imports are removed by the caller.
@@ -957,6 +970,7 @@ data PreparedPackageTarget = PreparedPackageTarget
   , packageTargetGroups :: [ProjectedPackageGroup]
   , packageTargetImports :: [SymbolIdentity]
   , packageTargetHomeImports :: [(Text, Text, Word, [SymbolIdentity])]
+  , packageTargetCurrentHomeGroups :: Set (String, String, Word)
   , packageTargetPriorHomeImports :: Map PriorHomeGroup [SymbolIdentity]
   -- These are this target's reached uses, including uses with no package leaves.
   -- The stage-wide acquisition is not an executable root for every target.
@@ -972,6 +986,9 @@ projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> Text
 projectPreparedPackageTarget env hostBindings targetName context homeProducts cached externalDemand originalImports
     home components reach = do
   let reachedHome = originalExternalHomeGroups externalDemand
+      currentHome = Set.intersection reachedHome (Set.fromList
+        [(unitString (moduleUnit owner), moduleNameString (moduleName owner), fromIntegral ordinal)
+        | (owner, groups) <- Map.toAscList homeProducts, ordinal <- Map.keys groups])
       priorHomeImports = originalExternalPriorHomeGroups externalDemand
       packageModules = concatMap preparedComponentModules components
       modules = home ++ packageModules
@@ -1076,7 +1093,7 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
         [ globalIdentity global
         | global <- programGlobals program
         , isPackageImport global ]
-  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports priorHomeImports originalImports)
+  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports currentHome priorHomeImports originalImports)
   where
     insertHomeImport known row@(unit,name,ordinal,identities) =
       case Map.lookup (unit,name,ordinal) known of

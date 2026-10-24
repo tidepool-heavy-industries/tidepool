@@ -25,10 +25,13 @@ module Tidepool.CompilerProducts
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , CurrentOriginalInventory, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
-  , currentReconciledOriginalProducts
+  , currentReconciledOriginalProducts, currentOriginalGroupMetadata, lookupStageGroupMetadata
   ) where
 
 import Tidepool.RequestCompletion (finishCompletion)
+import Tidepool.CheckedCell (sealCheckedTypeWitness)
+import Tidepool.ConstructorIdentity (IssuedConstructor)
+import qualified Tidepool.EffectSchema as Effect
 
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
@@ -98,7 +101,7 @@ import Tidepool.ExecutionEncode
   , projectedGroupEncodingInput )
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), PreparedModuleProducts, OriginalGroupOmission(..)
-  , preparedModuleProductEncodings, preparedModuleProductOmissions, resolveTextPackageUnit
+  , preparedModuleProductGroupMetadata, preparedModuleProductEncodings, preparedModuleProductOmissions, resolveTextPackageUnit
   , rawOriginalProductOwner
   , OriginalProjectionCache, newOriginalProjectionCache, projectCachedOriginalHomeModuleProducts
   , lookupCachedOriginalHomeModuleProducts
@@ -351,6 +354,7 @@ data StagedOriginalProducts = StagedOriginalProducts
 -- and local-source certificates stay in the same staged product above.
 data StageInputAdditions = StageInputAdditions
   !(Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)) !(Maybe CanonicalOriginalInputs)
+  !(Map.Map PriorHomeGroup ([IssuedConstructor], [Effect.YieldSite]))
 
 -- One live view binds current compilation and the actual immediate predecessor.
 -- Base acquisitions are borrowed; completed stages own only their additions.
@@ -421,8 +425,21 @@ lookupCompletedType (Just (CompletedWorldProducts _ staged previous _)) owner =
 
 lookupCompletedCanonical :: Maybe CompletedWorldProducts -> Module -> Maybe CanonicalOriginalInput
 lookupCompletedCanonical Nothing _ = Nothing
-lookupCompletedCanonical (Just (CompletedWorldProducts _ (StagedOriginalProducts _ _ _ _ (StageInputAdditions _ current)) previous _)) owner =
+lookupCompletedCanonical (Just (CompletedWorldProducts _ (StagedOriginalProducts _ _ _ _ (StageInputAdditions _ current _)) previous _)) owner =
   (current >>= (\inputs -> lookupCanonicalOriginalInput inputs owner)) <|> lookupCompletedCanonical previous owner
+
+-- A predecessor retains only its own groups. Different versions of the same
+-- module/group elsewhere in the chain neither satisfy nor conflict with demand.
+lookupStageGroupMetadata :: WorldStageInputs -> PriorHomeGroup
+  -> Either String ([IssuedConstructor], [Effect.YieldSite])
+lookupStageGroupMetadata (WorldStageInputs _ prior _ _ _ _ _) coordinate =
+  maybe (Left ("prior original group lacks producer-sealed metadata: " ++ show coordinate)) Right
+    (lookupCompletedGroupMetadata prior)
+  where
+    lookupCompletedGroupMetadata Nothing = Nothing
+    lookupCompletedGroupMetadata (Just (CompletedWorldProducts _
+        (StagedOriginalProducts _ _ _ _ (StageInputAdditions _ _ metadata)) previous _)) =
+      Map.lookup coordinate metadata <|> lookupCompletedGroupMetadata previous
 
 lookupStageType :: WorldStageInputs -> Module -> Maybe (ExactIfaceArtifact,ArtifactBytes)
 lookupStageType (WorldStageInputs _ prior _ current _ _ _) owner =
@@ -508,7 +525,7 @@ stagedOriginalOutputFiles (StagedOriginalProducts _ certificate bytes outputs _)
 -- This index retains type bytes, not native group or original authority.
 -- Those remain in the same stage's certified TargetCertificationContext.
 stagedTypeInterfaces :: StagedOriginalProducts -> Map.Map (String,String) (ExactIfaceArtifact,ArtifactBytes)
-stagedTypeInterfaces (StagedOriginalProducts _ _ _ _ (StageInputAdditions interfaces _)) = interfaces
+stagedTypeInterfaces (StagedOriginalProducts _ _ _ _ (StageInputAdditions interfaces _ _)) = interfaces
 
 -- A relocated view may borrow the already-issued type capture. Preserve its
 -- descriptor and compare semantic requirements and owned bytes, rather than
@@ -689,6 +706,7 @@ data CurrentOriginalInventory = CurrentOriginalInventory
     -- Kept with these immutable products through item output selection; both
     -- package demand and certification consume this same reconciliation.
   , currentReconciledOriginalProducts :: ReconciledOriginalProducts
+  , currentOriginalGroupMetadata :: Map.Map PriorHomeGroup ([IssuedConstructor], [Effect.YieldSite])
   , currentOriginalNames :: Map.Map Name SymbolIdentity
     -- Already admitted native originals are imports, never fresh emitted groups.
   , currentOriginalExternalNames :: Map.Map Name SymbolIdentity
@@ -749,12 +767,27 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
       priorNames <- maybe (pure Map.empty) (stagedOriginalBindings prepared)
         (preparedPriorOriginalProducts productContext)
       externalNames <- mergeOriginalBindings priorNames (pprOriginalBindings prepared)
+      groupMetadata <- either (fail . show) pure
+        (preparedModuleProductGroupMetadata (preparedProductInventory admittedContext))
+      let admittedGroups = Set.fromList
+            [(unit,name,fromIntegral (projectedOriginalOrdinal group))
+            | product <- products
+            , let (unit,name,_,groups) = moduleProductInput (originalProductEncoding product)
+            , group <- groups]
+      sealedMetadata <- fmap Map.fromList $ forM (Map.toAscList
+          (Map.restrictKeys groupMetadata admittedGroups)) $ \((unit,name,ordinal),(constructors,sites)) -> do
+        sealedSites <- forM sites $ \site -> do
+          witnesses <- forM (Effect.ysInputTypeWitnesses site) $ \witness ->
+            maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
+          pure site { Effect.ysInputTypeWitnesses = witnesses }
+        pure ((unit,name,Nothing,ordinal),(constructors,sealedSites))
       let inventory = CurrentOriginalInventory
             { currentOriginalAvailability = availability
             , currentOriginalProducts = products
             , currentOriginalPackages = packages
             , currentOriginalFinalized = finalized
             , currentReconciledOriginalProducts = reconciled
+            , currentOriginalGroupMetadata = sealedMetadata
             , currentOriginalNames = preparedTopIdentityBindings (preparedProductModules productContext)
             , currentOriginalExternalNames = Map.filter (`Set.member` preparedExternalBinders productContext)
                 externalNames
@@ -1217,7 +1250,10 @@ writeCertifiedProductsKeepingWithOriginals includes originals directory prepared
 writeCertifiedSegmentProducts
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult
   -> PreparedProductContext -> IO StagedOriginalProducts
-writeCertifiedSegmentProducts includes originals directory prepared context = do
+writeCertifiedSegmentProducts includes originals directory prepared rawContext = do
+  context <- admitCurrentOriginalProducts originals directory prepared rawContext
+  inventory <- maybe (fail "World stage lacks its admitted current original inventory") pure
+    (preparedCurrentOriginalInventory context)
   (certified,bytes,outputs) <- writeCertifiedProducts SegmentOriginalFacts True includes originals directory prepared (Just context) []
   let current = finalizedTypeInterfaces (certifiedFinalizedArtifacts certified)
       prior = case preparedStageInputs context of Just (WorldStageInputs _ previous _ _ _ _ _) -> previous; Nothing -> Nothing
@@ -1228,7 +1264,7 @@ writeCertifiedSegmentProducts includes originals directory prepared context = do
         (retainTypeInterfaceCaptures (Map.singleton key old) (Map.singleton key pair))) Map.empty (Map.toAscList candidates)
   let canonical = canonicalOriginalInputAdditions (lookupCompletedCanonical prior) (pprCanonicalOriginalInputs prepared)
   pure (StagedOriginalProducts certified (directory </> "certified-products.cbor") bytes outputs
-    (StageInputAdditions additions canonical))
+    (StageInputAdditions additions canonical (currentOriginalGroupMetadata inventory)))
 
 writeCertifiedSegmentItemProducts
   :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> PreparedPackageTarget -> IO FilePath
