@@ -2,13 +2,13 @@
 
 use super::*;
 use crate::session::resident::world_cell_test_support::{
-    InputRecipe, bootstrap_world_for, fixture_cell_recipe, plan_fixture_specification_for,
-    source_action_with_original,
+    bootstrap_world_for, fixture_cell_recipe, plan_fixture_specification_for,
+    source_action_with_original, InputRecipe,
 };
 use std::collections::BTreeSet;
 use tidepool_bridge_derive::FromHaskell;
-use tidepool_effect::EffectError;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler, Response};
+use tidepool_effect::EffectError;
 use tidepool_toolchain::artifact_inventory::{ArtifactKind, NativeGroupKey};
 
 #[path = "staged_world_acceptance_tests.rs"]
@@ -547,10 +547,8 @@ fn execute_semantic_cell(
                         "projected semantic bind must publish all original binders: {outcome:?}"
                     );
                 } else {
-                    assert!(
-                        matches!(outcome, crate::session::ResidentOutcome::Completed { .. }),
-                        "semantic native item must complete after dispatching its real effects: {outcome:?}"
-                    );
+                    assert!(matches!(outcome, crate::session::ResidentOutcome::Completed { .. }),
+                        "semantic native item must complete after dispatching its real effects: {outcome:?}");
                 }
             }
             assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
@@ -711,12 +709,10 @@ fn signed_template_helpers_execute_recursion_and_polymorphism_once() {
     assert_eq!(session.compiler_counts.lock().len(), 1);
     session.assert_no_compiler_since_last_effect();
     for name in ["replyValue", "recursiveValue", "integerStep", "doubleStep"] {
-        assert!(
-            session
-                .resident
-                .current_binding_in(session.public, name)
-                .is_some()
-        );
+        assert!(session
+            .resident
+            .current_binding_in(session.public, name)
+            .is_some());
     }
 }
 
@@ -937,9 +933,7 @@ fn effectful_observation_runs_once_and_retains_its_lazy_result() {
         .resident
         .public_visibility_snapshot_in(session.public)
         .unwrap();
-    let source = format!(
-        "demandedEffectfulObservation <- pure ({observation} ()); segmentRecord demandedEffectfulObservation"
-    );
+    let source = format!("demandedEffectfulObservation <- pure ({observation} ()); segmentRecord demandedEffectfulObservation");
     let error = session
         .execute("demand_effectful_observation", &source, 0)
         .unwrap_err();
@@ -1109,18 +1103,14 @@ fn render_history(seed: i8, operations: &[HistoryOperation], no_mr: bool) -> Ren
                 value = i64::from(*next) + 1;
                 current = fresh;
                 coverage.later_constraints += 1;
-                format!(
-                    "historyRead{index} <- pure (read \"{next}\")\nlet {current} = historyRead{index} + (1 :: Int)\n"
-                )
+                format!("historyRead{index} <- pure (read \"{next}\")\nlet {current} = historyRead{index} + (1 :: Int)\n")
             }
             HistoryOperation::Tuple(next, flag) => {
                 value = i64::from(*next) + i64::from(*flag);
                 current = fresh;
                 coverage.tuples += 1;
                 let flag = if *flag { "True" } else { "False" };
-                format!(
-                    "(historyTuple{index}, historyFlag{index}) <- pure (({next} :: Int), {flag})\nlet {current} = historyTuple{index} + (if historyFlag{index} then 1 else 0)\n"
-                )
+                format!("(historyTuple{index}, historyFlag{index}) <- pure (({next} :: Int), {flag})\nlet {current} = historyTuple{index} + (if historyFlag{index} then 1 else 0)\n")
             }
             HistoryOperation::Observe => {
                 expected.push(value);
@@ -1368,12 +1358,10 @@ fn one_four_eight_actions_use_one_completed_inference_segment() {
         assert_eq!(session.compiler_counts.lock().len(), count);
         session.assert_no_compiler_since_last_effect();
         for ordinal in 1..=count {
-            assert!(
-                session
-                    .resident
-                    .current_binding_in(session.public, &format!("count{count}Value{ordinal}"))
-                    .is_some()
-            );
+            assert!(session
+                .resident
+                .current_binding_in(session.public, &format!("count{count}Value{ordinal}"))
+                .is_some());
         }
     }
 }
@@ -1424,12 +1412,10 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
         tidepool_toolchain::declaration_join::ExportNamespace::Value
     );
     assert_eq!(declaration.head.occurrence, "historyCaptured");
-    assert!(
-        session
-            .resident
-            .current_binding_in(session.public, "historyValue0")
-            .is_some()
-    );
+    assert!(session
+        .resident
+        .current_binding_in(session.public, "historyValue0")
+        .is_some());
     session
         .execute("produced_type_reuse", "segmentRecord historyCaptured", 0)
         .unwrap();
@@ -1455,12 +1441,10 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
                     "preparing the new Original cannot execute its later consumer"
                 );
                 assert_eq!(program.items().len(), 3);
-                assert!(
-                    program.items()[1]
-                        .checked_item()
-                        .planned_declaration()
-                        .is_some()
-                );
+                assert!(program.items()[1]
+                    .checked_item()
+                    .planned_declaration()
+                    .is_some());
                 let unrelated = program.items()[0]
                     .native()
                     .expect("the unrelated binding is a real preceding staged value");
@@ -1767,12 +1751,10 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
                 ));
                 assert_eq!(session.observed(), [1, 2]);
                 assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
-                assert!(
-                    session
-                        .resident
-                        .current_binding_in(execution.private_scope(), "parkedValue")
-                        .is_some()
-                );
+                assert!(session
+                    .resident
+                    .current_binding_in(execution.private_scope(), "parkedValue")
+                    .is_some());
                 let repeated = tidepool_testing::with_settlement(|report| {
                     session.resident.resume_classified(rewrapped, (), report)
                 });
@@ -1791,12 +1773,10 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
                 assert!(matches!(aborted, Err(ResidentError::Run(_))));
                 assert_eq!(session.observed(), [1]);
                 assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
-                assert!(
-                    session
-                        .resident
-                        .freeze_private_execution(&execution)
-                        .is_err()
-                );
+                assert!(session
+                    .resident
+                    .freeze_private_execution(&execution)
+                    .is_err());
             }
             Scenario::FenceBeforeCommit => {
                 let fenced = Arc::new(std::sync::Mutex::new(None));
@@ -1842,26 +1822,20 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
                     "completed effects are not replayed or rolled back"
                 );
                 assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
-                assert!(
-                    session
-                        .resident
-                        .current_binding_in(execution.private_scope(), "parkedValue")
-                        .is_none()
-                );
-                assert!(
-                    session
-                        .resident
-                        .retained_checked_value_artifact(tidepool_repr::SessionModule::val(
-                            reservation.generation()
-                        ))
-                        .is_none()
-                );
-                assert!(
-                    session
-                        .resident
-                        .freeze_private_execution(&execution)
-                        .is_err()
-                );
+                assert!(session
+                    .resident
+                    .current_binding_in(execution.private_scope(), "parkedValue")
+                    .is_none());
+                assert!(session
+                    .resident
+                    .retained_checked_value_artifact(tidepool_repr::SessionModule::val(
+                        reservation.generation()
+                    ))
+                    .is_none());
+                assert!(session
+                    .resident
+                    .freeze_private_execution(&execution)
+                    .is_err());
             }
             Scenario::RevokedScope | Scenario::RevokedOwner => {
                 let expected = if matches!(scenario, Scenario::RevokedScope) {
@@ -1888,12 +1862,10 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
                 assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
                 // Refusal leaves the continuation parked; explicit retirement
                 // must release its captured owner without executing it.
-                assert!(
-                    session
-                        .resident
-                        .abort(hole.cont_id(), "retire refused owner".into())
-                        .is_err()
-                );
+                assert!(session
+                    .resident
+                    .abort(hole.cont_id(), "retire refused owner".into())
+                    .is_err());
             }
         }
         drop(hole);
@@ -2410,12 +2382,10 @@ fn compiler_issued_binding_survives_capture_and_releases_interface_and_root() {
     assert_eq!(retired.bindings_retired, 0);
     assert_eq!(retired.roots_released, 0);
     assert_eq!(roots(&session.resident), produced_roots);
-    assert!(
-        session
-            .resident
-            .current_binding_in(session.public, "indexedValue")
-            .is_none()
-    );
+    assert!(session
+        .resident
+        .current_binding_in(session.public, "indexedValue")
+        .is_none());
     assert_eq!(
         session
             .resident
@@ -2484,24 +2454,20 @@ fn compiler_issued_binding_survives_capture_and_releases_interface_and_root() {
     assert_eq!(retired.bindings_retired, 2);
     assert_eq!(retired.roots_released, 2);
     assert_eq!(roots(&session.resident), before_retirement - 2);
-    assert!(
-        session
-            .resident
-            .retained_checked_value_artifact(original.1)
-            .is_none()
-    );
+    assert!(session
+        .resident
+        .retained_checked_value_artifact(original.1)
+        .is_none());
     assert!(
         certificate_lifetime.upgrade().is_none(),
         "last binding releases the issued certificate"
     );
     assert!(session.resident.inject_val_modules().is_empty());
     assert!(session.resident.current_val_modules_in(consumer).is_empty());
-    assert!(
-        session
-            .resident
-            .current_binding_in(consumer, "indexedValue")
-            .is_none()
-    );
+    assert!(session
+        .resident
+        .current_binding_in(consumer, "indexedValue")
+        .is_none());
     assert_eq!(
         session.resident.retire_scope(consumer),
         crate::session::ScopeRetirement::default()
