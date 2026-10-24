@@ -9924,7 +9924,9 @@ pub(crate) struct DemandedWorldCompilerInputs {
     original_bindings: crate::certified_products::OriginalBindingSelection,
     support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     binding: WorldCompilationIdentity,
-    context: Arc<ExactDeclarationContext>,
+    // Keep the stage's selected TYPE inputs paired with their issuing context.
+    // The continuation's primary deliberately excludes these borrowed rows.
+    stage_primary: WorldPrimaryInputs,
     checked_values: crate::checked_cell::CheckedValueImportAuthority,
     program_support: Option<ProgramSourceSupport>,
 }
@@ -9943,7 +9945,7 @@ impl DemandedWorldCompilerInputs {
     }
 
     pub(crate) fn context(&self) -> &Arc<ExactDeclarationContext> {
-        &self.context
+        &self.stage_primary.context
     }
 
     pub(crate) fn checked_values(&self) -> &crate::checked_cell::CheckedValueImportAuthority {
@@ -9969,7 +9971,7 @@ impl DemandedWorldCompilerInputs {
 
     fn facts(&self) -> ProductInputFacts<'_> {
         ProductInputFacts::from_demand(
-            &self.context,
+            &self.stage_primary.context,
             self.compiler_inputs(),
             &self.groups,
             &self.checked_values,
@@ -12243,15 +12245,13 @@ impl WorldProgramContinuation {
         let checked_types = checked_values.selected_type_interfaces(&operation)?;
         // Visible checked values own TYPE inputs separately from the World's
         // primary declaration/source namespace. Only this stage borrows them.
-        let stage_inputs = if checked_types.is_empty() {
-            Arc::clone(&self.primary.inputs)
+        let stage_primary = if checked_types.is_empty() {
+            self.primary.clone()
         } else {
-            self.primary
-                .with_type_interfaces(&checked_types)?
-                .primary
-                .inputs
+            self.primary.with_type_interfaces(&checked_types)?.primary
         };
-        let demand = decoded.prefix_inputs(&stage_inputs)?;
+        let stage_inputs = stage_primary.inputs();
+        let demand = decoded.prefix_inputs(stage_inputs)?;
         // Prefix source/TYPE projection carries no new executable choice.
         // The empty owner belongs to that prefix, separately from initial.
         let prefix_groups = demand.certify_receipt_groups(
@@ -12311,13 +12311,13 @@ impl WorldProgramContinuation {
             original_bindings,
             support,
             binding: WorldCompilationIdentity::from_binding(&decoded.binding),
-            context: Arc::clone(&self.primary.context),
+            stage_primary,
             checked_values,
             program_support: prepared.prior.support.cloned(),
         };
         #[cfg(test)]
         stage_type_anchor_tests::assert_actual_type_anchors(
-            &stage_inputs,
+            inputs.stage_primary.inputs(),
             &inputs,
             &prefix_groups,
             receipt,
@@ -12497,18 +12497,22 @@ impl WorldProgramSegment {
                 )
             }),
             |owner| {
-                context
+                self.inputs
+                    .stage_primary
+                    .context()
                     .compiler_source_support()
                     .implementation_entry(owner)
             },
             |owner| {
                 self.inputs
-                    .context
+                    .context()
                     .compiler_source_support()
                     .implementation_entry(owner)
             },
             Some(produced),
         )?;
+        #[cfg(test)]
+        stage_type_anchor_tests::assert_actual_borrowed_type_admission(self, &fragment, produced);
         let fragment = admission.compiler();
         let imports = admission.dependencies().adjacency();
         let generated = self.source.generated_source_owner();

@@ -136,6 +136,89 @@ pub(super) fn assert_actual_type_anchors(
     eprintln!("actual World TYPE anchor controls: stage {}, prior {exercised}, omitted {exercised}, wrong facts {}; current structural checks {current_outputs}", actual.initial.stage().index(), exercised * 2);
 }
 
+/// Prior-request values enter source-fragment admission through the stage's
+/// checked TYPE borrow, independently of same-request produced outputs.
+/// These mutations observe the actual row; they issue no new input authority.
+pub(super) fn assert_actual_borrowed_type_admission(
+    segment: &WorldProgramSegment,
+    fragment: &Arc<crate::artifact_inventory::CompilerSourceSupport>,
+    produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+) {
+    let prior = segment
+        .inputs
+        .stage_primary
+        .context()
+        .compiler_source_support();
+    let primary = segment
+        .continuation
+        .primary
+        .context()
+        .compiler_source_support();
+    let candidate = fragment
+        .projection()
+        .snapshot_roles()
+        .iter()
+        .find_map(|(owner, _)| {
+            let entry = fragment.implementation_entry(owner)?;
+            (matches!(
+                &entry.payload,
+                ArtifactPayload::Interface(
+                    _,
+                    crate::artifact_inventory::JoinedInterfaceRole::ValueInterface
+                )
+            ) && !produced.matches_artifact(entry)
+                && primary.implementation_entry(owner).is_none()
+                && prior
+                    .implementation_entry(owner)
+                    .is_some_and(|held| held.descriptor.id == entry.descriptor.id))
+            .then(|| (owner.clone(), Arc::clone(entry)))
+        });
+    let Some((owner, entry)) = candidate else {
+        return;
+    };
+    let issue = |observed: &Arc<ArtifactEntry>, include_prior: bool| {
+        SourceAdmissionBundle::issue(
+            SourceAdmissionBoundary::WorldStage(segment.stage.index()),
+            Arc::clone(fragment),
+            segment.source.compiler_dependencies().clone(),
+            std::iter::once(&segment.source),
+            std::iter::once((&owner, observed)),
+            |requested| {
+                include_prior
+                    .then(|| prior.implementation_entry(requested))
+                    .flatten()
+            },
+            |requested| prior.implementation_entry(requested),
+            Some(produced),
+        )
+    };
+    let admitted =
+        issue(&entry, true).expect("the exact checked TYPE borrow admits its source fragment");
+    assert!(
+        !admitted.admits_lexical(&owner),
+        "a checked TYPE borrow grants no lexical source authority"
+    );
+    let missing = issue(&entry, false)
+        .err()
+        .expect("omitting the borrowed TYPE owner must refuse");
+    let mut changed = (*entry).clone();
+    changed.descriptor.id.0[0] ^= 1;
+    let changed = issue(&Arc::new(changed), true)
+        .err()
+        .expect("changed borrowed TYPE facts must refuse");
+    for error in [missing, changed] {
+        assert!(
+            matches!(error, CompileError::SourceAdmission(ref refusal)
+            if refusal.owner == owner
+                && refusal.boundary == SourceAdmissionBoundary::WorldStage(segment.stage.index())
+                && refusal.claim.is_none()
+                && refusal.reason == SourceAdmissionRefusal::ChangedSynthetic),
+            "the borrowed TYPE row must refuse at its exact source-admission boundary: {error:?}"
+        );
+    }
+    eprintln!("actual World borrowed TYPE source-admission controls: stage {}, positive 1, omitted 1, changed 1, lexical 0", segment.stage.index());
+}
+
 /// The named repeated-source fixture chooses an actually available prior group.
 /// These positive execution checks do not impose native demand on Source metadata.
 /// Raw observation mutations below do not create a new certificate or choice.
