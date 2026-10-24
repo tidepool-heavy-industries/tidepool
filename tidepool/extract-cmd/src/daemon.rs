@@ -1778,6 +1778,66 @@ pub(crate) fn preflight_until(
 /// finishing when `STOP` is sent.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// An owned STOP request is pumped alongside child retirement.
+pub(crate) struct StopRequest {
+    stream: UnixStream,
+    written: usize,
+}
+impl StopRequest {
+    pub(crate) fn start(path: &Path) -> io::Result<Self> {
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        if bytes.len() >= address.sun_path.len() {
+            return Err(io::Error::other("STOP socket path exceeds Unix limit"));
+        }
+        address.sun_family = libc::AF_UNIX as _;
+        for (out, byte) in address.sun_path.iter_mut().zip(bytes) {
+            *out = *byte as _;
+        }
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let stream = unsafe { UnixStream::from_raw_fd(fd) };
+        if unsafe {
+            libc::connect(
+                stream.as_raw_fd(),
+                (&address as *const libc::sockaddr_un).cast(),
+                std::mem::size_of::<libc::sockaddr_un>() as _,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { stream, written: 0 })
+    }
+    pub(crate) fn poll(&mut self) -> io::Result<bool> {
+        while self.written < STOP.len() {
+            match self.stream.write(&STOP[self.written..]) {
+                Ok(0) => return Err(io::Error::other("STOP write closed")),
+                Ok(n) => self.written += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(e) => return Err(e),
+            }
+        }
+        let mut ack = [0];
+        match self.stream.read(&mut ack) {
+            Ok(1) if ack == [STOP_ACK] => Ok(true),
+            Ok(_) => Err(io::Error::other("STOP acknowledgement missing or invalid")),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// Ask a running daemon at `socket_path` to stop gracefully: it finishes any
 /// request already accepted, retires its socket so queued clients rebind
 /// direct, and exits its accept loop. Idempotent: no daemon listening (the
@@ -2375,12 +2435,99 @@ fn validate_worker_footprint(workers: usize, budget_mb: u64) -> Result<(), Front
     Ok(())
 }
 
-pub(crate) fn serve(
+pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
+    serve_lifecycle(config, || Ok(prepared), None)
+}
+pub(crate) fn serve_owned(
+    config: &DaemonConfig,
+    owner: std::sync::Arc<crate::frontend::OwnedServiceStartup>,
+    prepare: impl FnOnce() -> Result<PreparedWorker, FrontendError>,
+) -> Result<u8, FrontendError> {
+    serve_lifecycle(config, prepare, Some(owner))
+}
+fn serve_lifecycle(
+    config: &DaemonConfig,
+    prepare: impl FnOnce() -> Result<PreparedWorker, FrontendError>,
+    owner: Option<std::sync::Arc<crate::frontend::OwnedServiceStartup>>,
+) -> Result<u8, FrontendError> {
+    let epoch = boot_epoch()?;
+    let mut socket = None;
+    let mut retirement = Vec::new();
+    let mut settlement = Vec::new();
+    let result = (|| {
+        if let Some(owner) = &owner {
+            owner
+                .send(crate::service::ServiceMessage::Boot { epoch })
+                .map_err(FrontendError::Io)?;
+        }
+        let prepared = prepare()?;
+        serve_inner(
+            config,
+            prepared,
+            epoch,
+            owner.as_ref(),
+            &mut socket,
+            &mut retirement,
+        )
+    })();
+    let socket_retired = match socket.take() {
+        Some(socket) => {
+            let result = socket.retire();
+            drop(socket);
+            match result {
+                Ok(()) => true,
+                Err(error) => {
+                    settlement.push(error);
+                    false
+                }
+            }
+        }
+        None => true,
+    };
+    let workers_retired = retirement.iter().all(|slot: &SlotRetirementOwner| {
+        slot.lock()
+            .map(|slot| slot.outstanding.is_empty())
+            .unwrap_or(false)
+    });
+    let mut failures: Vec<String> = result
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .into_iter()
+        .collect();
+    failures.extend(settlement.iter().map(ToString::to_string));
+    if let Some(owner) = &owner {
+        if let Err(error) = owner.send(crate::service::ServiceMessage::Terminal {
+            observation: crate::service::ServiceTerminal {
+                epoch,
+                workers_retired,
+                socket_retired,
+                failures,
+            },
+        }) {
+            settlement.push(FrontendError::Io(error));
+        }
+    }
+    if settlement.is_empty() {
+        result
+    } else {
+        Err(FrontendError::OwnedService {
+            action: result.map_err(Box::new),
+            settlement,
+            publication: vec![],
+            service: vec![],
+        })
+    }
+}
+fn serve_inner(
     config: &DaemonConfig,
     mut prepared: PreparedWorker,
+    epoch: [u8; 32],
+    owner: Option<&std::sync::Arc<crate::frontend::OwnedServiceStartup>>,
+    owned_socket: &mut Option<OwnedSocket>,
+    retirement: &mut Vec<SlotRetirementOwner>,
 ) -> Result<u8, FrontendError> {
     let producer = prepared.producer_identity()?;
-    let epoch = boot_epoch()?;
     if let Some(parent) = config.socket.parent() {
         fs::create_dir_all(parent).map_err(FrontendError::Io)?;
     }
@@ -2426,17 +2573,45 @@ pub(crate) fn serve(
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_REQUEST_DEADLINE);
     let executable = std::env::current_exe().map_err(FrontendError::Io)?;
-    let socket = OwnedSocket::bind(&config.socket)?;
-    let listener = &socket.listener;
+    *owned_socket = Some(OwnedSocket::bind(&config.socket)?);
+    let listener = &owned_socket.as_ref().unwrap().listener;
     if let Some(configuration) =
         crate::package_source::ConfiguredSource::from_environment().map_err(FrontendError::Io)?
     {
-        let owner = crate::frontend::read_owned_service_startup().map_err(FrontendError::Io)?;
-        prepared.service_source = Some(
-            configuration
-                .acquire(epoch, owner)
-                .map_err(FrontendError::Io)?,
-        );
+        let owner = owner.ok_or_else(|| {
+            FrontendError::Daemon("configured compiler source requires actual service owner".into())
+        })?;
+        match configuration.acquire(epoch, owner.clone()) {
+            Ok(source) => {
+                owner
+                    .send(crate::service::ServiceMessage::Acquisition {
+                        outcome: source.acquisition_observation(),
+                    })
+                    .map_err(FrontendError::Io)?;
+                prepared.service_source = Some(source);
+            }
+            Err(error) => {
+                let observation = error.observation().clone();
+                // The causal acquisition error survives carrier publication failure.
+                if let Err(publication) = owner.send(crate::service::ServiceMessage::Acquisition {
+                    outcome: observation,
+                }) {
+                    return Err(FrontendError::OwnedService {
+                        action: Err(Box::new(FrontendError::Io(error.error))),
+                        settlement: vec![],
+                        publication: vec![publication],
+                        service: vec![],
+                    });
+                }
+                return Err(FrontendError::Io(error.error));
+            }
+        }
+    } else if let Some(owner) = owner {
+        owner
+            .send(crate::service::ServiceMessage::Acquisition {
+                outcome: crate::service::AcquisitionObservation::NotConfigured,
+            })
+            .map_err(FrontendError::Io)?;
     }
     let run_id = config.run_id.as_deref().unwrap_or("standalone");
     tracing::info!(
@@ -2474,7 +2649,11 @@ pub(crate) fn serve(
         );
     }
 
-    let result = serve_workers(
+    retirement.extend(
+        (0..worker_count)
+            .map(|_| std::sync::Arc::new(std::sync::Mutex::new(SlotRetirement::default()))),
+    );
+    serve_workers(
         config,
         &prepared,
         listener,
@@ -2486,16 +2665,9 @@ pub(crate) fn serve(
         rotate_after,
         rss_ceiling_mb,
         request_deadline,
-    );
-
-    // Once accepted jobs settle, drain unaccepted clients with an explicit
-    // rejection before the endpoint closes.
-    let retired = socket.retire();
-    drop(socket);
-    match (result, retired) {
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-        (Ok(code), Ok(())) => Ok(code),
-    }
+        retirement,
+        owner.map(|o| o.as_ref()),
+    )
 }
 
 /// One connection handed from the accept thread to a free worker slot. Only
@@ -2990,6 +3162,8 @@ fn serve_workers(
     rotate_after: u64,
     rss_ceiling_mb: u64,
     request_deadline: Duration,
+    retirement: &[SlotRetirementOwner],
+    owner: Option<&crate::frontend::OwnedServiceStartup>,
 ) -> Result<u8, FrontendError> {
     let consumed_worker = prepared.consumed_worker_identity();
     listener.set_nonblocking(true).map_err(FrontendError::Io)?;
@@ -3017,10 +3191,11 @@ fn serve_workers(
             let ready_tx = ready_tx.clone();
             let resources = std::sync::Arc::clone(&resources);
             let dispatch = dispatch.clone();
+            let retirement = retirement[slot].clone();
             slots.push(scope.spawn(move || -> Result<Option<QuarantinedSlot>, FrontendError> {
                 let _dispatch = tracing::dispatcher::set_default(&dispatch);
                 let mut resident = ResidentSlot { resources: std::sync::Arc::clone(&resources), slot, quarantined: false };
-                let mut worker = Worker::spawn_in_slot(prepared, epoch, slot)?;
+                let mut worker=Worker::spawn_in_slot(prepared,epoch,slot,Some(retirement),owner.map(|owner|owner.deadline))?;
                 resources.observe_worker(slot, worker.instance);
                 tracing::info!(
                     run_id,
@@ -3200,12 +3375,16 @@ fn serve_workers(
 
         // Do not advertise the endpoint before at least one worker has started.
         let mut boot_receipts = Vec::with_capacity(worker_count);
-        let started = (0..worker_count).all(|_| match ready_rx.recv() {
-            Ok(receipt) => {
-                boot_receipts.push(receipt);
-                true
+        let started = (0..worker_count).all(|_| {
+            match ready_rx.recv_timeout(owner.map_or(IO_TIMEOUT, |owner| {
+                owner.deadline.saturating_duration_since(Instant::now())
+            })) {
+                Ok(receipt) => {
+                    boot_receipts.push(receipt);
+                    true
+                }
+                Err(_) => false,
             }
-            Err(_) => false,
         });
         let service_association_result = if started {
             prepared
@@ -3226,6 +3405,20 @@ fn serve_workers(
                 );
             }
         };
+        if started {
+            if let Some(owner) = owner {
+                let identity = crate::CompilerIdentity::daemon(*producer, consumed_worker, *epoch);
+                if let Err(error) = owner.send(crate::service::ServiceMessage::Ready {
+                    endpoint: identity.to_hex(),
+                }) {
+                    drop(job_txs);
+                    return collect_slot_retirement(
+                        Err(FrontendError::Io(error)),
+                        slots.into_iter().map(|slot| slot.join()),
+                    );
+                }
+            }
+        }
         let mut next_admission_id = AdmissionId(0);
         let outcome: Result<(), FrontendError> = 'accept: loop {
             if !started {
@@ -3473,35 +3666,32 @@ fn collect_slot_retirement(
         Item = std::thread::Result<Result<Option<QuarantinedSlot>, FrontendError>>,
     >,
 ) -> Result<u8, FrontendError> {
-    let mut first_error = outcome.err();
+    let mut errors: Vec<FrontendError> = outcome.err().into_iter().collect();
     let mut quarantined = Vec::new();
     for outcome in outcomes {
         match outcome {
             Ok(Ok(None)) => {}
             Ok(Ok(Some(owner))) => quarantined.push(owner),
-            Ok(Err(error)) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-            Err(_) => {
-                if first_error.is_none() {
-                    first_error = Some(FrontendError::Daemon(
-                        "compiler worker slot thread panicked".to_owned(),
-                    ));
-                }
-            }
+            Ok(Err(error)) => errors.push(error),
+            Err(_) => errors.push(FrontendError::Daemon(
+                "compiler worker slot thread panicked".into(),
+            )),
         }
     }
     if !quarantined.is_empty() {
         return Err(FrontendError::UnconfirmedWorkers {
             retained: RetainedDaemonWorkers(quarantined),
-            prior: first_error.map(Box::new),
+            prior: if errors.is_empty() {
+                None
+            } else {
+                Some(Box::new(FrontendError::DaemonSettlement(errors)))
+            },
         });
     }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(0),
+    if errors.is_empty() {
+        Ok(0)
+    } else {
+        Err(FrontendError::DaemonSettlement(errors))
     }
 }
 
@@ -4346,34 +4536,31 @@ pub(crate) struct WorkerAbortRetirement {
     pub(crate) worker: crate::endpoint::CompilerWorkerRetirement,
 }
 
-fn observe_aborted_worker(
-    mut observe: impl FnMut() -> io::Result<Option<std::process::ExitStatus>>,
-    deadline: Instant,
-) -> crate::endpoint::CompilerWorkerRetirement {
-    use crate::endpoint::{CompilerIoCause, CompilerWorkerRetirement};
-    loop {
-        match observe() {
-            Ok(Some(status)) => return CompilerWorkerRetirement::Reaped(status),
-            Err(error) => {
-                return CompilerWorkerRetirement::WaitUnconfirmed(CompilerIoCause::from(&error));
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                return CompilerWorkerRetirement::WaitUnconfirmed(CompilerIoCause::from(
-                    &io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "aborted compiler worker retirement remains unconfirmed",
-                    ),
-                ));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-        }
-    }
+use crate::process::observe_child_until as observe_aborted_worker;
+
+fn read_package_boot(stdout: &mut ChildStdout, deadline: Instant) -> io::Result<Vec<u8>> {
+    let mut bytes = vec![0; 8 + 5 * 32];
+    crate::process::read_exact_until(stdout, &mut bytes, deadline, || false)?;
+    Ok(bytes)
 }
 
-fn read_package_boot(stdout: &mut ChildStdout) -> io::Result<Vec<u8>> {
-    let mut bytes = vec![0; 8 + 5 * 32];
-    crate::process::read_exact_until(stdout, &mut bytes, Instant::now() + IO_TIMEOUT, || false)?;
-    Ok(bytes)
+#[derive(Default)]
+struct SlotRetirement {
+    current: Option<([u8; 32], u32)>,
+    outstanding: std::collections::BTreeSet<([u8; 32], u32)>,
+}
+type SlotRetirementOwner = std::sync::Arc<std::sync::Mutex<SlotRetirement>>;
+impl SlotRetirement {
+    fn register(&mut self, instance: [u8; 32], pid: u32) {
+        self.current = Some((instance, pid));
+        self.outstanding.insert((instance, pid));
+    }
+    fn reaped(&mut self, instance: [u8; 32], pid: u32) {
+        self.outstanding.remove(&(instance, pid));
+        if self.current == Some((instance, pid)) {
+            self.current = None;
+        }
+    }
 }
 
 pub(crate) struct Worker {
@@ -4384,29 +4571,36 @@ pub(crate) struct Worker {
     build_products_namespace: BuildProductsNamespace,
     package_boot: Option<crate::package_source::WorkerPackageBootReceipt>,
     _package_source: Option<std::sync::Arc<crate::package_source::ServicePackageSource>>,
+    service_retirement: Option<SlotRetirementOwner>,
 }
 
 impl Worker {
     pub(crate) fn spawn(prepared: &PreparedWorker) -> Result<Self, FrontendError> {
-        Self::spawn_in_namespace(prepared, BuildProductsNamespace::direct()?)
+        Self::spawn_in_namespace(prepared, BuildProductsNamespace::direct()?, None, None)
     }
 
     fn spawn_in_slot(
         prepared: &PreparedWorker,
         epoch: &[u8; 32],
         slot: usize,
+        retirement: Option<SlotRetirementOwner>,
+        startup_deadline: Option<Instant>,
     ) -> Result<Self, FrontendError> {
         let namespace =
             std::path::PathBuf::from(format!("daemon-{}", hex(epoch))).join(slot.to_string());
         Self::spawn_in_namespace(
             prepared,
             BuildProductsNamespace::new(namespace, BuildProductsTransport::Daemon),
+            retirement,
+            startup_deadline,
         )
     }
 
     fn spawn_in_namespace(
         prepared: &PreparedWorker,
         mut build_products_namespace: BuildProductsNamespace,
+        service_retirement: Option<SlotRetirementOwner>,
+        startup_deadline: Option<Instant>,
     ) -> Result<Self, FrontendError> {
         let mut command = prepared.command()?;
         let worker_instance = boot_epoch()?;
@@ -4459,6 +4653,12 @@ impl Worker {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         let mut child = command.spawn().map_err(FrontendError::Io)?;
+        if let Some(owner) = &service_retirement {
+            owner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .register(worker_instance, child.id());
+        }
         let stdin = child
             .stdin
             .take()
@@ -4475,10 +4675,14 @@ impl Worker {
             build_products_namespace,
             package_boot: None,
             _package_source: prepared.service_source.clone(),
+            service_retirement,
         };
         if let Some(source) = &prepared.service_source {
-            match read_package_boot(&mut worker.stdout)
-                .and_then(|bytes| source.check_boot(&bytes, &worker_instance))
+            match read_package_boot(
+                &mut worker.stdout,
+                startup_deadline.unwrap_or_else(|| Instant::now() + IO_TIMEOUT),
+            )
+            .and_then(|bytes| source.check_boot(&bytes, &worker_instance))
             {
                 Ok(receipt) => worker.package_boot = Some(receipt),
                 Err(error) => {
@@ -4519,6 +4723,8 @@ impl Worker {
                 self.build_products_namespace.path.clone(),
                 self.build_products_namespace.transport,
             ),
+            self.service_retirement.clone(),
+            None,
         )?;
         replacement.build_products_namespace.directories =
             std::mem::take(&mut self.build_products_namespace.directories);
@@ -4895,6 +5101,15 @@ impl Worker {
         Ok(())
     }
 
+    fn record_reaped(&self) {
+        if let Some(owner) = &self.service_retirement {
+            owner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reaped(self.instance, self.child.id());
+        }
+    }
+
     pub(crate) fn abort(&mut self) -> WorkerAbortRetirement {
         use crate::endpoint::CompilerIoCause;
         drop(self.stdin.take());
@@ -4906,6 +5121,9 @@ impl Worker {
             || self.child.try_wait(),
             Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
         );
+        if matches!(&worker, crate::CompilerWorkerRetirement::Reaped(_)) {
+            self.record_reaped();
+        }
         let retirement = WorkerAbortRetirement {
             termination,
             worker,
@@ -4924,6 +5142,7 @@ impl Worker {
             Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
         ) {
             crate::CompilerWorkerRetirement::Reaped(status) => {
+                self.record_reaped();
                 let scratch = self.build_products_namespace.cleanup_checked();
                 if status.success() {
                     scratch.map_err(|failures| FrontendError::ScratchCleanup { status, failures })
@@ -4963,6 +5182,7 @@ impl Drop for Worker {
             self.abort();
         }
         if matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.record_reaped();
             self.build_products_namespace.cleanup();
         } else {
             tracing::warn!(
@@ -5013,6 +5233,32 @@ mod tests {
         argv: &[OsString],
     ) -> Result<Output, DaemonError> {
         super::execute_transaction_request(transaction, cwd, &test_request(argv))
+    }
+
+    #[test]
+    fn slot_replacement_preserves_unresolved_prior_obligations() {
+        let mut slot = SlotRetirement::default();
+        slot.register([1; 32], 10);
+        slot.register([2; 32], 20);
+        slot.reaped([2; 32], 20);
+        assert_eq!(slot.current, None);
+        assert_eq!(slot.outstanding.len(), 1);
+        slot.reaped([1; 32], 11);
+        assert_eq!(
+            slot.outstanding.len(),
+            1,
+            "foreign process cannot settle prior obligation"
+        );
+        slot.reaped([1; 32], 10);
+        assert!(slot.outstanding.is_empty());
+        for n in 0..100 {
+            slot.register([3; 32], n);
+            slot.reaped([3; 32], n);
+        }
+        assert!(
+            slot.outstanding.is_empty(),
+            "successful rotations retain no history"
+        );
     }
 
     #[test]
@@ -5769,8 +6015,8 @@ mod tests {
         fs::write(&a, "alpha").unwrap();
         fs::write(&b, "beta").unwrap();
         let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
-        let mut first = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
-        let mut second = Worker::spawn_in_slot(&prepared, &[0; 32], 1).unwrap();
+        let mut first = Worker::spawn_in_slot(&prepared, &[0; 32], 0, None, None).unwrap();
+        let mut second = Worker::spawn_in_slot(&prepared, &[0; 32], 1, None, None).unwrap();
         let argv_a = products_request(&root, &a);
         let argv_b = products_request(&root, &b);
         let original = argv_a.clone();
@@ -5783,7 +6029,7 @@ mod tests {
         assert_eq!(out_b[2], "beta");
         assert_ne!(out_a[0], out_b[0]);
         assert_eq!(argv_a, original, "logical request must remain unchanged");
-        let mut independent = Worker::spawn_in_slot(&prepared, &[1; 32], 0).unwrap();
+        let mut independent = Worker::spawn_in_slot(&prepared, &[1; 32], 0, None, None).unwrap();
         let out = products_response(&mut independent, dir.path(), &argv_b);
         assert_ne!(out[0], out_a[0]);
         assert_ne!(out[0], out_b[0]);
@@ -5797,7 +6043,7 @@ mod tests {
     fn permanent_wait_error_quarantines_the_actual_service_without_respawn() {
         let dir = tempfile::tempdir().unwrap();
         let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
-        let mut worker = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
+        let mut worker = Worker::spawn_in_slot(&prepared, &[0; 32], 0, None, None).unwrap();
         let pid = worker.child.id();
         worker.child.kill().unwrap();
         let mut status = 0;
@@ -5884,7 +6130,8 @@ mod tests {
             assert_eq!(permit.slot, expected_slot);
             let marker = std::sync::Arc::new(AtomicBool::new(true));
             busy.push(std::sync::Arc::clone(&marker));
-            let worker = Worker::spawn_in_slot(&prepared, &[7; 32], expected_slot).unwrap();
+            let worker =
+                Worker::spawn_in_slot(&prepared, &[7; 32], expected_slot, None, None).unwrap();
             owners.push(QuarantinedSlot {
                 worker,
                 retirement: WorkerAbortRetirement {
@@ -5987,7 +6234,7 @@ mod tests {
         let input = dir.path().join("Expr.hs");
         fs::write(&input, "alpha").unwrap();
         let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
-        let mut worker = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
+        let mut worker = Worker::spawn_in_slot(&prepared, &[0; 32], 0, None, None).unwrap();
         let argv = products_request(&dir.path().join("products"), &input);
         let first = products_response(&mut worker, dir.path(), &argv);
         let second = products_response(&mut worker, dir.path(), &argv);
@@ -6054,8 +6301,8 @@ mod tests {
         fs::write(&input, "alpha").unwrap();
         let prepared = PreparedWorker::for_test(build_products_fixture().to_owned()).unwrap();
         let argv = products_request(&root, &input);
-        let mut first = Worker::spawn_in_slot(&prepared, &[0; 32], 0).unwrap();
-        let mut second = Worker::spawn_in_slot(&prepared, &[0; 32], 1).unwrap();
+        let mut first = Worker::spawn_in_slot(&prepared, &[0; 32], 0, None, None).unwrap();
+        let mut second = Worker::spawn_in_slot(&prepared, &[0; 32], 1, None, None).unwrap();
         let out_a = products_response(&mut first, dir.path(), &argv);
         let out_b = products_response(&mut second, dir.path(), &argv);
         let pid_a = first.child.id();
@@ -8291,6 +8538,7 @@ tidepool-reuse-error: witness failed\n";
             build_products_namespace: BuildProductsNamespace::direct().unwrap(),
             package_boot: None,
             _package_source: None,
+            service_retirement: None,
         };
         let (connection, client) = UnixStream::pair().unwrap();
         drop(client);
@@ -8341,6 +8589,7 @@ tidepool-reuse-error: witness failed\n";
                     build_products_namespace: BuildProductsNamespace::direct().unwrap(),
                     package_boot: None,
                     _package_source: None,
+                    service_retirement: None,
                 };
                 let (connection, client) = UnixStream::pair().unwrap();
                 let action_client = client.try_clone().unwrap();
@@ -8418,6 +8667,7 @@ tidepool-reuse-error: witness failed\n";
             build_products_namespace: BuildProductsNamespace::direct().unwrap(),
             package_boot: None,
             _package_source: None,
+            service_retirement: None,
         };
         let (connection, client) = UnixStream::pair().unwrap();
         let result = worker.request_while_connected(

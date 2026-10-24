@@ -10,7 +10,8 @@ use crate::request::{PRINT_WORKER_REQUEST_FLAG, WORKER_REQUEST_FLAG};
 use crate::{daemon, ExtractRequest};
 
 const WORKER_ENV: &str = "TIDEPOOL_EXTRACT_WORKER";
-const OWNED_COMPILER_ENV: [&str; 6] = [
+const OWNED_COMPILER_ENV: [&str; 7] = [
+    "TIDEPOOL_OWNED_COMPILER_SERVICE",
     crate::DAEMON_SOCKET_ENV,
     crate::REQUIRED_DAEMON_ENDPOINT_ENV,
     "TIDEPOOL_EXTRACT_NO_DAEMON",
@@ -51,7 +52,15 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         // Named binding: dropping the guard would close the trace appender's
         // flush channel before the daemon serves its first request.
         let _trace_guard = daemon::init_tracing(&config)?;
-        let result = prepare_worker().and_then(|worker| daemon::serve(&config, worker));
+        let result = if std::env::var_os("TIDEPOOL_OWNED_COMPILER_SERVICE").is_some() {
+            let owner =
+                std::sync::Arc::new(read_owned_service_startup().map_err(FrontendError::Io)?);
+            daemon::serve_owned(&config, owner.clone(), || {
+                PreparedWorker::prepare_until(owner.deadline)
+            })
+        } else {
+            prepare_worker().and_then(|worker| daemon::serve(&config, worker))
+        };
         match &result {
             Ok(_) => tracing::info!(
                 target: "tidepool_extract_cmd::daemon",
@@ -129,12 +138,26 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
 /// runner's daemon child. Ordinary workload children do not inherit either end.
 pub(crate) struct OwnedServiceStartup {
     directory: PathBuf,
-    _control: std::os::unix::net::UnixStream,
+    control: std::sync::Mutex<std::os::unix::net::UnixStream>,
+    operation: [u8; 32],
+    pub(crate) deadline: std::time::Instant,
 }
 
 impl OwnedServiceStartup {
     pub(crate) fn directory(&self) -> &Path {
         &self.directory
+    }
+    pub(crate) fn send(&self, message: crate::service::ServiceMessage) -> io::Result<()> {
+        let mut stream = self
+            .control
+            .lock()
+            .map_err(|_| io::Error::other("service carrier lock poisoned"))?;
+        let deadline = if matches!(&message, crate::service::ServiceMessage::Terminal { .. }) {
+            std::time::Instant::now() + std::time::Duration::from_secs(5)
+        } else {
+            self.deadline
+        };
+        crate::service::send(&mut stream, self.operation, message, deadline)
     }
 }
 
@@ -146,9 +169,6 @@ pub(crate) fn read_owned_service_startup() -> io::Result<OwnedServiceStartup> {
         return Err(io::Error::last_os_error());
     }
     let mut control = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
-    if unsafe { libc::fcntl(0, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
     let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
     let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     if unsafe {
@@ -169,7 +189,7 @@ pub(crate) fn read_owned_service_startup() -> io::Result<OwnedServiceStartup> {
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "compiler source startup carrier is not issued by its actual parent",
+            "service carrier is not issued by its actual parent",
         ));
     }
     let parent = std::fs::metadata(format!("/proc/{}/exe", peer.pid))?;
@@ -177,49 +197,58 @@ pub(crate) fn read_owned_service_startup() -> io::Result<OwnedServiceStartup> {
     if parent.dev() != current.dev() || parent.ino() != current.ino() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "compiler source startup parent is not its owning frontend",
+            "service parent differs from owning frontend",
         ));
     }
-    control.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-    let mut magic = [0; 8];
-    control.read_exact(&mut magic)?;
-    if &magic != b"TPSOWN01" {
+    // The duplicate is the sole control carrier. No worker/provider may inherit
+    // the original fd0 socket through Command::stdin inheritance.
+    let null = File::open("/dev/null")?;
+    if unsafe { libc::dup2(null.as_raw_fd(), 0) } < 0
+        || unsafe { libc::fcntl(0, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let initial = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut fixed = [0u8; 64];
+    crate::process::read_exact_until(&mut control, &mut fixed, initial, || false)?;
+    if &fixed[..8] != b"TPSOWN02" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "invalid compiler source startup carrier",
+            "unsupported service startup carrier",
         ));
     }
-    let mut start = [0; 8];
-    control.read_exact(&mut start)?;
-    if crate::process::process_start_ticks(peer.pid as u32)? != Some(u64::from_le_bytes(start)) {
+    let start = u64::from_le_bytes(fixed[8..16].try_into().unwrap());
+    if crate::process::process_start_ticks(peer.pid as u32)? != Some(start) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "compiler source startup parent incarnation differs",
+            "service parent incarnation differs",
         ));
     }
-    let mut length = [0; 4];
-    control.read_exact(&mut length)?;
-    let length = u32::from_le_bytes(length) as usize;
-    if length > 16 * 1024 * 1024 {
+    let deadline =
+        crate::service::instant_deadline(u64::from_le_bytes(fixed[16..24].try_into().unwrap()))?;
+    let operation = fixed[24..56].try_into().unwrap();
+    let length = u64::from_le_bytes(fixed[56..64].try_into().unwrap()) as usize;
+    if length > 4096 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "compiler source startup path exceeds control budget",
+            "service owner path exceeds control budget",
         ));
     }
     let mut bytes = vec![0; length];
-    control.read_exact(&mut bytes)?;
-    let path = String::from_utf8(bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let directory = PathBuf::from(&path);
-    if path.contains('\0') || !directory.is_absolute() || !directory.is_dir() {
+    crate::process::read_exact_until(&mut control, &mut bytes, deadline, || false)?;
+    use std::os::unix::ffi::OsStringExt;
+    let directory = PathBuf::from(OsString::from_vec(bytes));
+    if !directory.is_absolute() || std::fs::canonicalize(&directory)? != directory {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "invalid owned compiler source directory",
+            "service owner must be its canonical directory",
         ));
     }
     Ok(OwnedServiceStartup {
         directory,
-        _control: control,
+        control: std::sync::Mutex::new(control),
+        operation,
+        deadline,
     })
 }
 
@@ -256,23 +285,6 @@ impl OwnedSocketDirectory {
     }
 }
 
-impl Drop for OwnedSocketDirectory {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir(&self.0);
-    }
-}
-
-struct OwnedDaemonChild(std::process::Child);
-
-impl Drop for OwnedDaemonChild {
-    fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-        }
-        let _ = self.0.wait();
-    }
-}
-
 fn owned_timing_command(
     program: impl AsRef<OsStr>,
     profile: crate::CompilerTraceProfile,
@@ -282,14 +294,13 @@ fn owned_timing_command(
     command
 }
 
-/// One owner's preflight facts feed both the child and retained lifecycle.
+/// One preflight identity feeds the workload environment and retained report.
 struct OwnedCompilerEvidence<'a> {
     identity: &'a crate::CompilerIdentity,
     epoch: &'a [u8; 32],
     pid: u32,
     socket: &'a Path,
 }
-
 impl OwnedCompilerEvidence<'_> {
     fn configure_child(&self, command: &mut Command) {
         command
@@ -308,126 +319,259 @@ impl OwnedCompilerEvidence<'_> {
                 crate::endpoint::hex(self.epoch),
             );
     }
-
-    fn write_lifecycle(&self, report: &Path, state: OwnedLifecycleState<'_>) -> io::Result<()> {
-        let (confirmed, code, execution) = match state {
-            OwnedLifecycleState::Running => (false, None, "{\"status\":\"running\"}".to_owned()),
-            OwnedLifecycleState::Observed { child, cleanup } => {
-                let (code, execution) = match child {
-                    Ok(status) => {
-                        use std::os::unix::process::ExitStatusExt;
-                        (
-                            Some(exit_code(*status)),
-                            format!(
-                                "{{\"status\":\"exited\",\"success\":{},\"signal\":{}}}",
-                                status.success(),
-                                status
-                                    .signal()
-                                    .map_or("null".into(), |signal| signal.to_string()),
-                            ),
-                        )
-                    }
-                    Err(error) => (
-                        None,
-                        format!(
-                            "{{\"status\":\"status_failed\",\"kind\":{},\"message\":{}}}",
-                            json_string(&format!("{:?}", error.kind())),
-                            json_string(&error.to_string()),
-                        ),
-                    ),
-                };
-                (
-                    matches!(cleanup, OwnedCleanupState::Complete(Ok(()))),
-                    code,
-                    execution,
-                )
-            }
-        };
-        atomic_write_manifest(report, format!(
-            "{{\"schema\":1,\"producer\":{},\"endpoint\":{},\"daemon_epoch\":{},\"daemon_pid\":{},\"socket_path\":{},\"cleanup_confirmed\":{},\"exit_code\":{},\"execution\":{}}}\n",
-            json_string(&self.identity.producer_hex()), json_string(&self.identity.to_hex()),
-            json_string(&crate::endpoint::hex(self.epoch)), self.pid,
-            json_string(&self.socket.display().to_string()), confirmed,
-            code.map_or("null".into(), |value| value.to_string()), execution
-        ).as_bytes())
-    }
 }
 
-enum OwnedLifecycleState<'a> {
-    Running,
-    Observed {
-        child: &'a io::Result<ExitStatus>,
-        cleanup: OwnedCleanupState<'a>,
-    },
-}
-
-enum OwnedCleanupState<'a> {
-    Pending,
-    Complete(&'a Result<(), FrontendError>),
-}
-
-/// Observation precedes cleanup even when publishing that observation fails.
-struct OwnedChildLifecycle<'a> {
-    evidence: OwnedCompilerEvidence<'a>,
-    report: &'a Path,
-    outcome_path: &'a Path,
-    child: io::Result<ExitStatus>,
+/// Constructed before identity IO. Every subsequent normal exit runs finish.
+struct OwnedServiceRun {
+    report: crate::service::OwnedServiceReport,
+    daemon: Option<crate::process::OwnedChild>,
+    workload: Option<crate::process::OwnedChild>,
+    socket_directory: Option<OwnedSocketDirectory>,
+    pump: Option<crate::service::ServicePump>,
+    configuration: Option<std::sync::Arc<crate::package_source::ConfiguredSource>>,
     publication: Vec<io::Error>,
+    settlements: Vec<FrontendError>,
+    carrier_broken: bool,
 }
-
-impl<'a> OwnedChildLifecycle<'a> {
-    fn observe(
-        evidence: OwnedCompilerEvidence<'a>,
-        report: &'a Path,
-        outcome_path: &'a Path,
-        child: io::Result<ExitStatus>,
-    ) -> Self {
-        let mut owner = Self {
-            evidence,
-            report,
-            outcome_path,
-            child,
-            publication: Vec::new(),
+impl OwnedServiceRun {
+    fn publish(&mut self) {
+        if let Err(e) = self.report.publish() {
+            self.report.publication_failures.push(e.to_string());
+            self.publication.push(e);
+        }
+    }
+    fn poll(&mut self) {
+        if self.carrier_broken {
+            return;
+        }
+        if let Some(pump) = &mut self.pump {
+            if let Err(e) = pump.poll() {
+                self.carrier_broken = true;
+                self.settlements.push(FrontendError::Io(e));
+            }
+            self.report.daemon_epoch = pump.epoch().as_ref().map(|v| crate::endpoint::hex(v));
+            if let Some(acquisition) = pump.acquisition() {
+                if self.configuration.is_some()
+                    && matches!(
+                        acquisition,
+                        crate::service::AcquisitionObservation::NotConfigured
+                    )
+                {
+                    self.carrier_broken = true;
+                    self.settlements.push(FrontendError::Daemon(
+                        "configured service reported no source acquisition".into(),
+                    ));
+                } else {
+                    self.report.acquisition = acquisition.clone();
+                }
+            }
+            self.report.service_terminal = pump.terminal().cloned();
+        }
+    }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "bounded service-owner settlement and carrier observation"
+    )]
+    fn finish(mut self, action: Result<u8, FrontendError>) -> Result<u8, FrontendError> {
+        use crate::service::{Observation, ObservationStatus};
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        if let Some(mut child) = self.workload.take() {
+            if let Err(error) = child.0.kill() {
+                self.settlements.push(FrontendError::Io(error));
+            }
+            loop {
+                self.poll();
+                match child.observe() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Ok(None) => {
+                        self.settlements
+                            .push(FrontendError::Daemon("workload reap unconfirmed".into()));
+                        break;
+                    }
+                    Err(error) => {
+                        self.settlements.push(FrontendError::Io(error));
+                        break;
+                    }
+                }
+            }
+        }
+        self.publish();
+        let mut stop = if self.daemon.is_some() {
+            self.report
+                .socket_path
+                .as_ref()
+                .map(|socket| daemon::StopRequest::start(socket))
+        } else {
+            None
         };
-        owner.publish(OwnedCleanupState::Pending);
-        owner
-    }
-
-    fn publish(&mut self, cleanup: OwnedCleanupState<'_>) {
-        if let Err(error) = self.evidence.write_lifecycle(
-            self.report,
-            OwnedLifecycleState::Observed {
-                child: &self.child,
-                cleanup,
-            },
-        ) {
-            self.publication.push(error);
+        if let Some(Err(error)) = stop.as_ref() {
+            // A startup terminal may precede endpoint publication. Missing STOP
+            // is separate from the affirmative worker/socket terminal and reap.
+            if self.report.service_terminal.is_none() {
+                self.settlements.push(FrontendError::Daemon(format!(
+                    "compiler STOP failed: {error}"
+                )));
+            }
+            stop = None;
         }
-    }
-
-    fn finish(
-        mut self,
-        cleanup: impl FnOnce(bool) -> Result<(), FrontendError>,
-    ) -> Result<u8, FrontendError> {
-        let cleanup = cleanup(self.child.as_ref().is_ok_and(|status| status.success()));
-        self.publish(OwnedCleanupState::Complete(&cleanup));
-        if cleanup.is_ok() {
-            if let Err(error) = atomic_write_manifest(
-                self.outcome_path,
-                b"{\"schema\":1,\"cleanup\":{\"status\":\"confirmed\"}}\n",
-            ) {
-                self.publication.push(error);
+        let mut reaped = None;
+        while self.daemon.is_some() && std::time::Instant::now() < deadline {
+            self.poll();
+            if let Some(Ok(request)) = &mut stop {
+                match request.poll() {
+                    Ok(true) => stop = None,
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.settlements.push(FrontendError::Io(error));
+                        stop = None;
+                    }
+                }
+            }
+            match self.daemon.as_mut().unwrap().observe() {
+                Ok(Some(status)) => {
+                    reaped = Some(status);
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(e) => {
+                    self.settlements.push(FrontendError::Io(e));
+                    break;
+                }
             }
         }
-        if cleanup.is_ok() && self.publication.is_empty() {
-            if let Ok(status) = &self.child {
-                return Ok(exit_code(*status));
+        if stop.is_some() {
+            self.settlements.push(FrontendError::Daemon(
+                "compiler STOP acknowledgement unconfirmed".into(),
+            ));
+        }
+        if reaped.is_none() {
+            if let Some(child) = &mut self.daemon {
+                let (kill, reap) = child
+                    .terminate(std::time::Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT);
+                if let Err(e) = kill {
+                    self.settlements.push(FrontendError::Io(e));
+                }
+                match reap {
+                    crate::CompilerWorkerRetirement::Reaped(_) => {
+                        reaped = child.observe().ok().flatten();
+                    }
+                    crate::CompilerWorkerRetirement::WaitUnconfirmed(e) => self.settlements.push(
+                        FrontendError::Daemon(format!("compiler daemon reap unconfirmed: {e:?}")),
+                    ),
+                }
             }
         }
-        Err(FrontendError::OwnedRun {
-            child: self.child,
-            cleanup: cleanup.map_err(Box::new),
+        self.poll();
+        self.report.daemon_reap = match reaped.as_ref() {
+            Some(s) => Observation::exited(crate::service::ObservationStatus::Reaped, s.status()),
+            None if self.daemon.is_none() => {
+                Observation::state(crate::service::ObservationStatus::NotStarted)
+            }
+            None => Observation::state(crate::service::ObservationStatus::Unconfirmed),
+        };
+        let proof = if !self.carrier_broken {
+            self.pump
+                .as_ref()
+                .zip(reaped.as_ref())
+                .and_then(|(pump, reaped)| {
+                    pump.retirement(&self.report.owner_directory, reaped).ok()
+                })
+        } else {
+            None
+        };
+        if self.daemon.is_some() && proof.is_none() {
+            self.settlements.push(FrontendError::Daemon(
+                "complete matching worker/socket retirement not observed".into(),
+            ));
+        }
+        if let Some(configuration) = &self.configuration {
+            self.report.source_settlement = match proof.as_ref() {
+                Some(proof) => match configuration
+                    .release_after_complete(&self.report.owner_directory, proof)
+                {
+                    Ok(()) => Observation::state(crate::service::ObservationStatus::Settled),
+                    Err(e) => {
+                        let observation =
+                            Observation::failed(crate::service::ObservationStatus::Retained, &e);
+                        self.settlements.push(FrontendError::Io(e));
+                        observation
+                    }
+                },
+                None => Observation::failed(
+                    crate::service::ObservationStatus::Retained,
+                    "complete matching service retirement not observed",
+                ),
+            };
+        }
+        if let Some(directory) = &self.socket_directory {
+            if proof.is_some() {
+                if let Err(e) = directory.cleanup() {
+                    self.settlements.push(FrontendError::Io(e));
+                }
+            }
+        }
+        let cache = self.report.owner_directory.join("cache");
+        self.report.artifact_retention =
+            if action.as_ref().is_ok_and(|code| *code == 0) && proof.is_some() {
+                match std::fs::remove_dir_all(cache) {
+                    Ok(()) => Observation::state(crate::service::ObservationStatus::Removed),
+                    Err(e) => {
+                        let o = Observation::failed(crate::service::ObservationStatus::Failed, &e);
+                        self.settlements.push(FrontendError::Io(e));
+                        o
+                    }
+                }
+            } else {
+                Observation::state(crate::service::ObservationStatus::Retained)
+            };
+        if let Err(error) = &action {
+            self.report.action =
+                Observation::failed(crate::service::ObservationStatus::Failed, error);
+        }
+        if let crate::service::AcquisitionObservation::Acquired { publication, .. } =
+            &self.report.acquisition
+        {
+            self.report
+                .publication_failures
+                .extend(publication.iter().cloned());
+        }
+        let mut service = self
+            .report
+            .service_terminal
+            .as_ref()
+            .map(|terminal| terminal.failures.clone())
+            .unwrap_or_default();
+        if let Some(reaped) = &reaped {
+            if !reaped.status().success() {
+                service.push(format!("compiler daemon exited with {}", reaped.status()));
+            }
+        }
+        self.report.settlement_failures =
+            self.settlements.iter().map(ToString::to_string).collect();
+        self.report.complete = proof.is_some()
+            && self.settlements.is_empty()
+            && self.publication.is_empty()
+            && self.report.publication_failures.is_empty()
+            && matches!(
+                self.report.source_settlement.status,
+                ObservationStatus::Settled | ObservationStatus::NotConfigured
+            );
+        self.publish();
+        if self.settlements.is_empty()
+            && self.publication.is_empty()
+            && service.is_empty()
+            && self.report.complete
+        {
+            return action;
+        }
+        Err(FrontendError::OwnedService {
+            action: action.map_err(Box::new),
+            settlement: self.settlements,
             publication: self.publication,
+            service,
         })
     }
 }
@@ -549,172 +693,231 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
             "owned daemon requires its explicitly selected frontend, worker and deployment".into(),
         ));
     }
-    let direct = crate::ExtractCmd::new()
-        .map_err(|error| FrontendError::Io(error.into()))?
-        .bind_direct()
-        .map_err(|error| FrontendError::Io(error.source))?;
-    let expected = direct.identity().clone();
-    drop(direct);
     let root = Path::new(root);
     if !root.is_absolute() {
         return Err(FrontendError::Usage(
             "owned daemon root must be absolute and fresh".into(),
         ));
     }
+    let parent = std::fs::canonicalize(root.parent().ok_or_else(|| {
+        FrontendError::Usage("owned daemon root needs a parent directory".into())
+    })?)
+    .map_err(FrontendError::Io)?;
+    let root = parent.join(root.file_name().ok_or_else(|| {
+        FrontendError::Usage("owned daemon root needs a fresh directory name".into())
+    })?);
+    let mut operation = [0; 32];
+    File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut operation))
+        .map_err(FrontendError::Io)?;
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
         .mode(0o700)
-        .create(root)
+        .create(&root)
         .map_err(FrontendError::Io)?;
-    let outcome_path = root.join("owned-compiler-outcome.json");
-    atomic_write_manifest(
-        &outcome_path,
-        b"{\"schema\":1,\"cleanup\":{\"status\":\"unconfirmed\"}}\n",
-    )
-    .map_err(FrontendError::Io)?;
-    let cache = root.join("cache");
-    std::fs::create_dir(&cache).map_err(FrontendError::Io)?;
-    // Keep the socket within Unix path bounds independently of a long evidence path.
-    let socket_directory = OwnedSocketDirectory::create().map_err(FrontendError::Io)?;
-    let socket = socket_directory.0.join("compiler.sock");
-    let daemon_log = File::create(root.join("daemon.stderr.log")).map_err(FrontendError::Io)?;
-    let arguments = crate::persistent_daemon_arguments(
-        &socket,
-        &root.join("compiler.log"),
-        "isolated-qualification",
-        workers,
-        Some(crate::SESSION_WORKER_RSS_CEILING_MB),
-        allowances,
-    );
-    let mut command = owned_timing_command(&frontend, profile);
-    let (mut owner_control, daemon_control) = if service_configuration.is_some() {
-        let (owner, daemon) = std::os::unix::net::UnixStream::pair().map_err(FrontendError::Io)?;
-        (Some(owner), Some(daemon))
-    } else {
-        (None, None)
+    let mut owner = OwnedServiceRun {
+        report: crate::service::OwnedServiceReport::new(
+            root.clone(),
+            operation,
+            service_configuration.is_some(),
+        ),
+        daemon: None,
+        workload: None,
+        socket_directory: None,
+        pump: None,
+        configuration: service_configuration,
+        publication: vec![],
+        settlements: vec![],
+        carrier_broken: false,
     };
-    command
-        .args(&arguments)
-        .env("XDG_CACHE_HOME", &cache)
-        .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
-        .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
-        .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"))
-        .stdin(daemon_control.map_or_else(Stdio::null, |control| {
-            Stdio::from(std::os::fd::OwnedFd::from(control))
-        }))
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(daemon_log));
-    let mut daemon = OwnedDaemonChild(command.spawn().map_err(FrontendError::Io)?);
-    drop(command);
-    if let Some(control) = &mut owner_control {
+    owner.publish();
+    let action = (|| -> Result<u8, FrontendError> {
+        if !owner.publication.is_empty() {
+            return Err(FrontendError::Daemon(
+                "initial service evidence publication failed".into(),
+            ));
+        }
+        let direct = crate::ExtractCmd::new()
+            .map_err(|e| FrontendError::Io(e.into()))?
+            .bind_direct()
+            .map_err(|e| FrontendError::Io(e.source))?;
+        let expected = direct.identity().clone();
+        drop(direct);
+        let cache = root.join("cache");
+        std::fs::create_dir(&cache).map_err(FrontendError::Io)?;
+        owner.socket_directory = Some(OwnedSocketDirectory::create().map_err(FrontendError::Io)?);
+        let socket = owner
+            .socket_directory
+            .as_ref()
+            .unwrap()
+            .0
+            .join("compiler.sock");
+        owner.report.socket_path = Some(socket.clone());
+        let daemon_log = File::create(root.join("daemon.stderr.log")).map_err(FrontendError::Io)?;
+        let arguments = crate::persistent_daemon_arguments(
+            &socket,
+            &root.join("compiler.log"),
+            "isolated-qualification",
+            workers,
+            Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+            allowances,
+        );
+        let mut command = owned_timing_command(&frontend, profile);
+        let (mut owner_control, daemon_control) =
+            std::os::unix::net::UnixStream::pair().map_err(FrontendError::Io)?;
+        let absolute = crate::service::monotonic_nanos()
+            .map_err(FrontendError::Io)?
+            .saturating_add(30_000_000_000);
+        let deadline = crate::service::instant_deadline(absolute).map_err(FrontendError::Io)?;
+        command
+            .args(&arguments)
+            .env("TIDEPOOL_OWNED_COMPILER_SERVICE", "1")
+            .env("XDG_CACHE_HOME", &cache)
+            .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
+            .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
+            .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"))
+            .stdin(Stdio::from(std::os::fd::OwnedFd::from(daemon_control)))
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(daemon_log));
+        owner.daemon = Some(crate::process::OwnedChild(
+            command.spawn().map_err(FrontendError::Io)?,
+        ));
+        drop(command);
+        owner.report.daemon_pid = Some(owner.daemon.as_ref().unwrap().0.id());
+        owner.report.daemon_reap =
+            crate::service::Observation::state(crate::service::ObservationStatus::Pending);
+        owner.publish();
         use std::os::unix::ffi::OsStrExt;
         let bytes = root.as_os_str().as_bytes();
-        let count = u32::try_from(bytes.len())
-            .map_err(|_| FrontendError::Usage("owned source path exceeds framing".into()))?;
         let parent_start = crate::process::process_start_ticks(std::process::id())
             .map_err(FrontendError::Io)?
             .ok_or_else(|| {
-                FrontendError::Daemon("owned frontend incarnation unavailable".into())
+                FrontendError::Daemon("owning frontend incarnation unavailable".into())
             })?;
-        control
-            .write_all(b"TPSOWN01")
-            .and_then(|()| control.write_all(&parent_start.to_le_bytes()))
-            .and_then(|()| control.write_all(&count.to_le_bytes()))
-            .and_then(|()| control.write_all(bytes))
-            .and_then(|()| control.flush())
+        owner_control
+            .set_nonblocking(true)
             .map_err(FrontendError::Io)?;
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let binding = loop {
-        if let Some(status) = daemon.0.try_wait().map_err(FrontendError::Io)? {
-            return Err(FrontendError::Daemon(format!(
-                "owned compiler exited before readiness: {status}"
-            )));
-        }
-        if let Ok(binding) = daemon::preflight_until(&socket, deadline) {
-            break binding;
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(FrontendError::Daemon(
-                "owned compiler readiness timed out; direct fallback forbidden".into(),
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    };
-    let identity = binding.identity();
-    if identity.producer_bytes() != expected.producer_bytes()
-        || identity.consumed_worker_bytes() != expected.consumed_worker_bytes()
-    {
-        return Err(FrontendError::Daemon(
-            "owned compiler differs from selected direct producer".into(),
-        ));
-    }
-    let report = root.join("lifecycle.json");
-    let daemon_pid = daemon.0.id();
-    let evidence = OwnedCompilerEvidence {
-        identity: &identity,
-        epoch: &binding.epoch,
-        pid: daemon_pid,
-        socket: &socket,
-    };
-    evidence
-        .write_lifecycle(&report, OwnedLifecycleState::Running)
-        .map_err(FrontendError::Io)?;
-    let mut descendants =
-        crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?;
-    let mut child_command = owned_timing_command(program, profile);
-    evidence.configure_child(&mut child_command);
-    let child = child_command
-        .args(child_args)
-        .env(
-            "TIDEPOOL_PERFORMANCE_COMPILER_TRACE",
-            root.join("compiler.jsonl"),
-        )
-        .env("XDG_CACHE_HOME", &cache)
-        .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
-        .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
-        .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"))
-        .status();
-    let lifecycle = OwnedChildLifecycle::observe(evidence, &report, &outcome_path, child);
-    lifecycle.finish(|child_succeeded| {
-        descendants
-            .extend(crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?);
-        daemon::request_stop(&socket).map_err(|error| FrontendError::Daemon(error.to_string()))?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let stopped = loop {
-            if let Some(status) = daemon.0.try_wait().map_err(FrontendError::Io)? {
-                break status;
+        let mut header = b"TPSOWN02".to_vec();
+        header.extend_from_slice(&parent_start.to_le_bytes());
+        header.extend_from_slice(&absolute.to_le_bytes());
+        header.extend_from_slice(&operation);
+        header.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        header.extend_from_slice(bytes);
+        crate::process::write_all_until(&mut owner_control, &header, deadline)
+            .map_err(FrontendError::Io)?;
+        owner.pump = Some(
+            crate::service::ServicePump::new(
+                owner_control,
+                operation,
+                owner.daemon.as_ref().unwrap().0.id(),
+            )
+            .map_err(FrontendError::Io)?,
+        );
+        let binding = loop {
+            owner.poll();
+            if owner.carrier_broken {
+                return Err(FrontendError::Daemon(
+                    "owned compiler service carrier failed".into(),
+                ));
+            }
+            if let Some(terminal) = &owner.report.service_terminal {
+                return Err(FrontendError::Daemon(format!(
+                    "owned compiler terminated during startup: {:?}",
+                    terminal.failures
+                )));
+            }
+            if let Some(status) = owner
+                .daemon
+                .as_mut()
+                .unwrap()
+                .0
+                .try_wait()
+                .map_err(FrontendError::Io)?
+            {
+                return Err(FrontendError::Daemon(format!(
+                    "owned compiler exited before readiness: {status}"
+                )));
+            }
+            if owner.pump.as_ref().is_some_and(|p| p.endpoint().is_some()) {
+                if let Ok(binding) = daemon::preflight_until(&socket, deadline) {
+                    break binding;
+                }
             }
             if std::time::Instant::now() >= deadline {
                 return Err(FrontendError::Daemon(
-                    "owned compiler shutdown remains unconfirmed".into(),
+                    "owned compiler readiness deadline expired".into(),
                 ));
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         };
-        if !stopped.success() || socket.exists() {
-            return Err(FrontendError::Daemon(format!(
-                "owned compiler cleanup remains unconfirmed: {stopped}"
-            )));
+        let identity = binding.identity();
+        if identity.producer_bytes() != expected.producer_bytes()
+            || identity.consumed_worker_bytes() != expected.consumed_worker_bytes()
+            || owner.pump.as_ref().unwrap().epoch() != Some(binding.epoch)
+            || owner.pump.as_ref().unwrap().endpoint() != Some(identity.to_hex().as_str())
+        {
+            return Err(FrontendError::Daemon(
+                "owned compiler differs from exact service identity".into(),
+            ));
         }
-        for (pid, start) in descendants {
-            if crate::process::process_start_ticks(pid).map_err(FrontendError::Io)? == Some(start) {
-                return Err(FrontendError::Daemon(format!(
-                    "owned compiler descendant {pid} remains live or unreaped"
-                )));
+        owner.report.producer = Some(identity.producer_hex());
+        owner.report.endpoint = Some(identity.to_hex());
+        let evidence = OwnedCompilerEvidence {
+            identity: &identity,
+            epoch: &binding.epoch,
+            pid: owner.daemon.as_ref().unwrap().0.id(),
+            socket: &socket,
+        };
+        let mut child_command = owned_timing_command(program, profile);
+        evidence.configure_child(&mut child_command);
+        child_command
+            .args(child_args)
+            .env_remove("TIDEPOOL_OWNED_COMPILER_SERVICE")
+            .env(
+                "TIDEPOOL_PERFORMANCE_COMPILER_TRACE",
+                root.join("compiler.jsonl"),
+            )
+            .env("XDG_CACHE_HOME", &cache)
+            .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
+            .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
+            .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"));
+        owner.workload = Some(crate::process::OwnedChild(
+            child_command.spawn().map_err(FrontendError::Io)?,
+        ));
+        owner.report.action =
+            crate::service::Observation::state(crate::service::ObservationStatus::Running);
+        owner.publish();
+        loop {
+            owner.poll();
+            if owner.carrier_broken {
+                return Err(FrontendError::Daemon(
+                    "owned service control carrier failed during workload".into(),
+                ));
             }
+            if let Some(status) = owner
+                .workload
+                .as_mut()
+                .unwrap()
+                .0
+                .try_wait()
+                .map_err(FrontendError::Io)?
+            {
+                owner.report.action = crate::service::Observation::exited(
+                    crate::service::ObservationStatus::Exited,
+                    status,
+                );
+                owner.workload.take();
+                return Ok(exit_code(status));
+            }
+            if owner.report.service_terminal.is_some() {
+                return Err(FrontendError::Daemon(
+                    "compiler service terminated during workload".into(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        if let Some(configuration) = &service_configuration {
-            configuration
-                .release_after_complete(root, binding.epoch)
-                .map_err(FrontendError::Io)?;
-        }
-        socket_directory.cleanup().map_err(FrontendError::Io)?;
-        if child_succeeded {
-            std::fs::remove_dir_all(&cache).map_err(FrontendError::Io)?;
-        }
-        Ok(())
-    })
+    })();
+    owner.finish(action)
 }
 
 fn connect(args: &[OsString]) -> Result<u8, FrontendError> {
@@ -790,12 +993,15 @@ pub(crate) struct PreparedWorker {
 
 impl PreparedWorker {
     pub(crate) fn prepare() -> Result<Self, FrontendError> {
+        Self::prepare_until(std::time::Instant::now() + std::time::Duration::from_secs(300))
+    }
+    fn prepare_until(deadline: std::time::Instant) -> Result<Self, FrontendError> {
         let selection = std::fs::canonicalize(worker_bin()?).map_err(FrontendError::Io)?;
         let mut file = File::open(&selection).map_err(FrontendError::Io)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(FrontendError::Io)?;
         file.rewind().map_err(FrontendError::Io)?;
-        let ghc_libdir = resolve_ghc_libdir()?;
+        let ghc_libdir = resolve_ghc_libdir_until(deadline)?;
         let prepared = Self {
             file,
             selection,
@@ -803,7 +1009,7 @@ impl PreparedWorker {
             ghc_libdir,
             service_source: None,
         };
-        prepared.check_request_protocol()?;
+        prepared.check_request_protocol_until(deadline)?;
         Ok(prepared)
     }
 
@@ -814,18 +1020,22 @@ impl PreparedWorker {
     /// argv-parse rejection instead of naming the mismatch; an old worker
     /// that predates the probe flag (unknown flag, or any nonzero exit)
     /// is reported the same way, as speaking an older protocol.
-    fn check_request_protocol(&self) -> Result<(), FrontendError> {
+    fn check_request_protocol_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<(), FrontendError> {
         let mut command = self.command()?;
         command
             .arg(PRINT_WORKER_REQUEST_FLAG)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let worker_flag = match command.output() {
+        let worker_flag = match crate::process::output_until(&mut command, deadline) {
             Ok(output) if output.status.success() => std::str::from_utf8(&output.stdout)
                 .ok()
                 .map(|text| text.trim().to_owned()),
-            _ => None,
+            Ok(_) => None,
+            Err(error) => return Err(FrontendError::Io(error)),
         };
         if worker_flag.as_deref() == Some(WORKER_REQUEST_FLAG) {
             return Ok(());
@@ -977,15 +1187,13 @@ fn prepare_worker() -> Result<PreparedWorker, FrontendError> {
     PreparedWorker::prepare()
 }
 
-fn resolve_ghc_libdir() -> Result<OsString, FrontendError> {
+fn resolve_ghc_libdir_until(deadline: std::time::Instant) -> Result<OsString, FrontendError> {
     if let Some(value) = std::env::var_os("TIDEPOOL_GHC_LIBDIR") {
         return Ok(value);
     }
-    let output = crate::process::command("ghc")
-        .arg("--print-libdir")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(FrontendError::Io)?;
+    let mut command = crate::process::command("ghc");
+    command.arg("--print-libdir").stdin(Stdio::null());
+    let output = crate::process::output_until(&mut command, deadline).map_err(FrontendError::Io)?;
     if !output.status.success() {
         return Err(FrontendError::Io(io::Error::other(format!(
             "ghc --print-libdir exited with {}",
@@ -1277,9 +1485,11 @@ pub struct ScratchCleanupFailure {
 
 #[derive(Debug)]
 pub enum FrontendError {
-    OwnedRun {
-        child: io::Result<ExitStatus>,
-        cleanup: Result<(), Box<FrontendError>>,
+    DaemonSettlement(Vec<FrontendError>),
+    OwnedService {
+        service: Vec<String>,
+        action: Result<u8, Box<FrontendError>>,
+        settlement: Vec<FrontendError>,
         publication: Vec<io::Error>,
     },
     Usage(String),
@@ -1387,20 +1597,8 @@ impl std::fmt::Display for FrontendError {
                     WORKER_REQUEST_FLAG,
                 )
             }
-            Self::OwnedRun { child, cleanup, publication } => {
-                match child {
-                    Ok(status) => write!(f, "owned producer exited with {status}")?,
-                    Err(error) => write!(f, "owned producer status failed: {error}")?,
-                }
-                match cleanup {
-                    Ok(()) => f.write_str("; compiler cleanup confirmed")?,
-                    Err(error) => write!(f, "; compiler cleanup unconfirmed: {error}")?,
-                }
-                for error in publication {
-                    write!(f, "; outcome publication failed: {error}")?;
-                }
-                Ok(())
-            }
+            Self::OwnedService {action,settlement,publication,service}=>write!(f,"owned compiler action: {action:?}; service: {service:?}; settlement: {settlement:?}; publication: {publication:?}"),
+            Self::DaemonSettlement(errors)=>write!(f,"compiler daemon independent failures: {errors:?}"),
             Self::Io(error) => error.fmt(f),
         }
     }
@@ -1414,6 +1612,129 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV: Mutex<()> = Mutex::new(());
+
+    fn service_owner_fixture(
+        root: &Path,
+        daemon_code: u8,
+        failures: Vec<String>,
+    ) -> OwnedServiceRun {
+        use crate::service::{
+            AcquisitionObservation, Observation, ObservationStatus, ServiceMessage, ServiceTerminal,
+        };
+        let mut command = crate::process::command(
+            std::env::var_os("TIDEPOOL_TEST_BASH").expect("declared test Bash"),
+        );
+        command.args(["-c", &format!("exit {daemon_code}")]);
+        let daemon = crate::process::OwnedChild(command.spawn().unwrap());
+        let (read, mut write) = std::os::unix::net::UnixStream::pair().unwrap();
+        let pump = crate::service::ServicePump::new(read, [1; 32], daemon.0.id()).unwrap();
+        for message in [
+            ServiceMessage::Boot { epoch: [2; 32] },
+            ServiceMessage::Acquisition {
+                outcome: AcquisitionObservation::NotConfigured,
+            },
+            ServiceMessage::Terminal {
+                observation: ServiceTerminal {
+                    epoch: [2; 32],
+                    workers_retired: true,
+                    socket_retired: true,
+                    failures,
+                },
+            },
+        ] {
+            crate::service::send(
+                &mut write,
+                [1; 32],
+                message,
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        }
+        drop(write);
+        let mut report = crate::service::OwnedServiceReport::new(root.to_owned(), [1; 32], false);
+        let mut workload_command =
+            crate::process::command(std::env::var_os("TIDEPOOL_TEST_BASH").unwrap());
+        let status = workload_command.args(["-c", "exit 0"]).status().unwrap();
+        report.action = Observation::exited(ObservationStatus::Exited, status);
+        report.daemon_pid = Some(daemon.0.id());
+        std::fs::create_dir(root.join("cache")).unwrap();
+        OwnedServiceRun {
+            report,
+            daemon: Some(daemon),
+            workload: None,
+            socket_directory: None,
+            pump: Some(pump),
+            configuration: None,
+            publication: vec![],
+            settlements: vec![],
+            carrier_broken: false,
+        }
+    }
+    #[test]
+    fn owned_service_failure_survives_successful_workload_and_complete_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = service_owner_fixture(root.path(), 37, vec!["worker scratch refused".into()]);
+        let error = owner.finish(Ok(0)).unwrap_err();
+        match error {
+            FrontendError::OwnedService {
+                action,
+                service,
+                settlement,
+                publication,
+            } => {
+                assert_eq!(action.unwrap(), 0);
+                assert!(service
+                    .iter()
+                    .any(|cause| cause.contains("worker scratch refused")));
+                assert!(service.iter().any(|cause| cause.contains("37")));
+                assert!(settlement.is_empty());
+                assert!(publication.is_empty());
+            }
+            other => panic!("lost service failure: {other:?}"),
+        }
+        let report: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.path().join(crate::service::REPORT)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["action"]["exit_code"], 0);
+        assert_eq!(report["daemon_reap"]["exit_code"], 37);
+        assert_eq!(
+            report["complete"], true,
+            "settlement remains separate from daemon execution failure"
+        );
+    }
+    #[test]
+    fn owned_service_attempts_independent_cleanup_and_report_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let mut owner = service_owner_fixture(root.path(), 0, vec![]);
+        owner.socket_directory = Some(OwnedSocketDirectory(
+            root.path().join("missing-socket-owner"),
+        ));
+        std::fs::remove_dir(root.path().join("cache")).unwrap();
+        std::fs::write(root.path().join("cache"), b"retained artifact").unwrap();
+        std::fs::create_dir(root.path().join(crate::service::REPORT)).unwrap();
+        match owner.finish(Ok(0)).unwrap_err() {
+            FrontendError::OwnedService {
+                action,
+                settlement,
+                publication,
+                ..
+            } => {
+                assert_eq!(action.unwrap(), 0);
+                assert_eq!(
+                    settlement.len(),
+                    2,
+                    "independent socket and artifact cleanup both attempted"
+                );
+                assert_eq!(
+                    publication.len(),
+                    2,
+                    "publication failures cannot bypass retirement"
+                );
+            }
+            other => panic!("lost independent settlement: {other:?}"),
+        }
+    }
 
     #[test]
     fn daemon_rejects_unaccepted_requests_when_it_exits_on_an_error() {
@@ -1585,183 +1906,6 @@ mod tests {
             owned_daemon_run(&["/tmp/fresh".into(), "--other".into(), "test".into()]),
             Err(FrontendError::Usage(_))
         ));
-    }
-
-    fn owned_evidence_property_config() -> proptest::test_runner::Config {
-        let mut config = proptest::test_runner::Config::default();
-        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
-            config.failure_persistence = Some(Box::new(
-                proptest::test_runner::FileFailurePersistence::Direct(path),
-            ));
-        }
-        config
-    }
-
-    proptest::proptest! {
-        #![proptest_config(owned_evidence_property_config())]
-
-        #[test]
-        fn owned_measurement_handoff_preserves_identity_across_lifecycle_transitions(
-            producer in proptest::prelude::any::<[u8; 32]>(),
-            worker in proptest::prelude::any::<[u8; 32]>(),
-            epoch in proptest::prelude::any::<[u8; 32]>(),
-            pid in 1_u32..u32::MAX,
-            code in proptest::prelude::any::<u8>(),
-            suffix in "[a-z\"\\\\]{0,12}",
-            cleanup_fails in proptest::prelude::any::<bool>(),
-        ) {
-            let directory = tempfile::tempdir().unwrap();
-            let report = directory.path().join("lifecycle.json");
-            let socket = directory.path().join(format!("{suffix}.sock"));
-            let identity = crate::CompilerIdentity::daemon(producer, worker, epoch);
-            let evidence = OwnedCompilerEvidence { identity: &identity, epoch: &epoch, pid, socket: &socket };
-            let mut command = Command::new("unused-child");
-            for key in OWNED_COMPILER_ENV { command.env(key, "foreign-owner"); }
-            evidence.configure_child(&mut command);
-            evidence.write_lifecycle(&report, OwnedLifecycleState::Running).unwrap();
-            let outcome = directory.path().join("owned-compiler-outcome.json");
-            let child = crate::process::command(
-                std::env::var_os("TIDEPOOL_TEST_BASH").expect("declared test Bash is required"),
-            ).args(["-c", &format!("exit {code}")]).status();
-            let observed = OwnedChildLifecycle::observe(evidence, &report, &outcome, child);
-            let result = observed.finish(|succeeded| {
-                let before_cleanup: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
-                assert_eq!(before_cleanup["cleanup_confirmed"], false);
-                assert_eq!(before_cleanup["exit_code"], code);
-                assert_eq!(succeeded, code == 0);
-                if cleanup_fails {
-                    Err(FrontendError::Daemon("injected shutdown refusal".into()))
-                } else {
-                    Ok(())
-                }
-            });
-            proptest::prop_assert_eq!(result.is_ok(), !cleanup_fails);
-            let confirmed = !cleanup_fails;
-            let exit = Some(code);
-            let lifecycle: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
-            let environment: std::collections::BTreeMap<_, _> = command.get_envs()
-                .filter_map(|(key, value)| value.map(|value| (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())))
-                .collect();
-            proptest::prop_assert_eq!(lifecycle["daemon_pid"].as_u64(), Some(u64::from(pid)));
-            proptest::prop_assert_eq!(environment["TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID"].as_str(), pid.to_string());
-            for (key, field, expected) in [
-                ("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER", "producer", producer.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
-                ("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH", "daemon_epoch", epoch.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
-                (crate::DAEMON_SOCKET_ENV, "socket_path", socket.display().to_string()),
-            ] {
-                proptest::prop_assert_eq!(&environment[key], &expected);
-                proptest::prop_assert_eq!(lifecycle[field].as_str(), Some(expected.as_str()));
-            }
-            proptest::prop_assert_eq!(lifecycle["cleanup_confirmed"].as_bool(), Some(confirmed));
-            proptest::prop_assert_eq!(lifecycle["exit_code"].as_u64(), exit.map(u64::from));
-            proptest::prop_assert_eq!(lifecycle["endpoint"].as_str(), Some(environment[crate::REQUIRED_DAEMON_ENDPOINT_ENV].as_str()));
-        }
-    }
-
-    #[test]
-    fn owned_producer_failure_survives_cleanup_and_publication_failures() {
-        let directory = tempfile::tempdir().unwrap();
-        let report = directory.path().join("lifecycle.json");
-        let outcome = directory.path().join("owned-compiler-outcome.json");
-        let socket = directory.path().join("compiler.sock");
-        let epoch = [3; 32];
-        let identity = crate::CompilerIdentity::daemon([1; 32], [2; 32], epoch);
-        for fail_initial_publication in [false, true] {
-            let evidence = OwnedCompilerEvidence {
-                identity: &identity,
-                epoch: &epoch,
-                pid: 1,
-                socket: &socket,
-            };
-            if fail_initial_publication {
-                std::fs::create_dir(&report).unwrap();
-            }
-            let child = crate::process::command(
-                std::env::var_os("TIDEPOOL_TEST_BASH").expect("declared test Bash is required"),
-            )
-            .args(["-c", "exit 37"])
-            .status();
-            let owner = OwnedChildLifecycle::observe(evidence, &report, &outcome, child);
-            let mut cleanup_ran = false;
-            let result = owner.finish(|succeeded| {
-                cleanup_ran = true;
-                assert!(!succeeded);
-                if !fail_initial_publication {
-                    let observed: serde_json::Value =
-                        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
-                    assert_eq!(observed["exit_code"], 37);
-                    assert_eq!(observed["cleanup_confirmed"], false);
-                    std::fs::remove_file(&report).unwrap();
-                    std::fs::create_dir(&report).unwrap();
-                }
-                Err(FrontendError::Io(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "injected root release refusal",
-                )))
-            });
-            assert!(cleanup_ran, "publication failure must not bypass cleanup");
-            match result.unwrap_err() {
-                FrontendError::OwnedRun {
-                    child,
-                    cleanup,
-                    publication,
-                } => {
-                    assert_eq!(child.unwrap().code(), Some(37));
-                    assert!(
-                        matches!(*cleanup.unwrap_err(), FrontendError::Io(error) if error.kind() == io::ErrorKind::PermissionDenied)
-                    );
-                    assert_eq!(
-                        publication.len(),
-                        if fail_initial_publication { 2 } else { 1 }
-                    );
-                }
-                other => panic!("lost owned producer result: {other:?}"),
-            }
-            assert!(
-                !outcome.exists(),
-                "failed cleanup cannot publish confirmation"
-            );
-            std::fs::remove_dir(&report).unwrap();
-        }
-    }
-
-    #[test]
-    fn owned_status_failure_retains_independent_confirmed_cleanup() {
-        let directory = tempfile::tempdir().unwrap();
-        let report = directory.path().join("lifecycle.json");
-        let outcome = directory.path().join("owned-compiler-outcome.json");
-        let socket = directory.path().join("compiler.sock");
-        let epoch = [3; 32];
-        let identity = crate::CompilerIdentity::daemon([1; 32], [2; 32], epoch);
-        let evidence = OwnedCompilerEvidence {
-            identity: &identity,
-            epoch: &epoch,
-            pid: 1,
-            socket: &socket,
-        };
-        let child = crate::process::command(directory.path().join("missing-child")).status();
-        let result =
-            OwnedChildLifecycle::observe(evidence, &report, &outcome, child).finish(|succeeded| {
-                assert!(!succeeded);
-                Ok(())
-            });
-        match result.unwrap_err() {
-            FrontendError::OwnedRun {
-                child,
-                cleanup,
-                publication,
-            } => {
-                assert_eq!(child.unwrap_err().kind(), io::ErrorKind::NotFound);
-                assert!(cleanup.is_ok());
-                assert!(publication.is_empty());
-            }
-            other => panic!("lost owned producer status failure: {other:?}"),
-        }
-        let observed: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
-        assert_eq!(observed["execution"]["status"], "status_failed");
-        assert_eq!(observed["exit_code"], serde_json::Value::Null);
-        assert_eq!(observed["cleanup_confirmed"], true);
     }
 
     #[test]
@@ -2363,7 +2507,9 @@ fn main() {{
         assert!(status.success(), "protocol probe fixture failed to compile");
         PreparedWorker::for_test(binary)
             .unwrap()
-            .check_request_protocol()
+            .check_request_protocol_until(
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
             .unwrap();
     }
 
@@ -2398,7 +2544,11 @@ fn main() {
         assert!(rustc.success(), "fake worker failed to compile");
 
         let prepared = PreparedWorker::for_test(bin.clone()).unwrap();
-        let error = prepared.check_request_protocol().unwrap_err();
+        let error = prepared
+            .check_request_protocol_until(
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .unwrap_err();
         let message = error.to_string();
         assert!(
             message.contains(&format!("compiler worker {}", bin.display())),
@@ -2451,7 +2601,11 @@ fn main() {
         assert!(rustc.success(), "fake worker failed to compile");
 
         let prepared = PreparedWorker::for_test(bin.clone()).unwrap();
-        let error = prepared.check_request_protocol().unwrap_err();
+        let error = prepared
+            .check_request_protocol_until(
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("speaks an older protocol"), "{message}");
         assert!(
