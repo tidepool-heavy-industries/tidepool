@@ -148,6 +148,7 @@ class EvidenceControls(unittest.TestCase):
                     settlement = MODULE.settle_compiler_owner(owner, output, {"TIDEPOOL_EXTRACT": "/frontend"}, 1)
                 self.assertEqual(stop.call_args.args[0], ["/frontend", "--stop-daemon", "--socket", report["socket_path"]])
                 self.assertFalse(settlement["forced_kill"])
+                self.assertEqual(settlement["stop_control"]["status"], "exited")
                 self.assertEqual(settlement["stop_control"]["compiler_service"]["status"], "incomplete")
                 self.assertEqual(settlement.get("owner_forced_termination", False), stop_code != 0)
                 if stop_code:
@@ -166,6 +167,7 @@ class EvidenceControls(unittest.TestCase):
             stop.assert_not_called()
             owner.terminate.assert_called_once()
             self.assertTrue(settlement["owner_forced_termination"])
+            self.assertEqual(settlement["stop_control"]["status"], "unavailable")
             self.assertEqual(settlement["stop_control"]["compiler_service"]["status"], "unknown")
 
     def test_actual_intersection_and_reserved_slot(self):

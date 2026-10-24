@@ -133,8 +133,9 @@ def settle_compiler_owner(owner, output, environment, grace=90):
         if not isinstance(socket, str) or not Path(socket).is_absolute():
             raise ValueError("private compiler service socket is not absolute")
         argv = [environment["TIDEPOOL_EXTRACT"], "--stop-daemon", "--socket", socket]
+        control.update(status="unknown", argv=argv)
         result = subprocess.run(argv, env=environment, timeout=30, capture_output=True)
-        control.update(argv=argv, exit_code=result.returncode,
+        control.update(status="exited", exit_code=result.returncode,
                        stdout=result.stdout.decode(errors="replace"),
                        stderr=result.stderr.decode(errors="replace"))
         if result.returncode != 0:
