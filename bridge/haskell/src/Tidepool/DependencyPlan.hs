@@ -21,8 +21,7 @@ module Tidepool.DependencyPlan
 
 import Control.Exception (Exception, throwIO)
 import Control.Monad (foldM, forM_, replicateM, unless, when)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar, modifyMVar_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.List (sortOn)
@@ -95,22 +94,21 @@ data DependencyTerminal = DependencyTerminal !DependencyOrigin !NativeOriginalUs
 -- Compiler tasks share this operation's SOURCE-only borrow. The basis gate
 -- covers discovery through publication; lock order is basis then transport.
 data CompilerDependencyBasis = CompilerDependencyBasis !SourceDemandBorrow
-  !(MVar ()) !(IORef (Map.Map NativeOriginalUse SourceDependencyReply))
+  !(MVar (Map.Map NativeOriginalUse SourceDependencyReply))
 data FrozenDependencyBasis = FrozenDependencyBasis [DependencyTerminal]
   (Map.Map SymbolIdentity (Set.Set ((BS.ByteString,BS.ByteString),Word64)))
 
 newCompilerDependencyBasis :: NativeDemandExchange -> Word64 -> IO CompilerDependencyBasis
 newCompilerDependencyBasis exchange stage = do
   borrowed <- borrowSourceDemand exchange stage
-  CompilerDependencyBasis borrowed <$> newMVar () <*> newIORef Map.empty
+  CompilerDependencyBasis borrowed <$> newMVar Map.empty
 
 captureSourceDependencies :: CompilerDependencyBasis -> [NativeOriginalUse] -> IO ()
-captureSourceDependencies (CompilerDependencyBasis exchange gate state) uses = withMVar gate $ \_ -> do
-  known <- readIORef state
+captureSourceDependencies (CompilerDependencyBasis exchange state) uses = modifyMVar_ state $ \known -> do
   let pending = Set.toAscList (Set.fromList uses `Set.difference` Map.keysSet known)
-  unless (null pending) $ do
+  if null pending then pure known else do
     reply <- exchangeSourceDependencies exchange (sourceDependencyQuery pending)
-    writeIORef state (Map.union known reply)
+    pure (Map.union known reply)
 
 sourceTerminals :: Map.Map NativeOriginalUse SourceDependencyReply -> [DependencyTerminal]
 sourceTerminals replies = [DependencyTerminal SourceDefinition use occurrence
@@ -124,9 +122,9 @@ nativeDependencyTerminals replies uses = fmap concat $ mapM select (Set.toAscLis
       Just reply -> pure [DependencyTerminal NativeOriginal use occurrence | occurrence <- nativeDependencyRetained reply]
 
 freezeDependencyBasis :: CompilerDependencyBasis -> IO FrozenDependencyBasis
-freezeDependencyBasis (CompilerDependencyBasis _ gate state) = withMVar gate $ \_ -> do
-  terminals <- sourceTerminals <$> readIORef state
-  let choices = Map.fromListWith Set.union
+freezeDependencyBasis (CompilerDependencyBasis _ state) = withMVar state $ \known -> do
+  let terminals = sourceTerminals known
+      choices = Map.fromListWith Set.union
         [(identity,Set.singleton (binding,generation))
           | DependencyTerminal _ _ (RetainedOccurrence _ _ binding identity generation) <- terminals]
   pure (FrozenDependencyBasis terminals choices)

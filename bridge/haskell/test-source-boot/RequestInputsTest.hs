@@ -6,7 +6,7 @@ module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifa
 
 import Tidepool.RequestCompletion (finishCompletion, captureCompletion, completionResult, completionFailures, completionAsync, BodyOutcome(..), CleanupStage(CompilerScopeRestore), cleanupStage, cleanupException)
 import Tidepool.WorkerServer (runWorkerLoop, WorkerResponse(..), requireNativeDemandOwner)
-import Tidepool.DependencyPlan (newCompilerDependencyBasis, captureSourceDependencies, freezeDependencyBasis, frozenDependencyGenerations)
+import Tidepool.DependencyPlan (newCompilerDependencyBasis, captureSourceDependencies, freezeDependencyBasis, frozenDependencyGenerations, NativePreparationFailure(..))
 import Tidepool.Identity (nameSymbolIdentity)
 
 import Control.Exception (AsyncException(ThreadKilled), Exception, IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try, finally, mask)
@@ -112,8 +112,8 @@ import Tidepool.ExactScope
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readPackageInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation
-  , prepareWorldCell, commitPreparedWorldDependencies, preparedCompilationResult
-  , preparedCompilationWorldInputs, prepareCompilationOriginals)
+  , prepareWorldCell, commitPreparedWorldDependencies
+  , preparedCompilationWorldInputs)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import Tidepool.ExtractRequest
   ( AdmittedWorkerRequest, admitWorkerRequest, WorkerRequest, ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
@@ -2368,8 +2368,8 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
     withRootedCompilerEnvironment worldDirectory $ do
       let requestedCounters =
             [("world.cell.source_frontends.main:" ++ name,1) | name <- ["CacheEntry","CacheEven","CacheOdd"]]
-            ++ [("world.cell.source_frontends.main:WorldCancellationNames",2)
-              ,("world.cell.admission_parses",15)
+            ++ [("world.cell.source_frontends.main:WorldCancellationNames",3)
+              ,("world.cell.admission_parses",16)
               -- Recovery has a separate finite observation budget for this
               -- fixed staged fixture; overflow refuses incomplete evidence.
               ,("world.cell.prior_source_preparations",256)]
@@ -3030,6 +3030,25 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
               && not (T.null fromFault) && not (null beforeCounts) && not (null afterCounts)
               && all (== last beforeCounts) afterCounts)
             (fail "cancelled expression plan lost its settlement observations or committed a source module")
+          nativeFired <- newIORef False
+          let nativeCause = "injected native load failure at WorldCancellationNames frontend"
+          (nativeFailure,nativeLog) <- captureDiagnostics $ runScope (pure ()) $ \compiler -> do
+            acquire compiler
+            try (withDiagnosticCountFault "world.cell.source_frontends.main:WorldCancellationNames" nativeFired
+              (throwIO (NativeReplyCorrupt nativeCause)) (issueCancellation compiler))
+              :: IO (Either SomeException BS.ByteString)
+          hPutStrLn stderr nativeLog
+          nativeReached <- readIORef nativeFired
+          unless nativeReached (fail "native load fault did not reach the fresh GHC frontend")
+          case nativeFailure of
+            Left failure -> do
+              unless (case fromException failure of
+                  Just (NativeReplyCorrupt actual) -> actual == nativeCause
+                  _ -> False)
+                (fail ("GHC load lost its exact native failure: " ++ show failure))
+              unless (isNothing (sourceFailureDiagnostics failure))
+                (fail "native load failure was classified as a source diagnostic")
+            Right _ -> fail "native load fault completed successfully"
           -- Recovery opens a fresh phase; the poisoned phase is never retried.
           (_,retryLog) <- captureDiagnostics $
             runScope (pure ()) $ \compiler -> acquire compiler >> void (issueCancellation compiler)
@@ -3048,13 +3067,13 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
       unless (sum priorPreparations > 0)
         (fail "SOURCE history did not prepare its newly demanded prior source body")
       cancellationFrontends <- observed "world.cell.source_frontends.main:WorldCancellationNames"
-      unless (cancellationFrontends == [1,1])
+      unless (cancellationFrontends == [1,1,1])
         (fail ("cancelled expression plan published its pending captured source preparation: frontends="
           ++ show cancellationFrontends ++ "; cancellation/retry/publication=" ++ show outcome
           ++ "; globalCaptureTruncated=" ++ show ("[compiler diagnostics truncated at 4 MiB]" `isInfixOf` diagnostics)))
       admissionParses <- observed "world.cell.admission_parses"
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 15 1)
+      unless (admissionParses == replicate 16 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 

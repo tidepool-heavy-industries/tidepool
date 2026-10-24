@@ -4512,6 +4512,20 @@ instance Show CanonicalFrontendFailure where
 
 instance Exception CanonicalFrontendFailure
 
+data CanonicalLoadFailure
+  = CanonicalLoadFrontendFailure CanonicalFrontendFailure
+  | CanonicalLoadNativeFailure NativePreparationFailure
+
+retainCanonicalLoadFailure :: CanonicalLoadFailure -> Maybe CanonicalLoadFailure -> Maybe CanonicalLoadFailure
+retainCanonicalLoadFailure incoming previous = case (incoming,previous) of
+  (_,Nothing) -> Just incoming
+  (CanonicalLoadNativeFailure _,Just (CanonicalLoadFrontendFailure _)) -> Just incoming
+  _ -> previous
+
+throwCanonicalLoadFailure :: CanonicalLoadFailure -> IO a
+throwCanonicalLoadFailure (CanonicalLoadFrontendFailure failure) = throwIO failure
+throwCanonicalLoadFailure (CanonicalLoadNativeFailure failure) = throwIO failure
+
 -- The interpreter backend completes the same partial interface and tidy Core.
 -- This handoff exists only between PostTc and Backend in one load operation.
 data PendingFinalization = PendingFinalization
@@ -5713,16 +5727,18 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           worldOriginalReferenceFor facts owner
         nativeCanonical summary = isJust (canonicalOriginalFor summary)
           && isJust (nativeReference (ms_mod summary))
-        nativeOriginalInputs =
-          [(ms_mod summary,hm_iface (canonicalOriginalHome input),reference) | summary <- sourceOrder
-            , input <- maybe [] pure (canonicalOriginalFor summary)
+        nativeOriginalInputs = Map.fromListWith Set.union $
+          [(ms_mod summary,Set.singleton reference) | summary <- sourceOrder
+            , isJust (canonicalOriginalFor summary)
             , reference <- maybe [] pure (nativeReference (ms_mod summary))]
-          ++ [(mi_module iface,iface,reference)
+          ++ [(mi_module iface,Set.singleton reference)
              | WorldSourceInputBasis _ _ _ _ _ imports _ <- maybe [] pure (pvWorldSources variant)
              , entry <- worldImportEntries imports
              , let iface = worldTypeEntryInterface entry
              , reference <- maybe [] pure (nativeReference (mi_module iface))]
-        uniqueReference name references = case Set.toAscList (Set.fromList references) of
+        referencesForName name = maybe Set.empty
+          (\owner -> Map.findWithDefault Set.empty owner nativeOriginalInputs) (nameModule_maybe name)
+        uniqueReference name references = case Set.toAscList references of
           [] -> pure Nothing
           [reference] -> pure (Just reference)
           _ -> throwIO (OriginalNativeNameConflict name)
@@ -5730,9 +5746,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           -- Original association follows the defining Name. A facade export
           -- cannot substitute its own Original for a package-backed name;
           -- absent defining custody leaves the symbol on the package path.
-          uniqueReference name
-            [reference | (owner,_,reference) <- nativeOriginalInputs
-              , nameModule_maybe name == Just owner]
+          uniqueReference name (referencesForName name)
         -- Observe actual Names on both compilation routes and warm reuse.
         -- This is a bounded census, not an acquisition: even conflicting or
         -- subsequently dead uses must not change admission while tracing.
@@ -5751,14 +5765,13 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             [("phase",LogText phase),("owner",LogText ownerKey)
             ,("identifier_count",LogInteger (fromIntegral (Map.size identifiers)))
             ,("identifiers_omitted",LogInteger (fromIntegral (max 0 (Map.size identifiers - 64))))
-            ,("native_input_count",LogInteger (fromIntegral (length nativeOriginalInputs)))
+            ,("native_input_count",LogInteger (fromIntegral (sum (map Set.size (Map.elems nativeOriginalInputs)))))
             ,("native_input_sample",LogText (show (take 16
                 [(unitString (moduleUnit inputOwner),moduleNameString (moduleName inputOwner),reference)
-                | (inputOwner,_,reference) <- nativeOriginalInputs])))]
+                | (inputOwner,references) <- Map.toAscList nativeOriginalInputs
+                  , reference <- Set.toAscList references])))]
           forM_ (take 64 (Map.toAscList identifiers)) $ \(name,identifier) -> do
-            let references = Set.toAscList (Set.fromList
-                  [reference | (inputOwner,_,reference) <- nativeOriginalInputs
-                    , nameModule_maybe name == Just inputOwner])
+            let references = Set.toAscList (referencesForName name)
                 selectedSource = case (pvWorldSources variant,nameModule_maybe name) of
                   (Just (WorldSourceInputBasis _ facts _ _ _ _ _),Just definingOwner) ->
                     worldHasSelectedSource facts
@@ -5777,8 +5790,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           Just basis -> do
             let rhs (NonRec _ value) = [value]
                 rhs (Rec pairs) = map snd pairs
-                identifiers = [identifier | binding <- mg_binds guts, value <- rhs binding
-                  , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isId value)]
+                identifiers = Map.elems (Map.fromList
+                  [(idName identifier,identifier) | binding <- mg_binds guts, value <- rhs binding
+                    , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isId value)])
                 isSource name = case (pvWorldSources variant,nameModule_maybe name) of
                   (Just (WorldSourceInputBasis _ facts _ _ _ _ _),Just owner) ->
                     worldHasSelectedSource facts (unitString (moduleUnit owner),moduleNameString (moduleName owner))
@@ -6473,7 +6487,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             when (targetPhase phase) (writeIORef targetLoadFailure (Just (failure :: SourceError)))
             throwIO failure)
           `catch` (\failure -> do
-            writeIORef canonicalFailureRef (Just (failure :: CanonicalFrontendFailure))
+            atomicModifyIORef' canonicalFailureRef (\known ->
+              (retainCanonicalLoadFailure (CanonicalLoadFrontendFailure failure) known,()))
+            throwIO failure)
+          `catch` (\failure -> do
+            atomicModifyIORef' canonicalFailureRef (\known ->
+              (retainCanonicalLoadFailure (CanonicalLoadNativeFailure failure) known,()))
             throwIO failure)
         observedCanonicalLoad :: TPhase a -> IO a
         observedCanonicalLoad phase@(T_Hsc _ summary)
@@ -6593,7 +6612,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           typedFailure <- liftIO (readIORef typedFailureRef)
           forM_ typedFailure (liftIO . throwIO)
           canonicalFailure <- liftIO (readIORef canonicalFailureRef)
-          forM_ canonicalFailure (liftIO . throwIO)
+          forM_ canonicalFailure (liftIO . throwCanonicalLoadFailure)
           instanceFailure <- liftIO (readIORef targetInstanceFailure)
           forM_ instanceFailure (liftIO . throwIO)
           targetFailure <- liftIO (readIORef targetLoadFailure)
