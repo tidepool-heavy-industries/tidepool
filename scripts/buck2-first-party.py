@@ -66,6 +66,8 @@ TOOLCHAIN_COMPILER_FREE_TESTS = [
     "certified_products::tests::original_native_witness_retains_package_custody_and_refuses_zero_group_downgrade",
     "certified_products::tests::repeated_retained_core_promotion_preserves_exact_original_membership",
     "certified_products::tests::nonempty_exact_source_recipe_preserves_original_versions_and_selected_subsets",
+    "declaration_context::tests::split_native_demand_reuses_transitive_child_issuance",
+    "declaration_context::tests::split_native_demand_reuses_direct_child_issuance_when_parent_arrives_later",
     "artifact_inventory::tests::native_requirement_index_refuses_interface_edges",
     "artifact_inventory::tests::native_requirement_index_preserves_empty_sparse_and_overlapping_edges",
     "artifact_inventory::tests::native_requirement_planning_visits_only_selected_group_edges",
