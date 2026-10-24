@@ -159,47 +159,38 @@ force/recovery/performance matrices and restore deduplication remain separate.
 
 ## Live state
 
+Code candidate: `bff9e561755246ace2fe8ff139441844c4067a04`.
 Evidence root: `/srv/swarm/evidence/inanna/g2-source-owner-20261024/`.
+Review packet: [g2-source-owner-mid-effort-review-20261024.md](g2-source-owner-mid-effort-review-20261024.md).
 
-- Joined candidate `36c0873bbcbe981f433ec84d57ced935bb814920` contains G2
-  Rust core, G2 Haskell and Q9. The warm validator
-  `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020` is running
-  the five actor notebook cases at that exact revision. Source was advanced
-  under its exclusive output lease. See `joined/actor-36c0873-plan.json` and
-  `joined/actor-36c0873.log`; execution and qualification are pending.
-- Q9 candidate `633e6c1e72` is integrated as `35fa315631`: production and test
-  targets compile, seven focused cases pass (`q9/result.json`).
-- G2 Haskell candidate `082f4925d1` is fully integrated through `eae5c40fab`:
-  seven distinct focused cases pass. Removing only the new native-failure catch
-  makes the actual load test fail with the expected `DependencySourceFailure`
-  instead of its exact native cause; restoring the committed bytes passes again.
-  Mutation and restoration evidence is retained under `haskell/`.
-- G2 Rust candidate `3d790d701d` is integrated as `36c0873bbc`. Production and
-  test targets compile; SOURCE scope and historical-body controls pass. The
-  acquired-scope fixture repair is committed separately at `4ecec03bd5`; its
-  pre-tightening run passes, with exact-final-source execution pending. A real
-  Full-offer observation followed by nonempty retained-terminal consumption
-  remains unproven. Two attempted value-import fixtures failed before SOURCE
-  observation because source qualification precedes checked-value hydration.
-  One bounded route through actual declaration publication is in progress;
-  do not modify hydration or manufacture SOURCE authority to make a test pass.
-- Q10 candidate `a5a5e86814` is source-reviewed; final focused compilation and
-  nine controls are running. The actual ordinary-demand history remains pending.
-  See `q10/run-plan-final.json`. It is not integrated yet.
-- Q6 remains in `refactor/g3-compiler-access-20261024`, with production and
-  affected tests compiled. Nine of ten focused cases pass after correcting
-  migrated fixture construction. Its remaining original-projection failure
-  reproduces independently at G2-only `082f4925d1`: authored source imports are
-  attempted through a lexical scope without current SOURCE admission
-  (`ExecutionSourceUnavailable main:ProjectionIndependent`). This inherited
-  boundary is unqualified; the refactor must preserve the refusal. A final
-  native-only session-writer preflight and no-write control remain in progress.
-- All five isolated toolchains are configured. Measured memory and scratch
-  headroom permit the current independent lanes. Swap inspection found allocated
-  pages but no active swapping or pressure; no service or system setting changed.
-  Installed `swarm-build` lacks the staged storage switches; use its supported
-  launcher and actual observations.
-- Integration-status ran with consistent Harness pins; its strict result is
-  `local_main_missing` in this named campaign checkout. Do not claim main or
-  frozen-release qualification from this integration branch. Argon receives
-  the joined candidate after the remaining focused controls and actor results.
+- All four parcels are integrated: G2 Rust/Haskell, Q9, Q10 and Q6. Obsolete
+  passive group APIs and raw compiler-result escape routes are deleted.
+- G2 Haskell: seven distinct focused cases pass, including a live-load typed
+  failure regression with a failing counterfactual and passing exact restoration.
+  Q9: production/test compilation and seven real-GHC cases pass.
+- G2 Rust: SOURCE/scope and certification controls pass. The combined Full-offer,
+  absent-passive-custody and nonempty-retained-terminal control remains unproven.
+  Fixture attempts are retained separately, not accepted as product coverage.
+  One exact diagnostic recovery is running before the worker stands down.
+- Q10: nine attribution controls pass. The named owned-service history target is
+  registered; a shared helper was migrated from deleted lifecycle.json to the
+  live schema-2 owned-service report, with its new control passing. The actual
+  joined later-cell history is running at worker `50028e2217`; not yet proven.
+- Q6: nine guarded ownership/pre-write controls and three real checked-worker
+  cases pass. The inherited source-free projection fixture still refuses SOURCE
+  without proper admission. The preview test's original-owner helper correction
+  now reaches successful Haskell preview compilation, followed by Rust's
+  `HOME package slot lacks current or exact held occurrence` refusal. The full
+  render assertion remains intact and unpassed; see the review packet.
+- First actual actor run at `36c0873bbc`: five executed, three passed, two failed.
+  Concurrent publication reaches the final read then refuses competing physical
+  HOME occurrences. The other failure is a keyed-command fixture mismatch,
+  corrected at `d01a007676` without changing production or acceptance assertions.
+- The warm validator is now frozen at `bff9e56175` and running the same five-case
+  cohort on the complete integrated candidate. See joined/actor-bff9e56175.log.
+  Its result, consolidated capture histories, remaining G2 gates, and matched
+  frozen-bundle/Persona qualification remain pending.
+- Resource inspection found no active swap pressure; no shared service or system
+  setting changed. Installed swarm-build lacks the staged storage switches.
+- Integration-status has consistent Harness pins but reports local_main_missing
+  in this campaign checkout. No main/release or frozen qualification is claimed.
