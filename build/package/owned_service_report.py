@@ -33,7 +33,7 @@ def validate_owned_service_report(report: dict, owner: Path) -> dict:
         if not isinstance(path, str) or not Path(path).is_absolute() or str(Path(path)) != path or ".." in Path(path).parts:
             raise ValueError("owned service report reference path is not normalized")
         digest_array(value["sha256"])
-    if not isinstance(report["operation"], str) or re.fullmatch(r"[0-9a-f]{64}", report["operation"]) is None or report["operation"] == "0" * 64:
+    if not isinstance(report["operation"], str) or re.fullmatch(r"[0-9a-f]{64}", report["operation"]) is None:
         raise ValueError("owned service report has invalid operation identity")
     for key, length in (("daemon_epoch", 64), ("producer", 64), ("endpoint", 192)):
         value = report[key]

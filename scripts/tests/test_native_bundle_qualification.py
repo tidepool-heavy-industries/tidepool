@@ -4890,6 +4890,17 @@ class OwnedServiceReportTests(unittest.TestCase):
             self.assertEqual(result['producer_exit_code'], 19)
             self.assertTrue(result['invocation_result_consistent'])
 
+    def test_operation_bytes_follow_native_codec_without_reserved_zero(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            report = self.report(owner)
+            report['operation'] = '00' * 32
+            self.assertEqual(qualification.validate_owned_service_report(report, owner), report)
+            for invalid in ('0' * 63, 'g' * 64, [], None):
+                report['operation'] = invalid
+                with self.subTest(operation=invalid), self.assertRaises(ValueError):
+                    qualification.validate_owned_service_report(report, owner)
+
     def test_schema1_pair_cannot_qualify_new_invocation(self):
         with tempfile.TemporaryDirectory() as temporary:
             owner = Path(temporary)
