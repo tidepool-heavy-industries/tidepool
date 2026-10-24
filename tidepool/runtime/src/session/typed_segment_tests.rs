@@ -1328,6 +1328,58 @@ proptest::proptest! {
 }
 
 #[test]
+fn successive_capture_declarations_select_new_value_and_keep_qualified_history() {
+    let operations = [
+        HistoryOperation::Capture,
+        HistoryOperation::ObserveCapture,
+        HistoryOperation::Shadow,
+        HistoryOperation::ObserveCapture,
+    ];
+    let first = render_history(23, &operations, false);
+    let mut second = render_history(91, &operations, false);
+    assert_eq!(ghc_trace(&first.oracle), first.expected);
+    assert_eq!(ghc_trace(&second.oracle), second.expected);
+    assert_ne!(first.captured, second.captured);
+
+    let mut session = SemanticSession::new();
+    session.execute_history("first_capture", &first).unwrap();
+    session.assert_only_publication_join_since_last_effect();
+    assert_eq!(session.observed(), first.expected);
+    let previous_module = session
+        .resident
+        .exact_exports_in_namespace(
+            session.public,
+            tidepool_toolchain::declaration_join::ExportNamespace::Value,
+            &["historyCaptured"],
+        )
+        .unwrap()
+        .source_module()
+        .expect("the first capture has a published declaration owner");
+
+    // Different values distinguish a stale unqualified winner from the new
+    // declaration. The previous owner remains readable through its qualifier.
+    second.cell.push_str(&format!(
+        "segmentRecord {}.historyCaptured\n",
+        previous_module.module_name()
+    ));
+    session
+        .execute_history("replacement_capture", &second)
+        .unwrap();
+    session.assert_only_publication_join_since_last_effect();
+    let mut expected = first.expected.clone();
+    expected.extend_from_slice(&second.expected);
+    expected.push(first.captured);
+    assert_eq!(session.observed(), expected);
+
+    session
+        .execute("published_replacement", "segmentRecord historyCaptured", 0)
+        .unwrap();
+    expected.push(second.captured);
+    assert_eq!(session.observed(), expected);
+    session.assert_no_compiler_since_last_effect();
+}
+
+#[test]
 fn one_four_eight_actions_use_one_completed_inference_segment() {
     use super::super::tests::TestEnvGuard;
 

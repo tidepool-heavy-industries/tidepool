@@ -1387,6 +1387,7 @@ RUNTIME_TYPED_SEGMENT_SEMANTIC_CASES = ["session::turn::scaling_tests::typed_seg
     "cancellation_after_real_effect_preserves_receipt_and_allows_new_intent",
     "generated_capture_histories_match_ghc_cold_warm_and_recovery",
     "deterministic_capture_history_matches_ghc_cold_warm_and_recovery",
+    "successive_capture_declarations_select_new_value_and_keep_qualified_history",
     "authentic_native_entries_refuse_root_and_order_substitution_before_effects",
     "warm_target_selects_previously_unselected_original_native_groups",
     "one_four_eight_actions_use_one_completed_inference_segment",
