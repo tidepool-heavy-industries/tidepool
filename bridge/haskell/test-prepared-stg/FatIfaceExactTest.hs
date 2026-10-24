@@ -70,7 +70,7 @@ import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
 import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceArtifact(..), hydrateExactScope,
   RequestIfaceDecoder, CapturedInterfaceInputs, verifiedInterfaceProducts, newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
   selectVerifiedExactInterfaceProducts, verifiedExactInterface, capturedInterfaceInputs,
-  hydrateInterfaceInputs, hydratedExactEnvironment, restoreHydratedInterfaceEnvironment,
+  hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactInterfaces, hydratedExactEnvironment, restoreHydratedInterfaceEnvironment,
   readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface,
   newOriginalInterfaceArtifactsWithSessionCaptures,
   InterfaceInputFailure(..))
@@ -204,6 +204,21 @@ verifyCompletedInterfaceMerges libdir work environment = do
     assert (maybe False (sameCapturedSessionInterfaceOwner capture) borrowed)
       "completed input retention lost an authenticated logical receiving alias"
   actualIdentity <- evaluate actualHome >>= makeStableName
+  absentCompleted <- freshExactContext injected
+  retainedCompleted <- retainInstalledInterfaceInputs absentCompleted completed
+  case hydratedExactInterfaces retainedCompleted of
+    [(selectedArtifact,retainedHome)] -> do
+      assert (selectedArtifact == artifact) "retain-only completed selection changed its descriptor"
+      retainedIdentity <- evaluate retainedHome >>= makeStableName
+      assert (retainedIdentity == actualIdentity)
+        "retain-only completion reconstructed its actual HMI when absent from the phase"
+    _ -> fail "retain-only completion changed the selected owner set"
+  thinRefusal <- try (retainInstalledInterfaceInputs injected decoded >> pure ())
+    :: IO (Either InterfaceInputFailure ())
+  assert (case thinRefusal of
+      Left (InterfaceUnownedThinHome owner) -> owner == ("main",sessionModuleString selected)
+      _ -> False)
+    "retain-only decoded thin input borrowed an unowned zero-fingerprint HMI"
   forM_ [[completed,decoded],[decoded,completed]] $ \inputs -> do
     merged <- either throwIO pure (mergeCapturedInterfaceInputs inputs)
     reused <- either throwIO pure (capturedSessionInterfaceFor merged artifact body packages)
@@ -223,6 +238,10 @@ verifyCompletedInterfaceMerges libdir work environment = do
   decodedIdentity <- evaluate decodedHome >>= makeStableName
   assert (decodedIdentity /= actualIdentity) "raw decoded input silently claimed a completed HMI owner"
   foreignEnvironment <- runGhc (Just libdir) getSession
+  foreignRetain <- try (retainInstalledInterfaceInputs foreignEnvironment completed >> pure ())
+    :: IO (Either InterfaceInputFailure ())
+  assert (case foreignRetain of Left InterfaceNameCacheMismatch -> True; _ -> False)
+    "retain-only completion accepted another NameCache"
   foreignInput <- readVerifiedExactIfaceClosure foreignEnvironment [artifact] >>= either fail pure
   assert (case mergeCapturedInterfaceInputs [completed,foreignInput] of
       Left InterfaceNameCacheMismatch -> True; _ -> False)
@@ -496,7 +515,37 @@ verifyRetainedHome :: InlineOriginalFixture -> IO ()
 verifyRetainedHome (InlineOriginalFixture fixture identifier) = do
   environment <- freshFixtureEnvironment fixture
   genuine <- declaringId environment identifier
+  let path = fixtureDirectory fixture </> "MissingFixture.hi"
+  body <- captureArtifactBytes <$> BS.readFile path
+  original <- fixtureInterface environment "MissingFixture"
+  let artifact = ExactIfaceArtifact (unitString (moduleUnit (mi_module original)))
+        "MissingFixture" path (artifactSha256 body) []
+  captured <- readVerifiedExactIfaceClosure environment [artifact] >>= either fail pure
+  actualHome <- maybe (fail "producer lost MissingFixture HMI") pure
+    (lookupHpt (hsc_HPT environment) (mkModuleName "MissingFixture"))
+  actualIdentity <- evaluate actualHome >>= makeStableName
+  assert (maybe False (const True) (lookupHpt (hsc_HPT environment) (mkModuleName "FatFixture")))
+    "retain-only exclusion premise lacks an unrelated actual HPT owner"
   withFixtureFileRemoved fixture "MissingFixture" $ do
+    installed <- retainInstalledInterfaceInputs environment captured
+    case hydratedExactInterfaces installed of
+      [(selectedArtifact,retainedHome)] -> do
+        assert (selectedArtifact == artifact)
+          "retain-only TYPE selection changed its descriptor or included unrelated HPT owners"
+        retainedIdentity <- evaluate retainedHome >>= makeStableName
+        assert (retainedIdentity == actualIdentity) "retain-only TYPE rebuilt its existing HMI"
+      _ -> fail "retain-only TYPE included unrelated HPT owners"
+    missingPhase <- freshExactContext environment
+    missing <- try (retainInstalledInterfaceInputs missingPhase captured >> pure ())
+      :: IO (Either InterfaceInputFailure ())
+    assert (case missing of
+        Left (InterfaceHydratedHomeMissing owner) -> owner == (exactUnit artifact,exactModule artifact)
+        _ -> False)
+      "retain-only TYPE refilled a missing installed HMI"
+    -- The same captured bytes remain sufficient for the separate hydration owner.
+    hydrated <- hydrateInterfaceInputs missingPhase captured
+    assert (length (hydratedExactInterfaces hydrated) == 1)
+      "valid captured TYPE could not be hydrated after the retain-only refusal"
     retainedCache <- newFatIfaceCache
     retained <- lookupFatIfaceExact environment retainedCache (varName identifier)
     assert (isFound retained) "unlink invalidated its retained HOME interface owner"
