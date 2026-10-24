@@ -22,7 +22,7 @@ Do not add counts from different checkpoints into one passing suite.
    real crossed-target installer refusal followed by honest execution, and the
    newly added package lifetime/prior Source histories.
 4. Run notebook5, N2 publication14, private custody3, World input2, runtime owner9,
-   typed segment World semantics22, publication histories32 and the separately
+   typed segment World semantics30, publication histories34 and the separately
    registered `runtime_world_segment_component_tests`3. The former finite runtime
    entrypoints are deleted; use each current target's declared count.
    HOME/PACKAGE owner/lifetime component5, source membership2, closed runtime vacancy1 and abort composition
