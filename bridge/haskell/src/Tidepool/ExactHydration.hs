@@ -43,7 +43,7 @@ module Tidepool.ExactHydration
   , generatedScaffoldRecipeWithImportRendering
   , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
   , CapturedGeneratedScaffoldSource, captureGeneratedScaffoldSource
-  , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
+  , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldText, capturedGeneratedScaffoldPath
   , capturedSourceImportOrigins
   , CapturedGeneratedImports, parseCapturedGeneratedImports
   , capturedGeneratedImportSource, capturedGeneratedImportFlags, capturedGeneratedImportSyntax
@@ -790,6 +790,12 @@ data CapturedGeneratedScaffoldSource = CapturedGeneratedScaffoldSource FilePath 
 capturedGeneratedScaffoldBytes :: CapturedGeneratedScaffoldSource -> BS.ByteString
 capturedGeneratedScaffoldBytes (CapturedGeneratedScaffoldSource _ bytes _) = bytes
 
+-- Recipes encode their rendered source as UTF-8; capture issues this owner
+-- only after the file matches those exact bytes. Text consumers retain that
+-- guarantee without decoding an unrelated raw-byte projection.
+capturedGeneratedScaffoldText :: CapturedGeneratedScaffoldSource -> Text.Text
+capturedGeneratedScaffoldText (CapturedGeneratedScaffoldSource _ bytes _) = TextEncoding.decodeUtf8 bytes
+
 capturedGeneratedScaffoldPath :: CapturedGeneratedScaffoldSource -> FilePath
 capturedGeneratedScaffoldPath (CapturedGeneratedScaffoldSource path _ _) = path
 
@@ -803,7 +809,7 @@ data CapturedGeneratedImportOccurrence = CapturedGeneratedImportOccurrence Impor
 
 parseCapturedGeneratedImports :: DynFlags -> CapturedGeneratedScaffoldSource
   -> Either String CapturedGeneratedImports
-parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource path bytes _) =
+parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource path _ _) =
   case unP Parser.parseModule parser of
     PFailed state -> Left (parseDiagnostics state)
     POk state parsed -> do
@@ -816,7 +822,7 @@ parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource pa
   where
     parseDiagnostics state = showPpr flags (getPsErrorMessages state)
     parser = initParserState (initParserOpts flags)
-      (stringToStringBuffer (Text.unpack (TextEncoding.decodeUtf8 bytes)))
+      (stringToStringBuffer (Text.unpack (capturedGeneratedScaffoldText captured)))
       (mkRealSrcLoc (mkFastString path) 1 1)
     associate [] [] = Right []
     associate (occurrence:occurrences) (origin:origins) =

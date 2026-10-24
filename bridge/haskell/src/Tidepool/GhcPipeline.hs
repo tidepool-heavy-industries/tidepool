@@ -317,8 +317,8 @@ import Tidepool.ExactHydration
   , readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
   , checkedValueImportAuthorityFromCaptures, unionCheckedValueImports, admitsCheckedValueImport
-  , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget, captureGeneratedScaffoldSource
-  , CapturedGeneratedImports, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
+  , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldSource
+  , CapturedGeneratedImports, CapturedGeneratedScaffoldSource, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldText, capturedGeneratedScaffoldPath
   , capturedGeneratedImportSource, capturedGeneratedImportSyntax, capturedGeneratedImportOccurrences
   , capturedGeneratedImportOccurrenceSyntax, capturedGeneratedImportOccurrenceOrigin
   , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
@@ -2912,8 +2912,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     emitWorldAcquisitionRejection "world stage source recipe" path reason
     traceStageIO "source-recipe-refused" [("detail", LogText reason)]
     throwIO WorldCellCorrupt) pure)
-  let source = capturedGeneratedScaffoldBytes capturedSource
-      sourceText = Text.unpack (TextEncoding.decodeUtf8 source)
+  let sourceText = Text.unpack (capturedGeneratedScaffoldText capturedSource)
   effective <- liftIO (sourceModuleFlags flags sourceText >>= either (throwIO . SourceRejection . renderCellSplitError) pure)
   liftIO (requireWorldHeaderPolicy WorldAuthoredHeader path flags effective)
   parsedDemand <- either (\reason -> liftIO $ case operation of
@@ -2923,7 +2922,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         [("detail", LogText (moduleDemandFailureDetail reason))]
       throwIO WorldCellUnsupported
     WorldObservationSource {} -> do
-      emitWorldObservationSourceRejection effective path source reason
+      emitWorldObservationSourceRejection effective capturedSource reason
       throwIO (SourceRejection (boundedDiagnosticText 4096 (moduleDemandFailureDetail reason)))
     WorldCellNameSource {} -> do
       emitWorldAcquisitionRejection "world cell name imports" path (moduleDemandFailureDetail reason)
@@ -5238,14 +5237,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       verified <- liftIO (validateExactScopeEnvironment env scope)
       either (liftIO . ioError . userError) pure verified
     capturedTarget <- forM (pvGeneratedScaffold variant) $ \recipe ->
-      liftIO (captureGeneratedScaffoldTarget recipe path) >>= either (liftIO . fail) pure
+      liftIO (captureGeneratedScaffoldSource recipe path) >>= either (liftIO . fail) pure
     target <- guessTarget path Nothing Nothing
     capturedTargetInput <- case capturedTarget of
       Nothing -> pure target
-      Just bytes -> do
+      Just captured -> do
         now <- liftIO (getModificationTime path)
         pure target {targetContents=Just
-          (stringToStringBuffer (Text.unpack (TextEncoding.decodeUtf8 bytes)),now)}
+          (stringToStringBuffer (Text.unpack (capturedGeneratedScaffoldText captured)),now)}
     setTargets [capturedTargetInput]
     -- Install diagnostic capture before load/typecheck. Target warnings become
     -- part of a successful result; all source errors remain available if 'load'' reports
@@ -8322,18 +8321,20 @@ emitWorldAcquisitionRejection reason manifest detail = do
 -- World retirement cannot erase the actual rejected source. The 64 KiB source
 -- allowance bounds reporting only; it does not restrict accepted source size.
 -- Even worst-case JSON escaping stays below the 16 MiB response allowance.
-emitWorldObservationSourceRejection :: DynFlags -> FilePath -> BS.ByteString
+emitWorldObservationSourceRejection :: DynFlags -> CapturedGeneratedScaffoldSource
   -> TypedSegmentFailure -> IO ()
-emitWorldObservationSourceRejection flags path source reason = do
+emitWorldObservationSourceRejection flags captured reason = do
   _ <- trySynchronous $ do
-    let extensions = [show extension | extension <- [minBound .. maxBound], xopt extension flags]
+    let path = capturedGeneratedScaffoldPath captured
+        source = capturedGeneratedScaffoldBytes captured
+        extensions = [show extension | extension <- [minBound .. maxBound], xopt extension flags]
         message = "world observation source rejected: " ++ boundedDiagnosticText 4096 (moduleDemandFailureDetail reason)
           ++ "\nsource path: " ++ boundedDiagnosticText 4096 path
           ++ "\nsource bytes: " ++ show (BS.length source)
           ++ "\nsource sha256: " ++ hexBytes (SHA256.hash source)
           ++ "\neffective extensions: " ++ boundedDiagnosticText 16384 (unwords extensions)
           ++ "\ncaptured source:\n" ++ boundedDiagnosticText 65536
-            (Text.unpack (TextEncoding.decodeUtf8 source))
+            (Text.unpack (capturedGeneratedScaffoldText captured))
     hPutStrLn stderr (renderDiag (Diag Nothing DiagError message))
   pure ()
 
