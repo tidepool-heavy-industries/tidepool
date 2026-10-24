@@ -171,11 +171,15 @@ Review packet: [g2-source-owner-mid-effort-review-20261024.md](g2-source-owner-m
 - G2 Rust: SOURCE/scope and certification controls pass. The combined Full-offer,
   absent-passive-custody and nonempty-retained-terminal control remains unproven.
   Fixture attempts are retained separately, not accepted as product coverage.
-  One exact diagnostic recovery is running before the worker stands down.
+  The exact diagnostic recovery exposed the fixture's unadmitted internal Lib
+  import; its patch is retained separately. Worker closeout is complete.
 - Q10: nine attribution controls pass. The named owned-service history target is
   registered; a shared helper was migrated from deleted lifecycle.json to the
   live schema-2 owned-service report, with its new control passing. The actual
-  joined later-cell history is running at worker `50028e2217`; not yet proven.
+  joined history at worker `50028e2217` executed one case and failed at startup:
+  16,974,750 bytes of worker stderr exceeded the 16,777,216-byte response budget.
+  The original stderr is not retained; volume cause and later-cell attribution
+  remain unproven. See the review packet and `q10/handoff.json`.
 - Q6: nine guarded ownership/pre-write controls and three real checked-worker
   cases pass. The inherited source-free projection fixture still refuses SOURCE
   without proper admission. The preview test's original-owner helper correction
@@ -192,5 +196,7 @@ Review packet: [g2-source-owner-mid-effort-review-20261024.md](g2-source-owner-m
   frozen-bundle/Persona qualification remain pending.
 - Resource inspection found no active swap pressure; no shared service or system
   setting changed. Installed swarm-build lacks the staged storage switches.
+- All implementation workers are stood down with clean delivered trees and owned
+  idle Buck daemons stopped. Only the root-owned integrated actor rerun is active.
 - Integration-status has consistent Harness pins but reports local_main_missing
   in this campaign checkout. No main/release or frozen qualification is claimed.

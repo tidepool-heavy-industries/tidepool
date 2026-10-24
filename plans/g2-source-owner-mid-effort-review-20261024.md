@@ -120,12 +120,24 @@ What the implementation worker learned:
   `certify_publication_join` and `CellProgram::declaration_item_successor`.
   A later ordinary SOURCE parent failed during preparation before observation.
   That attempt mistakenly disabled compiler capture, losing its underlying
-  stderr. An exact repeat with the G2 Haskell cause-preservation repair and
-  diagnostics capture is in flight; no root cause is claimed from `Corrupt`.
+  stderr. The exact repeat with the G2 Haskell cause-preservation repair and
+  diagnostics capture now establishes the cause: `world carried import` refuses
+  `SourceOfferParent -> Tidepool.Session.Lib.G12` as an unadmitted HOME
+  implementation. This direct import of an internal declaration implementation
+  is an invalid fixture admission, not evidence of native-error masking. See
+  `rust/world-offer-authored-child-typed-capture.frontier.json` and its retained
+  `.tmp2hn43A/compiler.stderr`. One case executed, zero passed; the investigative
+  test was removed from delivered source and preserved as a patch.
 - An attempted fresh receiving projection using
   `CompilerInputProjection::admit_interfaces_with_native_offers` and existing
   offers refused `native namespace pair differs from its issuing bindings`.
   The worker did not rewrite roots, synthesize bindings, or weaken admission.
+  A final variant using the production canonical TYPE parent reached an OrdMap
+  invalid-key panic at `artifact_inventory.rs:7450`, before the claimed SOURCE
+  observation. That WIP is retained as `rust/simple-source-offer-wip.patch`;
+  it is not integrated or counted as coverage. Its construction and panic need
+  separate review before calling it either a valid positive fixture or a product
+  regression.
 - Independently recovered issuers in the attempted competing control yield
   partial offers, not Full. Full must come from actual completed-stage issuance.
 
@@ -150,8 +162,9 @@ terminal controls must remain explicitly pending until executed.
   `53a864772b` registers the named owned-service target. Its next execution found
   the shared test helper still reading deleted `lifecycle.json`; `7a7619c830`
   uses the actual live schema-2 `owned-service.json`, validates its exact owned
-  child identity, and passes its new focused control. The joined history is now
-  running with both G2 halves. Exact later-cell attribution is not yet proven.
+  child identity, and passes its new focused control. The joined history with
+  both G2 halves compiled and executed one case, failing at hosted startup before
+  the second-cell attribution check. See the capture-limit finding below.
 - **Q6** (`e1d108e3e0`): nine focused ownership/pre-write controls and three
   real checked-worker cases pass at worker candidate `f6948bcb4a`. The inherited
   source-free original-projection test still refuses `ExecutionSourceUnavailable
@@ -196,6 +209,26 @@ choosing an unsupported projection; the error alone does not decide which.
 Please trace that contract alongside the concurrent-publication failure without
 assuming they share a root cause. Do not choose packages by broad symbol search.
 
+### Q10 actual-history blocker: worker response capture
+
+Worker candidate `50028e22170b73ebe7fd05e2eb3176e992ad0b91` compiled (25 local
+actions, build `19b885a9-e40c-4a53-9f28-363373fcf518`) and executed the named
+history: one executed, zero passed, 47.46 seconds. The first source compilation
+during `HostedTestRuntime::start_prepared_configured` failed because captured
+stderr was 16,974,750 bytes against a 16,777,216-byte response budget; stdout was
+zero. `phases.jsonl` is empty, so no Q10 later-operation join ran.
+
+Evidence: `q10/handoff.json`, `q10/history-owned-fixed.log`, and
+`q10/history-owned-fixed/7d5db64864746fb29f1777281cfa0904d2d393a4850777a30b5b13ace950eca5.json`.
+Process and compiler cleanup are confirmed; hosted cleanup is not established.
+The retained prepared-entry `raw/compiler.stderr` contains only the 95-byte
+budget refusal, not the original 16.97 MB. The worker's
+`WorkerServer.hs::captureOutputWithin` / rendering boundary owns this capture.
+The test requires full tracing, but tracing has not been proved to cause the
+volume; do not conflate observed limit failure with its underlying producer.
+Inspect what generated the stderr and preserve bounded diagnostic samples before
+proposing a changed budget. Do not silently disable the oracle's required trace.
+
 ## Execution and continuation
 
 Actor command (warm validator frozen at `36c0873bbc`):
@@ -227,10 +260,18 @@ Log: `joined/actor-bff9e56175.log`; output: `joined/actor-bff9e56175/`.
 The rerun is pending, not counted as passing evidence. The named cohort owns its
 resources and does not accept an appended single-test selector.
 
-The Rust worker is finishing the bounded evidence-recovery run; Q6 is closing
-out at its new documented boundary; Q10 is running the real joined history at
-worker `50028e22170b73ebe7fd05e2eb3176e992ad0b91`. Preserve
-their WIP and evidence; do not switch active checkout branches or build sources.
+Interim rerun evidence at `bff9e56175`: the first two cases pass, and the
+concurrent-publication case reproduces the same competing-physical-HOME refusal
+on the complete integrated candidate. Its receipt is
+`joined/actor-bff9e56175/0bcd8106e3a311c327afcd2e909939f2af58040891d3682ae6890f2744d0cb22.json`.
+The remaining two cases have not yet completed at this documentation update.
+
+All three implementation workers are now stood down with clean delivered trees,
+retained investigative patches/evidence, and their owned idle Buck daemons
+stopped. Their closeouts are `rust/parcel-closeout.json`, `q6/result-ledger.json`,
+and `q10/handoff.json`. Only the root-owned actor rerun remains active. Preserve
+its frozen source and all retained evidence; do not switch active checkout
+branches or build sources.
 Main/release delivery, the three capture-history reruns at the consolidated
 candidate, remaining `g2-completion.md` gates and matched frozen-bundle/Persona
 qualification remain pending. Integration-status has matching Harness pins but
