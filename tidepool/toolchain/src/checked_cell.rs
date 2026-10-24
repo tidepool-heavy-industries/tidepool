@@ -2573,7 +2573,54 @@ type SettledNativeBinding = (
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CheckedSettledValues {
-    rows: Vec<SettledNativeBinding>,
+    rows: Vec<CheckedSettledValue>,
+}
+
+#[derive(Clone, Debug)]
+struct CheckedSettledValue {
+    binding: SettledNativeBinding,
+    producer: ExactCheckedItem,
+    checked_row: Arc<CheckedValueArtifact>,
+}
+
+/// Compiler-selected input to an exact native item. Stage inputs and values
+/// from earlier items within that stage have different issuing owners.
+/// Neither case establishes runtime completion or a live lexical lease.
+pub enum CellStageRetainedInput<'a> {
+    StageSelected(&'a crate::compiler_world::WorldCellRuntimeInput),
+    EarlierItem(EarlierItemRuntimeInput<'a>),
+}
+
+/// An exact binder and checked row from a preceding item in the receiving stage.
+/// Only the receiving compiled item can select this evidence for its own demand.
+pub struct EarlierItemRuntimeInput<'a> {
+    selected: &'a CheckedSettledValue,
+}
+
+impl EarlierItemRuntimeInput<'_> {
+    pub fn producer(&self) -> &ExactCheckedItem {
+        &self.selected.producer
+    }
+    pub fn identity(&self) -> &tidepool_repr::execution_schema::SymbolIdentity {
+        &self.selected.binding.1
+    }
+    pub fn generation(&self) -> u64 {
+        self.selected.binding.2
+    }
+    pub fn session_var(&self) -> tidepool_repr::SessionVarId {
+        tidepool_repr::SessionVarId::from_extract(self.selected.binding.3)
+    }
+    pub fn defining_scope(&self) -> u64 {
+        self.selected
+            .producer
+            .cell
+            .world
+            .reservation()
+            .defining_scope()
+    }
+    pub fn checked_row(&self) -> &Arc<CheckedValueArtifact> {
+        &self.selected.checked_row
+    }
 }
 
 impl CheckedSettledValues {
@@ -2594,6 +2641,7 @@ impl CheckedSettledValues {
             let Some((name, identity, generation, identifier)) = self
                 .rows
                 .iter()
+                .map(|selected| &selected.binding)
                 .find(|(_, identity, _, _)| identity == required)
             else {
                 continue;
@@ -2928,6 +2976,50 @@ impl CheckedTypedEntry {
 }
 
 impl ExactCompiledItem {
+    /// Select an actual demanded retained leaf from its compiler-issued owner.
+    /// Same-stage binders are absent from the stage's incoming-input list; they
+    /// must retain their producer item and row instead of borrowing availability
+    /// from the runtime value pool. Cross-stage values still require explicit
+    /// stage selection. Runtime admission and slot checks remain separate.
+    pub fn cell_stage_retained_input(
+        &self,
+        leaf: &tidepool_repr::native_code::NativeRetainedRequirement,
+    ) -> Option<CellStageRetainedInput<'_>> {
+        if !self
+            .typed_entry
+            .native_requirements
+            .bindings
+            .iter()
+            .any(|required| {
+                &required.identity == leaf.identity()
+                    && required.generation == leaf.generation()
+                    && leaf.type_artifact() == Some(&required.artifact_id.0)
+            })
+        {
+            return None;
+        }
+        let inputs = self.item.world_selected_runtime_inputs();
+        if let Some(selected) = inputs.inputs().iter().find(|selected| {
+            selected.symbol() == leaf.identity() && selected.generation() == leaf.generation()
+        }) {
+            return Some(CellStageRetainedInput::StageSelected(selected));
+        }
+        let selected = self.settled_values.rows.iter().find(|selected| {
+            &selected.binding.1 == leaf.identity()
+                && selected.binding.2 == leaf.generation()
+                && selected.producer.same_cell(&self.item)
+                && selected.producer.index() < self.item.index()
+                && selected
+                    .producer
+                    .world_selected_runtime_inputs()
+                    .stage_first_ordinal()
+                    == inputs.stage_first_ordinal()
+        })?;
+        Some(CellStageRetainedInput::EarlierItem(
+            EarlierItemRuntimeInput { selected },
+        ))
+    }
+
     pub fn table(&self) -> &tidepool_repr::DataConTable {
         &self.table
     }
@@ -3273,9 +3365,9 @@ impl ExactCompiledPrefix {
             .filter_map(|item| {
                 item.value_interface
                     .as_ref()
-                    .map(|artifact| (item.generation, artifact, item.bound_binders.as_slice()))
+                    .map(|artifact| (item, artifact, item.bound_binders.as_slice()))
             });
-        for (generation, artifact, binders) in native {
+        for (producer, artifact, binders) in native {
             for binder in binders {
                 let fields = row(binder, 7)?;
                 let name = string(&fields[0])?;
@@ -3287,7 +3379,7 @@ impl ExactCompiledPrefix {
                 if sealed
                     .insert(
                         (artifact.interface.module.as_str(), name),
-                        (generation, id, artifact),
+                        (producer, id, artifact),
                     )
                     .is_some()
                 {
@@ -3296,27 +3388,36 @@ impl ExactCompiledPrefix {
             }
         }
         let mut seen = BTreeSet::new();
-        for (name, identity, generation, id) in &rows {
+        let mut selected_rows = Vec::with_capacity(rows.len());
+        for binding in rows {
+            let (name, identity, generation, id) = &binding;
             if identity.unit != "main"
                 || identity.namespace != "value"
                 || identity.record_parent.is_some()
                 || identity.occurrence != *name
-                || !seen.insert((identity, generation, id))
+                || !seen.insert((identity.clone(), *generation, *id))
             {
                 return Err(failure(
                     "actual native selection has a duplicate or foreign identity",
                 ));
             }
-            let (expected_generation, expected_id, _) = sealed
+            let (producer, expected_id, checked_row) = sealed
                 .get(&(identity.module.as_str(), name.as_str()))
                 .ok_or_else(|| failure("actual native selection has no same-cell sealed binder"))?;
-            if generation != expected_generation || id != expected_id {
+            if *generation != producer.generation || id != expected_id {
                 return Err(failure(
                     "actual native selection differs from its sealed binder",
                 ));
             }
+            selected_rows.push(CheckedSettledValue {
+                binding,
+                producer: producer.item.clone(),
+                checked_row: Arc::clone(checked_row),
+            });
         }
-        Ok(CheckedSettledValues { rows })
+        Ok(CheckedSettledValues {
+            rows: selected_rows,
+        })
     }
 }
 
