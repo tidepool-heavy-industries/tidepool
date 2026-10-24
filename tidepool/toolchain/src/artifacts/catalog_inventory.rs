@@ -94,6 +94,18 @@ pub(super) fn inventory(
     if NativeCatalogSourceSelection::capture(&selection.snapshot_root)? != *selection {
         return Err(crate::toolchain::ModulePackageError::SourceChanged.into());
     }
+    write(
+        output,
+        "catalog-inventory.json",
+        &inventory_observation(evidence, certified),
+    )?;
+    phase(output, Phase::TargetAdmission)
+}
+
+fn inventory_observation(
+    evidence: &crate::cache::DependencyEvidence,
+    certified: &certified_products::CertifiedProducts,
+) -> Value {
     let interfaces: Vec<_> = certified.module_interfaces.iter().map(|interface| json!({
         "unit": interface.unit(),
         "module": interface.module(),
@@ -119,27 +131,22 @@ pub(super) fn inventory(
                 "module_version": owner.module_version.0,
                 "skinny_iface_sha256": owner.skinny_iface_sha256,
                 "product_sha256": owner.product_sha256,
-                "source_sha256": product.source_sha256(),
+                "source_admission_sha256": product.source_admission().map(|admission| admission.source_sha256()),
             })
         })
         .collect();
-    write(
-        output,
-        "catalog-inventory.json",
-        &json!({
-            "schema": 1,
-            "diagnostic_only": true,
-            "canonical_interface_count": interfaces.len(),
-            "native_owner_count": native_owners.len(),
-            "native_group_count": certified.groups.len(),
-            "module_interfaces": interfaces,
-            "native_owners": native_owners,
-            "worker_module_inventory": evidence.modules,
-            "cache_safe": evidence.cache_safe,
-            "selection_complete": evidence.selection_complete,
-        }),
-    )?;
-    phase(output, Phase::TargetAdmission)
+    json!({
+        "schema": 2,
+        "diagnostic_only": true,
+        "canonical_interface_count": interfaces.len(),
+        "native_owner_count": native_owners.len(),
+        "native_group_count": certified.groups.len(),
+        "module_interfaces": interfaces,
+        "native_owners": native_owners,
+        "worker_module_inventory": evidence.modules,
+        "cache_safe": evidence.cache_safe,
+        "selection_complete": evidence.selection_complete,
+    })
 }
 
 pub(super) fn outcome(
@@ -185,6 +192,46 @@ pub(super) fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovered_native_inventory_distinguishes_identity_from_source_admission() {
+        use std::sync::Arc;
+        let original = certified_products::fixture_finalized_product(
+            certified_products::tests::original_groups_fixture(
+                "Diagnostic",
+                vec![(7, vec![])],
+                1,
+                &Default::default(),
+            ),
+            [1; 32],
+        );
+        assert!(original.source_admission().is_none());
+        let canonical = original.module_interface().clone();
+        let canonical_source = canonical.source_sha256();
+        let certified = certified_products::CertifiedProducts {
+            groups: certified_products::IssuedGroupCandidates::empty(),
+            recovery_products: Arc::from([original]),
+            module_interfaces: Arc::from([canonical]),
+            value_interfaces: Arc::from([]),
+            retained_core_products: Default::default(),
+            home_contracts: None,
+        };
+        let evidence = serde_json::from_value(json!({
+            "version": 4, "cache_safe": true, "selection_complete": true,
+            "sources": [], "modules": [], "packages": [], "resolutions": [],
+        }))
+        .unwrap();
+        let report = inventory_observation(&evidence, &certified);
+        assert_eq!(report["schema"], 2);
+        assert_eq!(report["diagnostic_only"], true);
+        assert_eq!(
+            report["module_interfaces"][0]["source_sha256"],
+            json!(canonical_source)
+        );
+        let native = report["native_owners"][0].as_object().unwrap();
+        assert!(native["source_admission_sha256"].is_null());
+        assert!(!native.contains_key("source_sha256"));
+    }
 
     #[test]
     fn refusal_preserves_worker_flags_without_claiming_canonical_inventory() {

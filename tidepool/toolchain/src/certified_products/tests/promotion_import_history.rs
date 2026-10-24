@@ -312,7 +312,6 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 unreachable!()
             };
-            assert!(product.source_sha256().is_none());
             assert!(product.source_admission().is_none());
             assert!(product.execution_source().is_none());
             let offer = stage

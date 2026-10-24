@@ -2118,6 +2118,17 @@ runtime_executable(
 )
 
 rust_compile_fail(
+    name = "compile_fail_canonical_digest_is_not_source_admission",
+    source = "tests/compile_fail/canonical_digest_is_not_source_admission.rs",
+    control = "tests/compile_pass/canonical_digest_is_not_source_admission.rs",
+    expected = "tests/compile_fail/canonical_digest_is_not_source_admission.stderr",
+    dependencies = {
+        "tidepool_toolchain": ":tidepool_toolchain",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
     name = "compile_fail_certified_product_has_no_digest_admission",
     source = "tests/compile_fail/certified_product_has_no_digest_admission.rs",
     control = "tests/compile_pass/certified_product_has_no_digest_admission.rs",
@@ -2221,6 +2232,17 @@ rust_compile_fail(
     source = "tests/compile_fail/retained_context_is_not_selected_type_interfaces.rs",
     control = "tests/compile_pass/retained_context_is_not_selected_type_interfaces.rs",
     expected = "tests/compile_fail/retained_context_is_not_selected_type_interfaces.stderr",
+    dependencies = {
+        "tidepool_toolchain": ":tidepool_toolchain",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_source_admission_issuer_is_private",
+    source = "tests/compile_fail/source_admission_issuer_is_private.rs",
+    control = "tests/compile_pass/source_admission_issuer_is_private.rs",
+    expected = "tests/compile_fail/source_admission_issuer_is_private.stderr",
     dependencies = {
         "tidepool_toolchain": ":tidepool_toolchain",
     },

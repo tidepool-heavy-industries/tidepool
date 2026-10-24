@@ -1531,7 +1531,7 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
         assert!(acquired.records[0]
             .certified_original()
             .unwrap()
-            .source_sha256()
+            .source_admission()
             .is_none());
         let incoming_root = if relocated {
             let moved = fixture._root.path().join("moved-products");
@@ -1559,7 +1559,7 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
         assert!(incoming_package.records[0]
             .certified_original()
             .unwrap()
-            .source_sha256()
+            .source_admission()
             .is_none());
         let source = selected.by_owner[&("u".into(), "Library".into())]
             .original_module_interface
@@ -1567,8 +1567,18 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
         let producer = selected.by_owner[&("u".into(), "Library".into())]
             .original_module_interface
             .producer_sha256();
-        assert_eq!(checked_previous.source_sha256(), Some(source));
-        assert_eq!(checked_incoming.source_sha256(), Some(source));
+        assert_eq!(
+            checked_previous
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
+            Some(source)
+        );
+        assert_eq!(
+            checked_incoming
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
+            Some(source)
+        );
         for retained_fresh in [false, true] {
             for retained_captured in [false, true] {
                 for warm in [false, true] {
@@ -1590,7 +1600,9 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
                         previous, incoming,
                         "fresh source proof is separate from durable recovery identity"
                     );
-                    let expected = previous.source_sha256();
+                    let expected = previous
+                        .source_admission()
+                        .map(|admission| admission.source_sha256());
                     let first = ArtifactEntry::original(producer, previous).unwrap();
                     let id = first.descriptor.id;
                     let next = ArtifactEntry::original(producer, incoming).unwrap();
@@ -1607,7 +1619,9 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
                         let ArtifactPayload::Original(product) = &entry.payload else {
                             panic!("native original");
                         };
-                        product.source_sha256()
+                        product
+                            .source_admission()
+                            .map(|admission| admission.source_sha256())
                     };
                     if warm {
                         assert_eq!(source_of(&parent), expected);
@@ -1802,18 +1816,24 @@ fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_rec
         let bundle = &selected.by_owner[&("u".into(), "Library".into())];
         let original = bundle.product.deployment_original().unwrap().clone();
         assert_eq!(
-            original.source_sha256(),
+            original
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
             None,
             "catalog identity is not a fresh source observation"
         );
         let admitted = admit_borrowed_catalog(&fixture, &selected).unwrap();
         let accepted = &admitted.data().recovery_products[0];
         assert_eq!(
-            accepted.source_sha256(),
+            accepted
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
             Some(super::super::super::parse_sha(&bundle.source_sha256).unwrap())
         );
         assert_eq!(
-            original.source_sha256(),
+            original
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
             None,
             "admission does not upgrade the acquired owner"
         );
@@ -1859,7 +1879,13 @@ fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_rec
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
-        assert_eq!(restored[0].product.source_sha256(), None);
+        assert_eq!(
+            restored[0]
+                .product
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
+            None
+        );
         assert!(restored[0].product.same_durable_artifact(accepted));
         drop(ordinary);
         drop(selected);

@@ -979,6 +979,24 @@ pub fn certify_authored_declaration_in_context(
     )
 }
 
+/// Require the certifier's completed-source witness for this authored original.
+pub(crate) fn require_authored_original_source<'a>(
+    product: &'a CertifiedRecoveryProduct,
+    expected_source: &[u8; 32],
+    generation: u64,
+) -> Result<&'a crate::certified_products::OriginalSourceAdmission, CompileError> {
+    let admission = product
+        .source_admission()
+        .filter(|admission| admission.admits_source(product.owner(), expected_source))
+        .ok_or_else(|| contract("authored original lacks matching source admission"))?;
+    if product.module_interface().origin()
+        != (crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation })
+    {
+        return Err(contract("certified authored declaration origin differs"));
+    }
+    Ok(admission)
+}
+
 fn certify_authored_declaration_inner(
     module: SessionModule,
     source_path: &Path,
@@ -1091,16 +1109,7 @@ fn certify_authored_declaration_inner(
     let (Some(selected), None) = (matches.next(), matches.next()) else {
         return Err(contract("authored module has no unique certified product"));
     };
-    if selected.source_sha256() != Some(source_sha256) {
-        return Err(contract("certified authored source digest differs"));
-    }
-    if selected.module_interface().origin()
-        != (crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
-            generation: module.gen.0,
-        })
-    {
-        return Err(contract("certified authored declaration origin differs"));
-    }
+    require_authored_original_source(selected, &source_sha256, module.gen.0)?;
 
     let source_imports = match compiled.exact_source_admission.as_ref() {
         Some(admission) => admission.consumed_home_adjacency().clone(),
@@ -2849,7 +2858,13 @@ mod authored_tests {
         )
         .unwrap();
         assert_eq!(result.product.owner().module, module.module_name());
-        assert_eq!(result.product.source_sha256(), Some(result.source_sha256));
+        assert_eq!(
+            result
+                .product
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
+            Some(result.source_sha256)
+        );
         assert_eq!(
             result.product.module_interface().origin(),
             crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 }
@@ -3136,7 +3151,13 @@ mod authored_tests {
         )
         .expect("the authored probe must reach its native origin issuer in an exact context");
         assert_eq!(result.product.owner().module, module.module_name());
-        assert_eq!(result.product.source_sha256(), Some(result.source_sha256));
+        assert_eq!(
+            result
+                .product
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
+            Some(result.source_sha256)
+        );
         assert_eq!(
             result.product.module_interface().origin(),
             crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 2 }
@@ -3364,7 +3385,8 @@ mod authored_tests {
         .unwrap();
         for module in [first, second] {
             assert!(result.recovery_products().iter().any(|product| {
-                product.owner().module == module.module_name() && product.source_sha256().is_some()
+                product.owner().module == module.module_name()
+                    && product.source_admission().is_some()
             }));
         }
         assert!(result.original_home_imports().any(|(owner, imports)| {
@@ -3970,7 +3992,8 @@ mod authored_tests {
                 imports: vec![owner],
             },
         ];
-        let live = ExactDeclarationContext::new(&[], &[Arc::new(accepted.clone())], lexical).unwrap();
+        let live =
+            ExactDeclarationContext::new(&[], &[Arc::new(accepted.clone())], lexical).unwrap();
         assert!(hidden_ids
             .iter()
             .all(|id| live.artifact_view().artifact_ids().contains(id)));
@@ -3989,9 +4012,9 @@ mod authored_tests {
             expected_targets
         );
 
-        assert!(live_edges
-            .iter()
-            .all(|(_, to, kind)| !hidden_ids.contains(to) && *kind == ArtifactDependency::Interface));
+        assert!(live_edges.iter().all(
+            |(_, to, kind)| !hidden_ids.contains(to) && *kind == ArtifactDependency::Interface
+        ));
         for root in original_graph.roots.iter().filter(|node| {
             matches!(
                 node,
@@ -4291,13 +4314,13 @@ mod authored_tests {
         );
         assert_eq!(recovered.toolchain_identity_sha256(), expected_producer);
         assert_eq!(recovered.authored_native_root(1).unwrap(), original_root);
-        assert!(certificate.product().source_sha256().is_some());
+        assert!(certificate.product().source_admission().is_some());
         assert!(recovered
             .recovery_products()
             .iter()
             .find(|product| product.owner() == certificate.product().owner())
             .unwrap()
-            .source_sha256()
+            .source_admission()
             .is_none());
         assert!(recovered.authored_native_root(2).is_err());
         OwnedJoinRecoveryFixture {
@@ -4309,6 +4332,35 @@ mod authored_tests {
             original_root,
             _durable: durable,
         }
+    }
+
+    #[test]
+    fn authored_source_consumer_refuses_recovered_identity_without_admission() {
+        let fixture = owned_join_recovery_fixture();
+        let original = fixture.certificate.product();
+        let expected_source = fixture.certificate.source_sha256();
+        let generation = fixture.module.gen.0;
+        assert!(require_authored_original_source(original, &expected_source, generation).is_ok());
+        let recovered = fixture.recovered.recovery_products();
+        let recovered = recovered
+            .iter()
+            .find(|product| product.owner() == original.owner())
+            .unwrap();
+        assert!(recovered.same_durable_artifact(original));
+        assert_eq!(
+            recovered.module_interface().source_sha256(),
+            expected_source
+        );
+        assert!(require_authored_original_source(recovered, &expected_source, generation).is_err());
+        let mut wrong_source = expected_source;
+        wrong_source[0] ^= 1;
+        assert!(require_authored_original_source(original, &wrong_source, generation).is_err());
+        let mut wrong_owner = original.owner().clone();
+        wrong_owner.product_sha256[0] ^= 1;
+        assert!(!original
+            .source_admission()
+            .unwrap()
+            .admits_source(&wrong_owner, &expected_source));
     }
 
     fn assert_interface_only_recovery(
@@ -4417,7 +4469,7 @@ mod authored_tests {
             .iter()
             .find(|product| product.owner().module == module.module_name())
             .unwrap()
-            .source_sha256()
+            .source_admission()
             .is_none());
         assert!(extended.authored_native_root(2).is_err());
         let extended = Arc::new(extended);

@@ -14929,7 +14929,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &original.payload else {
             unreachable!()
         };
-        assert_eq!(product.source_sha256(), None);
+        assert!(product.source_admission().is_none());
     }
 
     #[test]
@@ -21390,7 +21390,9 @@ mod tests {
     fn independent_native_admission_does_not_inherit_global_source_witness() {
         let (_fixture, cold, fresh) = issued_source_admission_pair();
         let source = match &fresh.payload {
-            ArtifactPayload::Original(product) => product.source_sha256(),
+            ArtifactPayload::Original(product) => product
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
             _ => unreachable!(),
         }
         .expect("actual checked source digest");
@@ -21422,10 +21424,15 @@ mod tests {
             };
             eprintln!(
                 "independent admission: expected_source={expected:?}, actual_source={:?}, equals_fresh_product={}",
-                product.source_sha256(),
+                product.source_admission().map(|admission| admission.source_sha256()),
                 product == fresh_product
             );
-            observations.push((expected, product.source_sha256()));
+            observations.push((
+                expected,
+                product
+                    .source_admission()
+                    .map(|admission| admission.source_sha256()),
+            ));
             let old_entries = old.entries();
             let ArtifactPayload::Original(old_product) = &old_entries
                 .iter()
@@ -21454,7 +21461,9 @@ mod tests {
                 else {
                     unreachable!()
                 };
-                product.source_sha256()
+                product
+                    .source_admission()
+                    .map(|admission| admission.source_sha256())
             };
             assert_eq!(source_of(&selected), expected);
             let fresh_again = inventory
@@ -21506,7 +21515,8 @@ mod tests {
             Arc::clone(
                 product
                     .source_admission()
-                    .expect("actual checked source observation"),
+                    .expect("actual checked source observation")
+                    .evidence(),
             )
         });
         assert!(
@@ -21528,7 +21538,7 @@ mod tests {
             product.source_admission().map(|actual| {
                 observations
                     .iter()
-                    .position(|expected| Arc::ptr_eq(actual, expected))
+                    .position(|expected| Arc::ptr_eq(actual.evidence(), expected))
                     .expect("selection carries an actual issuing source observation")
                     + 1
             })
@@ -21598,7 +21608,9 @@ mod tests {
     fn native_inventory_reuse_preserves_each_owners_source_admission_witness() {
         let (_fixture, cold, fresh) = issued_source_admission_pair();
         let source = match &fresh.payload {
-            ArtifactPayload::Original(product) => product.source_sha256(),
+            ArtifactPayload::Original(product) => product
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
             _ => unreachable!(),
         }
         .expect("actual checked source digest");
@@ -21632,7 +21644,12 @@ mod tests {
             let ArtifactPayload::Original(product) = &selected.payload else {
                 unreachable!()
             };
-            assert_eq!(product.source_sha256(), expected_source);
+            assert_eq!(
+                product
+                    .source_admission()
+                    .map(|admission| admission.source_sha256()),
+                expected_source
+            );
         }
 
         let altered = crate::recovery_artifacts::OriginalDraft::from_certification(
@@ -22962,7 +22979,9 @@ mod tests {
         let inventory = ArtifactInventory::default();
         let (_fixture, _cold, native) = issued_source_admission_pair();
         let source = match &native.payload {
-            ArtifactPayload::Original(product) => product.source_sha256(),
+            ArtifactPayload::Original(product) => product
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
             _ => unreachable!(),
         }
         .expect("actual checked source digest");
@@ -23006,8 +23025,8 @@ mod tests {
                 unreachable!()
             };
             assert!(Arc::ptr_eq(
-                actual.source_admission().unwrap(),
-                expected.source_admission().unwrap()
+                actual.source_admission().unwrap().evidence(),
+                expected.source_admission().unwrap().evidence()
             ));
         }
         let after = inventory.metrics();
@@ -23015,7 +23034,9 @@ mod tests {
         assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 2);
         assert_eq!(
             match &selected.lease.payloads[&id].payload {
-                ArtifactPayload::Original(product) => product.source_sha256(),
+                ArtifactPayload::Original(product) => product
+                    .source_admission()
+                    .map(|admission| admission.source_sha256()),
                 _ => unreachable!(),
             },
             Some(source)

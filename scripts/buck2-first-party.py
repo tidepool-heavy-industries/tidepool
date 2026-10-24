@@ -1079,6 +1079,8 @@ def compile_fail_cases(package, library):
     extra_dependencies = {
         'recovery_record_is_not_certified_product': (),
         'certified_product_has_no_digest_admission': (),
+        'canonical_digest_is_not_source_admission': (),
+        'source_admission_issuer_is_private': (),
         'original_draft_is_private': (),
         "retained_context_is_not_completed_execution": (),
         "original_execution_census_is_private": (),
