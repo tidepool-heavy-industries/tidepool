@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use tidepool_extract_cmd::{
     compiler_host_checkpoint, preflight_compiler_daemon, with_compiler_transaction,
     with_compiler_transaction_cancellable, CompilerTransactionCancellation, ExtractCmd,
-    NativeDemand, NativeDemandControl, NativeDemandOwner, NativeDemandResolver, NativeReply,
-    ResolvedExtractBin,
+    NativeDemand, NativeDemandControl, NativeDemandOwner, NativeDemandResolver,
+    NativeDemandSession, NativeReply, ResolvedExtractBin,
 };
 
 const FRONTEND: &str = env!("CARGO_BIN_EXE_tidepool-extract");
@@ -199,6 +199,29 @@ impl NativeDemandResolver for Resolver {
     }
 }
 
+impl NativeDemandSession for Resolver {
+    type Outcome = (
+        Self,
+        Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+    );
+
+    fn owner(&self) -> NativeDemandOwner {
+        owner()
+    }
+
+    fn complete(
+        self,
+        execution: Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+    ) -> Self::Outcome {
+        // This borrows TRANSACTION_SCOPE mutably through the production custody
+        // owner. Completion must run after the request's RefMut is released.
+        assert!(tidepool_extract_cmd::retain_compiler_input_directory(
+            std::sync::Arc::new(tempfile::tempdir().unwrap()),
+        ));
+        (self, execution)
+    }
+}
+
 fn assert_reaped(root: &Path) {
     let pids = fs::read_to_string(root.join("worker-pids")).unwrap();
     assert!(!pids.is_empty());
@@ -222,7 +245,7 @@ fn native_demand_actual_direct_and_daemon_preserve_terminal_counts_and_refusal()
                 .join(format!("resident-{resident}-refuse-{refuse}"));
             let command = setup(&root, &fixture, 20);
             let mut daemon = resident.then(|| daemon(&root, 5));
-            let mut resolver = Resolver {
+            let resolver = Resolver {
                 seen: Vec::new(),
                 refuse,
                 cancel: None,
@@ -230,14 +253,14 @@ fn native_demand_actual_direct_and_daemon_preserve_terminal_counts_and_refusal()
             let outcome = with_compiler_transaction(
                 |_| {},
                 || {
-                    command.bind().unwrap().execute_with_native_demand(
-                        &command,
-                        owner(),
-                        &mut resolver,
-                    )
+                    command
+                        .bind()
+                        .unwrap()
+                        .execute_with_native_demand(&command, resolver)
                 },
             );
-            let run = outcome.action.unwrap();
+            let (resolver, execution) = outcome.action;
+            let run = execution.unwrap();
             assert_eq!(run.success(), !refuse);
             assert!(outcome.close.is_clean(), "{:?}", outcome.close);
             assert_eq!(
@@ -279,7 +302,7 @@ fn native_demand_actual_transports_poison_malformed_frames_and_reap_workers() {
                 .join(format!("resident-{resident}-phase-{phase}"));
             let command = setup(&root, &fixture, phase);
             let mut daemon = resident.then(|| daemon(&root, 2));
-            let mut resolver = Resolver {
+            let resolver = Resolver {
                 seen: Vec::new(),
                 refuse: false,
                 cancel: None,
@@ -287,14 +310,14 @@ fn native_demand_actual_transports_poison_malformed_frames_and_reap_workers() {
             let outcome = with_compiler_transaction(
                 |_| {},
                 || {
-                    command.bind().unwrap().execute_with_native_demand(
-                        &command,
-                        owner(),
-                        &mut resolver,
-                    )
+                    command
+                        .bind()
+                        .unwrap()
+                        .execute_with_native_demand(&command, resolver)
                 },
             );
-            let error = outcome.action.unwrap_err();
+            let (_, execution) = outcome.action;
+            let error = execution.unwrap_err();
             assert!(!error.definitely_unsubmitted(), "phase {phase}: {error}");
             assert!(!error.permits_rebind());
             assert!(!outcome.close.is_clean());
@@ -316,7 +339,7 @@ fn native_demand_resolver_cancellation_observes_real_host_checkpoint_and_retirem
         let command = setup(&root, &fixture, 20);
         let mut daemon = resident.then(|| daemon(&root, 20));
         let cancellation = CompilerTransactionCancellation::new();
-        let mut resolver = Resolver {
+        let resolver = Resolver {
             seen: Vec::new(),
             refuse: false,
             cancel: Some(cancellation.clone()),
@@ -332,10 +355,11 @@ fn native_demand_resolver_cancellation_observes_real_host_checkpoint_and_retirem
                 command
                     .bind()
                     .unwrap()
-                    .execute_with_native_demand(&command, owner(), &mut resolver)
+                    .execute_with_native_demand(&command, resolver)
             },
         );
-        assert!(outcome.action.is_err());
+        let (resolver, execution) = outcome.action;
+        assert!(execution.is_err());
         assert!(!outcome.close.is_clean());
         assert_eq!(
             outcome.close.resources_retired(),

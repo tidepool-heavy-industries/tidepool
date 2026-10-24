@@ -54,6 +54,27 @@ pub use artifacts::{
 };
 pub use failclass::{classify_compile, FailureClass, FailureEnvelope, Phase};
 
+/// The transport's result retained alongside an independent semantic refusal.
+/// A failed spawn keeps its original private submission/settlement evidence.
+#[derive(Debug)]
+pub enum NativeDemandExecution {
+    Received(tidepool_extract_cmd::ExtractRun),
+    Failed(tidepool_extract_cmd::SpawnError),
+}
+
+impl From<Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>>
+    for NativeDemandExecution
+{
+    fn from(
+        execution: Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+    ) -> Self {
+        match execution {
+            Ok(run) => Self::Received(run),
+            Err(error) => Self::Failed(error),
+        }
+    }
+}
+
 /// Errors that can occur during Haskell compilation via `tidepool-extract`.
 /// The one error type both compile front doors ([`crate::compile_targets`]
 /// and `tidepool_runtime::compile_haskell`) produce — re-exported at
@@ -73,6 +94,13 @@ pub enum CompileError {
     /// Transport failure with the endpoint's original submission classification.
     #[error("compiler endpoint: {0}")]
     CompilerEndpoint(#[source] tidepool_extract_cmd::SpawnError),
+    /// A semantic refusal and the later transport outcome are independent facts.
+    #[error("native input resolution refused: {refusal}")]
+    NativeDemandRefused {
+        #[source]
+        refusal: Box<CompileError>,
+        execution: NativeDemandExecution,
+    },
     /// An abnormal close preserves its action and retirement evidence.
     /// Unconfirmed input use retains descriptors; neither abnormal outcome permits replay.
     #[error("compiler transaction close is unconfirmed")]

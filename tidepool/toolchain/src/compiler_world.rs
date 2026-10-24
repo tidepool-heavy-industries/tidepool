@@ -5871,14 +5871,25 @@ fn prepare_world_cell_outputs(
             }
         }
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        let mut resolver =
+        let resolver =
             native_demand::WorldNativeDemandResolver::new(&reservation, &mut validation)?;
-        let owner = resolver.owner();
-        let run = bound
-            .execute_with_native_demand(&command, owner, &mut resolver)
-            .map_err(CompileError::CompilerEndpoint);
-        let native_demands = resolver.finish();
-        let run = run?;
+        let completed = bound
+            .execute_with_native_demand(&command, resolver)
+            .inspect_err(|error| {
+                if let CompileError::NativeDemandRefused {
+                    execution: crate::NativeDemandExecution::Received(run),
+                    ..
+                } = error
+                {
+                    diagnostics.completed(
+                        directory.path(),
+                        &command,
+                        run.success(),
+                        &run.output.stderr,
+                    );
+                }
+            })?;
+        let (run, native_demands) = completed.into_parts();
 
         diagnostics.completed(
             directory.path(),
@@ -5886,7 +5897,6 @@ fn prepare_world_cell_outputs(
             run.success(),
             &run.output.stderr,
         );
-        let native_demands = native_demands?;
         let report = crate::diag::decode_extract_result(
             run.success(),
             &run.output.stdout,

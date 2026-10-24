@@ -1862,35 +1862,40 @@ impl CompilerEndpoint {
 
     /// Execute World preparation with the exact held input owner's narrow
     /// dependency resolver. The outer scope retains input/END custody.
-    pub fn execute_with_native_demand(
+    pub fn execute_with_native_demand<S: crate::NativeDemandSession>(
         self,
         cmd: &ExtractCmd,
-        owner: crate::NativeDemandOwner,
-        resolver: &mut dyn crate::NativeDemandResolver,
-    ) -> Result<ExtractRun, SpawnError> {
-        if !matches!(self.transport, Transport::Scoped) {
-            return Err(SpawnError::not_submitted(
-                &cmd.program,
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "native demand requires an explicit compiler transaction scope",
-                ),
-            ));
-        }
-        refuse_native_demand_reentry(&cmd.program)?;
-        ensure_scoped_transaction(cmd, &self.identity)?;
-        TRANSACTION_SCOPE.with(|scope| {
-            let mut scope = scope.borrow_mut();
-            let Some(ScopedCompiler::Active { transaction, .. }) =
-                scope.as_mut().map(|state| &mut state.compiler)
-            else {
-                return Err(SpawnError::indeterminate(
-                    "compiler transaction",
-                    io::Error::other("compiler scope ended before native demand execution"),
+        mut session: S,
+    ) -> S::Outcome {
+        let result = (|| {
+            let owner = session.owner();
+            if !matches!(self.transport, Transport::Scoped) {
+                return Err(SpawnError::not_submitted(
+                    &cmd.program,
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "native demand requires an explicit compiler transaction scope",
+                    ),
                 ));
-            };
-            transaction.execute_with_native_demand(cmd, owner, resolver)
-        })
+            }
+            refuse_native_demand_reentry(&cmd.program)?;
+            ensure_scoped_transaction(cmd, &self.identity)?;
+            TRANSACTION_SCOPE.with(|scope| {
+                let mut scope = scope.borrow_mut();
+                let Some(ScopedCompiler::Active { transaction, .. }) =
+                    scope.as_mut().map(|state| &mut state.compiler)
+                else {
+                    return Err(SpawnError::indeterminate(
+                        "compiler transaction",
+                        io::Error::other("compiler scope ended before native demand execution"),
+                    ));
+                };
+                transaction.execute_native_borrowed(cmd, owner, &mut session)
+            })
+        })();
+        // Semantic completion may observe the scope. The transaction RefMut above
+        // must be gone before moving the affine session into its completion.
+        session.complete(result)
     }
 
     /// Execute `cmd` through the producer captured by this endpoint.
@@ -2634,7 +2639,20 @@ impl CompilerTransaction {
         result
     }
 
-    pub fn execute_with_native_demand(
+    pub fn execute_with_native_demand<S: crate::NativeDemandSession>(
+        &mut self,
+        cmd: &ExtractCmd,
+        mut session: S,
+    ) -> S::Outcome {
+        let result = (|| {
+            let owner = session.owner();
+            refuse_native_demand_reentry(&cmd.program)?;
+            self.execute_native_borrowed(cmd, owner, &mut session)
+        })();
+        session.complete(result)
+    }
+
+    fn execute_native_borrowed(
         &mut self,
         cmd: &ExtractCmd,
         owner: crate::NativeDemandOwner,
@@ -3524,6 +3542,104 @@ mod tests {
     #[test]
     fn direct_begin_handshake_deadline_terminates_and_reaps_the_child() {
         timeout_stalled_direct_handshake(4);
+    }
+
+    #[test]
+    fn native_session_completes_once_on_normal_admission_failures_outside_scope_borrow() {
+        struct CompletionProbe<'a>(&'a std::cell::Cell<usize>);
+        impl crate::NativeDemandResolver for CompletionProbe<'_> {
+            fn resolve_native_demand(
+                &mut self,
+                _: &crate::NativeDemand,
+                _: &crate::NativeDemandControl,
+            ) -> io::Result<crate::NativeReply> {
+                panic!("admission failure cannot invoke resolution");
+            }
+        }
+        impl crate::NativeDemandSession for CompletionProbe<'_> {
+            type Outcome = Result<ExtractRun, SpawnError>;
+            fn owner(&self) -> crate::NativeDemandOwner {
+                crate::NativeDemandOwner {
+                    admission: [1; 32],
+                    world: [2; 32],
+                    inputs: [3; 32],
+                }
+            }
+            fn complete(self, execution: Result<ExtractRun, SpawnError>) -> Self::Outcome {
+                TRANSACTION_SCOPE.with(|scope| assert!(scope.try_borrow_mut().is_ok()));
+                assert_eq!(self.0.replace(1), 0, "complete must run exactly once");
+                execution
+            }
+        }
+        let command = ExtractCmd {
+            program: "native-session-control".into(),
+            bin_source: BinSource::Explicit,
+            request: ExtractRequest::default(),
+            worker_affinity_hint: None,
+        };
+        // No transport or subprocess is needed for these production refusals.
+        for scoped in [false, true] {
+            let calls = std::cell::Cell::new(0);
+            let endpoint = CompilerEndpoint {
+                identity: CompilerIdentity::direct([1; 32], [2; 32]),
+                transport: if scoped {
+                    Transport::Scoped
+                } else {
+                    Transport::Daemon {
+                        socket: "/unused".into(),
+                        epoch: [3; 32],
+                    }
+                },
+            };
+            let error = endpoint
+                .execute_with_native_demand(&command, CompletionProbe(&calls))
+                .unwrap_err();
+            assert_eq!(calls.get(), 1);
+            assert_eq!(error.definitely_unsubmitted(), !scoped);
+        }
+
+        let calls = std::cell::Cell::new(0);
+        let mut transaction = CompilerTransaction {
+            workload: CompileWorkload::Foreground,
+            identity: CompilerIdentity::direct([1; 32], [2; 32]),
+            transport: None,
+            failed: true,
+            cancellation: None,
+        };
+        let error = transaction
+            .execute_with_native_demand(&command, CompletionProbe(&calls))
+            .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert!(!error.permits_rebind());
+
+        let calls = std::cell::Cell::new(0);
+        transaction.failed = false;
+        let error = transaction
+            .execute_with_native_demand(&command, CompletionProbe(&calls))
+            .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert!(transaction.failed);
+        assert!(!error.permits_rebind());
+
+        let calls = std::cell::Cell::new(0);
+        transaction.failed = false;
+        let exchange = crate::native_demand::Exchange::new(crate::NativeDemandOwner {
+            admission: [1; 32],
+            world: [2; 32],
+            inputs: [3; 32],
+        })
+        .unwrap();
+        let error = with_native_demand_control(exchange.control(None), || {
+            transaction.execute_with_native_demand(&command, CompletionProbe(&calls))
+        })
+        .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert!(error.definitely_unsubmitted());
+        assert_eq!(error.source.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            !transaction.failed,
+            "reentry refusal must precede transaction use"
+        );
     }
 
     #[test]

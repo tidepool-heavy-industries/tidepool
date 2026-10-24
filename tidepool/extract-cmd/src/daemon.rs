@@ -60,7 +60,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
 use crate::frontend::{DaemonConfig, FrontendError, PreparedWorker};
-use crate::native_demand::{self, Exchange, ExchangeBudget};
+use crate::native_demand::{self, Exchange};
 use crate::request::ExecutionGrant;
 use crate::{CompileWorkload, ExtractRequest};
 
@@ -1473,9 +1473,10 @@ fn execute_transaction_request_inner(
         // Only our explicit write-half cancellation preserves known response
         // framing after a partial outgoing request. Never resume a bad decoder.
     }
-    let mut budget = ExchangeBudget::new();
-    let mut first = true;
-    let mut refused = false;
+    let mut protocol = native
+        .as_ref()
+        .map(|(exchange, _)| native_demand::Protocol::client((**exchange).clone()));
+    let mut ordinary_budget = MAX_RESPONSE_PAYLOAD_BYTES;
     let response = loop {
         let deadline = match native.as_ref() {
             Some((exchange, _)) => exchange
@@ -1484,47 +1485,48 @@ fn execute_transaction_request_inner(
                 .map_err(DaemonError::Io)?,
             None => Instant::now() + IO_TIMEOUT,
         };
-        let event = transaction.read_event_with_budget(deadline, &mut budget.remaining);
+        let remaining = match protocol.as_mut() {
+            Some(protocol) => &mut protocol.budget.remaining,
+            None => &mut ordinary_budget,
+        };
+        let event = transaction.read_event_with_budget(deadline, remaining);
         let Ok(TransactionEvent::NativeDemand(observed, stage, sequence)) = event else {
             break event;
         };
         transaction.framing_known = false;
-        if refused {
-            return Err(DaemonError::Protocol(
-                "native demand after semantic refusal".into(),
-            ));
-        }
         let Some((exchange, resolver)) = native.as_mut() else {
             transaction.framing_known = false;
             break Err(DaemonError::Protocol("unsolicited native demand".into()));
         };
-        exchange.accept(&observed, first).map_err(DaemonError::Io)?;
-        first = false;
-        budget.demand(stage, sequence).map_err(DaemonError::Io)?;
-        budget
-            .charge(native_demand::ROUND_FRAME_BYTES)
+        let protocol = protocol.as_mut().expect("native transport protocol");
+        protocol
+            .demand(&observed, stage, sequence)
             .map_err(DaemonError::Io)?;
-        let control = exchange.control(transaction.cancellation.clone());
+        **exchange = protocol.exchange().clone();
+        let control = protocol
+            .exchange()
+            .control(transaction.cancellation.clone());
         let mut reader = control
             .read(&mut transaction.stream)
             .map_err(DaemonError::Io)?;
-        let payload = budget.frame(&mut reader).map_err(DaemonError::Io)?;
+        let payload = protocol
+            .budget
+            .frame(&mut reader)
+            .map_err(DaemonError::Io)?;
         transaction.framing_known = true;
-        let reply = native_demand::resolve(
-            *resolver,
-            exchange,
-            stage,
-            sequence,
-            payload,
-            &mut budget,
-            transaction.cancellation.clone(),
-        )
-        .map_err(DaemonError::Io)?;
+        let reply = protocol
+            .resolve(
+                *resolver,
+                stage,
+                sequence,
+                payload,
+                transaction.cancellation.clone(),
+            )
+            .map_err(DaemonError::Io)?;
         transaction
             .stream
             .set_write_timeout(Some(control.remaining().map_err(DaemonError::Io)?))
             .map_err(DaemonError::Io)?;
-        refused = matches!(reply, crate::NativeReply::Refused(_));
         let mut writer = control
             .writer(&mut transaction.stream)
             .map_err(DaemonError::Io)?;
@@ -1540,11 +1542,11 @@ fn execute_transaction_request_inner(
     match response.map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))? {
         TransactionEvent::Started(_) => unreachable!("read_event consumes worker start metadata"),
         TransactionEvent::Output(output) => {
-            if refused && output.status.success() {
-                transaction.framing_known = false;
-                return Err(DaemonError::Protocol(
-                    "native refusal followed by successful output".into(),
-                ));
+            if let Some(protocol) = protocol.as_mut() {
+                if let Err(error) = protocol.terminal(output.status.success()) {
+                    transaction.framing_known = false;
+                    return Err(DaemonError::Io(error));
+                }
             }
             if ordinal.0 != transaction.received_outputs + 1 {
                 transaction.framing_known = false;
@@ -1584,48 +1586,29 @@ pub(crate) fn read_direct_native_output<R: Read + AsRawFd>(
     resolver: &mut dyn crate::NativeDemandResolver,
     cancellation: Option<crate::CompilerTransactionCancellation>,
 ) -> Result<Output, DaemonError> {
-    let mut budget = ExchangeBudget::new();
-    let mut first = true;
-    let mut refused = false;
+    let mut protocol = native_demand::Protocol::client(exchange.clone());
     loop {
         let control = exchange.control(cancellation.clone());
         let mut input = control.read(reader).map_err(DaemonError::Io)?;
-        match read_transaction_event_with_budget(&mut input, &mut budget.remaining)? {
+        match read_transaction_event_with_budget(&mut input, &mut protocol.budget.remaining)? {
             TransactionEvent::Output(output) => {
-                if refused && output.status.success() {
-                    return Err(DaemonError::Protocol(
-                        "native refusal followed by successful output".into(),
-                    ));
-                }
+                protocol
+                    .terminal(output.status.success())
+                    .map_err(DaemonError::Io)?;
                 control.checkpoint().map_err(DaemonError::Io)?;
                 return Ok(output);
             }
             TransactionEvent::NativeDemand(observed, stage, sequence) => {
-                if refused {
-                    return Err(DaemonError::Protocol(
-                        "native demand after semantic refusal".into(),
-                    ));
-                }
-                exchange.accept(&observed, first).map_err(DaemonError::Io)?;
-                first = false;
-                budget.demand(stage, sequence).map_err(DaemonError::Io)?;
-                budget
-                    .charge(native_demand::ROUND_FRAME_BYTES)
+                protocol
+                    .demand(&observed, stage, sequence)
                     .map_err(DaemonError::Io)?;
-                let control = exchange.control(cancellation.clone());
+                *exchange = protocol.exchange().clone();
+                let control = protocol.exchange().control(cancellation.clone());
                 let mut input = control.read(reader).map_err(DaemonError::Io)?;
-                let payload = budget.frame(&mut input).map_err(DaemonError::Io)?;
-                let reply = native_demand::resolve(
-                    resolver,
-                    exchange,
-                    stage,
-                    sequence,
-                    payload,
-                    &mut budget,
-                    cancellation.clone(),
-                )
-                .map_err(DaemonError::Io)?;
-                refused = matches!(reply, crate::NativeReply::Refused(_));
+                let payload = protocol.budget.frame(&mut input).map_err(DaemonError::Io)?;
+                let reply = protocol
+                    .resolve(resolver, stage, sequence, payload, cancellation.clone())
+                    .map_err(DaemonError::Io)?;
                 let mut output = control.writer(writer).map_err(DaemonError::Io)?;
                 native_demand::write_reply(&mut output, exchange, stage, sequence, &reply)
                     .map_err(DaemonError::Io)?;
@@ -4634,49 +4617,40 @@ impl Worker {
         let control = exchange.control(None);
         control.checkpoint().map_err(FrontendError::Io)?;
         let diagnostics = self.start_request(cwd, request, Some(exchange))?;
-        let mut budget = ExchangeBudget::new();
-        budget
+        let mut protocol = native_demand::Protocol::relay(exchange.clone());
+        protocol
+            .budget
             .charge(diagnostics.len())
             .map_err(FrontendError::Io)?;
-        let mut refused = false;
         loop {
             let mut reader = control.read(&mut self.stdout).map_err(FrontendError::Io)?;
             let mut tag = [0];
             reader.read_exact(&mut tag).map_err(FrontendError::Io)?;
             match tag[0] {
                 TRANSACTION_OUTPUT => {
-                    let response = decode_response_with_budget(&mut reader, &mut budget.remaining)
-                        .map_err(daemon_frontend_error)?;
+                    let response =
+                        decode_response_with_budget(&mut reader, &mut protocol.budget.remaining)
+                            .map_err(daemon_frontend_error)?;
                     control.checkpoint().map_err(FrontendError::Io)?;
-                    if refused && response.0 == 0 {
-                        return Err(FrontendError::Io(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "native refusal followed by successful terminal output",
-                        )));
-                    }
+                    protocol
+                        .terminal(response.0 == 0)
+                        .map_err(FrontendError::Io)?;
                     return Self::finish_response(response, diagnostics);
                 }
                 native_demand::DEMAND => {
-                    if refused {
-                        return Err(FrontendError::Io(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "native demand after semantic refusal",
-                        )));
-                    }
+                    protocol
+                        .ensure_demand_allowed()
+                        .map_err(FrontendError::Io)?;
                     let observed = Exchange::read(&mut reader).map_err(FrontendError::Io)?;
-                    if &observed != exchange {
-                        return Err(FrontendError::Io(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "worker demand belongs to another request",
-                        )));
-                    }
                     let (stage, sequence) =
                         native_demand::read_coordinates(&mut reader).map_err(FrontendError::Io)?;
-                    budget.demand(stage, sequence).map_err(FrontendError::Io)?;
-                    budget
-                        .charge(native_demand::ROUND_FRAME_BYTES)
+                    protocol
+                        .demand(&observed, stage, sequence)
                         .map_err(FrontendError::Io)?;
-                    let payload = budget.frame(&mut reader).map_err(FrontendError::Io)?;
+                    let payload = protocol
+                        .budget
+                        .frame(&mut reader)
+                        .map_err(FrontendError::Io)?;
                     {
                         let mut output = control.writer(output).map_err(FrontendError::Io)?;
                         native_demand::write_demand(
@@ -4694,10 +4668,10 @@ impl Worker {
                         exchange,
                         stage,
                         sequence,
-                        &mut budget,
+                        &mut protocol.budget,
                     )
                     .map_err(FrontendError::Io)?;
-                    refused = matches!(reply, crate::NativeReply::Refused(_));
+                    protocol.reply(&reply);
                     native_demand::ensure_worker_quiet(self.stdout.as_raw_fd())
                         .map_err(FrontendError::Io)?;
                     let stdin = self

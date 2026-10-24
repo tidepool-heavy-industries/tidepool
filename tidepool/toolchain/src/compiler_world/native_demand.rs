@@ -20,6 +20,24 @@ pub(super) struct WorldDependencyObservations {
     stages: BTreeMap<u64, StageDependencyState>,
 }
 
+/// Issued only by the consuming session join: output and the observations from
+/// that exact request cannot be independently accepted by the World consumer.
+pub(super) struct CompletedWorldNativeRequest {
+    run: tidepool_extract_cmd::ExtractRun,
+    observations: WorldDependencyObservations,
+}
+
+impl CompletedWorldNativeRequest {
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        tidepool_extract_cmd::ExtractRun,
+        WorldDependencyObservations,
+    ) {
+        (self.run, self.observations)
+    }
+}
+
 pub(crate) struct WorldNativeDemandCompletion {
     pub(super) reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     pub(super) operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
@@ -646,8 +664,7 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
     );
     let foreign = WorldNativeDemandResolver::new(program.reservation(), &mut validation)
         .expect("same reservation has a distinct initial request acquisition")
-        .finish()
-        .expect("foreign request observations finish without a query refusal");
+        .completion;
     let refusal = foreign
         .bind_emitted_stages(program.stages())
         .err()
@@ -744,17 +761,6 @@ impl<'a> WorldNativeDemandResolver<'a> {
             refusals,
             refusal: None,
         })
-    }
-
-    pub(super) fn owner(&self) -> tidepool_extract_cmd::NativeDemandOwner {
-        self.owner.clone()
-    }
-
-    pub(super) fn finish(self) -> Result<WorldDependencyObservations, CompileError> {
-        match self.refusal {
-            Some(refusal) => Err(refusal),
-            None => Ok(self.completion),
-        }
     }
 
     fn resolve(
@@ -1107,11 +1113,47 @@ impl tidepool_extract_cmd::NativeDemandResolver for WorldNativeDemandResolver<'_
                         "native input resolution interrupted",
                     ));
                 }
+                let reason = refusal_reason(&error);
+                // Preserve the semantic cause even when a checkpoint, reply
+                // allocation or transport budget fails after resolution.
+                let refusal = self.refusal.insert(error);
+                tracing::warn!(
+                    cause = ?crate::failclass::classify_compile(refusal).cause,
+                    owner = ?demand.owner,
+                    stage = demand.stage,
+                    sequence = demand.sequence,
+                    "native input resolution refused",
+                );
                 control.checkpoint()?;
-                let reply = self.refusals[refusal_reason(&error) as usize].clone();
-                self.refusal = Some(error);
+                let reply = self.refusals[reason as usize].clone();
                 Ok(tidepool_extract_cmd::NativeReply::Refused(reply))
             }
+        }
+    }
+}
+
+impl tidepool_extract_cmd::NativeDemandSession for WorldNativeDemandResolver<'_> {
+    type Outcome = Result<CompletedWorldNativeRequest, CompileError>;
+
+    fn owner(&self) -> tidepool_extract_cmd::NativeDemandOwner {
+        self.owner.clone()
+    }
+
+    fn complete(
+        self,
+        execution: Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+    ) -> Self::Outcome {
+        match self.refusal {
+            Some(refusal) => Err(CompileError::NativeDemandRefused {
+                refusal: Box::new(refusal),
+                execution: execution.into(),
+            }),
+            None => execution
+                .map(|run| CompletedWorldNativeRequest {
+                    run,
+                    observations: self.completion,
+                })
+                .map_err(CompileError::CompilerEndpoint),
         }
     }
 }
