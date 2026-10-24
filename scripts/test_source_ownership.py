@@ -268,6 +268,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'tidepool/runtime/src/session/fixtures/checked-interleaved-declaration.hs',
         'tidepool/runtime/src/session/fixtures/checked-local-declaration.hs',
         'tidepool/runtime/src/session/fixtures/checked-native-support.hs',
+        'tidepool/runtime/src/session/fixtures/checked-same-stage-native-capture.hs',
         'tidepool/runtime/src/session/fixtures/checked-search-invalid.hs',
         'tidepool/runtime/src/session/fixtures/checked-search-original.hs',
         'tidepool/runtime/src/session/fixtures/checked-tiny-support.hs',

@@ -335,7 +335,8 @@ impl ScopedResolvedInputs {
     ) -> Result<AuthorizedRetainedValue, PreparedRuntimeError> {
         let item = execution.item();
         let stage = item.world_selected_runtime_inputs().stage_first_ordinal();
-        let selected = execution.cell_stage_retained_input(witness.leaf())
+        let selected = execution
+            .cell_stage_retained_input(witness.leaf())
             .ok_or_else(|| {
                 tracing::warn!(
                     target: "tidepool::runtime::retained_authorization",
@@ -717,6 +718,318 @@ mod tests {
     }
 
     #[test]
+    fn same_stage_native_authorization_uses_exact_producer_and_rejects_unselected_inputs() {
+        use crate::session::turn::{consume_cell_program_item, TurnResult};
+        use crate::session::SessionRunContext;
+        use tidepool_repr::native_code::NativeRetainedRequirement;
+
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let recipe = InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            effects.include_paths().to_vec(),
+        );
+        let library = SessionLib::open(
+            SessionId(1017),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+        let mut resident =
+            ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(library));
+        let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+        bootstrap_world_for(&mut resident, &recipe, &source);
+        let original = source.original_source().clone();
+        let execution = Arc::new(
+            source_action_with_original(&mut resident, original.clone(), |resident, _| {
+                resident.begin_private_execution(source.scope())
+            })
+            .unwrap(),
+        );
+        let admission = plan_fixture_cell_for(
+            &mut resident,
+            &recipe,
+            include_str!("../fixtures/checked-same-stage-native-capture.hs"),
+            execution.clone(),
+        )
+        .unwrap();
+        let prepared = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, report| {
+                    crate::session::turn::prepare_cell_program_admitted(owner, admission, report)
+                },
+            )
+            .unwrap();
+        let (checked, program) =
+            crate::session::turn::finish_cell_program_admitted(prepared).unwrap();
+        let prefix = resident.begin_cell_program(program).unwrap().unwrap();
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut selected_earlier = 0;
+        let mut after_shadow = false;
+        for index in 0..checked.items.len() {
+            let item = checked.checked_item(index).unwrap();
+            let reservation =
+                source_action_with_original(&mut resident, original.clone(), |resident, _| {
+                    resident.admit_checked_item(prefix.clone(), item.clone())
+                })
+                .unwrap();
+            if item.planned_declaration().is_some() {
+                source_action_with_original(&mut resident, original.clone(), |resident, _| {
+                    resident.adopt_checked_declaration(reservation)
+                })
+                .unwrap();
+                continue;
+            }
+            let TurnResult::Bind {
+                bound, compiled, ..
+            } = consume_cell_program_item(reservation.clone()).unwrap()
+            else {
+                panic!("fixture native item must bind one value")
+            };
+            let issued = &prefix.cell_program().items()[index];
+            let native = issued.native().unwrap();
+            let target = issued
+                .native_products()
+                .unwrap()
+                .linked_native_target()
+                .unwrap();
+            let inputs = prefix.snapshot().scoped_inputs.clone();
+            assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index);
+            if bound[0].name == "sameStageRead" || bound[0].name == "sameStageResult" {
+                let stage = native
+                    .item()
+                    .world_selected_runtime_inputs()
+                    .stage_first_ordinal();
+                assert!(
+                    stage > 1,
+                    "two earlier outputs precede the declaration barrier"
+                );
+                assert!(native
+                    .item()
+                    .world_selected_runtime_inputs()
+                    .inputs()
+                    .is_empty());
+                for owner in target.acquired() {
+                    let definitions = owner.code().body().definitions();
+                    for (global_index, import) in owner.imports().enumerate() {
+                        let AcquiredNativeImport::Retained {
+                            requirement: leaf,
+                            binding,
+                        } = import
+                        else {
+                            continue;
+                        };
+                        let Some(CellStageRetainedInput::EarlierItem(selected)) =
+                            native.cell_stage_retained_input(&leaf)
+                        else {
+                            continue;
+                        };
+                        selected_earlier += 1;
+                        assert!(selected.producer().same_cell(native.item()));
+                        assert!(
+                            stage <= selected.producer().index()
+                                && selected.producer().index() < index
+                        );
+                        let value = inputs.value(leaf.identity(), leaf.generation()).unwrap();
+                        assert_eq!(selected.session_var(), value.id);
+                        assert_eq!(selected.defining_scope(), value.defining_scope.0);
+                        let ScopedValueEvidence::Produced { row, provenance } = &value.evidence
+                        else {
+                            panic!("actual earlier execution must own Produced evidence")
+                        };
+                        assert!(Arc::ptr_eq(selected.checked_row(), row));
+                        let requirement = Arc::new(
+                            RetainedNativeRequirement::from_declaration(
+                                &definitions.globals()[global_index],
+                                definitions.signatures(),
+                                leaf,
+                                owner.clone(),
+                                u32::try_from(global_index).unwrap(),
+                                binding,
+                            )
+                            .unwrap(),
+                        );
+                        let authorized = inputs
+                            .resolve_native_requirement(&prefix, native, target, &requirement)
+                            .unwrap();
+                        assert!(authorized.matches_slot(
+                            native.item(),
+                            prefix.admission().digest(),
+                            target,
+                            &requirement
+                        ));
+                        if value.identity.occurrence == "sameStageRead" {
+                            after_shadow = true;
+                            assert!(
+                                inputs
+                                    .values
+                                    .values()
+                                    .filter(|held| held.identity.occurrence == "sameStageSeed")
+                                    .count()
+                                    == 2
+                            );
+                        }
+                        enum Defect {
+                            Identifier,
+                            Scope,
+                            Row,
+                            Admitted,
+                        }
+                        for defect in [
+                            Defect::Identifier,
+                            Defect::Scope,
+                            Defect::Row,
+                            Defect::Admitted,
+                        ] {
+                            let mut changed = inputs.clone();
+                            let wrong_row = prefix
+                                .cell_program()
+                                .items()
+                                .last()
+                                .unwrap()
+                                .native()
+                                .unwrap()
+                                .value_interface_certificate()
+                                .unwrap();
+                            let evidence = if matches!(defect, Defect::Admitted) {
+                                ScopedValueEvidence::Admitted {
+                                    row: row.clone(),
+                                    provenance: provenance.clone(),
+                                }
+                            } else {
+                                ScopedValueEvidence::Produced {
+                                    row: if matches!(defect, Defect::Row) {
+                                        wrong_row
+                                    } else {
+                                        row.clone()
+                                    },
+                                    provenance: provenance.clone(),
+                                }
+                            };
+                            changed.values.insert(
+                                (value.identity.clone(), value.generation),
+                                Arc::new(ScopedResolvedValue {
+                                    id: if matches!(defect, Defect::Identifier) {
+                                        SessionVarId::from_extract(value.id.raw() ^ (1 << 63))
+                                    } else {
+                                        value.id
+                                    },
+                                    defining_scope: if matches!(defect, Defect::Scope) {
+                                        ScopeId(value.defining_scope.0 + 1)
+                                    } else {
+                                        value.defining_scope
+                                    },
+                                    identity: value.identity.clone(),
+                                    generation: value.generation,
+                                    handle: value.handle,
+                                    name: value.name.clone(),
+                                    evidence,
+                                    _bindings: value._bindings.clone(),
+                                }),
+                            );
+                            assert!(matches!(
+                                changed.resolve_native_requirement(
+                                    &prefix,
+                                    native,
+                                    target,
+                                    &requirement
+                                ),
+                                Err(PreparedRuntimeError::CertifiedTargetOwners { .. })
+                            ));
+                        }
+                    }
+                }
+                // These are demand-membership controls, assembled from actual
+                // producer observations; they do not issue a retained-slot loan.
+                for producer in prefix
+                    .cell_program()
+                    .items()
+                    .iter()
+                    .filter_map(|item| item.native())
+                {
+                    let (name, _) = producer.bound_binder_identities().next().unwrap();
+                    if producer.item().index() != index
+                        && !matches!(
+                            name,
+                            "sameStageExcluded" | "sameStageUnused" | "sameStageFuture"
+                        )
+                    {
+                        continue;
+                    }
+                    let row = producer.value_interface_certificate().unwrap();
+                    let identity = SymbolIdentity {
+                        unit: "main".into(),
+                        module: row.owner().module_name(),
+                        namespace: "value".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    };
+                    let leaf = NativeRetainedRequirement::new(
+                        identity,
+                        producer.generation(),
+                        Some(row.certified_interface().artifact_id().0),
+                    );
+                    assert!(native.cell_stage_retained_input(&leaf).is_none());
+                    if producer.item().index() < index {
+                        assert!(inputs.value(leaf.identity(), leaf.generation()).is_some());
+                    }
+                    if name == "sameStageExcluded" {
+                        assert!(
+                            producer
+                                .item()
+                                .world_selected_runtime_inputs()
+                                .stage_first_ordinal()
+                                < stage
+                        );
+                    }
+                    if name == "sameStageFuture" {
+                        assert!(producer.item().index() > index);
+                    }
+                }
+            }
+            source_action_with_original(&mut resident, original.clone(), |resident, report| {
+                resident.run_bind_with_sites(
+                    &bound[0].name,
+                    compiled.code(),
+                    &bound[0],
+                    reservation.generation(),
+                    report,
+                )
+            })
+            .unwrap();
+            assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
+        }
+        assert!(
+            selected_earlier >= 3,
+            "the actual same-stage value dependencies must enter the new owner branch"
+        );
+        assert!(
+            after_shadow,
+            "the post-shadow consumer must retain the earlier read's exact producer"
+        );
+        let custody = resident
+            .retain_visible_binding_custody("sameStageResult")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resident.render_retained_preview(&custody, 64),
+            Some("115".into())
+        );
+    }
+
+    #[test]
     fn historical_native_authorization_requires_actual_stage_terminal_and_admitted_value() {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
@@ -744,13 +1057,51 @@ mod tests {
             })
             .unwrap(),
         );
-        execute_fixture_cell_for(
+        let (_, _, earlier_prefix) = execute_fixture_cell_for(
             &mut resident,
             &source,
             &recipe,
             &execution,
             include_str!("../fixtures/checked-produced-native-capture.hs"),
         );
+        let earlier_item = earlier_prefix.cell_program().items().last().unwrap();
+        let earlier_native = earlier_item.native().unwrap();
+        let earlier_target = earlier_item
+            .native_products()
+            .unwrap()
+            .linked_native_target()
+            .unwrap();
+        let prior = earlier_target
+            .acquired()
+            .find_map(|owner| {
+                owner.imports().find_map(|import| match import {
+                    AcquiredNativeImport::Retained { requirement, .. }
+                        if requirement.identity().occurrence == "capturedForNative" =>
+                    {
+                        Some(requirement)
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap();
+        let Some(CellStageRetainedInput::StageSelected(selected)) =
+            earlier_native.cell_stage_retained_input(&prior)
+        else {
+            panic!("cross-stage produced value requires explicit stage selection")
+        };
+        let WorldCellRuntimeInputOrigin::PriorStage { producer, consumer } = selected.origin()
+        else {
+            panic!("earlier stage input must retain its producer/consumer origin")
+        };
+        assert!(
+            producer < consumer
+                && consumer
+                    <= earlier_native
+                        .item()
+                        .world_selected_runtime_inputs()
+                        .stage_first_ordinal()
+        );
+
         let admission = plan_fixture_cell_for(
             &mut resident,
             &recipe,
