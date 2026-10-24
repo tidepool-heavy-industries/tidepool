@@ -71,7 +71,7 @@ import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceA
   RequestIfaceDecoder, CapturedInterfaceInputs, verifiedInterfaceProducts, newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
   selectVerifiedExactInterfaceProducts, verifiedExactInterface, capturedInterfaceInputs,
   hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactInterfaces, hydratedExactEnvironment, hydratedExactInputs, restoreHydratedInterfaceEnvironment,
-  emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, selectHydratedInterfaceInputs, admitCheckedValueInterface,
+  emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, selectHydratedInterfaceInputs, hydrateInterfaceInputsWithPrior, admitCheckedValueInterface,
   readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface,
   newOriginalInterfaceArtifactsWithSessionCaptures, serializeOriginalInterface,
   InterfaceInputFailure(..))
@@ -227,7 +227,13 @@ verifyHydratedOriginalOwners = do
         _ <- either fail pure (selectVerifiedExactInterfaceProducts
           (hydratedClosureAsCapturedInputs (hydratedExactInputs installed)) [alias])
         finalized <- retainCompletedModuleInterface environment original actualHome
-        completed <- captureCompletedInterfaceInputs environment closure [] [finalized]
+        otherFinalized <- case hydratedExactInterfaces first of
+          [(_,home)] -> retainCompletedModuleInterface environment original home
+          _ -> fail "finalization conflict premise lost its hydrated allocation"
+        duplicateRefusal <- try (captureCompletedInterfaceInputs environment closure [] [finalized,otherFinalized])
+        assert (case duplicateRefusal of Left InterfaceCompletedOwnerConflict{} -> True; _ -> False)
+          "one completion silently selected between independent finalized allocations"
+        completed <- captureCompletedInterfaceInputs environment closure [] [finalized,finalized]
         completionOwner <- retainInstalledInterfaceInputs fresh completed
         expectedIdentity <- evaluate actualHome >>= makeStableName
         case hydratedExactInterfaces completionOwner of
@@ -651,6 +657,21 @@ verifyRetainedHome (InlineOriginalFixture fixture identifier) = do
   assert (maybe False (const True) (lookupHpt (hsc_HPT environment) (mkModuleName "FatFixture")))
     "retain-only exclusion premise lacks an unrelated actual HPT owner"
   hydrated <- hydrateInterfaceInputs environment captured
+  unrelated <- fixtureInterface environment "FatFixture"
+  unrelatedBody <- captureArtifactBytes <$> serializeOriginalInterface environment
+    (fixtureDirectory fixture) (set_mi_extra_decls Nothing unrelated)
+  let unrelatedArtifact = ExactIfaceArtifact (unitString (moduleUnit (mi_module unrelated)))
+        "FatFixture" "unrelated/retained.hi" (artifactSha256 unrelatedBody) []
+  unrelatedCaptured <- readCapturedExactIfaceClosureWithCheckedValues decoder
+    (\requested -> if requested == unrelatedArtifact then pure unrelatedBody else fail "unexpected unrelated input")
+    environment [unrelatedArtifact] [] >>= either fail pure
+  broadInputs <- either throwIO pure (mergeCapturedInterfaceInputs [captured,unrelatedCaptured])
+  broadOwner <- hydrateInterfaceInputs environment broadInputs
+  selectedPhase <- freshExactContext environment
+  narrowOwner <- hydrateInterfaceInputsWithPrior selectedPhase (hydratedExactInputs broadOwner) captured
+  assert (length (hydratedExactInterfaces narrowOwner) == 1
+      && maybe True (const False) (lookupHpt (hsc_HPT (hydratedExactEnvironment narrowOwner)) (mkModuleName "FatFixture")))
+    "stage custody widened the selected closure with an unrelated retained original"
   withFixtureFileRemoved fixture "MissingFixture" $ do
     installed <- retainInstalledInterfaceInputs environment (hydratedExactInputs hydrated)
     case hydratedExactInterfaces installed of

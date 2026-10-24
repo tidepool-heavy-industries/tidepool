@@ -283,6 +283,13 @@ captureCompletedInterfaceInputs :: HscEnv -> HydratedInterfaceClosure
   -> [(ExactIfaceArtifact,CapturedSessionInterface)] -> [CompletedModuleInterface]
   -> IO HydratedInterfaceClosure
 captureCompletedInterfaceInputs environment previous captures finalized = do
+  let finalizedGroups = Map.fromListWith (++)
+        [((unitString (moduleUnit owner),moduleNameString (moduleName owner)),[completed])
+        | completed <- finalized,let owner = mi_module (hm_iface (completedModuleInterfaceHome completed))]
+  forM_ (Map.toAscList finalizedGroups) $ \(key,owners) -> case owners of
+    first:rest -> unless (all (sameCompletedModuleInterfaceOwner first) rest)
+      (throwIO (InterfaceCompletedOwnerConflict key))
+    [] -> pure ()
   sessions <- either throwIO pure (capturedSessionProducts captures)
   produced <- forM finalized $ \completed -> do
     let original = completedModuleInterfaceFinalized completed
