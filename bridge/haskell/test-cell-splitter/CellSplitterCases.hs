@@ -82,7 +82,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
   , originalInterfaceBytes, originalInterfaceSha256, CheckedTemplateImports(..)
   , captureProtectedTemplateImportsAt, renderProtectedTemplateImports
-  , generatedCheckingTemplateRecipeWithImportRendering, captureGeneratedScaffoldSource
+  , generatedCheckingTemplateRecipe, generatedCheckingTemplateRecipeWithImportRendering, captureGeneratedScaffoldSource
   , parseCapturedGeneratedImports, capturedGeneratedImportSyntax
   , capturedGeneratedImportOccurrences, capturedGeneratedImportOccurrenceOrigin )
 import Tidepool.ImportSyntax (capturedParsedSource)
