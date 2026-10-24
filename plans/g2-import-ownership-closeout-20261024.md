@@ -3,7 +3,10 @@
 Accepted implementation plan, 2026-10-24. Base code `35066c2115040ce9cf462d8ade764cb2ef84a4fc`, base documentation `b54861ea5cdbad7d3966257e29c42da4ded50f42`.
 Integration owner: root; branch `integration/g2-domain-runtime-20261023`.
 Evidence: `/srv/swarm/evidence/inanna/g2-import-ownership-closeout-20261024/`.
-The source-reviewed findings below are not new execution evidence. G2/G3 remain unqualified.
+Implemented code candidate: `75a0aa0fed3e30745ff43053d9ed5ea1a0f7cd72`.
+The three joined history cases now pass; see
+[review checkpoint](g2-import-ownership-review-20261024.md) and
+`joined-acceptance.json` in the evidence directory. G2/G3 remain unqualified.
 
 ## A: one chronological declaration-import composition
 
@@ -27,7 +30,7 @@ the final frontend applies chronological refinement, producing an ambiguous
 reach this same boundary; their cold histories succeed. Retained diagnostics:
 `joined-1519-history-two-retry/{4af84036685f91b40a3f31a583d4187c031f56059edf1ad9a601de7a48b2e33d,af7aeb8565ba408173b32b42fd7621d87e6da16cedb4a213dbe50975afcad7d6}/artifacts/compiler-transactions/`.
 
-Bounded follow-up: derive the demand import view from the actual matched
+The implemented follow-up derives the demand import view from the actual matched
 generated driver after prefix/import/operand restoration. Reuse the local
 declaration and chronological import rules. Project only imports onto the
 original no-quasiquote/root-checked demand declarations, with the same native
@@ -78,8 +81,8 @@ Return consolidated candidate and evidence to external Argon for final adversari
 - [x] A implemented, compiled and focused controls executed (six named cases; `imports/summary.json`)
 - [x] B implemented, compiled and focused controls executed (physical control, seven runtime controls, final prior-stage rerun; `slots/evidence.json`)
 - [x] C implemented, compiled and focused controls executed (nine controls plus strengthened ordered-import control; `rows/evidence.json`)
-- [ ] Joined deterministic and bounded generated histories executed
-- [ ] Integrated deletion/consumer review and Argon handoff
+- [x] Joined deterministic, distinct-value and bounded generated histories executed and passed
+- [x] Integrated deletion/consumer review and Argon handoff prepared (external acceptance pending)
 - [ ] Existing G2 bundle and Persona acceptance
 
 Selected joined fixture cohorts passed at `5650c5773b`: one recovered-base
@@ -87,7 +90,8 @@ program and eight user-type programs; `rows/joined-fixture-evidence.json`.
 The first joined history attempt built successfully but failed during compiler
 service startup on a malformed Nix root-query response. The retry reached the
 actual notebook failure described above; retain those as separate outcomes.
-No passing warm history, frozen bundle, or Persona acceptance is claimed.
+The later import-projection repair passes the warm histories, rejection and
+recovery controls. No frozen bundle or Persona acceptance is claimed.
 
 B's same-stage and prior-declaration controls pass separately. They do not
 establish reuse of an executable group whose capture was produced in that
