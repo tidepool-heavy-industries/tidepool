@@ -37227,6 +37227,60 @@ None,
             .unwrap();
         assert_eq!(restored.capture_graph_selection(), projected_graph);
 
+        // An explicit executable acquisition checks the parent's exact child
+        // pair before source membership consumes its already issued rows.
+        let executable = inventory
+            .admit_recovery_selection(
+                &physical,
+                vec![Arc::clone(&parent), Arc::clone(&child)],
+                &BTreeSet::from([
+                    crate::artifact_inventory::NativeGroupKey {
+                        artifact: parent.descriptor.id,
+                        original_ordinal: 7,
+                    },
+                    crate::artifact_inventory::NativeGroupKey {
+                        artifact: child.descriptor.id,
+                        original_ordinal: 7,
+                    },
+                ]),
+            )
+            .unwrap();
+        let mut validation = PackageInterfaceValidation::default();
+        let issued =
+            crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
+                &executable,
+                None,
+                &mut validation,
+            )
+            .unwrap();
+        let products = [product.clone(), child_product.clone()];
+        let membership =
+            AvailableOriginalSources::authenticate(&products, &validation.inventory).unwrap();
+        let before_overlay = executable.capture_graph_selection();
+        let overlay = membership
+            .overlay(
+                crate::declaration_context::ProductInputGroups::Exact(&issued),
+                &validation.inventory,
+            )
+            .unwrap();
+        assert!(overlay.contains_module("fixture", "NominalParent"));
+        assert!(overlay.contains_module("fixture", "NominalChild"));
+        assert_eq!(
+            executable.capture_graph_selection(),
+            before_overlay,
+            "source membership must not reselect the issuing child graph"
+        );
+        assert!(
+            matches!(
+                native.groups[0].source_imports(native),
+                Err(CertificationError::InputDecision {
+                    reason: InputDecisionRefusal::MissingContinuationOwner,
+                    ..
+                })
+            ),
+            "context-free metadata must still refuse to invent OriginalBinding execution"
+        );
+
         // Omitting metadata custody does not alter any selected outgoing row;
         // the full nominal witness independently detects the lost exact pair.
         let mut missing = graph;
