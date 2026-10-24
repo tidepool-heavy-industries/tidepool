@@ -221,14 +221,25 @@ impl SemanticSession {
         self.trace.lock().clone()
     }
 
+    fn observe_compiler_work<T>(&mut self, action: impl FnOnce(&mut Self) -> T) -> T {
+        let submissions_before = tidepool_extract_cmd::extract_spawn_count();
+        let (result, requests) = with_compiler_mode_capture(|| action(self));
+        assert_eq!(
+            requests.len() as u64,
+            tidepool_extract_cmd::extract_spawn_count() - submissions_before,
+            "every physical compiler submission must have a typed request observation"
+        );
+        self.history_compiler_census = Some((submissions_before, requests));
+        result
+    }
+
     fn execute_history(
         &mut self,
         label: &str,
         history: &RenderedHistory,
     ) -> Result<Duration, ResidentError> {
-        let submissions_before = tidepool_extract_cmd::extract_spawn_count();
-        let (result, requests) = with_compiler_mode_capture(|| {
-            self.execute_observed(
+        self.observe_compiler_work(|session| {
+            session.execute_observed(
                 label,
                 &history.cell,
                 CellDeclarationExpectation::CapturedAt {
@@ -240,14 +251,8 @@ impl SemanticSession {
                 None,
                 |_| {},
             )
-        });
-        assert_eq!(
-            requests.len() as u64,
-            tidepool_extract_cmd::extract_spawn_count() - submissions_before,
-            "every physical compiler submission must have a typed request observation"
-        );
-        self.history_compiler_census = Some((submissions_before, requests));
-        result.map(|(elapsed, _)| elapsed)
+        })
+        .map(|(elapsed, _)| elapsed)
     }
 
     fn assert_no_compiler_since_last_effect(&self) {
@@ -1483,40 +1488,40 @@ fn inherited_prior_stage_capture_preserves_effect_metadata_without_replay() {
     let imports = SourceImports::from_specs(["qualified Control.Monad.Freer as StageEff"]);
     let before_effects = Arc::clone(&session.trace);
     session
-        .execute_observed(
-            "inherited_effect_capture",
-            &source,
-            CellDeclarationExpectation::Total(1),
-            SemanticChecks::None,
-            &imports,
-            None,
-            |program| {
-                assert!(before_effects.lock().is_empty());
-                let last = program.items().last().unwrap().checked_item();
-                let selected = last.world_selected_runtime_inputs();
-                let captured = selected
-                    .inputs()
-                    .iter()
-                    .find(|input| input.occurrence() == "inheritedEffectValue")
-                    .expect("the effectful declaration retains its original produced value");
-                let WorldCellRuntimeInputOrigin::PriorStage { producer, consumer } =
-                    captured.origin()
-                else {
-                    panic!("the same cell's value must retain prior-stage provenance");
-                };
-                assert!(producer < consumer);
-                assert!(
-                    consumer < last.index(),
-                    "inherited selection keeps the original consumer, not the final stage"
-                );
-                assert!(
-                    program.items()[consumer]
+        .observe_compiler_work(|session| {
+            session.execute_observed(
+                "inherited_effect_capture",
+                &source,
+                CellDeclarationExpectation::Total(1),
+                SemanticChecks::None,
+                &imports,
+                None,
+                |program| {
+                    assert!(before_effects.lock().is_empty());
+                    let last = program.items().last().unwrap().checked_item();
+                    let selected = last.world_selected_runtime_inputs();
+                    let captured = selected
+                        .inputs()
+                        .iter()
+                        .find(|input| input.occurrence() == "inheritedEffectValue")
+                        .expect("the effectful declaration retains its original produced value");
+                    let WorldCellRuntimeInputOrigin::PriorStage { producer, consumer } =
+                        captured.origin()
+                    else {
+                        panic!("the same cell's value must retain prior-stage provenance");
+                    };
+                    assert!(producer < consumer);
+                    assert!(
+                        consumer < last.index(),
+                        "inherited selection keeps the original consumer, not the final stage"
+                    );
+                    assert!(program.items()[consumer]
                         .checked_item()
                         .planned_declaration()
-                        .is_some()
-                );
-            },
-        )
+                        .is_some());
+                },
+            )
+        })
         .unwrap();
     assert_eq!(session.observed(), [11, 23]);
     session.assert_only_publication_join_since_last_effect();
@@ -1533,11 +1538,6 @@ fn transitive_prior_home_chain_preserves_historical_and_produced_captures() {
         DependencyTerminalOrigin, WorldCellRuntimeInputOrigin,
     };
 
-    let subscriber = tracing_subscriber::fmt()
-        .with_test_writer()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .finish();
-    let _subscriber = tracing::subscriber::set_default(subscriber);
     let mut session = SemanticSession::new();
     session
         .execute(
@@ -1567,32 +1567,33 @@ fn transitive_prior_home_chain_preserves_historical_and_produced_captures() {
     assert_ne!(original.0, replacement.0);
     let before_effects = Arc::clone(&session.trace);
     session
-        .execute_observed(
-            "transitive_home_chain",
-            include_str!("fixtures/typed-segment-transitive-home-chain.hs"),
-            CellDeclarationExpectation::Total(2),
-            SemanticChecks::None,
-            &SourceImports::new(),
-            None,
-            |program| {
-                assert_eq!(before_effects.lock().as_slice(), &[5]);
-                let declarations = program
-                    .items()
-                    .iter()
-                    .filter(|item| item.checked_item().planned_declaration().is_some())
-                    .map(|item| item.checked_item().index())
-                    .collect::<Vec<_>>();
-                let [first, second] = declarations.as_slice() else {
-                    panic!("the chain must cross two independently issued declaration stages");
-                };
-                assert!(
-                    first + 1 < *second,
-                    "a real binding separates the declarations"
-                );
-                let last = program.items().last().unwrap().checked_item();
-                assert!(*second < last.index());
-                let selected = last.world_selected_runtime_inputs();
-                assert!(
+        .observe_compiler_work(|session| {
+            session.execute_observed(
+                "transitive_home_chain",
+                include_str!("fixtures/typed-segment-transitive-home-chain.hs"),
+                CellDeclarationExpectation::Total(2),
+                SemanticChecks::None,
+                &SourceImports::new(),
+                None,
+                |program| {
+                    assert_eq!(before_effects.lock().as_slice(), &[5]);
+                    let declarations = program
+                        .items()
+                        .iter()
+                        .filter(|item| item.checked_item().planned_declaration().is_some())
+                        .map(|item| item.checked_item().index())
+                        .collect::<Vec<_>>();
+                    let [first, second] = declarations.as_slice() else {
+                        panic!("the chain must cross two independently issued declaration stages");
+                    };
+                    assert!(
+                        first + 1 < *second,
+                        "a real binding separates the declarations"
+                    );
+                    let last = program.items().last().unwrap().checked_item();
+                    assert!(*second < last.index());
+                    let selected = last.world_selected_runtime_inputs();
+                    assert!(
                     selected.inputs().iter().any(|input| {
                         input.occurrence() == "chainCurrentValue"
                             && matches!(input.origin(), WorldCellRuntimeInputOrigin::PriorStage {
@@ -1601,23 +1602,27 @@ fn transitive_prior_home_chain_preserves_historical_and_produced_captures() {
                     }),
                     "the final consumer inherits the first declaration's exact produced capture"
                 );
-                let terminals = last
-                    .world_stage_dependencies()
-                    .terminals()
-                    .collect::<Vec<_>>();
-                assert!(terminals.iter().any(|terminal| {
-                    terminal.origin() == DependencyTerminalOrigin::NativeOriginal
-                        && terminal.identity().module == original.1.module_name()
-                        && terminal.generation() == original.1.gen.0
-                }), "the chain retains the historical declaration's old value terminal");
-                assert!(
-                    terminals.iter().all(|terminal| {
-                        terminal.identity().module != replacement.1.module_name()
-                    }),
-                    "the visible replacement cannot rebind the historical edge"
-                );
-            },
-        )
+                    let terminals = last
+                        .world_stage_dependencies()
+                        .terminals()
+                        .collect::<Vec<_>>();
+                    assert!(
+                        terminals.iter().any(|terminal| {
+                            terminal.origin() == DependencyTerminalOrigin::NativeOriginal
+                                && terminal.identity().module == original.1.module_name()
+                                && terminal.generation() == original.1.gen.0
+                        }),
+                        "the chain retains the historical declaration's old value terminal"
+                    );
+                    assert!(
+                        terminals.iter().all(|terminal| {
+                            terminal.identity().module != replacement.1.module_name()
+                        }),
+                        "the visible replacement cannot rebind the historical edge"
+                    );
+                },
+            )
+        })
         .unwrap();
     assert_eq!(session.observed(), [5, 11, 30]);
     session.assert_only_publication_join_since_last_effect();

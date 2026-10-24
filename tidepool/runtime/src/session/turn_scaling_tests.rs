@@ -124,7 +124,11 @@ where
 fn with_compiler_mode_capture<T>(action: impl FnOnce() -> T) -> (T, Vec<CompilerModeObservation>) {
     let observer = CompilerModeObserver::default();
     let result = tracing::subscriber::with_default(
-        tracing_subscriber::registry().with(observer.clone()),
+        tracing_subscriber::registry().with(observer.clone()).with(
+            tracing_subscriber::fmt::layer()
+                .with_test_writer()
+                .with_filter(tracing_subscriber::EnvFilter::from_default_env()),
+        ),
         action,
     );
     let requests = observer.0.lock().clone();
