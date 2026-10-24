@@ -856,6 +856,33 @@ impl PreparedEngine {
             if !authorized.matches_slot(item, *digest, &plan.linked, authorized.requirement()) {
                 return Err(PreparedRuntimeError::certified_target_owners());
             }
+            let requirement = authorized.requirement();
+            let capture = authorized.value();
+            let entry = bindings
+                .get(capture.id)
+                .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
+            if entry.value.identity != *requirement.identity()
+                || entry.module
+                    != super::super::SessionModule::val(tidepool_repr::Generation(
+                        requirement.generation(),
+                    ))
+                || entry.value.handle != capture.handle
+                || capture.identity != *requirement.identity()
+                || capture.generation != requirement.generation()
+                || capture.handle.rep() != requirement.rep
+                || self.machine.prepared_handle_of(capture.handle.raw()) != Some(capture.handle)
+                || requirement.entry_signature.is_some()
+            {
+                return Err(PreparedRuntimeError::certified_target_owners());
+            }
+            if requirement.required_evaluated
+                && !self
+                    .machine
+                    .handle_is_evaluated(capture.handle)
+                    .map_err(PreparedRuntimeError::Install)?
+            {
+                return Err(PreparedRuntimeError::certified_target_owners());
+            }
         }
         // Resolution retains weak choices, including observed vacancies. Check
         // them under the final source/snapshot admission before staging a batch;
@@ -1011,33 +1038,7 @@ impl PreparedEngine {
                             if !Arc::ptr_eq(authorized.target(), &plan.linked) {
                                 return Err(PreparedRuntimeError::certified_target_owners());
                             }
-                            let requirement = authorized.requirement();
                             let capture = authorized.value();
-                            let entry = bindings
-                                .get(capture.id)
-                                .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
-                            if entry.value.identity != *requirement.identity()
-                                || entry.module
-                                    != super::super::SessionModule::val(tidepool_repr::Generation(
-                                        requirement.generation(),
-                                    ))
-                                || entry.value.handle != capture.handle
-                                || capture.identity != *requirement.identity()
-                                || capture.generation != requirement.generation()
-                                || capture.handle.rep() != requirement.rep
-                                || self.machine.prepared_handle_of(capture.handle.raw()) != Some(capture.handle)
-                                || requirement.entry_signature.is_some()
-                            {
-                                return Err(PreparedRuntimeError::certified_target_owners());
-                            }
-                            if requirement.required_evaluated
-                                && !self
-                                    .machine
-                                    .handle_is_evaluated(capture.handle)
-                                    .map_err(PreparedRuntimeError::Install)?
-                            {
-                                return Err(PreparedRuntimeError::certified_target_owners());
-                            }
                             Ok(BatchImport::Existing {
                                 handle: capture.handle,
                                 entry_signature: None,
