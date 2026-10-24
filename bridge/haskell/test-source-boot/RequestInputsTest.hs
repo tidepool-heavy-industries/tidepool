@@ -2922,15 +2922,22 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
               && all (== last beforeCounts) afterCounts)
             (fail "cancelled expression plan lost its settlement observations or committed a source module")
           -- Recovery opens a fresh phase; the poisoned phase is never retried.
-          runScope (pure ()) $ \compiler -> acquire compiler >> void (issueCancellation compiler)
+          (_,retryLog) <- captureDiagnostics $
+            runScope (pure ()) $ \compiler -> acquire compiler >> void (issueCancellation compiler)
+          hPutStrLn stderr retryLog
+          pure (counterValues "world.cell.source_frontends.main:WorldCancellationNames" cancelledLog,
+            counterValues "world.cell.source_frontends.main:WorldCancellationNames" retryLog,
+            beforeCounts,afterCounts)
       outcome `seq` pure ()
       forM_ ["CacheEntry","CacheEven","CacheOdd"] $ \name ->
         unless (counterValues ("world.cell.source_frontends.main:" ++ name) diagnostics == [1])
           (fail "later native demand replayed an already finalized SOURCE owner")
       unless (sum (counterValues "world.cell.prior_source_preparations" diagnostics) > 0)
         (fail "SOURCE history did not prepare its newly demanded prior source body")
-      unless (counterValues "world.cell.source_frontends.main:WorldCancellationNames" diagnostics == [1,1])
-        (fail "cancelled expression plan published its pending captured source preparation")
+      let cancellationFrontends = counterValues "world.cell.source_frontends.main:WorldCancellationNames" diagnostics
+      unless (cancellationFrontends == [1,1])
+        (fail ("cancelled expression plan published its pending captured source preparation: frontends="
+          ++ show cancellationFrontends ++ "; cancellation/retry/publication=" ++ show outcome))
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
       unless (admissionParses == replicate 15 1)
