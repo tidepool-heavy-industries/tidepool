@@ -267,3 +267,163 @@ fn owned_daemon_publishes_exact_measurement_identity_and_refuses_inherited_coord
         assert!(!snapshot.exists());
     }
 }
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
+}
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+fn frame_path(bytes: &mut Vec<u8>, path: &Path) {
+    let path = path.as_os_str().as_encoded_bytes();
+    bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(path);
+}
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "real owned frontend/provider refusal and post-acquisition settlement controls"
+)]
+fn configured_startup_failures_retain_acquisition_and_settle_exact_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let worker_source = directory.path().join("worker.rs");
+    fs::write(&worker_source, worker_fixture_source()).unwrap();
+    let worker = directory.path().join("worker");
+    assert!(Command::new("rustc")
+        .args(["--edition=2021"])
+        .arg(&worker_source)
+        .arg("-o")
+        .arg(&worker)
+        .status()
+        .unwrap()
+        .success());
+    let python = fs::canonicalize(
+        std::env::var_os("TIDEPOOL_TEST_PYTHON").expect("declared provider Python is required"),
+    )
+    .unwrap();
+    assert!(python.starts_with("/nix/store"));
+    let python_object = Path::new("/nix/store").join(
+        python
+            .strip_prefix("/nix/store")
+            .unwrap()
+            .components()
+            .next()
+            .unwrap(),
+    );
+    let python_sha = sha256(&fs::read(&python).unwrap());
+    let provider = directory.path().join("provider.py");
+    let provider_bytes = include_bytes!("fixtures/service_provider.py");
+    fs::write(&provider, provider_bytes).unwrap();
+    let frontend = env!("CARGO_BIN_EXE_tidepool-extract");
+    for mode in ["preboot-refusal", "profile-failure", "release-refusal"] {
+        let owner = directory.path().join(mode);
+        let record = directory.path().join(format!("{mode}-source.json"));
+        // The executable deliberately is not a TPSPF001 package profile. Its
+        // valid immutable digest lets acquisition succeed before profile decode.
+        let record_bytes=serde_json::to_vec(&serde_json::json!({"schema":2,"kind":"compiler-service-package-source","source_id":hex(&[2;32]),"profile_id":hex(&[3;32]),"provider_guard_store_path":python_object,"profile_store_path":python,"profile_sha256":hex(&python_sha),"acquisition_roots":[python_object],"fixture_mode":mode})).unwrap();
+        fs::write(&record, &record_bytes).unwrap();
+        let mut config = b"TPSCF002".to_vec();
+        config.push(0);
+        frame_path(&mut config, &python);
+        config.extend_from_slice(&python_sha);
+        frame_path(&mut config, &provider);
+        config.extend_from_slice(&sha256(provider_bytes));
+        frame_path(&mut config, &record);
+        config.extend_from_slice(&sha256(&record_bytes));
+        config.extend_from_slice(&[2; 32]);
+        config.extend_from_slice(&[3; 32]);
+        let config_path = directory.path().join(format!("{mode}-launch.bin"));
+        fs::write(&config_path, &config).unwrap();
+        let marker = owner.join("workload-ran");
+        let mut command = Command::new(frontend);
+        for key in [
+            "TIDEPOOL_EXTRACT_DAEMON_SOCKET",
+            "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT",
+            "TIDEPOOL_EXTRACT_NO_DAEMON",
+            "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID",
+            "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER",
+            "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH",
+            "TIDEPOOL_OWNED_COMPILER_SERVICE",
+            "LD_PRELOAD",
+            "LD_AUDIT",
+            "LD_LIBRARY_PATH",
+        ] {
+            command.env_remove(key);
+        }
+        let output = command
+            .env("TIDEPOOL_EXTRACT", frontend)
+            .env("TIDEPOOL_EXTRACT_WORKER", &worker)
+            .env("TIDEPOOL_GHC_LIBDIR", "unused-by-fixture")
+            .env("TIDEPOOL_COMPILER_DEPLOYMENT", "configured-source-fixture")
+            .env("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", &config_path)
+            .env(
+                "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG_SHA256",
+                hex(&sha256(&config)),
+            )
+            .arg("--owned-daemon-run")
+            .arg(&owner)
+            .arg("--")
+            .arg(std::env::var_os("TIDEPOOL_TEST_BASH").unwrap())
+            .args(["-c", r#"touch "$1""#, "fixture"])
+            .arg(&marker)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "{mode} must retain startup failure"
+        );
+        assert!(
+            !marker.exists(),
+            "workload cannot start before source admission"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(owner.join("owned-service.json")).unwrap()).unwrap();
+        assert_eq!(report["schema"], 2);
+        assert_eq!(report["action"]["status"], "failed");
+        assert_eq!(report["daemon_reap"]["status"], "reaped");
+        assert_eq!(report["daemon_reap"]["success"], false);
+        assert_eq!(report["service_terminal"]["workers_retired"], true);
+        assert_eq!(report["service_terminal"]["socket_retired"], true);
+        assert!(
+            report["endpoint"].is_null(),
+            "terminal before Ready remains valid"
+        );
+        assert_eq!(report["complete"], mode != "release-refusal");
+        assert_eq!(
+            report["source_settlement"]["status"],
+            if mode == "release-refusal" {
+                "retained"
+            } else {
+                "settled"
+            }
+        );
+        let roots: Vec<serde_json::Value> =
+            serde_json::from_slice(&fs::read(owner.join("fixture-registrations.json")).unwrap())
+                .unwrap();
+        assert_eq!(roots.len(), 1);
+        for root in roots {
+            let path = Path::new(root["path"].as_str().unwrap());
+            assert_eq!(path.symlink_metadata().is_ok(), mode == "release-refusal");
+        }
+        if mode == "preboot-refusal" {
+            assert_eq!(report["acquisition"]["status"], "refused");
+            assert_eq!(report["acquisition"]["settlement"], "preboot_released");
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("injected refusal after fixture root registrations"));
+        } else {
+            assert_eq!(report["acquisition"]["status"], "acquired");
+            assert!(!report["service_terminal"]["failures"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            assert!(owner.join("package-source/receipt.json").is_file());
+        }
+        if mode == "release-refusal" {
+            assert!(!report["settlement_failures"].as_array().unwrap().is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("service package source release failed"));
+        }
+    }
+}

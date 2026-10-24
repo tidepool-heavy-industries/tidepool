@@ -203,9 +203,7 @@ pub(crate) fn read_owned_service_startup() -> io::Result<OwnedServiceStartup> {
     // The duplicate is the sole control carrier. No worker/provider may inherit
     // the original fd0 socket through Command::stdin inheritance.
     let null = File::open("/dev/null")?;
-    if unsafe { libc::dup2(null.as_raw_fd(), 0) } < 0
-        || unsafe { libc::fcntl(0, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
-    {
+    if unsafe { libc::dup2(null.as_raw_fd(), 0) } < 0 {
         return Err(io::Error::last_os_error());
     }
     let initial = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -517,20 +515,33 @@ impl OwnedServiceRun {
                 }
             }
         }
+        let mut service = self
+            .report
+            .service_terminal
+            .as_ref()
+            .map(|terminal| terminal.failures.clone())
+            .unwrap_or_default();
+        if let Some(reaped) = &reaped {
+            if !reaped.status().success() {
+                service.push(format!("compiler daemon exited with {}", reaped.status()));
+            }
+        }
         let cache = self.report.owner_directory.join("cache");
-        self.report.artifact_retention =
-            if action.as_ref().is_ok_and(|code| *code == 0) && proof.is_some() {
-                match std::fs::remove_dir_all(cache) {
-                    Ok(()) => Observation::state(crate::service::ObservationStatus::Removed),
-                    Err(e) => {
-                        let o = Observation::failed(crate::service::ObservationStatus::Failed, &e);
-                        self.settlements.push(FrontendError::Io(e));
-                        o
-                    }
+        self.report.artifact_retention = if action.as_ref().is_ok_and(|code| *code == 0)
+            && proof.is_some()
+            && service.is_empty()
+        {
+            match std::fs::remove_dir_all(cache) {
+                Ok(()) => Observation::state(crate::service::ObservationStatus::Removed),
+                Err(e) => {
+                    let o = Observation::failed(crate::service::ObservationStatus::Failed, &e);
+                    self.settlements.push(FrontendError::Io(e));
+                    o
                 }
-            } else {
-                Observation::state(crate::service::ObservationStatus::Retained)
-            };
+            }
+        } else {
+            Observation::state(crate::service::ObservationStatus::Retained)
+        };
         if let Err(error) = &action {
             if self.report.action.status != ObservationStatus::Exited {
                 self.report.action =
@@ -544,17 +555,6 @@ impl OwnedServiceRun {
             self.report
                 .publication_failures
                 .extend(publication.iter().cloned());
-        }
-        let mut service = self
-            .report
-            .service_terminal
-            .as_ref()
-            .map(|terminal| terminal.failures.clone())
-            .unwrap_or_default();
-        if let Some(reaped) = &reaped {
-            if !reaped.status().success() {
-                service.push(format!("compiler daemon exited with {}", reaped.status()));
-            }
         }
         self.report.settlement_failures =
             self.settlements.iter().map(ToString::to_string).collect();
