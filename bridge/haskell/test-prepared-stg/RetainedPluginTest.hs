@@ -31,6 +31,7 @@ import GHC.Types.Id
 import GHC.Types.Basic (isOpaquePragma)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import GHC.Unit.Types (unitString)
 import GHC.Unit.Module (moduleUnit)
 import System.Directory (copyFile, renameFile)
@@ -305,7 +306,10 @@ verifyNativeBoundary dir = do
         && all isLocalId (filter ordinary providerIds))
         "native boundary controls lack compulsory defaults, authored rules, or LocalId executable tops"
       if not native then liftIO $ require (any sourceSeed consumerIds)
-        "unprotected native fixture failed to expose its retained seed" else do
+        ("unprotected native fixture failed to expose its retained seed; consumer references="
+          ++ show [(defining identifier,occurrence identifier) | identifier <- consumerIds]
+          ++ "\nsource Core=" ++ showSDocUnsafe (ppr (mg_binds (snapshot "after" source)))
+          ++ "\nconsumer Core=" ++ showSDocUnsafe (ppr (mg_binds (snapshot "after" consumer)))) else do
         liftIO $ do
           require (not (any sourceSeed consumerIds)) "native boundary exposed retained seed in its consumer"
           let named = Set.fromList [occurrence identifier | identifier <- consumerIds, defining identifier == Just producer]
