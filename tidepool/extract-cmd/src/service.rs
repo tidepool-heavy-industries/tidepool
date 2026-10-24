@@ -254,7 +254,13 @@ impl ServicePump {
                 }
                 ServiceMessage::Ready { endpoint }
                     if self.epoch.is_some()
-                        && self.acquisition.is_some()
+                        && matches!(
+                            self.acquisition,
+                            Some(
+                                AcquisitionObservation::NotConfigured
+                                    | AcquisitionObservation::Acquired { .. }
+                            )
+                        )
                         && self.endpoint.is_none() =>
                 {
                     if endpoint.len() != 64 || !endpoint.bytes().all(|b| b.is_ascii_hexdigit()) {

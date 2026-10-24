@@ -351,15 +351,15 @@ impl OwnedServiceRun {
             }
             self.report.daemon_epoch = pump.epoch().as_ref().map(|v| crate::endpoint::hex(v));
             if let Some(acquisition) = pump.acquisition() {
-                if self.configuration.is_some()
-                    && matches!(
+                if self.configuration.is_none()
+                    != matches!(
                         acquisition,
                         crate::service::AcquisitionObservation::NotConfigured
                     )
                 {
                     self.carrier_broken = true;
                     self.settlements.push(FrontendError::Daemon(
-                        "configured service reported no source acquisition".into(),
+                        "service source acquisition differs from configured owner".into(),
                     ));
                 } else {
                     self.report.acquisition = acquisition.clone();
@@ -545,6 +545,7 @@ impl OwnedServiceRun {
             Observation::state(crate::service::ObservationStatus::Retained)
         };
         if let Err(error) = &action {
+            self.report.action.failure = Some(error.to_string());
             if self.report.action.status != ObservationStatus::Exited {
                 self.report.action =
                     Observation::failed(crate::service::ObservationStatus::Failed, error);
@@ -746,12 +747,12 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
                 "initial service evidence publication failed".into(),
             ));
         }
-        let direct = crate::ExtractCmd::new()
-            .map_err(|e| FrontendError::Io(e.into()))?
-            .bind_direct()
-            .map_err(|e| FrontendError::Io(e.source))?;
-        let expected = direct.identity().clone();
-        drop(direct);
+        let selected_worker = prepare_worker()?;
+        let expected = crate::CompilerIdentity::direct(
+            selected_worker.producer_identity()?,
+            selected_worker.consumed_worker_identity(),
+        );
+        drop(selected_worker);
         let cache = root.join("cache");
         std::fs::create_dir(&cache).map_err(FrontendError::Io)?;
         owner.socket_directory = Some(OwnedSocketDirectory::create().map_err(FrontendError::Io)?);
@@ -1681,6 +1682,50 @@ mod tests {
             carrier_broken: false,
         }
     }
+    #[test]
+    fn daemon_preparation_failure_cannot_infer_retirement_from_empty_slots() {
+        let root = tempfile::tempdir().unwrap();
+        let (read, write) = std::os::unix::net::UnixStream::pair().unwrap();
+        let startup = std::sync::Arc::new(OwnedServiceStartup {
+            directory: root.path().to_owned(),
+            control: std::sync::Mutex::new(write),
+            operation: [1; 32],
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+        });
+        let config = parse_daemon(&[
+            "--socket".into(),
+            root.path().join("compiler.sock").into_os_string(),
+        ])
+        .unwrap();
+        let result = daemon::serve_owned(&config, startup, || {
+            Err(FrontendError::Io(io::Error::other(
+                "metadata child reap unconfirmed",
+            )))
+        });
+        assert!(result.is_err());
+        let mut pump = crate::service::ServicePump::new(
+            read,
+            [1; 32],
+            std::process::id(),
+            root.path().to_owned(),
+        )
+        .unwrap();
+        pump.poll().unwrap();
+        let terminal = pump.terminal().unwrap();
+        assert!(
+            !terminal.workers_retired,
+            "failed preparation owns uncertainty before any slot exists"
+        );
+        assert!(
+            terminal.socket_retired,
+            "socket admission was never attempted"
+        );
+        assert!(terminal
+            .failures
+            .iter()
+            .any(|failure| failure.contains("metadata child reap unconfirmed")));
+    }
+
     #[test]
     fn owned_service_failure_survives_successful_workload_and_complete_retirement() {
         let root = tempfile::tempdir().unwrap();

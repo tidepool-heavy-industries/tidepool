@@ -2435,6 +2435,42 @@ fn validate_worker_footprint(workers: usize, budget_mb: u64) -> Result<(), Front
     Ok(())
 }
 
+enum ServiceSocket {
+    NotAttempted,
+    Binding,
+    Bound(OwnedSocket),
+}
+impl ServiceSocket {
+    fn bind(&mut self, path: &Path) -> Result<&UnixListener, FrontendError> {
+        *self = Self::Binding;
+        let socket = OwnedSocket::bind(path)?;
+        *self = Self::Bound(socket);
+        match self {
+            Self::Bound(socket) => Ok(&socket.listener),
+            _ => unreachable!(),
+        }
+    }
+    fn retire(self) -> (bool, Option<FrontendError>) {
+        match self {
+            Self::NotAttempted => (true, None),
+            Self::Binding => (
+                false,
+                Some(FrontendError::Daemon(
+                    "compiler socket acquisition remains unconfirmed".into(),
+                )),
+            ),
+            Self::Bound(socket) => {
+                let result = socket.retire();
+                drop(socket);
+                match result {
+                    Ok(()) => (true, None),
+                    Err(error) => (false, Some(error)),
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
     serve_lifecycle(config, || Ok(prepared), None)
 }
@@ -2451,7 +2487,8 @@ fn serve_lifecycle(
     owner: Option<std::sync::Arc<crate::frontend::OwnedServiceStartup>>,
 ) -> Result<u8, FrontendError> {
     let epoch = boot_epoch()?;
-    let mut socket = None;
+    let mut socket = ServiceSocket::NotAttempted;
+    let mut preparation_completed = false;
     let mut retirement = Vec::new();
     let mut settlement = Vec::new();
     let result = (|| {
@@ -2461,6 +2498,7 @@ fn serve_lifecycle(
                 .map_err(FrontendError::Io)?;
         }
         let prepared = prepare()?;
+        preparation_completed = true;
         serve_inner(
             config,
             prepared,
@@ -2470,25 +2508,16 @@ fn serve_lifecycle(
             &mut retirement,
         )
     })();
-    let socket_retired = match socket.take() {
-        Some(socket) => {
-            let result = socket.retire();
-            drop(socket);
-            match result {
-                Ok(()) => true,
-                Err(error) => {
-                    settlement.push(error);
-                    false
-                }
-            }
-        }
-        None => true,
-    };
-    let workers_retired = retirement.iter().all(|slot: &SlotRetirementOwner| {
-        slot.lock()
-            .map(|slot| slot.outstanding.is_empty())
-            .unwrap_or(false)
-    });
+    let (socket_retired, socket_error) = socket.retire();
+    if let Some(error) = socket_error {
+        settlement.push(error);
+    }
+    let workers_retired = preparation_completed
+        && retirement.iter().all(|slot: &SlotRetirementOwner| {
+            slot.lock()
+                .map(|slot| slot.outstanding.is_empty())
+                .unwrap_or(false)
+        });
     let mut failures: Vec<String> = result
         .as_ref()
         .err()
@@ -2524,7 +2553,7 @@ fn serve_inner(
     mut prepared: PreparedWorker,
     epoch: [u8; 32],
     owner: Option<&std::sync::Arc<crate::frontend::OwnedServiceStartup>>,
-    owned_socket: &mut Option<OwnedSocket>,
+    owned_socket: &mut ServiceSocket,
     retirement: &mut Vec<SlotRetirementOwner>,
 ) -> Result<u8, FrontendError> {
     let producer = prepared.producer_identity()?;
@@ -2573,8 +2602,7 @@ fn serve_inner(
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_REQUEST_DEADLINE);
     let executable = std::env::current_exe().map_err(FrontendError::Io)?;
-    *owned_socket = Some(OwnedSocket::bind(&config.socket)?);
-    let listener = &owned_socket.as_ref().unwrap().listener;
+    let listener = owned_socket.bind(&config.socket)?;
     if let Some(configuration) =
         crate::package_source::ConfiguredSource::from_environment().map_err(FrontendError::Io)?
     {
@@ -5233,6 +5261,19 @@ mod tests {
         argv: &[OsString],
     ) -> Result<Output, DaemonError> {
         super::execute_transaction_request(transaction, cwd, &test_request(argv))
+    }
+
+    #[test]
+    fn attempted_socket_acquisition_requires_positive_retirement() {
+        let (complete, error) = ServiceSocket::NotAttempted.retire();
+        assert!(complete);
+        assert!(error.is_none());
+        let (complete, error) = ServiceSocket::Binding.retire();
+        assert!(!complete);
+        assert!(
+            error.is_some(),
+            "missing returned owner after attempted bind is uncertainty"
+        );
     }
 
     #[test]
