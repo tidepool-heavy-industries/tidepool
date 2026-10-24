@@ -5,6 +5,8 @@ load("@prelude//rust:sources.bzl", "rust_filegroup")
 
 load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")
 
+load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
+
 rust_filegroup(
     name = "tidepool_extract_cmd_sources",
     mapped_srcs = {

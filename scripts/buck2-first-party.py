@@ -1852,7 +1852,7 @@ for package_name, package in local.items():
     if package_name == "tidepool-toolchain":
         rules.append('load("//build/rust:executable_resource.bzl", "runtime_executable")\n')
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
-    if package_name in ("tidepool-runtime", "tidepool-codegen"):
+    if package_name in ("tidepool-runtime", "tidepool-codegen", "tidepool-extract-cmd"):
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name in ("tidepool-runtime", "tidepool-toolchain"):
         rules.append('load("//build/rust:compile_fail.bzl", "rust_compile_fail")\n')

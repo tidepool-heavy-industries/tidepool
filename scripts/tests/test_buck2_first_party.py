@@ -231,13 +231,17 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
     def rules(self, path):
         tree = ast.parse((self.root / path / "BUCK").read_text())
         rules = {}
+        loaded = set()
         for statement in tree.body:
             self.assertIsInstance(statement, ast.Expr)
             self.assertIsInstance(statement.value, ast.Call)
             call = statement.value
             self.assertIsInstance(call.func, ast.Name)
             if call.func.id == "load":
+                loaded.update(self.arguments(argument) for argument in call.args[1:])
                 continue
+            if call.func.id.startswith("tidepool_rust_"):
+                self.assertIn(call.func.id, loaded, "generated Rust rule must have its Buck load")
             arguments = {keyword.arg: self.arguments(keyword.value) for keyword in call.keywords}
             # A no-argument owning macro (for example tidepool_codegen_md5)
             # emits its fixed targets internally rather than declaring a name.
@@ -427,6 +431,12 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertNotIn("LD_LIBRARY_PATH", case["resource_env"])
         self.assertNotIn("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", self.rule(
             "tidepool/extract-cmd", "daemon_integration")["resource_env"])
+        buck = self.root / "tidepool/extract-cmd/BUCK"
+        declaration = 'load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n'
+        self.assertIn(declaration, buck.read_text())
+        buck.write_text(buck.read_text().replace(declaration, ""))
+        with self.assertRaisesRegex(AssertionError, "generated Rust rule must have its Buck load"):
+            self.rules("tidepool/extract-cmd")
 
     def test_integration_executable_input_without_a_binary_owner_refuses_publication(self):
         metadata = json.loads(self.metadata.read_text())
