@@ -67,7 +67,6 @@ import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
 import GHC.Driver.Hooks (hscCompileCoreExprHook, hscFrontendHook, runPhaseHook, runMetaHook)
 import GHC.Data.StringBuffer (stringToStringBuffer)
-import qualified GHC.Data.EnumSet as EnumSet
 import qualified GHC.Data.Maybe as MaybeErr
 import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, runHsc')
@@ -116,7 +115,7 @@ import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, Type
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, typedItemCaptures, typedCaptureType, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, moduleInputOccurrences, moduleImportRequests, prepareSegmentDemand, prepareModuleDemand
-  , ParsedModuleDemand, moduleDemandCapturedImports, segmentModuleDemand, moduleDemandMatchesSource, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
+  , ParsedModuleDemand, moduleDemandCapturedImports, segmentModuleDemand, moduleDemandMatchesSource, annotateModuleDemand, projectRefinedDemandImports, ObservationOperand(..), validateObservationContribution
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
@@ -338,7 +337,7 @@ import Tidepool.ImportSyntax
   , driverImportOccurrences, importOccurrenceId, capturedParsedSource, refinedImportOccurrences )
 import Tidepool.ImportSyntax.Internal
   ( LocatedImport(..), ImportOccurrenceId(..), DriverImportSyntax(..)
-  , ImportOccurrenceRoot(..), importOccurrenceRoot, rootImportId )
+  , ImportOccurrenceRoot(..), importOccurrenceRoot, rootImportId, sameImportSourcePolicy )
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeProducerSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, scopeValueInterfaces
   , scopeAvailableOriginalProducts
@@ -3004,6 +3003,22 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     emitWorldAcquisitionRejection "world declaration type input" path reason
     traceStageIO "declaration-inputs-refused" [("detail", LogText reason)]
     throwIO WorldCellCorrupt) pure declarationInputs
+  previousImports <- liftIO $ case verifiedDeclaration of
+    Nothing -> pure []
+    Just declaration -> do
+      let artifact = verifiedWorldDeclarationInterface declaration
+          entries = [entry | entry <- verifiedWorldDeclarationTypeInputs declaration
+            , worldTypeEntryArtifact entry == artifact]
+      iface <- case entries of
+        [entry] -> pure (worldTypeEntryInterface entry)
+        _ -> throwIO WorldCellCorrupt
+      pure [(mi_module iface,mi_iface_hash (mi_final_exts iface),verifiedWorldDeclarationExports declaration)]
+  let declarationImports = previousImports ++ map plannedDeclarationImportInventory inventories
+      refineDeclarationImports environment parsed = do
+        local <- case originalPurpose purpose of
+          OriginalDeclarationCompile -> refineParsedDeclarationImports environment parsed
+          _ -> pure parsed
+        refineProgramDeclarationImports declarationImports environment local
   accumulated <- liftIO (newIORef privateInputs)
   traceStage "declaration-inputs-propagated" []
   let importFailure :: WorldInputsFailure -> IO value
@@ -3041,7 +3056,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
       requireResolved = readIORef resolvedRef >>= maybe (do
         traceStageIO "resolved-inputs-missing" []
         throwIO WorldCellCorrupt) pure
-      resolveInputs environment sourceOwners = do
+      resolveInputs environment sourceOwners matched = do
         existing <- readIORef resolvedRef
         case (operation,existing) of
           (WorldCellNameSource {},Nothing) -> do
@@ -3081,9 +3096,15 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
             annotations <- resolveNativeAnnotations available
               (worldLexicalObservation (worldInputsLexicalSurface facts) >>= worldObservationRequestTypes) inputAnnotation
             annotatedDemand <- annotateModuleDemand annotations parsedDemand
+            refinedDemand <- case matched of
+              MatchedImportDriver (ScopedImportAdmission (GeneratedImportCapture whole) _ _) driver _ _ -> do
+                declared <- refineDeclarationImports available
+                  (unannotatedModule (beginImportRefinement driver))
+                projectRefinedDemandImports whole driver (nativeImportSyntax declared) annotatedDemand
+              _ -> throwIO WorldCellCorrupt
             writeIORef nativeRef (Just annotations)
             (ready,resolved) <- resolveWorldCellInputs (universeOriginalInputs universe) facts accumulated path
-              offset sourceOwners available demandScope annotatedDemand (case operation of
+              offset sourceOwners available demandScope refinedDemand (case operation of
                 WorldCellSource {} -> WorldCellInputDemand
                 WorldObservationSource {} -> WorldObservationInputDemand
                 WorldCellNameSource {} -> WorldObservationInputDemand)
@@ -3131,26 +3152,18 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                   WorldCellNameSource {} -> mapNativeModule (\(L location syntax) ->
                     pure (L location syntax {hsmodDecls=[]})) parsed
                   _ -> pure parsed
-                transformed <- pvTransformParsed variant target environment summary sourceOnlyImports
+                transformed <- case originalPurpose purpose of
+                  -- The shared import-only recipe below owns this case for
+                  -- both demand and final checking.
+                  OriginalDeclarationCompile -> pure sourceOnlyImports
+                  _ -> pvTransformParsed variant target environment summary sourceOnlyImports
                 annotations <- requireNative
                 annotateNativeModule annotations transformed
             if ms_mod_name summary /= target then pure annotated else do
               resolved <- requireResolved
-              previousImports <- case verifiedDeclaration of
-                Nothing -> pure []
-                Just declaration -> do
-                  let artifact = verifiedWorldDeclarationInterface declaration
-                      entries = [entry | entry <- verifiedWorldDeclarationTypeInputs declaration
-                        , worldTypeEntryArtifact entry == artifact]
-                  iface <- case entries of
-                    [entry] -> pure (worldTypeEntryInterface entry)
-                    _ -> throwIO WorldCellCorrupt
-                  pure [(mi_module iface,mi_iface_hash (mi_final_exts iface),
-                    verifiedWorldDeclarationExports declaration)]
-              declared <- refineProgramDeclarationImports
-                (previousImports ++ map plannedDeclarationImportInventory inventories) environment annotated
+              declared <- refineDeclarationImports environment annotated
               transformCompletedValueAliases (worldResolvedAliases resolved) environment declared
-        , pvPlan = \directory enabled target observation@(SourceGraphObservation graph _) exact resolved -> do
+        , pvPlan = \directory enabled target observation@(SourceGraphObservation graph _) exact matched -> do
             forM_ nativeDeclarationOwner $ \owner ->
               unless (target == moduleName owner
                 && [ms_mod summary | ModuleNode _ summary <- mgModSummaries' graph
@@ -3170,7 +3183,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               imported <- restoreWorldImportBasis directory observation importHydrated importBasis prefixEnvironment `catch` importFailure
               restoreWorldCellOperandFor directory observation operandProjection imported
             setSession ready
-            planned <- pvPlan variant directory enabled target observation exact resolved
+            planned <- pvPlan variant directory enabled target observation exact matched
             let sourceOwners = Set.fromList
                   [(unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
                   | ModuleNode _ summary <- mgModSummaries' graph]
@@ -3209,7 +3222,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                   setSession ready
                   when (ms_mod_name summary == target) $ do
                     environment <- getSession
-                    (ready,resolved) <- liftIO (resolveInputs environment sourceOwners)
+                    (ready,resolved) <- liftIO (resolveInputs environment sourceOwners matched)
                     setSession (installRetainedUnfoldingsPlugin (policyFor resolved) ready)
               , cpInjectedSessionInterfaces = do
                   resolved <- requireResolved
@@ -4173,13 +4186,6 @@ matchedImportIntents (MatchedImportDriver _ _ selected _) =
     InheritedLexical -> InheritedLexicalImport
     ProtectedCompiler -> ProtectedCompilerImport
   | ImportDriverOccurrence _ origin requested raw _ _ <- selected]
-
-sameImportSourcePolicy :: DynFlags -> DynFlags -> Bool
-sameImportSourcePolicy left right =
-  language left == language right
-    && EnumSet.toList (extensionFlags left) == EnumSet.toList (extensionFlags right)
-    && safeHaskell left == safeHaskell right
-    && importPaths left == importPaths right
 
 -- Root-specific compiler planning borrows the same parsed body. A changed
 -- root summary refuses instead of silently substituting another parse.

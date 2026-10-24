@@ -5,7 +5,7 @@ module CellSplitterCases where
 
 import Control.Monad (forM, forM_, unless, void, when)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (AsyncException(ThreadKilled), SomeException, bracket, displayException, evaluate, finally, fromException, throwIO, try)
+import Control.Exception (AsyncException(ThreadKilled), SomeException, bracket, bracket_, displayException, evaluate, finally, fromException, throwIO, try)
 import qualified Data.Map.Strict as Map
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
@@ -50,7 +50,7 @@ import GHC.Types.SourceText (il_value)
 import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.Fixity (Fixity(..))
 import GHC.LanguageExtensions (Extension(ImportQualifiedPost))
-import GHC.Driver.Session (xopt_set, xopt_unset, parseDynamicFilePragma, gopt_set, PackageDBFlag(..), PkgDbRef(..))
+import GHC.Driver.Session (xopt, xopt_set, xopt_unset, parseDynamicFilePragma, gopt_set, PackageDBFlag(..), PkgDbRef(..))
 import GHC.Driver.Backend (interpreterBackend)
 import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
@@ -95,6 +95,10 @@ import Tidepool.ImportSyntax
   ( captureImportSyntax, matchDriverImports, beginImportRefinement
   , refinedImportOccurrences, importOccurrenceId, importOccurrenceDescriptor, importOccurrenceLineage, ImportLineage(..) )
 import Tidepool.CheckedCell (NativeParsedModule, nativeParsedModule, nativeImportSyntax, unannotatedModule, typecheckNativeModule)
+import Tidepool.TypedSegment.Source
+  ( ParsedModuleDemand, prepareModuleDemand, projectRefinedDemandImports, moduleInputOccurrences
+  , moduleImportRequests, newSegmentDemandScope )
+import Tidepool.TypedSegment.Types (TypedSegmentFailure(..))
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
@@ -702,6 +706,52 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         unless (observations composed == observations locallyRepeated
             && observations composed == observations repeated)
           (fail "repeated declaration composition changed occurrence identities, clone count or selections")
+        rawSource <- liftIO (readFile target)
+        let capturedDemand flags path name sourceText = do
+              recipe <- generatedCheckingTemplateRecipe flags (CheckedTemplateImports [] [])
+                sourceText sourceText path name >>= either fail pure
+              sourceOwner <- captureGeneratedScaffoldSource recipe path >>= either fail pure
+              imports <- either fail pure (parseCapturedGeneratedImports flags sourceOwner)
+              demand <- either (fail . show) pure (prepareModuleDemand imports)
+              pure (imports,demand)
+            requireProjectionRefusal label action = do
+              result <- try action :: IO (Either TypedSegmentFailure ParsedModuleDemand)
+              case result of
+                Left ModuleDemandImportSourceMismatch -> pure ()
+                Left failure -> fail (label ++ " refused for another reason: " ++ show failure)
+                Right _ -> fail (label ++ " admitted an unrelated captured demand proof")
+        (whole,demand) <- liftIO (capturedDemand (ms_hspp_opts summary) target "ProgramOriginalConsumer" rawSource)
+        demandScope <- liftIO (newSegmentDemandScope environment (Map.singleton "b" ()))
+        rawQuery <- liftIO (moduleInputOccurrences environment demandScope demand)
+        unless (case rawQuery of Left (InputDemandRenameRejected message) -> "Ambiguous occurrence" `isInfixOf` message; _ -> False)
+          (fail "demand composition control omitted its raw conflicting declaration imports")
+        projectedDemand <- liftIO (projectRefinedDemandImports whole driver (nativeImportSyntax repeated) demand)
+        unless (moduleImportRequests projectedDemand == moduleImportRequests demand)
+          (fail "refined demand changed the captured source qualification requests")
+        projectedQuery <- liftIO (moduleInputOccurrences environment demandScope projectedDemand)
+        unless (projectedQuery == Right [("b",())])
+          (fail "demand query did not consume the same chronological declaration imports as final checking")
+        liftIO $ do
+          let changedSource = rawSource ++ "\n-- distinct captured bytes\n"
+          (_,changedDemand) <- bracket_ (writeFile target changedSource) (writeFile target rawSource)
+            (capturedDemand (ms_hspp_opts summary) target "ProgramOriginalConsumer" changedSource)
+          requireProjectionRefusal "changed source bytes"
+            (projectRefinedDemandImports whole driver (nativeImportSyntax repeated) changedDemand)
+          let otherPath = root </> "OtherDemandConsumer.hs"
+              otherSource = Text.unpack (Text.replace "module ProgramOriginalConsumer where"
+                "module OtherDemandConsumer where" (Text.pack rawSource))
+          writeFile otherPath otherSource
+          (_,otherDemand) <- capturedDemand (ms_hspp_opts summary) otherPath "OtherDemandConsumer" otherSource
+          requireProjectionRefusal "different captured root"
+            (projectRefinedDemandImports whole driver (nativeImportSyntax repeated) otherDemand)
+          let changedFlags = (if xopt ImportQualifiedPost (ms_hspp_opts summary) then xopt_unset else xopt_set)
+                (ms_hspp_opts summary) ImportQualifiedPost
+          (changedFlagsWhole,changedFlagsDemand) <- capturedDemand changedFlags
+            target "ProgramOriginalConsumer" rawSource
+          requireProjectionRefusal "different captured flags"
+            (projectRefinedDemandImports whole driver (nativeImportSyntax repeated) changedFlagsDemand)
+          requireProjectionRefusal "matched captured flags differ from driver"
+            (projectRefinedDemandImports changedFlagsWhole driver (nativeImportSyntax repeated) changedFlagsDemand)
         facadeHome <- maybe (fail "facade field control has no exact installed owner") pure
           (lookupHpt (hsc_HPT environment) (mkModuleName "Tidepool.Session.Lib.G0"))
         facadeImport <- case [declaration

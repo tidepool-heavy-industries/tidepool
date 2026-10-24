@@ -165,6 +165,7 @@ data TypedSegmentFailure
   | UnprovedRootAbstraction
   | ModuleDemandParseRejected FilePath String
   | ModuleDemandQuasiQuoteRejected FilePath [String]
+  | ModuleDemandImportSourceMismatch
   | InputDemandRenameRejected String
   | UnprovedRootContinuation
   | UnprovedItemSequence Int
