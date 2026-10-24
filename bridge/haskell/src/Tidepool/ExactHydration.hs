@@ -41,9 +41,9 @@ module Tidepool.ExactHydration
   , generatedTypedSegmentRecipeWithProtectedImports
   , generatedCheckingTemplateRecipeWithImportRendering, generatedTypedSegmentRecipeWithImportRendering
   , generatedScaffoldRecipeWithImportRendering
-  , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
+  , generatedActivationPreviewRecipe
   , CapturedGeneratedScaffoldSource, captureGeneratedScaffoldSource
-  , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
+  , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldText, capturedGeneratedScaffoldPath
   , capturedSourceImportOrigins
   , CapturedGeneratedImports, parseCapturedGeneratedImports
   , capturedGeneratedImportSource, capturedGeneratedImportFlags, capturedGeneratedImportSyntax
@@ -790,6 +790,12 @@ data CapturedGeneratedScaffoldSource = CapturedGeneratedScaffoldSource FilePath 
 capturedGeneratedScaffoldBytes :: CapturedGeneratedScaffoldSource -> BS.ByteString
 capturedGeneratedScaffoldBytes (CapturedGeneratedScaffoldSource _ bytes _) = bytes
 
+-- Recipes encode their rendered source as UTF-8; capture issues this owner
+-- only after the file matches those exact bytes. Text consumers retain that
+-- guarantee without decoding an unrelated raw-byte projection.
+capturedGeneratedScaffoldText :: CapturedGeneratedScaffoldSource -> Text.Text
+capturedGeneratedScaffoldText (CapturedGeneratedScaffoldSource _ bytes _) = TextEncoding.decodeUtf8 bytes
+
 capturedGeneratedScaffoldPath :: CapturedGeneratedScaffoldSource -> FilePath
 capturedGeneratedScaffoldPath (CapturedGeneratedScaffoldSource path _ _) = path
 
@@ -803,7 +809,7 @@ data CapturedGeneratedImportOccurrence = CapturedGeneratedImportOccurrence Impor
 
 parseCapturedGeneratedImports :: DynFlags -> CapturedGeneratedScaffoldSource
   -> Either String CapturedGeneratedImports
-parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource path bytes _) =
+parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource path _ _) =
   case unP Parser.parseModule parser of
     PFailed state -> Left (parseDiagnostics state)
     POk state parsed -> do
@@ -816,7 +822,7 @@ parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource pa
   where
     parseDiagnostics state = showPpr flags (getPsErrorMessages state)
     parser = initParserState (initParserOpts flags)
-      (stringToStringBuffer (Text.unpack (TextEncoding.decodeUtf8 bytes)))
+      (stringToStringBuffer (Text.unpack (capturedGeneratedScaffoldText captured)))
       (mkRealSrcLoc (mkFastString path) 1 1)
     associate [] [] = Right []
     associate (occurrence:occurrences) (origin:origins) =
@@ -864,10 +870,6 @@ captureGeneratedScaffoldSource (GeneratedScaffoldRecipe path _ expected _ _ _ _ 
     then Right (CapturedGeneratedScaffoldSource path expected census)
     else Left "generated scaffold target differs from its protected recipe"
 
-captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String BS.ByteString)
-captureGeneratedScaffoldTarget recipe requested =
-  fmap capturedGeneratedScaffoldBytes <$> captureGeneratedScaffoldSource recipe requested
-
 -- Interface-only template edges never enter the native/source replay inventory.
 data GeneratedScaffoldImportAuthority = GeneratedScaffoldImportAuthority
   [(Module,Fingerprint,SrcSpan,ExactIfaceArtifact)]
@@ -902,7 +904,7 @@ readGeneratedScaffoldImportAuthority (CapturedInterfaceInputs captured)
     (CapturedGeneratedImports (CapturedGeneratedScaffoldSource capturedPath capturedBytes capturedCensus) _ syntax classified)
     driver sourceGraph env = do
   let parsed = driverParsedModule driver
-  checked <- captureGeneratedScaffoldTarget recipe path
+  checked <- captureGeneratedScaffoldSource recipe path
   (source,fingerprint) <- sourceEvidenceWithFingerprint path
   targetPaths <- forM [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph
       , moduleNameString (moduleName (ms_mod summary)) == target] $ \summary ->

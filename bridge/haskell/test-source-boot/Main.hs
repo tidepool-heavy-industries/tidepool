@@ -3,10 +3,10 @@ module Main (main, tests) where
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
 import Test.Tasty (withResource)
 import SourceBootCases
-import CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease)
+import CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, compilerScopeCleanupFailure)
 import CompilerRequestTest (checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
-import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries)
+import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries)
 import RequestInputsTest (compilerServiceBootBoundaries, worldCanonicalOriginalReuse, worldCarriedImportTypes)
 import RequestInputsTest (bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage)
 import SourceBootFixtureSupport (withTiming, withScratch)
@@ -35,6 +35,7 @@ tests = testGroup "source-boot"
   , testCase "unissued world materialization preserves failure and cleanup" worldMaterializationBoundaries
   , testCase "completed compiler cancellation preserves facts and fences effects" completedRequestCancellation
   , testCase "closed executor refuses completed cached preparation" completedRequestRelease
+  , testCase "compiler recovery cleanup failure preserves causes and poisons later scopes" compilerScopeCleanupFailure
   , testCase "owned arena range reads" ownedArenaRangeReads
   , testCase "artifact byte ownership" artifactByteOwnership
   , testCase "request input custody histories" requestInputHistories
@@ -50,6 +51,7 @@ tests = testGroup "source-boot"
   , testCase "fresh output seal set laws" freshOutputSealSetLaws
   , testCase "request input admission boundaries" requestInputBoundaries
   , testCase "World residency uses shared bytes across END and eviction" worldResidencyBoundaries
+  , testCase "failed compiler recovery retains exact World backing custody" worldRecoveryCustody
   , testCase "world cell admission parses one recipe" worldCellAdmissionParse
   , testCase "World interface-only canonical body survives source relocation and cold reuse" worldCanonicalOriginalReuse
   , testCase "World carried imports keep exact types and global Names without source" worldCarriedImportTypes

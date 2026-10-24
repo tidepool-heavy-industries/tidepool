@@ -6,6 +6,8 @@ import Control.Monad.IO.Class (liftIO)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as BS
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import GHC
 import GHC.Driver.Backend (noBackend)
 import GHC.Types.Name (nameOccName)
@@ -36,6 +38,7 @@ demandScopeChecks = do
   bracket acquire removeDirectoryRecursive $ \directory ->
     runGhc (Just libdir) $ do
       initial <- getSessionDynFlags
+      liftIO (capturedSourceTextChecks directory initial)
       forM_ controls $ \(name,root,aliases,expected) -> do
         source <- liftIO $ case name of
           "DeclarationModule" -> pure (unlines
@@ -161,6 +164,35 @@ demandScopeChecks = do
             Right _ -> fail (name ++ ": source drift was accepted")
       observationContributionChecks directory initial
       liftIO (putStrLn ("demand scope: " ++ show (length controls) ++ " controls passed"))
+
+-- The production capture owner retains valid Unicode text after file drift;
+-- invalid current bytes must be refused before they can obtain that accessor.
+capturedSourceTextChecks :: FilePath -> DynFlags -> IO ()
+capturedSourceTextChecks directory flags = do
+  let name = "CapturedUnicode"
+      path = directory </> name ++ ".hs"
+      source = "module CapturedUnicode where\n-- \955 \26085 \128512\nvalue = ()\n"
+      expected = Text.pack source
+      bytes = TextEncoding.encodeUtf8 expected
+  BS.writeFile path bytes
+  recipe <- generatedCheckingTemplateRecipe flags (CheckedTemplateImports [] [])
+    source source path name >>= either fail pure
+  captured <- captureGeneratedScaffoldSource recipe path >>= either fail pure
+  unless (capturedGeneratedScaffoldText captured == expected
+      && capturedGeneratedScaffoldBytes captured == bytes)
+    (fail "captured scaffold text changed the original Unicode source")
+  _ <- either fail pure (parseCapturedGeneratedImports flags captured)
+  BS.writeFile path (BS.singleton 0xff <> BS.drop 1 bytes)
+  tampered <- captureGeneratedScaffoldSource recipe path
+  case tampered of
+    Left _ -> pure ()
+    Right _ -> fail "invalid UTF-8 tampering acquired a captured scaffold owner"
+  unless (capturedGeneratedScaffoldText captured == expected)
+    (fail "captured scaffold text consulted the tampered current file")
+  BS.writeFile path bytes
+  restored <- captureGeneratedScaffoldSource recipe path >>= either fail pure
+  unless (capturedGeneratedScaffoldText restored == expected)
+    (fail "restored scaffold source lost its original Unicode text")
 
 -- Actual rendered operands must remain inside their single compiler-owned
 -- declaration slot. LINE pragmas cannot move a physical suffix into custody.

@@ -2,14 +2,14 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
 
-import Tidepool.RequestCompletion (finishCompletion, captureCompletion)
+import Tidepool.RequestCompletion (finishCompletion, captureCompletion, completionResult, completionFailures, completionAsync, BodyOutcome(..), CleanupStage(CompilerScopeRestore), cleanupStage, cleanupException)
 import Tidepool.WorkerServer (runWorkerLoop, WorkerResponse(..), requireNativeDemandOwner)
 import Tidepool.DependencyPlan (newCompilerDependencyBasis, captureSourceDependencies, freezeDependencyBasis, frozenDependencyGenerations)
 import Tidepool.Identity (nameSymbolIdentity)
 
-import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try, finally, mask)
+import Control.Exception (AsyncException(ThreadKilled), Exception, IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try, finally, mask)
 import Control.Concurrent (forkIO, forkFinally, killThread, newEmptyMVar, putMVar, takeMVar, readMVar, threadDelay)
 import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
@@ -2960,6 +2960,121 @@ worldResidencyHistories handles work producer profile parcel scopePath = do
       runScope (pure ()) $ \compiler -> do
         same <- scopedEnsureWorld compiler (ExactInputsRequest secondRoot (ResidentExactInputs second)) >>= ready secondRoot retained
         unless (same == second) (fail "FIFO evicted its newly admitted World")
+
+data WorldRecoveryCase
+  = HealthyWorldRecovery | PropagatedWorldRecovery | SwallowedWorldRecovery
+  | ReplacedWorldRecovery | CancelledWorldRecovery
+  | PropagatedWorldPoison | SwallowedWorldPoison | ReplacedWorldPoison
+  deriving (Eq, Show)
+
+data WorldRecoveryFailure = WorldGuardedFailure | WorldCleanupFailure | WorldReplacementFailure
+  deriving (Eq, Show)
+instance Exception WorldRecoveryFailure
+
+-- Acquire an actual active-only World, then fail through the resident owner's
+-- existing guarded operation/recovery seam. Its sole materialization must stay
+-- in custody after failed recovery, even when the operation failure was caught.
+worldRecoveryCustody :: IO ()
+worldRecoveryCustody = withCapturedWorldContext $ \handles work producer profile parcel _ ->
+  forM_ [HealthyWorldRecovery,PropagatedWorldRecovery,SwallowedWorldRecovery
+    ,ReplacedWorldRecovery,CancelledWorldRecovery,PropagatedWorldPoison
+    ,SwallowedWorldPoison,ReplacedWorldPoison] $ \mode -> do
+    createDirectory (work </> show mode)
+    directory <- canonicalizePath (work </> show mode)
+    let marker = BS8.pack (show mode)
+        poisoned = mode `elem` [PropagatedWorldPoison,SwallowedWorldPoison,ReplacedWorldPoison]
+        directories = Set.fromList . filter ("world." `isPrefixOf`) <$> listDirectory directory
+        requireOriginal completed = case completionResult completed of
+          BodyFailed failure
+            | poisoned && fromException failure == Just CompilerTransactionPoisoned -> pure ()
+            | not poisoned && fromException failure == Just WorldGuardedFailure -> pure ()
+          _ -> fail ("guarded World failure lost its original cause: " ++ show mode)
+    (packet,_) <- writeWorldCellAdmissionPacketWithSources handles directory producer profile parcel
+      [("recovery-proof.txt",marker)]
+    facts <- newExactInputOwner >>= \owner -> readWorldInputsWithOwner owner packet
+    withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" "0" $
+      withRootedCompilerEnvironment directory $ withQuietStdout $
+        withResidentCompilerScopes [] $ \runScope -> do
+          backingRef <- newIORef Nothing
+          cleanupCalls <- newIORef (0 :: Int)
+          let recovery = do
+                modifyIORef' cleanupCalls (+1)
+                case mode of
+                  HealthyWorldRecovery -> pure ()
+                  CancelledWorldRecovery -> throwIO ThreadKilled
+                  _ | poisoned -> fail "unsettled interpreter retirement was retried"
+                  _ -> throwIO WorldCleanupFailure
+          (completed,diagnostics) <- captureDiagnostics $ captureCompletion $
+            runScope recovery $ \compiler -> do
+              before <- directories
+              admitted <- scopedEnsureWorld compiler
+                (ExactInputsRequest (worldInputsIdentity facts) (CompleteExactInputs packet))
+              case admitted of
+                ExactInputsReady actual _ (WorldActiveOnly (WorldStorageAllowanceExceeded required 0))
+                  | actual == worldInputsIdentity facts && required > 0 -> pure ()
+                other -> fail ("recovery custody control was not active-only: " ++ show other)
+              after <- directories
+              backing <- case Set.toList (after Set.\\ before) of
+                [child] -> pure (directory </> child)
+                _ -> fail "World recovery control did not acquire one exact physical backing"
+              bytes <- BS.readFile (backing </> "root-0" </> "recovery-proof.txt")
+              unless (bytes == marker) (fail "actual World backing lacks its captured proof file")
+              writeIORef backingRef (Just backing)
+              failed <- captureCompletion (scopedRunGhc compiler (liftIO $
+                if poisoned then throwIO CompilerTransactionPoisoned else throwIO WorldGuardedFailure) :: IO ())
+              requireOriginal failed
+              unless (null (completionFailures failed))
+                (fail "guarded World operation duplicated scope-owned recovery reporting")
+              if mode == HealthyWorldRecovery then scopedRunGhc compiler (pure ()) else do
+                later <- try (scopedRunGhc compiler (pure ())) :: IO (Either CompilerTransactionFailure ())
+                unless (case later of Left CompilerTransactionFailed -> True; _ -> False)
+                  (fail "failed World recovery resumed its compiler phase")
+              case mode of
+                HealthyWorldRecovery -> pure ()
+                SwallowedWorldRecovery -> pure ()
+                SwallowedWorldPoison -> pure ()
+                ReplacedWorldRecovery -> throwIO WorldReplacementFailure
+                ReplacedWorldPoison -> throwIO WorldReplacementFailure
+                _ -> finishCompletion failed
+          backing <- readIORef backingRef >>= maybe (fail "World recovery lost its exact backing path") pure
+          alive <- doesDirectoryExist backing
+          let healthy = mode == HealthyWorldRecovery
+          unless (alive /= healthy) (fail ("World recovery made the wrong physical release: " ++ show mode))
+          when alive $ do
+            bytes <- BS.readFile (backing </> "root-0" </> "recovery-proof.txt")
+            unless (bytes == marker) (fail "failed World recovery changed its retained physical backing")
+          let owners = counterValues "worlds.backing_realization_owners" diagnostics
+              retained = counterValues "worlds.retained_worlds" diagnostics
+          unless (not (null owners) && head owners == 1
+              && not (null retained) && all (== 0) retained)
+            (fail "World recovery control did not observe its actual sole nonresident owner")
+          case completionResult completed of
+            BodySucceeded () | healthy -> pure ()
+            BodyAbortedByCleanup | mode `elem` [SwallowedWorldRecovery,SwallowedWorldPoison] -> pure ()
+            BodyFailed failure | mode `elem` [ReplacedWorldRecovery,ReplacedWorldPoison]
+              , fromException failure == Just WorldReplacementFailure -> pure ()
+            _ | mode `elem` [PropagatedWorldRecovery,CancelledWorldRecovery,PropagatedWorldPoison] ->
+                  requireOriginal completed
+            _ -> fail ("World recovery replaced or swallowed its primary failure: " ++ show mode)
+          case completionFailures completed of
+            [] | healthy -> pure ()
+            [failure] | cleanupStage failure == CompilerScopeRestore ->
+              unless (if poisoned then fromException (cleanupException failure) == Just CompilerTransactionPoisoned
+                else if mode == CancelledWorldRecovery then fromException (cleanupException failure) == Just ThreadKilled
+                else fromException (cleanupException failure) == Just WorldCleanupFailure)
+                (fail "World settlement lost its actual unrecovered cleanup cause")
+            _ -> fail "World settlement duplicated or discarded recovery cleanup evidence"
+          when (mode == CancelledWorldRecovery) $
+            unless (case completionAsync completed of
+              Just failure -> fromException failure == Just ThreadKilled
+              _ -> False) (fail "interrupted World recovery lost cancellation identity")
+          calls <- readIORef cleanupCalls
+          unless (calls == (if poisoned then 0 else 1)) (fail "World recovery retried or skipped its actual cleanup")
+          later <- try (runScope (pure ()) (\compiler -> scopedRunGhc compiler (pure ())))
+            :: IO (Either CompilerTransactionFailure ())
+          unless (if healthy then case later of Right () -> True; _ -> False
+            else case later of Left CompilerTransactionPoisoned -> True; _ -> False)
+            (fail "World recovery changed later resident admission")
 
 -- The Context fixture's logical roots and captured bytes stay genuine. Only
 -- the transport restoration's profile field is rebound to the rooted service
