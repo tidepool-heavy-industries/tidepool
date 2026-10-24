@@ -528,6 +528,7 @@ pub struct ExactCheckedCell {
     planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
     typed_segments: Vec<CheckedTypedSegmentPlan>,
     value_inputs: Arc<CheckedValueInputs>,
+    stage_native_products: Vec<crate::declaration_context::WorldStageNativeProducts>,
 }
 
 impl std::fmt::Debug for ExactCheckedCell {
@@ -2587,8 +2588,30 @@ struct CheckedSettledValue {
 /// from earlier items within that stage have different issuing owners.
 /// Neither case establishes runtime completion or a live lexical lease.
 pub enum CellStageRetainedInput<'a> {
-    StageSelected(&'a crate::compiler_world::WorldCellRuntimeInput),
+    StageSelected(SelectedStageRuntimeInput<'a>),
     EarlierItem(EarlierItemRuntimeInput<'a>),
+}
+
+/// An explicit incoming selection coupled to its actual checked value row.
+/// A prior-stage input borrows the row from its same-cell sealed producer.
+pub struct SelectedStageRuntimeInput<'a> {
+    selected: &'a crate::compiler_world::WorldCellRuntimeInput,
+    checked_row: &'a Arc<CheckedValueArtifact>,
+}
+
+impl SelectedStageRuntimeInput<'_> {
+    pub fn origin(&self) -> crate::compiler_world::WorldCellRuntimeInputOrigin {
+        self.selected.origin()
+    }
+    pub fn session_var(&self) -> tidepool_repr::SessionVarId {
+        self.selected.session_var()
+    }
+    pub fn defining_scope(&self) -> u64 {
+        self.selected.defining_scope()
+    }
+    pub fn checked_row(&self) -> &Arc<CheckedValueArtifact> {
+        self.checked_row
+    }
 }
 
 /// An exact binder and checked row from a preceding item in the receiving stage.
@@ -2976,15 +2999,48 @@ impl CheckedTypedEntry {
 }
 
 impl ExactCompiledItem {
-    /// Select an actual demanded retained leaf from its compiler-issued owner.
-    /// Same-stage binders are absent from the stage's incoming-input list; they
-    /// must retain their producer item and row instead of borrowing availability
-    /// from the runtime value pool. Cross-stage values still require explicit
-    /// stage selection. Runtime admission and slot checks remain separate.
-    pub fn cell_stage_retained_input(
+    /// Select a live-value input for this target's exact retained code slot.
+    /// Target-issued provenance determines which stage owns the physical code;
+    /// the receiving stage independently selects the runtime value.
+    pub fn select_cell_stage_retained_input(
         &self,
-        leaf: &tidepool_repr::native_code::NativeRetainedRequirement,
-    ) -> Option<CellStageRetainedInput<'_>> {
+        witness: crate::linked_native::CellStageSlotWitness<'_>,
+    ) -> Result<Option<CellStageRetainedInput<'_>>, CompileError> {
+        use crate::compiler_world::WorldCellRuntimeInputOrigin;
+        use crate::linked_native::CellStageSlotOrigin;
+        if !self.shares_target(witness.target().prepared()) {
+            return Ok(None);
+        }
+        let receiving_stage = self
+            .item
+            .cell
+            .world
+            .stages()
+            .iter()
+            .position(|stage| stage.ordinals().contains(&self.item.index()))
+            .ok_or_else(|| failure("checked item lacks its issuing World stage"))?;
+        let owns_group = |stage: &crate::declaration_context::WorldStageNativeProducts| {
+            stage.owns_group(witness.demander(), witness.group())
+        };
+        let source_matches = match witness.origin() {
+            CellStageSlotOrigin::Current => self
+                .item
+                .cell
+                .stage_native_products
+                .get(receiving_stage)
+                .is_some_and(owns_group),
+            CellStageSlotOrigin::PriorProgram => self
+                .item
+                .cell
+                .stage_native_products
+                .iter()
+                .take(receiving_stage)
+                .any(owns_group),
+        };
+        if !source_matches {
+            return Ok(None);
+        }
+        let leaf = witness.leaf();
         if !self
             .typed_entry
             .native_requirements
@@ -2996,17 +3052,64 @@ impl ExactCompiledItem {
                     && leaf.type_artifact() == Some(&required.artifact_id.0)
             })
         {
-            return None;
+            return Ok(None);
         }
         let inputs = self.item.world_selected_runtime_inputs();
         if let Some(selected) = inputs.inputs().iter().find(|selected| {
             selected.symbol() == leaf.identity() && selected.generation() == leaf.generation()
         }) {
-            return Some(CellStageRetainedInput::StageSelected(selected));
+            let checked_row = match selected.origin() {
+                WorldCellRuntimeInputOrigin::BaseWorld
+                | WorldCellRuntimeInputOrigin::CellOperand => selected.checked_row(),
+                WorldCellRuntimeInputOrigin::PriorStage { producer, consumer } => self
+                    .settled_values
+                    .rows
+                    .iter()
+                    .find(|row| {
+                        row.producer.same_cell(&self.item)
+                            && row.producer.index() == producer
+                            && producer < consumer
+                            && consumer <= inputs.stage_first_ordinal()
+                            && row.producer.index() < self.item.index()
+                            && &row.binding.1 == selected.symbol()
+                            && row.binding.2 == selected.generation()
+                            && row.binding.3 == selected.session_var().raw()
+                            && row
+                                .checked_row
+                                .certified_interface()
+                                .interface()
+                                .descriptor(
+                                    crate::artifact_inventory::JoinedInterfaceRole::ValueInterface,
+                                )
+                                .interface_sha256
+                                .as_slice()
+                                == selected.seal()
+                            && row.producer.cell.world.reservation().defining_scope()
+                                == selected.defining_scope()
+                    })
+                    .map(|row| &row.checked_row),
+            };
+            let Some(checked_row) = checked_row else {
+                return Ok(None);
+            };
+            if leaf.type_artifact() != Some(&checked_row.certified_interface().artifact_id().0) {
+                return Ok(None);
+            }
+            return Ok(Some(CellStageRetainedInput::StageSelected(
+                SelectedStageRuntimeInput {
+                    selected,
+                    checked_row,
+                },
+            )));
+        }
+        if witness.origin() != CellStageSlotOrigin::Current {
+            return Ok(None);
         }
         let selected = self.settled_values.rows.iter().find(|selected| {
             &selected.binding.1 == leaf.identity()
                 && selected.binding.2 == leaf.generation()
+                && leaf.type_artifact()
+                    == Some(&selected.checked_row.certified_interface().artifact_id().0)
                 && selected.producer.same_cell(&self.item)
                 && selected.producer.index() < self.item.index()
                 && selected
@@ -3014,10 +3117,10 @@ impl ExactCompiledItem {
                     .world_selected_runtime_inputs()
                     .stage_first_ordinal()
                     == inputs.stage_first_ordinal()
-        })?;
-        Some(CellStageRetainedInput::EarlierItem(
-            EarlierItemRuntimeInput { selected },
-        ))
+        });
+        Ok(selected.map(|selected| {
+            CellStageRetainedInput::EarlierItem(EarlierItemRuntimeInput { selected })
+        }))
     }
 
     pub fn table(&self) -> &tidepool_repr::DataConTable {
@@ -4124,10 +4227,12 @@ pub(crate) fn admit_world_cell(
     }
     let mut aliases = std::collections::BTreeSet::new();
     let mut planned_declarations = BTreeMap::new();
+    let mut stage_native_products = Vec::with_capacity(stages.len());
     let mut items = Vec::with_capacity(program.items().len());
     for (index, sealed) in stages.into_iter().enumerate() {
-        let (stage, source, stage_items) = sealed.into_parts();
-        if !Arc::ptr_eq(&stage, &program.stages()[index])
+        let (native_products, source, stage_items) = sealed.into_parts();
+        let stage = native_products.stage();
+        if !Arc::ptr_eq(stage, &program.stages()[index])
             || !source
                 .source
                 .matches_world_stage(&program, index, &source.text)?
@@ -4191,6 +4296,7 @@ pub(crate) fn admit_world_cell(
                 }
             }
         }
+        stage_native_products.push(native_products);
         aliases.extend(source.aliases);
     }
     if items.len() != program.items().len() {
@@ -4219,6 +4325,7 @@ pub(crate) fn admit_world_cell(
                 .map(|segment| segment.as_ref().clone())
                 .collect(),
             value_inputs,
+            stage_native_products,
             world: program,
         }),
         items,

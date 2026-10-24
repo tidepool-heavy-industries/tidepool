@@ -12750,11 +12750,15 @@ impl WorldProgramSegment {
         items: SealedWorldStageItems,
     ) -> Result<(WorldProgramContinuation, SealedWorldStage), CompileError> {
         crate::host_work::checkpoint()?;
+        let native_products = WorldStageNativeProducts::capture(
+            Arc::clone(&self.stage),
+            self.originals.captured_stage(),
+        )?;
         self.continuation.next_stage = self.stage.index() + 1;
         Ok((
             self.continuation,
             SealedWorldStage {
-                stage: self.stage,
+                native_products,
                 source: WorldStageSourceAdmission {
                     source: self.source,
                     text: self.source_text,
@@ -12899,8 +12903,78 @@ impl PendingWorldExecutableStage {
     }
 }
 
-pub(crate) struct SealedWorldStage {
+/// Physical products projected from their actual completed stage at sealing.
+/// The receipts retain their own Original acquisitions; no later inventory can
+/// substitute an equal payload or infer the issuing stage from a module name.
+#[derive(Debug)]
+pub(crate) struct WorldStageNativeProducts {
     stage: Arc<crate::compiler_world::CheckedWorldCellStage>,
+    products: Vec<Arc<CompletedNativeProductAvailability>>,
+}
+
+impl WorldStageNativeProducts {
+    fn capture(
+        stage: Arc<crate::compiler_world::CheckedWorldCellStage>,
+        physical: &CapturedCompilerStage,
+    ) -> Result<Self, CompileError> {
+        let mut products = Vec::new();
+        for entry in physical.producer_certificates() {
+            if !matches!(entry.payload, ArtifactPayload::Original(_)) {
+                continue;
+            }
+            let Some(receipt) = physical
+                .source_selection()
+                .produced_source_receipt(&entry.descriptor.owner, physical.issued_artifacts())
+                .map_err(compiler_evidence_failure)?
+            else {
+                continue;
+            };
+            let actual = receipt.own_offer().original_acquisition();
+            if actual.descriptor.id != entry.descriptor.id
+                || receipt.own_offer().original() != entry.descriptor.id
+                || !actual.same_issuing_authority(entry)
+            {
+                return Err(failure(
+                    "World stage completed product has another physical issuer",
+                ));
+            }
+            products.push(receipt);
+        }
+        Ok(Self { stage, products })
+    }
+
+    pub(crate) fn stage(&self) -> &Arc<crate::compiler_world::CheckedWorldCellStage> {
+        &self.stage
+    }
+
+    pub(crate) fn owns_group(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        pending: &crate::certified_products::PendingCertifiedGroup,
+    ) -> bool {
+        let key = NativeGroupKey {
+            artifact: binding.binding.artifact(),
+            original_ordinal: binding.original_ordinal,
+        };
+        self.products.iter().any(|receipt| {
+            let entry = receipt.own_offer().original_acquisition();
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return false;
+            };
+            entry.descriptor.id == key.artifact
+                && receipt.own_offer().original() == key.artifact
+                && receipt.support(key, binding).is_some()
+                && crate::certified_products::authenticates_original_native_group(
+                    product,
+                    key.original_ordinal,
+                    pending,
+                )
+        })
+    }
+}
+
+pub(crate) struct SealedWorldStage {
+    native_products: WorldStageNativeProducts,
     source: WorldStageSourceAdmission,
     items: SealedWorldStageItems,
 }
@@ -12909,11 +12983,11 @@ impl SealedWorldStage {
     pub(crate) fn into_parts(
         self,
     ) -> (
-        Arc<crate::compiler_world::CheckedWorldCellStage>,
+        WorldStageNativeProducts,
         WorldStageSourceAdmission,
         SealedWorldStageItems,
     ) {
-        (self.stage, self.source, self.items)
+        (self.native_products, self.source, self.items)
     }
 }
 
