@@ -1621,6 +1621,7 @@ impl CompilerEndpoint {
         timeout: Duration,
         hint: Option<&CompilerWorkerLocation>,
     ) -> Result<CompilerTransaction, SpawnError> {
+        refuse_native_demand_reentry(OsStr::new("compiler transaction"))?;
         let identity = self.identity.clone();
         let transport_name = self.transport.name();
         let admission_started = Instant::now();
