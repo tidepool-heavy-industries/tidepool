@@ -182,7 +182,7 @@ import GHC.Tc.Utils.Monad (initTcWithGbl, initIfaceCheck, getGblEnv)
 import GHC.Tc.Gen.Splice (defaultRunMeta)
 import GHC.Tc.Utils.TcMType (newEvVars)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
-import GHC.Types.Unique.Set (UniqSet, nonDetEltsUniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
+import GHC.Types.Unique.Set (UniqSet, nonDetEltsUniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, unionManyUniqSets)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.LanguageExtensions.Type qualified as LangExt
@@ -4526,6 +4526,14 @@ throwCanonicalLoadFailure :: CanonicalLoadFailure -> IO a
 throwCanonicalLoadFailure (CanonicalLoadFrontendFailure failure) = throwIO failure
 throwCanonicalLoadFailure (CanonicalLoadNativeFailure failure) = throwIO failure
 
+-- Imported Originals are global Ids, which exprFreeVars deliberately omits.
+freeIdsOfBinds :: [CoreBind] -> [Id]
+freeIdsOfBinds bindings = nonDetEltsUniqSet (unionManyUniqSets
+  [exprSomeFreeVars isId value | binding <- bindings, value <- rhs binding])
+  where
+    rhs (NonRec _ value) = [value]
+    rhs (Rec pairs) = map snd pairs
+
 -- The interpreter backend completes the same partial interface and tidy Core.
 -- This handoff exists only between PostTc and Backend in one load operation.
 data PendingFinalization = PendingFinalization
@@ -5757,9 +5765,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               tops = Set.fromList (map (idName . fst) definitions)
               identifiers = Map.fromList
                 [(idName identifier,identifier)
-                | identifier <- map fst definitions ++
-                    [used | (_,value) <- definitions
-                      , used <- nonDetEltsUniqSet (exprSomeFreeVars isId value)]]
+                | identifier <- map fst definitions ++ freeIdsOfBinds bindings]
               ownerKey = unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner)
           logTrace nativeUseLogger "native_uses.census"
             [("phase",LogText phase),("owner",LogText ownerKey)
@@ -5785,14 +5791,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               ,("selected_source",LogBool selectedSource)
               ,("original_reference_count",LogInteger (fromIntegral (length references)))
               ,("original_references",LogText (show (take 2 references)))]
-    let captureSourceDependenciesFor environment guts = case pvDependencyBasis variant of
-          Nothing -> pure environment
+    let captureSourceDependenciesFor guts = case pvDependencyBasis variant of
+          Nothing -> pure ()
           Just basis -> do
-            let rhs (NonRec _ value) = [value]
-                rhs (Rec pairs) = map snd pairs
-                identifiers = Map.elems (Map.fromList
-                  [(idName identifier,identifier) | binding <- mg_binds guts, value <- rhs binding
-                    , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isId value)])
+            let identifiers = freeIdsOfBinds (mg_binds guts)
                 isSource name = case (pvWorldSources variant,nameModule_maybe name) of
                   (Just (WorldSourceInputBasis _ facts _ _ _ _ _),Just owner) ->
                     worldHasSelectedSource facts (unitString (moduleUnit owner),moduleNameString (moduleName owner))
@@ -5809,7 +5811,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   [finalizedSourceUses selected | identifier <- identifiers
                     , Just selected <- [Map.lookup (idName identifier) previous]]
             captureSourceDependencies basis (uses ++ inherited)
-            pure environment
     let (freshGraph, exactImports) = case worldSources of
           Nothing -> sourceEvidenceGraph selectedExact modGraphRaw
           Just (WorldSourceSelection selected imports _ _ _) ->
@@ -6421,11 +6422,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               desugared <- installSegment typedEnv typedSegment desugared0
               printOrThrowDiagnostics (moduleDiagnosticLogger env summaryC) (initPrintConfig flags) (initDiagOpts flags)
                 (unionMessages tcWarnings dsWarnings)
-              dependencyEnv <- captureSourceDependenciesFor typedEnv desugared
+              captureSourceDependenciesFor desugared
               traceNativeUses "load.before_simplify" (mg_module desugared) (mg_binds desugared)
               plugins <- readIORef (tcg_th_coreplugins tcg)
               simplified <- timeDetailPhase timing "ghc_load_simplify"
-                (moduleNameString (ms_mod_name summaryC)) (hscSimplify dependencyEnv plugins desugared)
+                (moduleNameString (ms_mod_name summaryC)) (hscSimplify typedEnv plugins desugared)
               traceNativeUses "load.after_simplify" (mg_module simplified) (mg_binds simplified)
               (tidy, details) <- hscTidy typedEnv simplified
               traceNativeUses "load.after_tidy" (cg_module tidy) (cg_binds tidy)
@@ -6778,11 +6779,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 (simplified, coreMs) <- timeSection $
                   timeDetailPhase timing "deferred_simplify" (moduleNameString (ms_mod_name (mfSummary mf))) $
                     liftIO $ do
-                      dependencyEnv <- captureSourceDependenciesFor (mfHscEnv mf) (mfDesugared mf)
+                      captureSourceDependenciesFor (mfDesugared mf)
                       traceNativeUses "deferred.before_simplify"
                         (mg_module (mfDesugared mf)) (mg_binds (mfDesugared mf))
                       plugins <- readIORef (tcg_th_coreplugins (mfTcGblEnv mf))
-                      hscSimplify dependencyEnv plugins (mfDesugared mf)
+                      hscSimplify (mfHscEnv mf) plugins (mfDesugared mf)
                 liftIO (traceNativeUses "deferred.after_simplify" (mg_module simplified) (mg_binds simplified))
                 liftIO (modifyIORef' loweringMsRef (+ coreMs))
                 liftIO (modifyIORef' c2cMsRef (+ coreMs))
@@ -6860,12 +6861,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                           HydratedObservation{} -> []
                           CanonicalObservation{} -> []]
                     bindings = concatMap (cg_binds . finalizedTidyGuts) finalized
-                    rhs (NonRec _ value) = [value]
-                    rhs (Rec pairs) = map snd pairs
-                    -- Imported Originals are global Ids. GHC's ordinary
-                    -- exprFreeVars deliberately omits those occurrences.
-                    identifiers = [identifier | binding <- bindings,value <- rhs binding
-                      , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isId value)]
+                    identifiers = freeIdsOfBinds bindings
                 selected <- fmap catMaybes $ forM identifiers $ \identifier -> do
                   reference <- referenceForName (idName identifier)
                   pure ((\value -> (idName identifier,preparedRootIdentity identifier,value)) <$> reference)
