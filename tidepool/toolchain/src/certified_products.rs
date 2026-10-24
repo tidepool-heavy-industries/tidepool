@@ -16548,6 +16548,39 @@ pub(crate) mod tests {
         assert_eq!(owner, *group.owner());
         assert_eq!(&decoded, group.group());
         assert_eq!(imports, group.imports());
+
+        let physical = || {
+            fixture_finalized_product(
+                original_groups_fixture("PhysicalSlot", vec![(0, vec![])], 1, &BTreeMap::new()),
+                [1; 32],
+            )
+        };
+        let first = physical();
+        let second = physical();
+        assert_eq!(first.product_bytes(), second.product_bytes());
+        assert_eq!(first.certification_bytes(), second.certification_bytes());
+        let first_witness = first.original_native();
+        let second_witness = second.original_native();
+        let pending = first_witness
+            .group(0)
+            .unwrap()
+            .admitted(first_witness)
+            .unwrap();
+        let contextual = first_witness
+            .group(0)
+            .unwrap()
+            .admitted(first_witness)
+            .unwrap();
+        let foreign = second_witness
+            .group(0)
+            .unwrap()
+            .admitted(second_witness)
+            .unwrap();
+        assert!(authenticates_original_native_group(&first, 0, &pending));
+        assert!(authenticates_original_native_group(&first, 0, &contextual));
+        assert!(!authenticates_original_native_group(&first, 0, &foreign));
+        assert!(!authenticates_original_native_group(&first, 1, &pending));
+        assert!(authenticates_original_native_group(&second, 0, &foreign));
     }
 
     fn inherited_parsed(

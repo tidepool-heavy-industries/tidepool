@@ -1125,11 +1125,17 @@ mod tests {
         let slot = earlier_target
             .verify_retained_slot(&owner, global_index, binding, &prior)
             .unwrap();
-        let (VerifiedRetainedSlotDemander::CurrentStage(witness)
-        | VerifiedRetainedSlotDemander::PriorProgramStage(witness)) = slot
-        else {
-            panic!("same-cell capture requires a cell-stage slot witness")
+        let VerifiedRetainedSlotDemander::PriorProgramStage(witness) = slot else {
+            panic!("first use of the prior declaration requires its actual earlier physical issuer")
         };
+        let first_native = earlier_prefix.cell_program().items()[0].native().unwrap();
+        assert!(
+            first_native
+                .select_cell_stage_retained_input(witness)
+                .unwrap()
+                .is_none(),
+            "an authentic slot cannot authorize another receiving target"
+        );
         let Some(CellStageRetainedInput::StageSelected(selected)) = earlier_native
             .select_cell_stage_retained_input(witness)
             .unwrap()
@@ -1148,6 +1154,98 @@ mod tests {
                         .world_selected_runtime_inputs()
                         .stage_first_ordinal()
         );
+
+        let earlier_inputs = earlier_prefix.snapshot().scoped_inputs.clone();
+        let value = earlier_inputs
+            .value(prior.identity(), prior.generation())
+            .unwrap();
+        let ScopedValueEvidence::Produced { row, provenance } = &value.evidence else {
+            panic!("prior stage capture must use the actual Produced value")
+        };
+        assert!(Arc::ptr_eq(selected.checked_row(), row));
+        assert_eq!(selected.session_var(), value.id);
+        assert_eq!(selected.defining_scope(), value.defining_scope.0);
+        let definitions = owner.code().body().definitions();
+        let requirement = Arc::new(
+            RetainedNativeRequirement::from_declaration(
+                &definitions.globals()[usize::try_from(global_index).unwrap()],
+                definitions.signatures(),
+                prior.clone(),
+                owner.clone(),
+                global_index,
+                binding,
+            )
+            .unwrap(),
+        );
+        earlier_inputs
+            .resolve_native_requirement(
+                &earlier_prefix,
+                earlier_native,
+                earlier_target,
+                &requirement,
+            )
+            .unwrap();
+        enum PriorDefect {
+            Identifier,
+            Scope,
+            Row,
+            Admitted,
+        }
+        for defect in [
+            PriorDefect::Identifier,
+            PriorDefect::Scope,
+            PriorDefect::Row,
+            PriorDefect::Admitted,
+        ] {
+            let wrong_row = earlier_native.value_interface_certificate().unwrap();
+            assert!(!Arc::ptr_eq(row, &wrong_row));
+            let evidence = if matches!(defect, PriorDefect::Admitted) {
+                ScopedValueEvidence::Admitted {
+                    row: Arc::clone(row),
+                    provenance: Arc::clone(provenance),
+                }
+            } else {
+                ScopedValueEvidence::Produced {
+                    row: if matches!(defect, PriorDefect::Row) {
+                        wrong_row
+                    } else {
+                        Arc::clone(row)
+                    },
+                    provenance: Arc::clone(provenance),
+                }
+            };
+            let mut changed = earlier_inputs.clone();
+            changed.values.insert(
+                (value.identity.clone(), value.generation),
+                Arc::new(ScopedResolvedValue {
+                    id: if matches!(defect, PriorDefect::Identifier) {
+                        SessionVarId::from_extract(value.id.raw() ^ (1 << 63))
+                    } else {
+                        value.id
+                    },
+                    defining_scope: if matches!(defect, PriorDefect::Scope) {
+                        ScopeId(value.defining_scope.0 + 1)
+                    } else {
+                        value.defining_scope
+                    },
+                    identity: value.identity.clone(),
+                    generation: value.generation,
+                    handle: value.handle,
+                    name: value.name.clone(),
+                    evidence,
+                    _bindings: value._bindings.clone(),
+                }),
+            );
+            assert!(matches!(
+                changed.resolve_native_requirement(
+                    &earlier_prefix,
+                    earlier_native,
+                    earlier_target,
+                    &requirement,
+                ),
+                Err(PreparedRuntimeError::CertifiedTargetOwners { .. })
+            ));
+        }
 
         let admission = plan_fixture_cell_for(
             &mut resident,
