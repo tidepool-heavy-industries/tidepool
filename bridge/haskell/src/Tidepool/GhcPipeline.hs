@@ -1248,6 +1248,8 @@ data InterfaceInstallationFailure
   | InterfaceCapturedClosureMismatch
       { homesWithoutCapturedInputs :: [(String,String)]
       , capturedInputsWithoutHomes :: [(String,String)]
+      , homeOnlyDependencies :: [((String,String),(String,String))]
+      , capturedOnlyDependencies :: [((String,String),(String,String))]
       }
   deriving Show
 instance Exception InterfaceInstallationFailure
@@ -3517,10 +3519,24 @@ retainWorldCellOriginal prepared completion (PrefixHomeInterfaces homes previous
       retainedOwners = Set.fromList
         [(unitString (moduleUnit (mi_module (hm_iface home))),moduleNameString (moduleName (mi_module (hm_iface home))))
           | home <- eltsHpt retained]
-  unless (capturedOwners == retainedOwners)
-    (throwIO (InterfaceCapturedClosureMismatch
+  unless (capturedOwners == retainedOwners) $ do
+    -- Record the conflicting edges only on refusal. Captured nominal
+    -- requirements and GHC usage observations have different issuers; a node
+    -- count alone cannot identify which projection lost required evidence.
+    let capturedEdges = Set.fromList
+          [((exactUnit artifact,exactModule artifact),dependency)
+          | product' <- verifiedInterfaceProducts captured
+          , let (artifact,_) = verifiedExactInterface product'
+          , dependency <- exactRequirements artifact]
+        homeEdges = Set.fromList
+          [((unitString (moduleUnit owner),moduleNameString (moduleName owner)),dependency)
+          | home <- eltsHpt retained, let owner = mi_module (hm_iface home)
+          , dependency <- homeInterfaceUsageOwners environment (hm_iface home)]
+    throwIO (InterfaceCapturedClosureMismatch
       (Set.toAscList (retainedOwners `Set.difference` capturedOwners))
-      (Set.toAscList (capturedOwners `Set.difference` retainedOwners))))
+      (Set.toAscList (capturedOwners `Set.difference` retainedOwners))
+      (Set.toAscList (homeEdges `Set.difference` capturedEdges))
+      (Set.toAscList (capturedEdges `Set.difference` homeEdges)))
   pure (PrefixHomeInterfaces retained captured,mkModuleGraph (mgModSummaries' graph ++ added))
   where
     environment = prHscEnv (pprPipelineResult prepared)
