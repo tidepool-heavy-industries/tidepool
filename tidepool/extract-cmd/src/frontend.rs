@@ -382,7 +382,13 @@ impl OwnedServiceRun {
             loop {
                 self.poll();
                 match child.observe() {
-                    Ok(Some(_)) => break,
+                    Ok(Some(reaped)) => {
+                        self.report.action = Observation::exited(
+                            crate::service::ObservationStatus::Exited,
+                            reaped.status(),
+                        );
+                        break;
+                    }
                     Ok(None) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(std::time::Duration::from_millis(10))
                     }
@@ -476,9 +482,7 @@ impl OwnedServiceRun {
             self.pump
                 .as_ref()
                 .zip(reaped.as_ref())
-                .and_then(|(pump, reaped)| {
-                    pump.retirement(&self.report.owner_directory, reaped).ok()
-                })
+                .and_then(|(pump, reaped)| pump.retirement(reaped).ok())
         } else {
             None
         };
@@ -528,10 +532,13 @@ impl OwnedServiceRun {
                 Observation::state(crate::service::ObservationStatus::Retained)
             };
         if let Err(error) = &action {
-            self.report.action =
-                Observation::failed(crate::service::ObservationStatus::Failed, error);
+            if self.report.action.status != ObservationStatus::Exited {
+                self.report.action =
+                    Observation::failed(crate::service::ObservationStatus::Failed, error);
+            }
         }
-        if let crate::service::AcquisitionObservation::Acquired { publication, .. } =
+        if let crate::service::AcquisitionObservation::Acquired { publication, .. }
+        | crate::service::AcquisitionObservation::Refused { publication, .. } =
             &self.report.acquisition
         {
             self.report
@@ -810,6 +817,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
                 owner_control,
                 operation,
                 owner.daemon.as_ref().unwrap().0.id(),
+                root.clone(),
             )
             .map_err(FrontendError::Io)?,
         );
@@ -881,19 +889,14 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
             .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
             .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
             .env("TIDEPOOL_BUILD_PRODUCTS_DIR", cache.join("products"));
-        owner.workload = Some(crate::process::OwnedChild(
-            child_command.spawn().map_err(FrontendError::Io)?,
-        ));
         owner.report.action =
             crate::service::Observation::state(crate::service::ObservationStatus::Running);
         owner.publish();
+        owner.workload = Some(crate::process::OwnedChild(
+            child_command.spawn().map_err(FrontendError::Io)?,
+        ));
         loop {
             owner.poll();
-            if owner.carrier_broken {
-                return Err(FrontendError::Daemon(
-                    "owned service control carrier failed during workload".into(),
-                ));
-            }
             if let Some(status) = owner
                 .workload
                 .as_mut()
@@ -908,6 +911,11 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
                 );
                 owner.workload.take();
                 return Ok(exit_code(status));
+            }
+            if owner.carrier_broken {
+                return Err(FrontendError::Daemon(
+                    "owned service control carrier failed during workload".into(),
+                ));
             }
             if owner.report.service_terminal.is_some() {
                 return Err(FrontendError::Daemon(
@@ -1627,7 +1635,8 @@ mod tests {
         command.args(["-c", &format!("exit {daemon_code}")]);
         let daemon = crate::process::OwnedChild(command.spawn().unwrap());
         let (read, mut write) = std::os::unix::net::UnixStream::pair().unwrap();
-        let pump = crate::service::ServicePump::new(read, [1; 32], daemon.0.id()).unwrap();
+        let pump = crate::service::ServicePump::new(read, [1; 32], daemon.0.id(), root.to_owned())
+            .unwrap();
         for message in [
             ServiceMessage::Boot { epoch: [2; 32] },
             ServiceMessage::Acquisition {

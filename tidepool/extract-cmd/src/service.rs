@@ -100,6 +100,7 @@ pub(crate) struct ServicePump {
     stream: UnixStream,
     operation: [u8; 32],
     daemon_pid: u32,
+    owner: PathBuf,
     pending: Vec<u8>,
     epoch: Option<[u8; 32]>,
     acquisition: Option<AcquisitionObservation>,
@@ -110,12 +111,18 @@ pub(crate) struct ServicePump {
     partial_since: Option<Instant>,
 }
 impl ServicePump {
-    pub fn new(stream: UnixStream, operation: [u8; 32], daemon_pid: u32) -> io::Result<Self> {
+    pub fn new(
+        stream: UnixStream,
+        operation: [u8; 32],
+        daemon_pid: u32,
+        owner: PathBuf,
+    ) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
         Ok(Self {
             stream,
             operation,
             daemon_pid,
+            owner,
             pending: Vec::new(),
             epoch: None,
             acquisition: None,
@@ -188,7 +195,6 @@ impl ServicePump {
     }
     pub fn retirement(
         &self,
-        owner: &Path,
         reaped: &crate::process::OwnedChildReaped,
     ) -> io::Result<CompleteServiceRetirement> {
         let terminal = self
@@ -205,7 +211,7 @@ impl ServicePump {
             return Err(invalid("service retirement obligations remain unconfirmed"));
         }
         Ok(CompleteServiceRetirement {
-            owner: owner.to_owned(),
+            owner: self.owner.clone(),
             epoch: terminal.epoch,
         })
     }
@@ -438,7 +444,8 @@ mod tests {
         let mut daemon = child(37);
         let mut foreign = child(0);
         let (read, mut write) = UnixStream::pair().unwrap();
-        let mut pump = ServicePump::new(read, [1; 32], daemon.0.id()).unwrap();
+        let mut pump =
+            ServicePump::new(read, [1; 32], daemon.0.id(), owner.path().to_owned()).unwrap();
         send(
             &mut write,
             [1; 32],
@@ -455,10 +462,10 @@ mod tests {
         .unwrap();
         pump.poll().unwrap();
         let foreign = reap(&mut foreign);
-        assert!(pump.retirement(owner.path(), &foreign).is_err());
+        assert!(pump.retirement(&foreign).is_err());
         let actual = reap(&mut daemon);
         assert_eq!(actual.status().code(), Some(37));
-        let proof = pump.retirement(owner.path(), &actual).unwrap();
+        let proof = pump.retirement(&actual).unwrap();
         assert_eq!(proof.owner(), owner.path());
         assert_eq!(proof.epoch(), [2; 32]);
     }
@@ -468,10 +475,11 @@ mod tests {
         let mut daemon = child(0);
         let actual = reap(&mut daemon);
         let (read, write) = UnixStream::pair().unwrap();
-        let mut pump = ServicePump::new(read, [1; 32], actual.pid()).unwrap();
+        let mut pump =
+            ServicePump::new(read, [1; 32], actual.pid(), owner.path().to_owned()).unwrap();
         drop(write);
         assert!(pump.poll().is_err());
-        assert!(pump.retirement(owner.path(), &actual).is_err());
+        assert!(pump.retirement(&actual).is_err());
     }
     #[test]
     fn carrier_refuses_foreign_duplicate_late_and_crossed_terminal() {
@@ -503,7 +511,8 @@ mod tests {
             ],
         ] {
             let (read, mut write) = UnixStream::pair().unwrap();
-            let mut pump = ServicePump::new(read, [1; 32], 123).unwrap();
+            let mut pump =
+                ServicePump::new(read, [1; 32], 123, PathBuf::from("/fixture-owner")).unwrap();
             for (operation, message) in messages {
                 send(
                     &mut write,
@@ -521,7 +530,8 @@ mod tests {
     fn carrier_partial_deadline_truncation_and_oversize_are_bounded() {
         for mode in 0..3 {
             let (read, mut write) = UnixStream::pair().unwrap();
-            let mut pump = ServicePump::new(read, [1; 32], 123).unwrap();
+            let mut pump =
+                ServicePump::new(read, [1; 32], 123, PathBuf::from("/fixture-owner")).unwrap();
             if mode == 2 {
                 write
                     .write_all(&((MAX_FRAME + 1) as u32).to_le_bytes())
