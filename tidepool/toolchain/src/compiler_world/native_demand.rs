@@ -1118,6 +1118,7 @@ impl tidepool_extract_cmd::NativeDemandResolver for WorldNativeDemandResolver<'_
                 // allocation or transport budget fails after resolution.
                 let refusal = self.refusal.insert(error);
                 tracing::warn!(
+                    error = %refusal,
                     cause = ?crate::failclass::classify_compile(refusal).cause,
                     owner = ?demand.owner,
                     stage = demand.stage,
