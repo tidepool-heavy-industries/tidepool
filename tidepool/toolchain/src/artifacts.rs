@@ -7640,6 +7640,7 @@ mod module_product_tests {
             None
         };
         let mut prior_world_output = None;
+        let mut terminal_refusal_control = None;
         for cancel_after_end in [false, true] {
             let cancellation = CompilerTransactionCancellation::new();
             let mut observed_close = None;
@@ -7919,7 +7920,7 @@ mod module_product_tests {
                 }
             }
             if mixed && !cancel_after_end {
-                crate::compiler_world::native_demand::assert_refusal_latched_before_postresolution_checkpoint(&checked);
+                terminal_refusal_control = Some(Arc::clone(&checked));
                 crate::declaration_context::assert_world_repeated_source_refusals(
                     &checked,
                     prepared.items[4]
@@ -8209,6 +8210,11 @@ mod module_product_tests {
             program
                 .validate_typed_entries()
                 .expect("actual native entry belongs to normalized item");
+        }
+        if let Some(program) = terminal_refusal_control {
+            // Retirement invalidates the compiler realization. Keep this terminal
+            // phase after every equal-facts comparison between request issuers.
+            crate::compiler_world::native_demand::assert_refusal_latched_before_postresolution_checkpoint(&program);
         }
     }
 
