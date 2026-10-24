@@ -100,14 +100,8 @@ pub(super) fn assert_committed_cell_operation(
     request_id: &str,
     call_id: &str,
 ) -> CommittedCellOperation {
-    let execution = dispatch_execution(lines, request_id, call_id);
-    let dispatch = lines
-        .iter()
-        .find(|line| {
-            log_message(line) == Some(DISPATCH_MESSAGE)
-                && line["fields"]["call_id"].as_str() == Some(call_id)
-        })
-        .expect("checked dispatch");
+    let (dispatch, execution) = dispatched_operation(lines, request_id, call_id);
+    let execution = execution.to_owned();
     let terminal = call_terminal(lines, &execution, "cell");
     assert_committed_terminal(terminal);
     let submitted = lines
@@ -183,38 +177,41 @@ pub(super) fn line_carries_execution(line: &Value, execution: &str) -> bool {
         })
 }
 
-/// Select the single dispatch row for `call_id` and return its execution.
-///
-/// The row must also retain the originating request as its turn and the model
-/// call as its context call id, so a coincidentally reused call id with a
-/// different origin cannot satisfy the identity check.
-pub(super) fn dispatch_execution(lines: &[Value], request_id: &str, call_id: &str) -> String {
+/// Select one exact originating request/call pair. A companion request may use
+/// the same call spelling; its dispatch is independent evidence.
+fn dispatched_operation<'a>(
+    lines: &'a [Value],
+    request_id: &str,
+    call_id: &str,
+) -> (&'a Value, &'a str) {
     let dispatches: Vec<_> = lines
         .iter()
         .filter(|line| {
             log_message(line) == Some(DISPATCH_MESSAGE)
+                && line["fields"]["turn_id"].as_str() == Some(request_id)
                 && line["fields"]["call_id"].as_str() == Some(call_id)
         })
         .collect();
     assert_eq!(
         dispatches.len(),
         1,
-        "expected one dispatch row for call {call_id}: {dispatches:#?}"
+        "expected one dispatch row for request {request_id} call {call_id}: {dispatches:#?}"
     );
     let dispatch = dispatches[0];
-    assert_eq!(
-        dispatch["fields"]["turn_id"].as_str(),
-        Some(request_id),
-        "dispatch row does not retain the originating turn: {dispatch}"
-    );
     assert_eq!(
         dispatch["fields"]["context_call_id"].as_str(),
         Some(call_id),
         "dispatch row does not retain the originating call: {dispatch}"
     );
-    dispatch["fields"]["execution"]
+    let execution = dispatch["fields"]["execution"]
         .as_str()
-        .expect("dispatch row names its execution")
+        .expect("dispatch row names its execution");
+    (dispatch, execution)
+}
+
+pub(super) fn dispatch_execution(lines: &[Value], request_id: &str, call_id: &str) -> String {
+    dispatched_operation(lines, request_id, call_id)
+        .1
         .to_owned()
 }
 
@@ -322,6 +319,10 @@ mod tests {
         companion["fields"]["execution"] = json!("exec-other");
         companion["fields"]["request_ordinal"] = json!(2);
         lines.push(companion);
+        let mut companion_dispatch = lines[0].clone();
+        companion_dispatch["fields"]["turn_id"] = json!("request-other");
+        companion_dispatch["fields"]["execution"] = json!("exec-other");
+        lines.push(companion_dispatch);
         let cell = operation(&lines);
         assert_eq!(cell.execution, "exec-1");
         let work = [
@@ -345,13 +346,13 @@ mod tests {
                 operation(&lines);
             });
         }
+        let mut duplicate = original.clone();
+        duplicate.push(original[0].clone());
+        refuses("expected one dispatch row", || {
+            operation(&duplicate);
+        });
         for (index, field, value, expected) in [
-            (
-                0,
-                "turn_id",
-                json!("foreign"),
-                "does not retain the originating turn",
-            ),
+            (0, "turn_id", json!("foreign"), "expected one dispatch row"),
             (
                 0,
                 "context_call_id",
