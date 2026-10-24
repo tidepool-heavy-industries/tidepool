@@ -3,7 +3,7 @@
 -- | Refine declaration imports and install typed aliases from the current
 -- World's captured value interfaces.
 module Tidepool.CheckedPrefixImports
-  ( refineOriginalDeclarationImports, refineProgramDeclarationImports
+  ( refineProgramDeclarationImports
   , refineParsedDeclarationImports
   , selectedImportNames, parsedDeclarationOccurrences
   , CompletedValueAliases, completedValueAliasIds, hydrateCompletedValueAliases, transformCompletedValueAliases
@@ -12,6 +12,7 @@ module Tidepool.CheckedPrefixImports
 import Control.Exception (evaluate)
 import Control.Monad (forM, forM_, unless)
 import Data.List (nub, sort)
+import Data.Maybe (isJust)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -26,7 +27,7 @@ import GHC.Rename.Names (renameRawPkgQual)
 import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLoad)
 import GHC.Types.Avail (AvailInfo, availName, availNames)
 import GHC.Types.Name (Name, nameOccName, nameModule_maybe)
-import GHC.Types.Name.Occurrence (OccName, isTcOcc, isDataOcc, mkVarOcc, occNameString, occNameFS, varToRecFieldOcc)
+import GHC.Types.Name.Occurrence (OccName, isTcOcc, isDataOcc, mkVarOcc, occNameString, occNameFS, varToRecFieldOcc, fieldOcc_maybe)
 import GHC.Types.Name.Reader (RdrName(Exact), mkRdrUnqual, rdrNameOcc)
 import GHC.Types.Name.Set (extendNameSet, unionNameSets)
 import GHC.Types.Id (Id, idName, idType)
@@ -43,7 +44,7 @@ import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Utils.Fingerprint (Fingerprint)
 import GHC.Utils.Outputable (ppr)
 import System.Mem.StableName (StableName, makeStableName)
-import Tidepool.DeclarationJoin (ExportIdentity(..), ExportNamespace(..), exportIdentity)
+import Tidepool.DeclarationJoin (DeclarationExport(..), ExportIdentity(..), ExportNamespace, exportIdentity)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), HydratedExactInterfaces
   , hydratedExactEnvironment, hydratedInterfaceProduct
@@ -53,7 +54,9 @@ import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.CheckedCell.Internal (NativeParsedModule(..))
 import Tidepool.ImportSyntax (RefinedImportSyntax, refinedParsedModule)
 import Tidepool.ImportSyntax.Internal
-  ( ImportRefinement(..), mapRefinedImportsM, insertSyntheticPrelude, mapImportPreservingSource )
+  ( ImportRefinement(..), mapRefinedImportsM, insertSyntheticPrelude, mapImportPreservingSource
+  , ImportOccurrence, ImportOccurrenceRoot, importOccurrenceId, importOccurrenceRoot
+  , refinedCapturedSyntax, capturedParsedSource, capturedImportOccurrences, refinedImportOccurrences )
 
 -- This capability comes from exact installed interface allocations and their
 -- actual exported Names. Runtime variable IDs never supply GHC binder identity.
@@ -169,45 +172,45 @@ mapPrefixImports transform (NativeParsedModule parsed uses) = do
   next <- transform parsed
   pure (NativeParsedModule next uses)
 
--- Planned declaration certification supplies the full authored-only original
--- export inventory. Its selected owner retains a direct wildcard import.
-refineOriginalDeclarationImports
-  :: Module -> Fingerprint -> [ExportIdentity] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
-refineOriginalDeclarationImports owner fingerprint names env = mapPrefixImports $ \parsed -> do
-  original <- originalRefinement env owner fingerprint names
-  refineImports [original] env parsed
-
 -- Select the source-ordered declaration winners while keeping every original
 -- owner available through its qualified import. World value aliases are applied
 -- separately after this declaration refinement.
 refineProgramDeclarationImports
-  :: [(Module,Fingerprint,[[ExportIdentity]])] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
+  :: [(Module,Fingerprint,[DeclarationExport])] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
+refineProgramDeclarationImports [] _ = pure
 refineProgramDeclarationImports originals env = mapPrefixImports $ \parsed -> do
-  owners <- mapM (\(owner,fingerprint,groups) -> originalRefinement env owner fingerprint (concat groups)) originals
-  let namespace TypeNamespace = TypeNamespace
-      namespace ConstructorNamespace = ConstructorNamespace
-      namespace FieldNamespace = FieldNamespace
-      namespace _ = ValueNamespace
-      key identity = (namespace (exportNamespace identity),exportOccurrence identity,exportRecordParent identity)
-      headWinners = Map.fromList [(key headName,owner)
-        | (owner,_,groups) <- originals, headName:_ <- groups]
-      originalWinners = [(key name,owner)
-        | (owner,_,groups) <- originals, group@(headName:_) <- groups
-        , Map.lookup (key headName) headWinners == Just owner, name <- group]
+  unless (length originals == Set.size (Set.fromList [owner | (owner,_,_) <- originals]))
+    (fail "program declaration owner is duplicated")
+  owners <- mapM (\(owner,fingerprint,groups) -> originalRefinement env owner fingerprint
+    (concatMap (\group -> exportHead group : exportChildren group) groups)) originals
+  bindings <- bindCapturedImports owners parsed
+  let headWinners = Map.fromList [(lexicalKey (exportHead group),owner)
+        | (owner,_,groups) <- originals, group <- groups]
+      originalWinners = [(lexicalKey name,owner)
+        | (owner,_,groups) <- originals, group <- groups
+        , Map.lookup (lexicalKey (exportHead group)) headWinners == Just owner
+        , name <- exportHead group : exportChildren group]
       winners = Map.fromList originalWinners
-  verified <- refineImports owners env parsed
-  let select located = case [owner | owner <- owners
-          , directRefinementImport owner located] of
+      bound occurrence = [owner | (root,owner) <- bindings
+        , root == importOccurrenceRoot (importOccurrenceId occurrence)]
+      shadowKeys = Set.fromList (map lexicalKey (concatMap refinementNames owners))
+  verified <- refineUnqualifiedImports (\occurrence _ -> not (null (bound occurrence)))
+    ((`Set.notMember` shadowKeys) . lexicalKey . exportIdentity) env parsed
+  let select occurrence located = case [owner | owner <- bound occurrence
+          , ideclQualified (unLoc located) == NotQualified] of
         [] -> pure KeepImport
         [owner] -> do
           original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
           selected <- either fail pure (selectedImportNames (mi_exports (hm_iface original))
             (ideclImportList (unLoc located)))
           let retained = [name | name <- selected
-                , Map.lookup (key (exportIdentity name)) winners == Just (refinementOwner owner)]
-          pure (NarrowUnqualified (map importName retained))
+                , Map.lookup (lexicalKey (exportIdentity name)) winners == Just (refinementOwner owner)]
+          pure $ if retained == selected then KeepImport else NarrowUnqualified (map importName retained)
         _ -> fail "program declaration owner is duplicated"
   mapRefinedImportsM select verified
+
+lexicalKey :: ExportIdentity -> (ExportNamespace,String,Maybe String)
+lexicalKey identity = (exportNamespace identity,exportOccurrence identity,exportRecordParent identity)
 
 originalRefinement
   :: HscEnv -> Module -> Fingerprint -> [ExportIdentity] -> IO RefinementOwner
@@ -231,7 +234,7 @@ refineParsedDeclarationImports :: HscEnv -> NativeParsedModule -> IO NativeParse
 refineParsedDeclarationImports env = mapPrefixImports $ \parsed ->
   let locals = nub (concatMap parsedDeclarationOccurrences
         (hsmodDecls (unLoc (pm_parsed_source (refinedParsedModule parsed)))))
-  in if null locals then pure parsed else refineUnqualifiedImports (const False)
+  in if null locals then pure parsed else refineUnqualifiedImports (\_ _ -> False)
       ((`notElem` locals) . nameOccName) env parsed
 
 parsedDeclarationOccurrences :: LHsDecl GhcPs -> [OccName]
@@ -267,7 +270,7 @@ parsedConstructorOccurrences (LConsWithFields constructors fields) =
     [] -> []
 
 -- This syntax identifies the unique direct import whose exact HOME owner and
--- interface are checked by refineImports. Aliased/package imports keep their
+-- interface are checked by the composition. Aliased/package imports keep their
 -- own selection and full-parent qualified clone from the ordinary pass.
 directRefinementImport :: RefinementOwner -> LImportDecl GhcPs -> Bool
 directRefinementImport owner imported = let declaration = unLoc imported in
@@ -277,36 +280,33 @@ directRefinementImport owner imported = let declaration = unLoc imported in
     && (case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
     && ideclSource declaration == NotBoot
 
-refineImports :: [RefinementOwner] -> HscEnv -> RefinedImportSyntax -> IO RefinedImportSyntax
-refineImports [] _ parsed = pure parsed
-refineImports owners env parsed = do
-  let syntax = unLoc (pm_parsed_source (refinedParsedModule parsed))
-      originalImports = hsmodImports syntax
-  forM_ owners $ \owner -> do
-    original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
-    case refinementReadback owner of
-      Nothing -> pure ()
-      Just (retained, expected) -> do
-        _ <- evaluate retained
-        actual <- evaluate (hm_iface original) >>= makeStableName
-        unless (actual == expected) $
-          fail "completed value import lost its exact installed interface allocation"
-    case filter (directRefinementImport owner) originalImports of
-      [imported] -> unless (ideclImportList (unLoc imported) == Nothing) $
-        fail "planned declaration requires one direct original wildcard import"
-      _ -> fail "checked import refinement requires one direct original import"
-  let namespace TypeNamespace = TypeNamespace
-      namespace ConstructorNamespace = ConstructorNamespace
-      namespace _ = ValueNamespace
-      key identity = (namespace (exportNamespace identity), exportOccurrence identity)
-      shadowKeys = map key (concatMap refinementNames owners)
-  refineUnqualifiedImports (\located -> any (`directRefinementImport` located) owners)
-    ((`notElem` shadowKeys) . key . exportIdentity) env parsed
+-- The wildcard premise belongs to immutable captured syntax. Subsequent passes
+-- may narrow only its one unqualified descendant; another same-module import
+-- cannot replace that occurrence.
+bindCapturedImports
+  :: [RefinementOwner] -> RefinedImportSyntax -> IO [(ImportOccurrenceRoot,RefinementOwner)]
+bindCapturedImports owners parsed = forM owners $ \owner -> do
+  let captured = refinedCapturedSyntax parsed
+      capturedImports = zip (capturedImportOccurrences captured)
+        (hsmodImports (unLoc (capturedParsedSource captured)))
+      liveImports = zip (refinedImportOccurrences parsed)
+        (hsmodImports (unLoc (pm_parsed_source (refinedParsedModule parsed))))
+  occurrence <- case [(occurrence,imported) | (occurrence,imported) <- capturedImports
+      , directRefinementImport owner imported] of
+    [(occurrence,imported)] | ideclImportList (unLoc imported) == Nothing -> pure occurrence
+    [_] -> fail "planned declaration requires one direct original wildcard import"
+    _ -> fail "checked import refinement requires one direct original import"
+  let root = importOccurrenceRoot (importOccurrenceId occurrence)
+  case [imported | (live,imported) <- liveImports
+      , importOccurrenceRoot (importOccurrenceId live) == root
+      , ideclQualified (unLoc imported) == NotQualified] of
+    [imported] | directRefinementImport owner imported -> pure (root,owner)
+    _ -> fail "checked import refinement lost its direct original occurrence"
 
 -- Narrow only the unqualified view. The qualified clone keeps the submitted
 -- alias and import selection, so shadowing cannot widen historical access.
 refineUnqualifiedImports
-  :: (LImportDecl GhcPs -> Bool) -> (Name -> Bool)
+  :: (ImportOccurrence -> LImportDecl GhcPs -> Bool) -> (Name -> Bool)
   -> HscEnv -> RefinedImportSyntax -> IO RefinedImportSyntax
 refineUnqualifiedImports protected retain env parsed = do
   let module_ = refinedParsedModule parsed
@@ -317,9 +317,9 @@ refineUnqualifiedImports protected retain env parsed = do
       && not (any ((== mkModuleName "Prelude") . unLoc . ideclName . unLoc) originalImports)
     then either fail pure (insertSyntheticPrelude parsed)
     else pure parsed
-  mapRefinedImportsM (\located -> do
+  mapRefinedImportsM (\occurrence located -> do
     let declaration = unLoc located
-    if protected located || ideclQualified declaration /= NotQualified
+    if protected occurrence located || ideclQualified declaration /= NotQualified
       then pure KeepImport
       else do
         let importedName = unLoc (ideclName declaration)
@@ -356,7 +356,8 @@ selectedImportNames available selection = do
     matches wrapped name =
       let occurrence = rdrNameOcc (ieWrappedName (unLoc wrapped))
           actual = nameOccName name
-       in occNameString occurrence == occNameString actual
+       in if isJust (fieldOcc_maybe occurrence) then occurrence == actual
+          else occNameString occurrence == occNameString actual
           && case unLoc wrapped of
             IEType {} -> isTcOcc actual
             IEPattern {} -> isDataOcc actual

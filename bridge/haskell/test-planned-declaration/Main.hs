@@ -356,9 +356,11 @@ checkImports checkFile importedEnv importedInventory staleInventory = do
       _ -> fail "checking module summary absent"
     parsed <- parseModule summary
     native <- liftIO (parsedNativeModule parsed)
-    transformed <- liftIO (transformPlannedDeclarationImports importedInventory importedEnv native)
+    transformed <- liftIO (refineProgramDeclarationImports
+      [plannedDeclarationImportInventory importedInventory] importedEnv native)
     forM_ staleInventory $ \stale -> do
-      absent <- liftIO (try (transformPlannedDeclarationImports stale importedEnv native) :: IO (Either IOException NativeParsedModule))
+      absent <- liftIO (try (refineProgramDeclarationImports
+        [plannedDeclarationImportInventory stale] importedEnv native) :: IO (Either IOException NativeParsedModule))
       unless (case absent of Left _ -> True; Right _ -> False) $
         fail "stale original inventory admitted changed interface"
     typed <- typecheckNativeModule transformed

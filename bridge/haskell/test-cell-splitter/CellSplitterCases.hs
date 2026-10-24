@@ -21,7 +21,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import GHC hiding (Target)
-import GHC.Types.Name.Reader (rdrNameOcc)
+import GHC.Types.Name.Reader (rdrNameOcc, mkRdrUnqual, greRdrNames, greName, globalRdrEnvElts)
 import GHC.Builtin.Types (intTy, intDataCon)
 import GHC.Builtin.Names (genClassKey)
 import GHC.Core.Class (className)
@@ -41,9 +41,9 @@ import GHC.Types.Literal (Literal(..), LitNumType(..))
 import GHC.Types.Var.Set (IdSet)
 import GHC.Types.Var (isId, isCoVar, varType, varName)
 import System.Mem.StableName (StableName, makeStableName)
-import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
+import GHC.Types.Name.Occurrence (mkVarOcc, mkRecFieldOcc, occNameString, fieldOcc_maybe)
 import GHC.Types.Name (nameModule_maybe, nameOccName, getOccString, nameUnique)
-import GHC.Tc.Types (TcGblEnv, tcg_rn_decls, tcg_mod, tcg_type_env, tcg_insts)
+import GHC.Tc.Types (TcGblEnv, tcg_rn_decls, tcg_mod, tcg_type_env, tcg_insts, tcg_rdr_env)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.SourceText (il_value)
@@ -89,12 +89,12 @@ import Tidepool.ImportSyntax (capturedParsedSource)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
-import Tidepool.CheckedPrefixImports (refineProgramDeclarationImports)
+import Tidepool.CheckedPrefixImports (refineProgramDeclarationImports, refineParsedDeclarationImports, selectedImportNames)
 import Tidepool.DeclarationJoin (interfaceExports, DeclarationExport(..))
 import Tidepool.ImportSyntax
   ( captureImportSyntax, matchDriverImports, beginImportRefinement
-  , refinedImportOccurrences, importOccurrenceLineage, ImportLineage(..) )
-import Tidepool.CheckedCell (nativeParsedModule, nativeImportSyntax, unannotatedModule)
+  , refinedImportOccurrences, importOccurrenceId, importOccurrenceDescriptor, importOccurrenceLineage, ImportLineage(..) )
+import Tidepool.CheckedCell (NativeParsedModule, nativeParsedModule, nativeImportSyntax, unannotatedModule, typecheckNativeModule)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
@@ -636,17 +636,32 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
       first = originalDirectory </> "G1.hs"
       second = originalDirectory </> "G2.hs"
       shadow = originalDirectory </> "G3.hs"
+      facade = originalDirectory </> "G0.hs"
       target = root </> "ProgramOriginalConsumer.hs"
   createDirectoryIfMissing True originalDirectory
-  writeFile first "module Tidepool.Session.Lib.G1 (a,T(..)) where\ndata T = Old\na :: Int\na = 1\n__result = (0 :: Int)\n"
+  writeFile first (unlines
+    [ "{-# LANGUAGE DuplicateRecordFields #-}"
+    , "module Tidepool.Session.Lib.G1 (a,T(..),RecordA(..),RecordB(..)) where"
+    , "data T = Old", "data RecordA = RecordA {field :: Int}", "data RecordB = RecordB {field :: Int}"
+    , "a :: Int", "a = 1", "__result = (0 :: Int)" ])
   writeFile second "module Tidepool.Session.Lib.G2 (b,c) where\nb :: Int\nb = 2\nc :: Int\nc = 3\n__result = (0 :: Int)\n"
-  writeFile shadow "module Tidepool.Session.Lib.G3 (a,T(..)) where\ndata T = New\na :: Bool\na = True\n__result = (0 :: Int)\n"
+  writeFile shadow (unlines
+    [ "module Tidepool.Session.Lib.G3 (a,T(..),RecordA(..)) where"
+    , "data T = New", "data RecordA = RecordA {field :: Bool}"
+    , "a :: Bool", "a = True", "__result = (0 :: Int)" ])
+  writeFile facade (unlines
+    [ "module Tidepool.Session.Lib.G0 (module Tidepool.Session.Lib.G1,module Tidepool.Session.Lib.G2) where"
+    , "import Tidepool.Session.Lib.G1", "import Tidepool.Session.Lib.G2" ])
   let source body = unlines
-        [ "module ProgramOriginalConsumer where"
+        [ "{-# LANGUAGE PackageImports, DuplicateRecordFields #-}"
+        , "module ProgramOriginalConsumer where"
         , "import Tidepool.Session.Lib.G1"
         , "import Tidepool.Session.Lib.G2"
         , "import Tidepool.Session.Lib.G2 as Restricted (b)"
         , "import Tidepool.Session.Lib.G3"
+        , "import Tidepool.Session.Lib.G0"
+        , "c :: Int"
+        , "c = 30"
         , "__result :: (Bool,Int)"
         , "__result = " ++ body
         ]
@@ -659,9 +674,8 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         original <- maybe (fail "original Lib interface is absent") pure (lookupHpt (hsc_HPT environment) (mkModuleName owner))
         let iface = hm_iface original
         exports <- interfaceExports environment iface
-        pure (mi_module iface,mi_iface_hash (mi_final_exts iface),
-          [exportHead item : exportChildren item | item <- exports]))
-        ["Tidepool.Session.Lib.G1","Tidepool.Session.Lib.G2","Tidepool.Session.Lib.G3"]
+        pure (mi_module iface,mi_iface_hash (mi_final_exts iface),exports))
+        ["Tidepool.Session.Lib.G0","Tidepool.Session.Lib.G3"]
       writeFile target (source "(a,Tidepool.Session.Lib.G1.a + b + c + Restricted.b)")
       libdir <- getLibdir
       transformed <- runGhc (Just libdir) $ do
@@ -675,31 +689,91 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         -- matching syntax DATA does not manufacture a declaration inventory.
         captured <- either (liftIO . fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
         driver <- either (liftIO . fail . show) pure (matchDriverImports captured parsed)
-        liftIO (refineProgramDeclarationImports inventories environment
+        narrowed <- liftIO (refineParsedDeclarationImports environment
           (unannotatedModule (beginImportRefinement driver)))
+        composed <- liftIO (refineProgramDeclarationImports inventories environment narrowed)
+        repeated <- liftIO (refineProgramDeclarationImports inventories environment composed)
+        let observations native = [(importOccurrenceId occurrence,importOccurrenceDescriptor occurrence)
+              | occurrence <- refinedImportOccurrences (nativeImportSyntax native)]
+        unless (observations composed == observations repeated)
+          (fail "repeated declaration composition changed occurrence identities, clone count or selections")
+        let parseImports imports = do
+              let source = unlines ("module ProgramOriginalConsumer where" : imports ++ ["__result = ()"])
+              parsed <- parseModule summary {ms_hspp_buf=Just (stringToStringBuffer source)}
+              captured <- either (liftIO . fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
+              driver <- either (liftIO . fail . show) pure (matchDriverImports captured parsed)
+              pure (unannotatedModule (beginImportRefinement driver))
+            baseline = ["import Tidepool.Session.Lib.G0", "import Tidepool.Session.Lib.G3"]
+            refuse label expected selected imports = do
+              native <- parseImports imports
+              refused <- liftIO (try (refineProgramDeclarationImports selected environment native)
+                :: IO (Either SomeException NativeParsedModule))
+              case refused of
+                Left failure | expected `isInfixOf` displayException failure -> pure ()
+                Left failure -> fail (label ++ " refused for another reason: " ++ displayException failure)
+                Right _ -> fail (label ++ " substituted another import for the captured direct wildcard")
+        -- Every refusal uses the same actual installed owners as this valid
+        -- control. Only the captured import premise or owner input changes.
+        control <- parseImports baseline
+        _ <- liftIO (refineProgramDeclarationImports inventories environment control)
+        forM_
+          [ ("explicit", "import Tidepool.Session.Lib.G3 (a)", "wildcard")
+          , ("hiding", "import Tidepool.Session.Lib.G3 hiding (a)", "wildcard")
+          , ("aliased", "import Tidepool.Session.Lib.G3 as Alias", "one direct original import")
+          , ("package", "import \"main\" Tidepool.Session.Lib.G3", "one direct original import")
+          , ("SOURCE", "import {-# SOURCE #-} Tidepool.Session.Lib.G3", "one direct original import")
+          , ("qualified", "import qualified Tidepool.Session.Lib.G3", "one direct original import")
+          ] $ \(label,imported,reason) -> refuse label reason inventories [head baseline,imported]
+        refuse "missing" "one direct original import" inventories [head baseline]
+        refuse "duplicate occurrence" "one direct original import" inventories (baseline ++ [last baseline])
+        refuse "restricted beside qualified wildcard" "wildcard" inventories
+          [head baseline,"import Tidepool.Session.Lib.G3 (a)","import qualified Tidepool.Session.Lib.G3"]
+        refuse "duplicate owner" "owner is duplicated" (inventories ++ take 1 inventories) baseline
+        refuse "incomplete inventory" "complete original export inventory"
+          [(owner,fingerprint,drop 1 groups) | (owner,fingerprint,groups) <- inventories] baseline
+        bareFields <- parseImports ["import Tidepool.Session.Lib.G1 (field)"]
+        original <- maybe (fail "field selection control has no installed original") pure
+          (lookupHpt (hsc_HPT environment) (mkModuleName "Tidepool.Session.Lib.G1"))
+        case hsmodImports (unLoc (pm_parsed_source (nativeParsedModule bareFields))) of
+          [L _ declaration] -> do
+            selected <- either fail pure (selectedImportNames (mi_exports (hm_iface original)) (ideclImportList declaration))
+            unless (sort [unpackFS parent | name <- selected, Just parent <- [fieldOcc_maybe (nameOccName name)]]
+                == ["RecordA","RecordB"] && length selected == 2)
+              (fail "authored bare field import lost GHC's multiple-parent selection")
+          _ -> fail "bare field control has no unique captured import"
+        -- Consume the actual refined AST, including the local narrowing and
+        -- facade reexports, rather than compiling the unchanged source parent.
+        typed <- typecheckNativeModule repeated
+        let (checked,_) = tm_internals_ typed
+            owners parent = [moduleNameString (moduleName owner)
+              | entry <- globalRdrEnvElts (tcg_rdr_env checked)
+              , mkRdrUnqual (mkRecFieldOcc (mkFastString parent) "field") `elem` greRdrNames entry
+              , Just owner <- [nameModule_maybe (greName entry)]]
+        unless (owners "RecordA" == ["Tidepool.Session.Lib.G3"]
+            && owners "RecordB" == ["Tidepool.Session.Lib.G1"])
+          (fail "composed field selections lost their exact record-parent winners or facade reexports")
+        pure repeated
       let transformedSource = pm_parsed_source (nativeParsedModule transformed)
           imports = map unLoc (hsmodImports (unLoc transformedSource))
-          originalOwner = mkModuleName "Tidepool.Session.Lib.G2"
+          originalOwner = mkModuleName "Tidepool.Session.Lib.G0"
           restricted = [declaration | declaration <- imports
-            , unLoc (ideclName declaration) == originalOwner
+            , unLoc (ideclName declaration) == mkModuleName "Tidepool.Session.Lib.G2"
             , (unLoc <$> ideclAs declaration) == Just (mkModuleName "Restricted")]
           direct = [declaration | declaration <- imports
             , unLoc (ideclName declaration) == originalOwner
             , ideclAs declaration == Nothing, ideclQualified declaration == NotQualified]
           selectedValues :: ImportDecl GhcPs -> Maybe [String]
           selectedValues declaration = case ideclImportList declaration of
-            Just (Exactly,entries) -> mapM (\entry -> case unLoc entry of
-              IEVar _ wrapped _ -> case unLoc wrapped of
-                IEName _ name -> Just (occNameString (rdrNameOcc (unLoc name)))
-                _ -> Nothing
-              _ -> Nothing) (unLoc entries)
+            Just (Exactly,entries) -> Just [occNameString (rdrNameOcc (ieWrappedName (unLoc wrapped)))
+              | entry <- unLoc entries, IEVar _ wrapped _ <- [unLoc entry]
+              , rdrNameOcc (ieWrappedName (unLoc wrapped)) `elem` map mkVarOcc ["a","b","c"]]
             _ -> Nothing
       unless ([selectedValues declaration | declaration <- restricted
             , ideclQualified declaration == NotQualified] == [Just []]
           && [selectedValues declaration | declaration <- restricted
             , ideclQualified declaration == QualifiedPre] == [Just ["b"]]
           && case direct of
-            [declaration] -> fmap sort (selectedValues declaration) == Just ["b","c"]
+            [declaration] -> fmap sort (selectedValues declaration) == Just ["b"]
             _ -> False)
         (fail "program winner pass widened a restricted alias or lost the direct winner selection")
       unless (any ((== SyntheticPrelude) . importOccurrenceLineage)
