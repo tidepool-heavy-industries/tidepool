@@ -1780,11 +1780,12 @@ impl NativeOfferCustody {
             .collect();
         let mut materializations = Vec::new();
         lease.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
-        let physical = crate::declaration_context::RetainedArtifactMaterialization::capture_custody(
-            &materializations,
-            &artifacts,
-            &available_groups,
-        );
+        let physical =
+            crate::declaration_context::RetainedArtifactMaterialization::capture_custody(
+                &materializations,
+                &artifacts,
+                &available_groups,
+            )?;
         let lease = Arc::new(ViewLease {
             admission_roots: lease.admission_roots.clone(),
             selection: Arc::clone(&lease.selection),

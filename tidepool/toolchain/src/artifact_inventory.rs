@@ -4229,7 +4229,7 @@ impl ArtifactInventory {
                 .custody_lease()
                 .collect_materializations(&mut materializations, &mut BTreeSet::new())?;
         }
-        artifacts.attach_projected_materializations(&materializations);
+        artifacts.attach_projected_materializations(&materializations)?;
         Ok(TargetNativeInputs {
             physical_inputs: Arc::clone(cohort.compiler_inputs()),
             admitted: AdmittedTargetArtifacts {
@@ -5506,7 +5506,7 @@ impl ArtifactInventory {
         );
         if !demanded_materializations.is_empty() {
             let mut observation = ArtifactView::from_custody(lease);
-            observation.attach_projected_materializations(&demanded_materializations);
+            observation.attach_projected_materializations(&demanded_materializations)?;
             lease = observation.lease;
         }
         Ok(IssuedArtifactCustody {
@@ -7372,7 +7372,7 @@ impl ArtifactView {
                     ));
                 }
             }
-            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect());
+            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
             retained.insert(key, complete.clone());
             return Ok(complete);
         }
@@ -7385,7 +7385,7 @@ impl ArtifactView {
                 &parents,
                 &metadata.retained,
                 &self.selected_native_binding_rows().1.into_iter().collect(),
-            );
+            )?;
         let materialization = Arc::new(prepare(parents)?);
         retained.insert(key, Arc::clone(&materialization));
         Ok(materialization)
@@ -7446,7 +7446,7 @@ impl ArtifactView {
             return Ok(None);
         };
         let leaves = self.checked_value_leaves(&retained, metadata);
-        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect());
+        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
         retained.insert(key, complete.clone());
         Ok(Some(complete))
     }
@@ -8922,18 +8922,19 @@ impl ArtifactView {
     fn attach_projected_materializations(
         &mut self,
         owners: &[Arc<crate::declaration_context::RetainedArtifactMaterialization>],
-    ) -> Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
+    ) -> Result<Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>, CompileError>
+    {
         if owners.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let custody =
             crate::declaration_context::RetainedArtifactMaterialization::select_custody_inputs(
                 owners,
                 &self.metadata_snapshot(),
                 &self.selected_native_binding_rows().1.into_iter().collect(),
-            );
+            )?;
         if custody.is_empty() {
-            return custody;
+            return Ok(custody);
         }
         let lease = Arc::get_mut(&mut self.lease).expect("new demanded selection lease");
         let mut fixed = lease
@@ -8944,7 +8945,7 @@ impl ArtifactView {
             .collect::<Vec<_>>();
         fixed.extend(custody.iter().cloned());
         lease.materialization.fixed = fixed.into();
-        custody
+        Ok(custody)
     }
 
     fn retain_projected_materializations(&self, mut retained: Self) -> Result<Self, CompileError> {
@@ -9008,7 +9009,7 @@ impl ArtifactView {
                         &materializations,
                         &retained.metadata_snapshot(),
                         &retained.selected_native_binding_rows().1.into_iter().collect(),
-                    );
+                    )?;
                 Arc::get_mut(&mut retained.lease)
                     .expect("new selection lease")
                     .materialization
@@ -9572,7 +9573,7 @@ impl ArtifactView {
             let mut visited = BTreeSet::new();
             self.collect_materializations(&mut materializations, &mut visited)?;
             other.collect_materializations(&mut materializations, &mut visited)?;
-            retained.attach_projected_materializations(&materializations);
+            retained.attach_projected_materializations(&materializations)?;
         }
         timing.finish(true);
         Ok((retained, selected, input_decisions))

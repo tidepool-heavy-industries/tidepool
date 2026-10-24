@@ -3558,9 +3558,8 @@ impl DemandCertifiedGroups {
         for (binding, row) in self.rows.iter().chain(&other.rows) {
             budget.checkpoint()?;
             if let Some(prior) = rows.get(binding) {
-                if !prior.product().same_issuance(row.product())
+                if !prior.issued.same_selected_issuance(&row.issued)
                     || prior.dependencies != row.dependencies
-                    || prior.imports() != row.imports()
                 {
                     tracing::warn!(target: "tidepool_toolchain::artifacts",
                         phase = "native_demand_merge_conflict",
@@ -4052,8 +4051,7 @@ impl DemandNativeInputs {
                     ));
                 }
                 if let Some(previous) = certified.get(&binding) {
-                    if !previous.product().same_issuance(row.product())
-                        || previous.imports() != row.imports()
+                    if !previous.issued.same_selected_issuance(&row)
                         || previous.dependencies != dependencies
                     {
                         return Err(failure(
@@ -4192,9 +4190,8 @@ fn prior_native_demand_row<'a>(
             continue;
         };
         if let Some(prior) = selected {
-            if !prior.product().same_issuance(row.product())
+            if !prior.issued.same_selected_issuance(&row.issued)
                 || prior.dependencies != row.dependencies
-                || prior.imports() != row.imports()
             {
                 return Err(failure(
                     "prior native acquisitions disagree on an issued occurrence",
@@ -7414,9 +7411,9 @@ impl RetainedArtifactMaterialization {
         leaves: &[Arc<Self>],
         metadata: &CompilerArtifactMetadata,
         selected_bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>, CompileError> {
         if leaves.is_empty() {
-            return complete.clone();
+            return Ok(complete.clone());
         }
         let mut selected_leaf_rows_visited = 0usize;
         if leaves
@@ -7433,7 +7430,7 @@ impl RetainedArtifactMaterialization {
             tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_overlay_reuse",
                 selected_leaf_rows_visited, baseline_fact_detaches = 0,
                 "reused unchanged direct physical facts");
-            return complete.clone();
+            return Ok(complete.clone());
         }
         let mut owned = if complete.kind == MaterializationKind::CheckedValueOverlay {
             Self {
@@ -7459,8 +7456,7 @@ impl RetainedArtifactMaterialization {
                 &owners,
                 &metadata.retained.artifacts,
                 selected_bindings,
-            )
-            .expect("selected checked value leaves have issued physical facts");
+            )?;
             let mut owned = facts.into_owned();
             owned.kind = MaterializationKind::CheckedValueOverlay;
             owned.execution_scope = complete.execution_scope.clone();
@@ -7479,7 +7475,7 @@ impl RetainedArtifactMaterialization {
             initial_fact_detach = complete.kind == MaterializationKind::Issued,
             changed_rows, current_rows = owned.rows.len(), predecessor_owners = 0,
             "retained current immutable physical facts");
-        Arc::new(owned)
+        Ok(Arc::new(owned))
     }
 
     pub(crate) fn issued_value_row(
@@ -7587,12 +7583,9 @@ impl RetainedArtifactMaterialization {
         owners: &[Arc<Self>],
         metadata: &crate::artifact_inventory::RetainedArtifactMetadata,
         selected_bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
-    ) -> Vec<Arc<Self>> {
-        let Some(mut selected) =
-            Self::select_custody_facts(owners, &metadata.artifacts, selected_bindings)
-        else {
-            return Vec::new();
-        };
+    ) -> Result<Vec<Arc<Self>>, CompileError> {
+        let mut selected =
+            Self::select_custody_facts(owners, &metadata.artifacts, selected_bindings)?;
         // Slots name selected facts only for this operation. They are neither
         // durable identities nor a registry of physical issuances.
         let mut next = 0;
@@ -7658,7 +7651,7 @@ impl RetainedArtifactMaterialization {
             for (binding, group) in &owner.groups {
                 if let Some((slot, _)) = group_slots
                     .get(binding)
-                    .filter(|(_, selected)| group.same_issuance(selected))
+                    .filter(|(_, selected)| group.same_selected_issuance(selected))
                 {
                     facts.insert(*slot);
                 } else {
@@ -7758,7 +7751,7 @@ impl RetainedArtifactMaterialization {
         {
             inputs.push(selected.detach());
         }
-        inputs
+        Ok(inputs)
     }
 
     /// Opaque availability retains physical files, not compilation cache history.
@@ -7767,15 +7760,20 @@ impl RetainedArtifactMaterialization {
         owners: &[Arc<Self>],
         artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
         available_groups: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
-    ) -> Option<Arc<Self>> {
-        Some(Self::select_custody_facts(owners, artifacts, available_groups)?.detach())
+    ) -> Result<Option<Arc<Self>>, CompileError> {
+        let facts = Self::select_custody_facts(owners, artifacts, available_groups)?;
+        Ok((!facts.rows.is_empty()
+            || !facts.package_rows.is_empty()
+            || !facts.groups.is_empty()
+            || !facts.graph_paths.is_empty())
+        .then(|| facts.detach()))
     }
 
     fn select_custody_facts<'a>(
         owners: &'a [Arc<Self>],
         artifacts: &impl crate::artifact_inventory::ArtifactEntryMap<ArtifactId>,
         selected_native_groups: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
-    ) -> Option<MaterializationFacts<'a>> {
+    ) -> Result<MaterializationFacts<'a>, CompileError> {
         let selected_graphs = artifacts
             .values()
             .filter_map(|entry| match &entry.payload {
@@ -7793,16 +7791,8 @@ impl RetainedArtifactMaterialization {
         for owner in owners {
             owner.visit_owners(&mut visited, &mut |owner| observed.push(owner));
         }
-        let mut groups = BTreeMap::new();
-        for owner in &observed {
-            groups.extend(
-                owner
-                    .groups
-                    .iter()
-                    .filter(|(binding, _)| selected_native_groups.contains(*binding))
-                    .map(|(binding, group)| (*binding, group)),
-            );
-        }
+        let groups =
+            Self::collect_selected_group_refs(observed.iter().copied(), selected_native_groups)?;
         for &owner in &observed {
             package_rows.extend(
                 owner
@@ -7826,11 +7816,7 @@ impl RetainedArtifactMaterialization {
                     .map(|(digest, file)| (*digest, file)),
             );
         }
-        if rows.is_empty() && package_rows.is_empty() && groups.is_empty() && graph_paths.is_empty()
-        {
-            return None;
-        }
-        Some(MaterializationFacts {
+        Ok(MaterializationFacts {
             rows,
             package_rows,
             groups,
@@ -7907,22 +7893,42 @@ impl RetainedArtifactMaterialization {
     fn selected_group_refs<'a>(
         owners: impl IntoIterator<Item = &'a Self>,
         selected: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
-    ) -> BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a Arc<IssuedSelectedNativeGroup>>
-    {
-        let mut groups = BTreeMap::new();
+    ) -> Result<
+        BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a Arc<IssuedSelectedNativeGroup>>,
+        CompileError,
+    > {
+        let mut observed = Vec::new();
         let mut visited = BTreeSet::new();
         for owner in owners {
-            owner.visit_owners(&mut visited, &mut |owner| {
-                groups.extend(
-                    owner
-                        .groups
-                        .iter()
-                        .filter(|(binding, _)| selected.contains(*binding))
-                        .map(|(binding, group)| (*binding, group)),
-                );
-            });
+            owner.visit_owners(&mut visited, &mut |owner| observed.push(owner));
         }
-        groups
+        Self::collect_selected_group_refs(observed, selected)
+    }
+
+    fn collect_selected_group_refs<'a>(
+        owners: impl IntoIterator<Item = &'a Self>,
+        selected: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+    ) -> Result<
+        BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a Arc<IssuedSelectedNativeGroup>>,
+        CompileError,
+    > {
+        let mut groups = BTreeMap::<_, &Arc<IssuedSelectedNativeGroup>>::new();
+        for owner in owners {
+            for (binding, row) in owner
+                .groups
+                .iter()
+                .filter(|(binding, _)| selected.contains(binding))
+            {
+                if let Some(previous) = groups.get(binding) {
+                    if !previous.same_selected_issuance(row) {
+                        return Err(failure("native custody has competing selected row issuers"));
+                    }
+                } else {
+                    groups.insert(*binding, row);
+                }
+            }
+        }
+        Ok(groups)
     }
 
     fn selected_graph_path_refs<'a>(
@@ -17092,17 +17098,13 @@ impl ExactDeclarationContext {
         let inherited_groups = RetainedArtifactMaterialization::selected_group_refs(
             parents.iter().map(Arc::as_ref),
             &selected_bindings,
-        );
+        )?;
         let inherited_group_handle_clones = inherited_groups.len();
-        let keyed = inherited_groups
-            .iter()
-            .map(|(binding, row)| (*binding, row.product().as_ref()))
-            .collect();
         let start = std::time::Instant::now();
         let groups = certify_artifact_view_groups(
             view,
             None,
-            Some(CertifiedNativeGroupBaseline::Rows(&keyed)),
+            Some(CertifiedNativeGroupBaseline::Rows(&inherited_groups)),
             &mut validation,
             None,
             NativeGroupBaselineScope::EntirePrefix,
@@ -17241,7 +17243,7 @@ impl PreparedNativeCompilerTransport {
         let group_rows = RetainedArtifactMaterialization::selected_group_refs(
             [retained.as_ref()],
             &selected_bindings,
-        );
+        )?;
         let groups = Arc::new(CertifiedArtifactGroupBindings::from_issued_rows(
             compiler.artifacts(),
             &group_rows,
@@ -17801,7 +17803,12 @@ pub(crate) enum CertifiedNativeGroupBaseline<'a> {
         prior: &'a CertifiedArtifactGroupBindings,
     },
     InitialRequest(&'a ProgramAdmissionContinuation),
-    Rows(&'a BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a PendingCertifiedGroup>),
+    Rows(
+        &'a BTreeMap<
+            crate::artifact_inventory::NativeGroupBinding,
+            &'a Arc<IssuedSelectedNativeGroup>,
+        >,
+    ),
 }
 
 pub(crate) fn certify_selected_artifact_view_groups_with_validation(
@@ -17972,7 +17979,7 @@ fn certify_artifact_view_groups(
         }
         Some(CertifiedNativeGroupBaseline::Rows(rows)) => {
             for (binding, row) in rows.iter() {
-                inherit_binding(*binding, row)?;
+                inherit_binding(*binding, row.product())?;
             }
         }
         _ => {}
@@ -18008,9 +18015,7 @@ fn certify_artifact_view_groups(
             return Ok(());
         }
         if let Some(previous) = shared_rows.get(&binding) {
-            if !previous.product().same_issuance(row.product())
-                || previous.imports() != row.imports()
-            {
+            if !previous.same_selected_issuance(row) {
                 return Err(failure(
                     "native baseline has competing selected row issuers",
                 ));
@@ -18044,7 +18049,12 @@ fn certify_artifact_view_groups(
                 inherit_row(*binding, row)?;
             }
         }
-        Some(CertifiedNativeGroupBaseline::Rows(_)) | None => {}
+        Some(CertifiedNativeGroupBaseline::Rows(rows)) => {
+            for (binding, row) in rows.iter() {
+                inherit_row(*binding, row)?;
+            }
+        }
+        None => {}
     }
     let keyed_current = selected_bindings
         .iter()
@@ -18109,7 +18119,12 @@ fn certify_artifact_view_groups(
                 check_links(*binding, prior)?;
             }
         }
-        _ => {}
+        Some(CertifiedNativeGroupBaseline::Rows(rows)) => {
+            for (binding, row) in rows.iter() {
+                check_links(*binding, row.imports())?;
+            }
+        }
+        None => {}
     }
     for (binding, row) in &rows {
         let binding = *binding;
@@ -27546,7 +27561,8 @@ mod tests {
                 .unwrap();
             assert!(Arc::ptr_eq(&hit, &request.materialization));
             let rows =
-                RetainedArtifactMaterialization::selected_group_refs([hit.as_ref()], expected);
+                RetainedArtifactMaterialization::selected_group_refs([hit.as_ref()], expected)
+                    .unwrap();
             let cached = CertifiedArtifactGroupBindings::from_issued_rows(
                 request.compiler_inputs().artifacts(),
                 &rows,
@@ -27577,7 +27593,8 @@ mod tests {
         ] {
             assert!(Arc::ptr_eq(owner, &materialize(view, metadata)));
             let rows =
-                RetainedArtifactMaterialization::selected_group_refs([owner.as_ref()], expected);
+                RetainedArtifactMaterialization::selected_group_refs([owner.as_ref()], expected)
+                    .unwrap();
             assert_eq!(rows.keys().copied().collect::<BTreeSet<_>>(), *expected);
             let rebound = CertifiedArtifactGroupBindings::from_issued_rows(view, &rows).unwrap();
             assert!(rebound.matches_view(view));
@@ -27591,6 +27608,65 @@ mod tests {
             )
             .is_err());
         }
+        // The same binding can be issued by two independent physical writers.
+        // Reject it before reduction can overwrite or discard either issuer.
+        let independently_issued = Arc::new(
+            context
+                .materialize_retained_artifacts(
+                    &first,
+                    &first_metadata,
+                    vec![],
+                    tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
+                )
+                .unwrap(),
+        );
+        for parents in [
+            vec![first_owner.clone(), independently_issued.clone()],
+            vec![independently_issued.clone(), first_owner.clone()],
+        ] {
+            assert!(RetainedArtifactMaterialization::selected_group_refs(
+                parents.iter().map(Arc::as_ref),
+                &first_bindings,
+            )
+            .is_err());
+            assert!(RetainedArtifactMaterialization::select_custody_inputs(
+                &parents,
+                &first_metadata.retained,
+                &first_bindings,
+            )
+            .is_err());
+            assert!(context
+                .materialize_retained_artifacts(
+                    &first,
+                    &first_metadata,
+                    parents.clone(),
+                    tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
+                )
+                .is_err());
+            // Unrequested alternatives impose no native-row uniqueness rule.
+            let physical = RetainedArtifactMaterialization::select_custody_inputs(
+                &parents,
+                &first_metadata.retained,
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            let expected_rows = parents.last().unwrap().selected_rows(&first_metadata);
+            let actual_rows = physical.last().unwrap().selected_rows(&first_metadata);
+            assert!(expected_rows
+                .iter()
+                .all(|(id, row)| std::ptr::eq(*row, actual_rows[id])));
+        }
+        let repeated = RetainedArtifactMaterialization::select_custody_inputs(
+            &[first_owner.clone(), first_owner.clone()],
+            &first_metadata.retained,
+            &first_bindings,
+        )
+        .unwrap();
+        assert_eq!(repeated.len(), 1);
+        assert!(Arc::ptr_eq(&repeated[0], &first_owner));
+        drop(repeated);
         let joined = first.merge_fixture_selections(&second).unwrap();
         let joined_metadata = projection
             .project_metadata(joined.metadata_snapshot())
@@ -27606,11 +27682,13 @@ mod tests {
             let first_rows = RetainedArtifactMaterialization::selected_group_refs(
                 [first_owner.as_ref()],
                 &first_bindings,
-            );
+            )
+            .unwrap();
             let second_rows = RetainedArtifactMaterialization::selected_group_refs(
                 [second_owner.as_ref()],
                 &second_bindings,
-            );
+            )
+            .unwrap();
             let first_product = first_rows.values().next().unwrap().product();
             let second_product = second_rows.values().next().unwrap().product();
             assert_eq!(first_product.group(), second_product.group());
@@ -27652,12 +27730,25 @@ mod tests {
             let first_rows = RetainedArtifactMaterialization::selected_group_refs(
                 [first_owner.as_ref()],
                 &first_bindings,
-            );
+            )
+            .unwrap();
             let shared_rows = RetainedArtifactMaterialization::selected_group_refs(
                 [shared_owner.as_ref()],
                 &aliases,
-            );
+            )
+            .unwrap();
             assert_eq!(shared_rows.len(), 2);
+            for (binding, row) in &first_rows {
+                assert!(
+                    Arc::ptr_eq(row, shared_rows[binding]),
+                    "inherited binding retains its actual selected row"
+                );
+            }
+            let alias_rows = shared_rows.values().collect::<Vec<_>>();
+            assert!(
+                !Arc::ptr_eq(alias_rows[0], alias_rows[1]),
+                "new aliases own distinct selected rows"
+            );
             let original = first_rows.values().next().unwrap().product();
             assert!(shared_rows
                 .values()
@@ -27688,7 +27779,8 @@ mod tests {
                     &RequestInputTransport::OwnedArena,
                 )
                 .unwrap();
-            let rows = RetainedArtifactMaterialization::selected_group_refs([&retained], &aliases);
+            let rows = RetainedArtifactMaterialization::selected_group_refs([&retained], &aliases)
+                .unwrap();
             let rebound = CertifiedArtifactGroupBindings::from_issued_rows(&joined, &rows).unwrap();
             assert_eq!(rebound.groups().len(), 1);
         }
@@ -27705,11 +27797,13 @@ mod tests {
             &captured_artifacts,
             &aliases,
         )
+        .unwrap()
         .unwrap();
         drop(first_owner);
         drop(second_owner);
         let detached_rows =
-            RetainedArtifactMaterialization::selected_group_refs([captured.as_ref()], &aliases);
+            RetainedArtifactMaterialization::selected_group_refs([captured.as_ref()], &aliases)
+                .unwrap();
         let detached =
             CertifiedArtifactGroupBindings::from_issued_rows(&joined, &detached_rows).unwrap();
         assert_eq!(aliases.len(), 2);
@@ -27742,6 +27836,109 @@ mod tests {
         assert!(aliases
             .iter()
             .all(|binding| detached.get(*binding).is_some()));
+    }
+
+    #[test]
+    fn nonempty_native_imports_keep_issued_rows_through_custody_and_request() {
+        let cold = demanded_native_fixture(
+            0,
+            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
+            false,
+        );
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(cold.compiler_source_support())
+                .unwrap(),
+        );
+        let scaffold = ProtectedScaffoldRequirements::default();
+        let inputs = scaffold.compiler_inputs(&context, None).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let mut prepared = NativeCompilerTransport::lower(ExactRequestInputs::issue(
+            context.clone(),
+            scaffold,
+            None,
+            inputs,
+        ))
+        .unwrap()
+        .prepare(
+            scratch.path(),
+            PROGRAM_TEST_PRODUCER,
+            None,
+            RequestInputTransport::OwnedArena,
+        )
+        .unwrap();
+        let view = prepared.inputs.compiler().artifacts();
+        let bindings = view.selected_native_binding_rows().1.into_iter().collect();
+        let issued = RetainedArtifactMaterialization::selected_group_refs(
+            [prepared.retained.as_ref()],
+            &bindings,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|(binding, row)| (binding, Arc::clone(row)))
+        .collect::<BTreeMap<_, _>>();
+        let (&child, _) = issued
+            .iter()
+            .find(|(_, row)| {
+                row.owner().module == "DemandChild" && row.group().original_ordinal() == 9
+            })
+            .unwrap();
+        let (&parent, parent_row) = issued
+            .iter()
+            .find(|(_, row)| row.owner().module == "DemandParent")
+            .unwrap();
+        let value = issued[&child]
+            .group()
+            .exported_values()
+            .find_map(|(identity, value)| {
+                (identity
+                    == &tidepool_repr::execution_schema::testing::identity(
+                        "DemandChild",
+                        "entry_9",
+                    ))
+                    .then_some(value)
+            })
+            .unwrap();
+        let expected = vec![crate::certified_products::SelectedNativeImport::Source {
+            binding: child,
+            value,
+        }];
+        assert_eq!(parent_row.imports(), expected);
+        let artifacts = prepared
+            .metadata
+            .retained
+            .artifacts
+            .iter()
+            .map(|(id, row)| (*id, Arc::clone(row)))
+            .collect();
+        let detached = RetainedArtifactMaterialization::capture_custody(
+            &[prepared.retained.clone()],
+            &artifacts,
+            &bindings,
+        )
+        .unwrap()
+        .unwrap();
+        let inherited = Arc::new(
+            context
+                .materialize_retained_artifacts(
+                    view,
+                    &prepared.metadata,
+                    vec![detached],
+                    tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
+                )
+                .unwrap(),
+        );
+        prepared.retained = inherited;
+        let request = prepared.into_request().unwrap();
+        for (binding, row) in &issued {
+            assert!(Arc::ptr_eq(
+                row,
+                request.groups.issued_row(*binding).unwrap()
+            ));
+        }
+        assert_eq!(request.groups.imports(parent).unwrap(), expected);
     }
 
     #[test]
@@ -28706,7 +28903,8 @@ mod tests {
                     .1
                     .into_iter()
                     .collect(),
-            );
+            )
+            .unwrap();
             let expected = metadata
                 .entries
                 .values()

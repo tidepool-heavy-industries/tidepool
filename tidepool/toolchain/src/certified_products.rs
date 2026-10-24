@@ -9289,21 +9289,6 @@ fn certified_source_map(groups: &[PendingCertifiedGroup]) -> CertResult<SourceGr
     Ok(sources)
 }
 
-/// Read-only source membership from complete authenticated original witnesses.
-/// This index does not admit executable groups or add inventory roots.
-#[cfg(test)]
-fn available_original_source_map(
-    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
-    selected: &[PendingCertifiedGroup],
-    operation: &InventoryOperation,
-) -> CertResult<SourceGroupMap> {
-    let issued = tests::issue_source_overlay_groups(products, selected)?;
-    AvailableOriginalSources::authenticate(products, operation)?.overlay(
-        crate::declaration_context::ProductInputGroups::Exact(&issued),
-        operation,
-    )
-}
-
 fn authenticate_original_source_membership(
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     operation: &InventoryOperation,
@@ -11845,6 +11830,11 @@ impl AcquiredHomeCodeGrant {
 }
 
 impl IssuedSelectedNativeGroup {
+    /// Physical issuance and its ordered selected destinations are inseparable.
+    pub(crate) fn same_selected_issuance(&self, other: &Self) -> bool {
+        self.product.same_issuance(&other.product) && self.imports == other.imports
+    }
+
     pub(crate) fn from_certified(
         groups: &crate::declaration_context::CertifiedArtifactGroupBindings,
         binding: crate::artifact_inventory::NativeGroupBinding,
@@ -18015,15 +18005,27 @@ pub(crate) mod tests {
         Recover,
     }
 
-    // The requested raw payloads are a baseline input to the existing selected
-    // scope issuer. This helper returns only that production issuer's owner.
+    /// Read-only source membership from complete authenticated original witnesses.
+    /// This index does not admit executable groups or add inventory roots.
+    fn available_original_source_map(
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        selected: &[PendingCertifiedGroup],
+        operation: &InventoryOperation,
+    ) -> CertResult<SourceGroupMap> {
+        let issued = issue_source_overlay_groups(products, selected)?;
+        AvailableOriginalSources::authenticate(products, operation)?.overlay(
+            crate::declaration_context::ProductInputGroups::Exact(&issued),
+            operation,
+        )
+    }
+
+    // Requested keys select ordinary issuance from the retained products.
+    // Pending payload contents are checked by the production baseline owner.
     pub(super) fn issue_source_overlay_groups(
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         expected: &[PendingCertifiedGroup],
     ) -> CertResult<crate::declaration_context::CertifiedArtifactGroupBindings> {
-        use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, ArtifactPayload, NativeGroupKey,
-        };
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeGroupKey};
         let inventory = ArtifactInventory::default();
         let keys = expected
             .iter()
@@ -18069,38 +18071,6 @@ pub(crate) mod tests {
                 &mut validation,
             )
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
-        let metadata = view.metadata_snapshot();
-        let available = metadata
-            .artifacts
-            .iter()
-            .filter_map(|(id, entry)| match &entry.payload {
-                ArtifactPayload::Original(product) => Some((*id, product)),
-                _ => None,
-            })
-            .collect();
-        let current = crate::declaration_context::ProductInputGroups::Exact(&issued)
-            .issued_rows()
-            .map(|row| {
-                let (binding, row) = row?;
-                let group = expected
-                    .iter()
-                    .find(|group| {
-                        group.owner() == row.product().owner()
-                            && group.group().original_ordinal() == binding.original_ordinal
-                    })
-                    .ok_or(CertificationError::Mismatch(
-                        "fixture baseline omitted its selected group",
-                    ))?;
-                Ok((binding, group))
-            })
-            .collect::<CertResult<BTreeMap<_, _>>>()?;
-        let mut checker = OriginalValidationInventory::selected(&available, &validation.inventory)?;
-        checker.certify_selected_scope(
-            SelectedOriginalGroupScope::View(&view),
-            &current,
-            &mut validation,
-            None,
-        )?;
         Ok(issued)
     }
 
@@ -23102,19 +23072,6 @@ pub(crate) mod tests {
             ),
             Err(CertificationError::Mismatch("shared original home groups"))
         ));
-        let mut wrong = selected.clone();
-        wrong.imports = vec![PendingImportOwner::Retained {
-            identity: testing::identity("Available", "captured"),
-            generation: 9,
-        }]
-        .into();
-        assert!(
-            matches!(
-                issue_source_overlay_groups(std::slice::from_ref(&original), &[wrong]),
-                Err(CertificationError::Mismatch("shared original home groups"))
-            ),
-            "the selected-scope issuer must reject changed pending imports before overlay"
-        );
         let duplicate = certified_source_map(&[selected.clone(), selected.clone()]);
         let Err(CertificationError::DuplicateSourceBinder(conflict)) = duplicate else {
             panic!("duplicate selected groups must retain their exact conflict");
@@ -37139,9 +37096,30 @@ None,
             2,
             &BTreeMap::new(),
         );
-        let mut witness = decode_home_witness(draft.certification_bytes()).unwrap();
-        witness.groups[0].2[0].owner = reference;
-        witness.sources.clear();
+        let mut raw = parse_module_products(
+            draft.product_bytes(),
+            &crate::prepared_artifact::production_requirements().unwrap(),
+            crate::module_candidates::product_decode_limits(),
+        )
+        .unwrap()
+        .remove(0);
+        let group = Arc::new(AuthenticatedOriginalGroup {
+            origin: ProductOrigin::Fresh,
+            owner: draft.owner().clone(),
+            group: Arc::new(raw.groups.remove(0)),
+            imports: vec![reference.clone()].into(),
+        });
+        let witness = issue_home_certification_with_validation(
+            draft.owner(),
+            &[group],
+            &HomeSourceMetadata::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         let parent = fixture_finalized_product(
             crate::recovery_artifacts::OriginalDraft::from_certification(
                 draft.owner().clone(),
@@ -37318,8 +37296,8 @@ None,
             original,
             binder: binder.clone(),
         };
-        // Edit untrusted compiler-shaped evidence, then enter the production
-        // physical completion boundary; the encoded reference grants nothing.
+        // Typed nominal imports enter the ordinary certificate issuer, then
+        // physical completion independently checks their receiving selection.
         let draft = original_groups_fixture(
             "NominalParent",
             vec![(
@@ -37333,9 +37311,30 @@ None,
             2,
             &BTreeMap::new(),
         );
-        let mut witness = decode_home_witness(draft.certification_bytes()).unwrap();
-        witness.groups[0].2[0].owner = reference.clone();
-        witness.sources.clear();
+        let mut raw = parse_module_products(
+            draft.product_bytes(),
+            &crate::prepared_artifact::production_requirements().unwrap(),
+            crate::module_candidates::product_decode_limits(),
+        )
+        .unwrap()
+        .remove(0);
+        let group = Arc::new(AuthenticatedOriginalGroup {
+            origin: ProductOrigin::Fresh,
+            owner: draft.owner().clone(),
+            group: Arc::new(raw.groups.remove(0)),
+            imports: vec![reference.clone()].into(),
+        });
+        let witness = issue_home_certification_with_validation(
+            draft.owner(),
+            &[group],
+            &HomeSourceMetadata::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         let bytes = encode_home_witness(&witness).unwrap();
         let cold = decode_home_witness(&bytes).unwrap();
         assert_eq!(cold.groups[0].2[0].owner, reference);
