@@ -112,6 +112,9 @@ workerChild oneFreeFd scratch = do
           forM_ [firstDone,validDone] $ \done ->
             takeMVar done >>= expectFailure "NativeDemandRejected OriginalUnavailable \"first-diagnostic\""
           takeMVar invalidDone >>= expectFailure "NativeDemandClosed"
+          wrongOwner <- try (requireNativeDemandOwner exchange
+            (BS.replicate 32 9) (BS.replicate 32 3) (BS.replicate 32 4))
+          expectFailure "native demand owner differs from admitted World inputs" wrongOwner
           childResult (exchangeNativeDemand exchange 3 "foreign") >>= expectFailure "NativeDemandWrongThread"
           childResult (exchangeSourceDemand borrowed (dependencyPacket "TPDEPENDENCYQUERY1" 1))
             >>= expectFailure "SOURCE borrow requires"
@@ -485,7 +488,7 @@ checkSourceRefusal scratch = withSourceChild scratch $ \input output child -> do
   writeFile (scratch ++ "/refusal-frame") "observed"
   awaitFile (scratch ++ "/refusal-waiters")
   replyDemand input stage number 1 firstRefusal
-  sourceFailedTerminal output "NativeDemandRejected OriginalUnavailable"
+  sourceFailedTerminal output "worker-failure" "NativeDemandRejected OriginalUnavailable"
   beginSource input "source-stale"
   (freshStage,freshNumber,freshPayload) <- readDemand output
   unless (freshStage == 5 && freshNumber == 1 && freshPayload == sourcePayload "current")
@@ -495,7 +498,7 @@ checkSourceRefusal scratch = withSourceChild scratch $ \input output child -> do
   beginSource input "refusal-malformed"
   (badStage,badNumber,_) <- readDemand output
   replyDemand input badStage badNumber 1 "malformed-semantic-refusal"
-  sourceFailedTerminal output "malformed refusal retained"
+  sourceFailedTerminal output "worker-failure" "malformed refusal retained"
   finishSourceChild input output child
   removeFile (scratch ++ "/refusal-frame")
   removeFile (scratch ++ "/refusal-waiters")
@@ -505,17 +508,19 @@ checkRefusalTerminal scratch = do
   -- Returned diagnostics carry presentation, while the typed completion owns
   -- success or failure. Neither returned severity may override a refusal.
   withSourceChild scratch $ \input output child -> do
-    forRequest input output "diagnostic-error" $ \code out _ ->
-      unless (code == 0 && BSC.isInfixOf "success" out && BSC.isInfixOf "typed-diagnostic-error" out)
-        (fail "returned diagnostic severity changed completion authority")
-    forRequest input output "diagnostic-warning" $ \code out _ ->
-      unless (code == 0 && BSC.isInfixOf "success" out && BSC.isInfixOf "typed-diagnostic-warning" out)
-        (fail "DiagnosticResponse warnings did not preserve success")
+    forRequest input output "diagnostic-error" $ \code out _ -> do
+      assertReportMessages "success" [("error","typed-diagnostic-error")] out
+      unless (code == 0) (fail "returned diagnostic severity changed completion authority")
+    forRequest input output "diagnostic-warning" $ \code out _ -> do
+      assertReportMessages "success" [("warning","typed-diagnostic-warning")] out
+      unless (code == 0) (fail "DiagnosticResponse warnings did not preserve success")
     forM_ ["refusal-error","refusal-render-failure"] $ \mode -> do
       beginSource input mode
       (stage,number,_) <- readDemand output
       replyDemand input stage number 1 firstRefusal
-      sourceFailedTerminal output (if mode == "refusal-error" then "typed-source-rejection" else "capture exceeds")
+      let (outcome,message) = if mode == "refusal-error"
+            then ("source-failure","typed-source-rejection") else ("worker-failure","capture exceeds")
+      sourceFailedTerminal output outcome message
     finishSourceChild input output child
   forM_ ["refusal-swallowed","refusal-returned-error","refusal-warning"] $ \mode ->
     withSourceChild scratch $ \input output child -> do
@@ -528,14 +533,15 @@ checkRefusalTerminal scratch = do
       bytes <- BS.hGet output 1
       unless (BS.null bytes) (fail "swallowed semantic refusal emitted a terminal or retry")
 
-sourceFailedTerminal :: Handle -> BS.ByteString -> IO ()
-sourceFailedTerminal output expected = do
+sourceFailedTerminal :: Handle -> String -> String -> IO ()
+sourceFailedTerminal output outcome message = do
   tag <- exact output 1
   code <- word32 <$> exact output 4
   out <- readFrame output
   _ <- readFrame output
-  unless (tag == BS.singleton 0 && code == 1 && BSC.isInfixOf expected out)
+  unless (tag == BS.singleton 0 && code == 1)
     (fail ("refused request lost its single failed terminal: " ++ show (tag,code,out)))
+  assertReportMessages outcome [("error",message)] out
 
 finishSourceChild :: Handle -> Handle -> ProcessHandle -> IO ()
 finishSourceChild input output child = do
@@ -901,14 +907,18 @@ assertNoCaptureFiles scratch = do
   unless (all (not . isPrefixOf "tidepool-worker-") names)
     (fail "real compiler cluster retained a capture file")
 
--- Independent JSON parsing refuses concatenated terminal reports and malformed
--- data; rendered marker checks above then assess the authored semantic facts.
+-- Independent JSON parsing checks the report outcome and diagnostic fields,
+-- and refuses concatenated terminal reports or malformed data.
 assertReport :: String -> BS.ByteString -> IO ()
-assertReport expected bytes = do
+assertReport expected = assertReportMessages expected []
+
+assertReportMessages :: String -> [(String,String)] -> BS.ByteString -> IO ()
+assertReportMessages expected messages bytes = do
   python <- lookupEnv "TIDEPOOL_TEST_PYTHON" >>= maybe
     (fail "missing declared JSON verifier") pure
   (status, _, diagnostic) <- readProcessWithExitCode python
-    ["-c", "import json,sys; r=json.loads(bytes(json.loads(sys.stdin.read())).decode('utf-8')); assert r['version']==2; assert r['outcome']==sys.argv[1]; assert isinstance(r['diagnostics'],list)", expected]
+    (["-c", "import json,sys; r=json.loads(bytes(json.loads(sys.stdin.read())).decode('utf-8')); assert r['version']==2; assert r['outcome']==sys.argv[1]; assert isinstance(r['diagnostics'],list); assert all(any(d['severity']==severity and message in d['message'] for d in r['diagnostics']) for severity,message in zip(sys.argv[2::2],sys.argv[3::2]))", expected]
+      ++ concatMap (\(severity,message) -> [severity,message]) messages)
     (show (BS.unpack bytes))
   unless (status == ExitSuccess) (fail ("terminal report is not one complete document: " ++ diagnostic))
 
