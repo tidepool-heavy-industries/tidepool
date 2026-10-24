@@ -7588,6 +7588,8 @@ impl AvailableOriginalSources {
             &PendingCertifiedGroup,
         > = BTreeMap::new();
         for row in selected.issued_rows() {
+            crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
+            operation.charge(1)?;
             let (binding, issued) = row?;
             let group = issued.product();
             let membership =
