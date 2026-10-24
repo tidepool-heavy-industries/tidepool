@@ -3409,10 +3409,12 @@ impl ExactCompiledPrefix {
                     "actual native selection differs from its sealed binder",
                 ));
             }
+            let producer = producer.item.clone();
+            let checked_row = Arc::clone(checked_row);
             selected_rows.push(CheckedSettledValue {
                 binding,
-                producer: producer.item.clone(),
-                checked_row: Arc::clone(checked_row),
+                producer,
+                checked_row,
             });
         }
         Ok(CheckedSettledValues {
