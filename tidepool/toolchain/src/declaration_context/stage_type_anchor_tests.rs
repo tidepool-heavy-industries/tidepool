@@ -136,6 +136,14 @@ pub(super) fn assert_actual_type_anchors(
     eprintln!("actual World TYPE anchor controls: stage {}, prior {exercised}, omitted {exercised}, wrong facts {}; current structural checks {current_outputs}", actual.initial.stage().index(), exercised * 2);
 }
 
+thread_local! {
+    static BORROWED_TYPE_ADMISSION_CONTROLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn borrowed_type_admission_control_count() -> usize {
+    BORROWED_TYPE_ADMISSION_CONTROLS.with(std::cell::Cell::get)
+}
+
 /// Prior-request values enter source-fragment admission through the stage's
 /// checked TYPE borrow, independently of same-request produced outputs.
 /// These mutations observe the actual row; they issue no new input authority.
@@ -216,6 +224,7 @@ pub(super) fn assert_actual_borrowed_type_admission(
             "the borrowed TYPE row must refuse at its exact source-admission boundary: {error:?}"
         );
     }
+    BORROWED_TYPE_ADMISSION_CONTROLS.with(|count| count.set(count.get() + 1));
     tracing::debug!(
         stage = segment.stage.index(),
         owner = ?owner,

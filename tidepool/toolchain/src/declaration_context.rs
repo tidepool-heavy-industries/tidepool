@@ -18051,6 +18051,9 @@ mod native_availability_tests;
 mod stage_type_anchor_tests;
 
 #[cfg(test)]
+pub(crate) use stage_type_anchor_tests::borrowed_type_admission_control_count;
+
+#[cfg(test)]
 mod candidate_offer_history_tests;
 
 #[cfg(test)]

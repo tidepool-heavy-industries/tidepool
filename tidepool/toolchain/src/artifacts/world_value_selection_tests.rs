@@ -105,6 +105,11 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
     .expect("operand from the actual checked execution owner");
 
     for used in [false, true] {
+        // The admission mutations live in toolchain's cfg(test), so their
+        // nonzero coverage belongs to this owning libtest, independently of
+        // runtime tests that link the production toolchain library. Preparation
+        // and its admission callbacks execute synchronously on this thread.
+        let controls_before = crate::declaration_context::borrowed_type_admission_control_count();
         let (prepared, admission) = settle(|| {
             let values = &[(51, "currentSelection"), (52, "laterSelection")];
             let checked = if used {
@@ -144,6 +149,13 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
         let program = prepared
             .seal(&admission)
             .expect("actual selected native END");
+        if used {
+            assert!(
+                crate::declaration_context::borrowed_type_admission_control_count()
+                    > controls_before,
+                "the actual prior-request operand must execute exact, omitted, and changed TYPE admission controls"
+            );
+        }
         let first = program.items()[0]
             .native_products()
             .expect("first target owner");
