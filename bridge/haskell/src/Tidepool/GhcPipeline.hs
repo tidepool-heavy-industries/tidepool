@@ -313,7 +313,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , renderDependencyQualifier, sourceEvidenceWithFingerprint, selectedFreshHomeRequirements, revalidateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
@@ -1245,12 +1245,6 @@ data InterfaceInstallationFailure
   | InterfaceSourceObservationChanged
   | InterfacePhaseSourceChanged (String,String)
   | InterfaceCapturedSelectionFailure String
-  | InterfaceCapturedClosureMismatch
-      { homesWithoutCapturedInputs :: [(String,String)]
-      , capturedInputsWithoutHomes :: [(String,String)]
-      , homeOnlyDependencies :: [((String,String),(String,String))]
-      , capturedOnlyDependencies :: [((String,String),(String,String))]
-      }
   deriving Show
 instance Exception InterfaceInstallationFailure
 
@@ -3390,7 +3384,7 @@ worldCellPrefixLexicalOwners environment prefix@(WorldCellPrefix _ (PrefixHomeIn
 
 -- Keep the actual successful compiler homes. Re-typechecking their interfaces
 -- would construct another details knot and lose the completed stage's Names.
--- The table is the closed interface-usage dependency set of held Originals.
+-- The table follows the captured interface requirements of held Originals.
 -- Staged values stay in the demand scope until an Original actually uses them;
 -- retaining such an interface never adds it to the lexical source graph.
 restoreWorldCellPrefixHomes :: HscEnv -> WorldCellPrefix -> IO HscEnv
@@ -3509,35 +3503,19 @@ retainWorldCellOriginal prepared completion (PrefixHomeInterfaces homes previous
     home <- maybe (throwIO WorldCellCorrupt) pure (lookupHpt retained (moduleName owner))
     retainCompletedModuleInterface environment product' home
   allInputs <- captureCompletedInterfaceInputs environment importedInputs sessionRows completedInterfaces
-  let roots = [artifact | product' <- verifiedInterfaceProducts allInputs
-        , let (artifact,iface) = verifiedExactInterface product'
-        , isJust (lookupHpt retained (moduleName (mi_module iface)))]
-  captured <- either throwIO pure (selectCapturedInterfaceInputs allInputs roots)
-  let capturedOwners = Set.fromList
-        [(exactUnit artifact,exactModule artifact) | product' <- verifiedInterfaceProducts captured
-          ,let (artifact,_) = verifiedExactInterface product']
-      retainedOwners = Set.fromList
+  let retainedOwners =
         [(unitString (moduleUnit (mi_module (hm_iface home))),moduleNameString (moduleName (mi_module (hm_iface home))))
           | home <- eltsHpt retained]
-  unless (capturedOwners == retainedOwners) $ do
-    -- Record the conflicting edges only on refusal. Captured nominal
-    -- requirements and GHC usage observations have different issuers; a node
-    -- count alone cannot identify which projection lost required evidence.
-    let capturedEdges = Set.fromList
-          [((exactUnit artifact,exactModule artifact),dependency)
-          | product' <- verifiedInterfaceProducts captured
-          , let (artifact,_) = verifiedExactInterface product'
-          , dependency <- exactRequirements artifact]
-        homeEdges = Set.fromList
-          [((unitString (moduleUnit owner),moduleNameString (moduleName owner)),dependency)
-          | home <- eltsHpt retained, let owner = mi_module (hm_iface home)
-          , dependency <- homeInterfaceUsageOwners environment (hm_iface home)]
-    throwIO (InterfaceCapturedClosureMismatch
-      (Set.toAscList (retainedOwners `Set.difference` capturedOwners))
-      (Set.toAscList (capturedOwners `Set.difference` retainedOwners))
-      (Set.toAscList (homeEdges `Set.difference` capturedEdges))
-      (Set.toAscList (capturedEdges `Set.difference` homeEdges)))
-  pure (PrefixHomeInterfaces retained captured,mkModuleGraph (mgModSummaries' graph ++ added))
+  -- Fresh GHC products above issue their own usage requirements. Imported
+  -- products already carry their authoritative closure, including source-less
+  -- Join reexports which cannot be recovered from mi_usages. Select that
+  -- closure once, then retain its existing compiler allocations as one owner.
+  captured <- either throwIO pure (selectCapturedInterfaceOwners allInputs retainedOwners)
+  installed <- retainInstalledInterfaceInputs environment captured
+  let closedHomes = foldr
+        (\(_,home) table -> addToHpt table (moduleName (mi_module (hm_iface home))) home)
+        emptyHomePackageTable (hydratedExactInterfaces installed)
+  pure (PrefixHomeInterfaces closedHomes (hydratedExactInputs installed),mkModuleGraph (mgModSummaries' graph ++ added))
   where
     environment = prHscEnv (pprPipelineResult prepared)
     completed = mgModSummaries' (hsc_mod_graph environment)

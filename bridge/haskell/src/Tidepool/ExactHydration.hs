@@ -16,7 +16,7 @@ module Tidepool.ExactHydration
   , RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, readCapturedExactIfaceArtifacts
   , readCapturedExactIfaceClosureWithCheckedValues
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
-  , HydratedExactInterfaces, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct
+  , HydratedExactInterfaces, hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct
   , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
   , checkedValueOwner, noCheckedValueImports
@@ -210,6 +210,7 @@ data InterfaceInputFailure
   | InterfaceNameCacheMismatch
   | InterfaceHydratedHomeMissing (String,String)
   | InterfaceHydratedHomeMismatch (String,String)
+  | InterfaceUnownedThinHome (String,String)
   | InterfacePhaseHomeConflict (String,String)
   | InterfaceCompletedOwnerConflict (String,String)
   deriving (Eq,Show)
@@ -1581,6 +1582,41 @@ hydrateInterfaceInputs env inputs = do
       (throwIO (InterfaceHydratedHomeMismatch (exactUnit artifact,exactModule artifact)))
     pure (artifact,home)
   pure (HydratedExactInterfaces completed inputs homes)
+
+-- Retain a selected closure after successful compilation without creating a
+-- second details knot. Captured requirements own this closure: a source-less
+-- declaration Join has reexports but no ordinary GHC usage entries from which
+-- its implementation dependencies could be reconstructed.
+retainInstalledInterfaceInputs :: HscEnv -> CapturedInterfaceInputs -> IO HydratedExactInterfaces
+retainInstalledInterfaceInputs environment inputs = do
+  homes <- forM (verifiedInterfaceProducts inputs) $ \selected@(VerifiedExactInterface _ product' _ issuer) -> do
+    unless (issuer == (nsUniqChar (hsc_NC environment),nsNames (hsc_NC environment)))
+      (throwIO InterfaceNameCacheMismatch)
+    let (artifact,interface) = verifiedExactInterface selected
+        key = (exactUnit artifact,exactModule artifact)
+        present = lookupHpt (hsc_HPT environment) (moduleName (mi_module interface))
+        matches home = mi_module (hm_iface home) == mi_module interface
+          && mi_hsc_src (hm_iface home) == mi_hsc_src interface
+          && mi_iface_hash (mi_final_exts (hm_iface home)) == mi_iface_hash (mi_final_exts interface)
+    unless (moduleUnit (mi_module interface) == homeUnitAsUnit (hsc_home_unit environment))
+      (throwIO (ExactContextContainsForeignHome (mi_module interface)))
+    forM_ present $ \home -> unless (matches home)
+      (throwIO (InterfacePhaseHomeConflict key))
+    home <- case product' of
+      -- Equal interface fingerprints cannot replace the completed allocation.
+      CompletedHomeInterface completed -> pure (completedInterfaceHome completed)
+      DecodedTypeInterface _ -> do
+        -- Thin value interfaces have no identity fingerprint. Only their
+        -- completed session issuer can associate an actual compiler object.
+        unless (mi_iface_hash (mi_final_exts interface) /= fingerprint0)
+          (throwIO (InterfaceUnownedThinHome key))
+        maybe (throwIO (InterfaceHydratedHomeMissing key)) pure present
+    unless (matches home) (throwIO (InterfaceHydratedHomeMismatch key))
+    pure (artifact,home)
+  let retained = hscUpdateHPT_lazy (\table -> foldr
+        (\(_,home) current -> addToHpt current (moduleName (mi_module (hm_iface home))) home)
+        table homes) environment
+  pure (HydratedExactInterfaces retained inputs homes)
 
 -- Make constructs a phase environment. Borrowing the same selected owner
 -- restores its actual HMI knots after checking the phase's issuer and any
