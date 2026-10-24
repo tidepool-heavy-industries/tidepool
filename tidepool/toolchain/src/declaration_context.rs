@@ -9890,24 +9890,39 @@ pub(crate) enum ProductInputGroups<'a> {
 impl<'a> ProductInputGroups<'a> {
     pub(crate) fn issued_rows(
         self,
-    ) -> impl Iterator<Item = Result<
-        (crate::artifact_inventory::NativeGroupBinding, &'a IssuedSelectedNativeGroup),
-        crate::certified_products::CertificationError,
-    >> {
+    ) -> impl Iterator<
+        Item = Result<
+            (
+                crate::artifact_inventory::NativeGroupBinding,
+                &'a IssuedSelectedNativeGroup,
+            ),
+            crate::certified_products::CertificationError,
+        >,
+    > {
         let (exact, world) = match self {
             Self::Exact(groups) => (Some(groups), None),
             Self::World(groups) => (None, Some(groups)),
         };
-        exact.into_iter().flat_map(|groups| groups.bindings.keys().map(move |binding| {
-            groups.rows.get(binding).map(|row| (*binding, row.as_ref())).ok_or(
-                crate::certified_products::CertificationError::Mismatch("selected binding lacks its issued row"),
-            )
-        })).chain(world.into_iter().flat_map(|groups| groups.rows.iter().map(|(binding, row)| {
-            Ok((*binding, row.issued.as_ref()))
-        })))
+        exact
+            .into_iter()
+            .flat_map(|groups| {
+                groups.bindings.keys().map(move |binding| {
+                    groups
+                        .rows
+                        .get(binding)
+                        .map(|row| (*binding, row.as_ref()))
+                        .ok_or(crate::certified_products::CertificationError::Mismatch(
+                            "selected binding lacks its issued row",
+                        ))
+                })
+            })
+            .chain(world.into_iter().flat_map(|groups| {
+                groups
+                    .rows
+                    .iter()
+                    .map(|(binding, row)| Ok((*binding, row.issued.as_ref())))
+            }))
     }
-
-
 }
 
 struct ProductInputFacts<'a> {
