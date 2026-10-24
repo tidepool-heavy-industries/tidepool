@@ -11655,6 +11655,9 @@ mod authored_publication_tests {
             Resolve,
             RefuseSecond,
             SubstituteFirst,
+            WrongItem,
+            WrongAdmission,
+            MissingContext,
         }
 
         // This callback exercises traversal only. The neighboring acquired-slot
@@ -11714,6 +11717,22 @@ mod authored_publication_tests {
                 )
                 .unwrap(),
             );
+            assert!(
+                matches!(
+                    super::super::prepared::ClosedInstantiationPlan::restrict(plan.clone()),
+                    Err(PreparedRuntimeError::CertifiedTargetOwners { .. }),
+                ),
+                "a real retained plan cannot enter the closed installation path"
+            );
+            let wrong_item = checked.checked_item(0).unwrap();
+            let mut wrong_admission = prefix.admission().digest();
+            wrong_admission[0] ^= 0x80;
+            let expected = match mode {
+                Probe::WrongItem => Some((&wrong_item, prefix.admission().digest())),
+                Probe::WrongAdmission => Some((execution.item(), wrong_admission)),
+                Probe::MissingContext => None,
+                _ => Some((execution.item(), prefix.admission().digest())),
+            };
             let selection = resident
                 .state
                 .bindings()
@@ -11733,7 +11752,7 @@ mod authored_publication_tests {
             let result = resident.state.instantiate_native_plan_in(
                 scope,
                 &plan,
-                Some((execution.item(), prefix.admission().digest())),
+                expected,
                 selection,
                 |requirement| {
                     let value = inputs.resolve_native_requirement(
@@ -11755,7 +11774,10 @@ mod authored_publication_tests {
                                     Probe::SubstituteFirst => {
                                         return Ok(first_authorization.as_ref().unwrap().clone())
                                     }
-                                    Probe::Resolve => {}
+                                    Probe::Resolve
+                                    | Probe::WrongItem
+                                    | Probe::WrongAdmission
+                                    | Probe::MissingContext => {}
                                 }
                             }
                         }
@@ -11798,7 +11820,14 @@ mod authored_publication_tests {
                     result,
                     Err(PreparedRuntimeError::CertifiedTargetOwners { .. })
                 ));
-                assert_eq!(resolved.len(), 2);
+                assert_eq!(
+                    resolved.len(),
+                    match mode {
+                        Probe::MissingContext => 0,
+                        Probe::WrongItem | Probe::WrongAdmission => 1,
+                        _ => 2,
+                    }
+                );
             } else {
                 let instantiation = result.expect("unchanged acquired obligations must resolve");
                 let digest = prefix.admission().digest();
@@ -11871,6 +11900,9 @@ mod authored_publication_tests {
             };
             probe(&mut resident, &compiled, Probe::RefuseSecond, index == 3);
             probe(&mut resident, &compiled, Probe::SubstituteFirst, index == 3);
+            probe(&mut resident, &compiled, Probe::WrongItem, index == 3);
+            probe(&mut resident, &compiled, Probe::WrongAdmission, index == 3);
+            probe(&mut resident, &compiled, Probe::MissingContext, index == 3);
             probe(&mut resident, &compiled, Probe::Resolve, index == 3);
             source_action(&mut resident, &original, |resident, report| {
                 resident.run_bind_with_sites(
