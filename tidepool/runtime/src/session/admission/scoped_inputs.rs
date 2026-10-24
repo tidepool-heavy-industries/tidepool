@@ -342,7 +342,7 @@ impl ScopedResolvedInputs {
                     && selected.generation() == witness.leaf().generation()
                     && *selected.symbol() == *witness.leaf().identity()
             })
-            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
         let row = match (&value.evidence, selected.origin()) {
             (
                 ScopedValueEvidence::Admitted { row, .. },
@@ -350,7 +350,7 @@ impl ScopedResolvedInputs {
             ) => {
                 let expected = selected
                     .checked_row()
-                    .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+                    .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
                 if !Arc::ptr_eq(expected, row) {
                     return Err(PreparedRuntimeError::certified_target_owners());
                 }
@@ -447,14 +447,14 @@ impl ScopedResolvedInputs {
             .cell_program()
             .items()
             .get(item.index())
-            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
         let issued_execution = issued
             .native()
-            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
         let issued_target = issued
             .native_products()
             .and_then(|products| products.linked_native_target())
-            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
         if !Arc::ptr_eq(issued_execution, execution) || !Arc::ptr_eq(issued_target, target) {
             return Err(PreparedRuntimeError::certified_target_owners());
         }

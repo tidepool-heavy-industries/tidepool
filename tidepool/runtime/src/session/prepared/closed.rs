@@ -640,7 +640,7 @@ impl NativeInstantiationPlan {
                 LinkedNativeTargetImport::RetainedCapture(capture) => {
                     let entry_owner = capture
                         .entry_owner()
-                        .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+                        .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
                     let requirement = Arc::new(RetainedNativeRequirement::from_declaration(
                         declaration,
                         definitions.signatures(),
