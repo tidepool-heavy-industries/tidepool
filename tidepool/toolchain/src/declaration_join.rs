@@ -4351,10 +4351,24 @@ mod authored_tests {
             recovered.module_interface().source_sha256(),
             expected_source
         );
-        assert!(require_authored_original_source(recovered, &expected_source, generation).is_err());
+        let recovered_refusal =
+            require_authored_original_source(recovered, &expected_source, generation);
+        assert!(
+            matches!(&recovered_refusal,
+            Err(CompileError::ExtractFailed(message))
+                if message == "authored original lacks matching source admission"),
+            "unexpected recovered source refusal: {recovered_refusal:?}"
+        );
         let mut wrong_source = expected_source;
         wrong_source[0] ^= 1;
-        assert!(require_authored_original_source(original, &wrong_source, generation).is_err());
+        let changed_source_refusal =
+            require_authored_original_source(original, &wrong_source, generation);
+        assert!(
+            matches!(&changed_source_refusal,
+            Err(CompileError::ExtractFailed(message))
+                if message == "authored original lacks matching source admission"),
+            "unexpected changed source refusal: {changed_source_refusal:?}"
+        );
         let mut wrong_owner = original.owner().clone();
         wrong_owner.product_sha256[0] ^= 1;
         assert!(!original
