@@ -776,10 +776,9 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     fixture_names = []
     if package_name == "tidepool-extract-cmd" and (unit or target_name == "build_products_frontend"):
         env["TIDEPOOL_TEST_BASH"] = "$(exe toolchains//:bash)"
-        resources.append("toolchains//:bash")
-    if package_name == "tidepool-extract-cmd" and (unit or target_name == "build_products_frontend"):
         env["TIDEPOOL_TEST_PYTHON"] = "$(exe toolchains//:python)"
-        resources.append("toolchains//:python")
+        env["TIDEPOOL_TEST_WORKER_FIXTURE"] = "$(exe :build_products_worker_fixture)"
+        resources.extend(["toolchains//:bash", "toolchains//:python", ":build_products_worker_fixture"])
     if package_name == "tidepool-extract-cmd" and target_name == "no_open_coded_extract_spawns":
         env["TIDEPOOL_WORKSPACE_SOURCE_ROOT"] = "$(location //build/rust:native_qualification_sources)"
         resources.append("//build/rust:native_qualification_sources")
@@ -972,6 +971,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_TEST_FIXTURE_ROOT",
     "TIDEPOOL_TEST_BASH",
     "TIDEPOOL_TEST_PYTHON",
+    "TIDEPOOL_TEST_WORKER_FIXTURE",
 )
 
 
@@ -2669,6 +2669,26 @@ tidepool_buildscript_run(
             NATIVE_TARGETS[package_name]["integration"][target["name"]]["execution_disposition"] = "manual_measurement"
         if package_name == "exomonad-actor" and target["name"] == "actor":
             rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary"))
+    if package_name == "tidepool-extract-cmd":
+        CURRENT_QUALIFICATION_SOURCES.add("src/fixtures/build_products_worker.rs")
+        rules.append('''rust_filegroup(
+    name = "build_products_worker_fixture_sources",
+    mapped_srcs = {"src/fixtures/build_products_worker.rs": "tidepool/extract-cmd/src/fixtures/build_products_worker.rs"},
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_binary(
+    name = "build_products_worker_fixture",
+    package_name = "tidepool-extract-cmd",
+    package_dir = "tidepool/extract-cmd",
+    version = "0.1.0",
+    crate_root = "tidepool/extract-cmd/src/fixtures/build_products_worker.rs",
+    edition = "2021",
+    srcs_filegroup = ":build_products_worker_fixture_sources",
+    deps = [":tidepool_extract_cmd"],
+    visibility = ["PUBLIC"],
+)
+''')
     if package_name == "tidepool-extract-cmd":
         rules.append('filegroup(\n    name = "retained_fingerprint_fixtures",\n    srcs = {path[len("tests/fixtures/retained_fingerprint/"):]: path for path in glob(["tests/fixtures/retained_fingerprint/*.hs"])},\n    visibility = ["PUBLIC"],\n)\n')
     if package_name == "tidepool-bignum":

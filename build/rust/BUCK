@@ -57,15 +57,15 @@ sh_test(
     env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
-        "PATH": read_root_config("nix", "action_path"),
+        "TIDEPOOL_TEST_WORKER_FIXTURE": "$(exe //tidepool/extract-cmd:build_products_worker_fixture)",
     },
     resources = [
         "//tidepool/extract-cmd:build_products_frontend_binary",
         "//tidepool/extract-cmd:tidepool-extract",
+        "//tidepool/extract-cmd:build_products_worker_fixture",
         ":isolated_libtest_source",
         "toolchains//:bash",
         "toolchains//:python",
-        "toolchains//:test_tools_closure",
     ],
     visibility = ["PUBLIC"],
 )

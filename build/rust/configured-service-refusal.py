@@ -41,6 +41,11 @@ def check_refusal(output, result):
     assert execution["compiler_cleanup_status"] == "unconfirmed", execution
     assert execution["compiler_cleanup_observation_complete"] is True, execution
     assert execution.get("timed_out") in (None, False), execution
+    fixture=execution["launch_inputs"]["resources"]["TIDEPOOL_TEST_WORKER_FIXTURE"]
+    assert fixture["status"] == "captured_before_execution", fixture
+    assert Path(fixture["path"]) == Path(os.environ["TIDEPOOL_TEST_WORKER_FIXTURE"]).absolute(), fixture
+    fixture_reference=reference(Path(fixture["path"]))
+    assert fixture_reference["sha256"] == fixture["sha256"] and fixture_reference["bytes"] == fixture["bytes"],fixture
     diagnostics = execution["diagnostic_summaries"]
     assert not diagnostics["issues"], diagnostics["issues"]
     owners = diagnostics["owned_compiler_roots"]
@@ -81,7 +86,8 @@ def check_refusal(output, result):
     return {"control_passed": True, "child_qualified": False,
             "native_executed": 1, "native_passed": 1, "outer_runner_exit": 1,
             "case_report": reference(case_path), "owned_service_report": reference(report_path),
-            "streams": streams, "real_nix_gc_registration": False}
+            "streams": streams, "fixture_executable":fixture_reference,
+            "real_nix_gc_registration": False}
 
 
 def run_refusal_case(command, output):
@@ -130,7 +136,8 @@ def main():
                str(options.binary.resolve(strict=True)), "--exact", CASE,
                "--expected-count", "1", "--ignored", "--compiler-mode", "direct",
                "--timeout", "60", "--output-dir", str(case_output), "--retain-artifacts",
-               "--resource-env", "TIDEPOOL_TEST_BASH", "--resource-env", "TIDEPOOL_TEST_PYTHON"]
+               "--resource-env", "TIDEPOOL_TEST_BASH", "--resource-env", "TIDEPOOL_TEST_PYTHON",
+               "--resource-env", "TIDEPOOL_TEST_WORKER_FIXTURE"]
     result = run_refusal_case(command, output)
     observation = check_refusal(case_output, result)
     (output / "observations.json").write_text(json.dumps(observation, indent=2) + "\n")

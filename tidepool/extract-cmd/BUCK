@@ -164,12 +164,14 @@ tidepool_rust_isolated_test(
         "tidepool/extract-cmd/src/fixtures/build_products_worker.rs",
     ],
     resources = [
+        ":build_products_worker_fixture",
         "toolchains//:bash",
         "toolchains//:python",
     ],
     resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_TEST_WORKER_FIXTURE": "$(exe :build_products_worker_fixture)",
     },
     visibility = ["PUBLIC"],
 )
@@ -178,7 +180,6 @@ rust_filegroup(
     name = "build_products_frontend_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
-        "src/fixtures/build_products_worker.rs": "tidepool/extract-cmd/src/fixtures/build_products_worker.rs",
         "tests/build_products_frontend.rs": "tidepool/extract-cmd/tests/build_products_frontend.rs",
         "tests/fixtures/service_provider.py": "tidepool/extract-cmd/tests/fixtures/service_provider.py",
     },
@@ -211,12 +212,14 @@ tidepool_rust_isolated_test(
         "tidepool/extract-cmd/tests/build_products_frontend.rs",
     ],
     resources = [
+        ":build_products_worker_fixture",
         "toolchains//:bash",
         "toolchains//:python",
     ],
     resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_TEST_WORKER_FIXTURE": "$(exe :build_products_worker_fixture)",
     },
     compile_env = {"CARGO_BIN_EXE_tidepool-extract": "$(location //tidepool/extract-cmd:tidepool-extract)"},
     visibility = ["PUBLIC"],
@@ -604,6 +607,24 @@ tidepool_rust_isolated_test(
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
     },
     haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+rust_filegroup(
+    name = "build_products_worker_fixture_sources",
+    mapped_srcs = {"src/fixtures/build_products_worker.rs": "tidepool/extract-cmd/src/fixtures/build_products_worker.rs"},
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_binary(
+    name = "build_products_worker_fixture",
+    package_name = "tidepool-extract-cmd",
+    package_dir = "tidepool/extract-cmd",
+    version = "0.1.0",
+    crate_root = "tidepool/extract-cmd/src/fixtures/build_products_worker.rs",
+    edition = "2021",
+    srcs_filegroup = ":build_products_worker_fixture_sources",
+    deps = [":tidepool_extract_cmd"],
     visibility = ["PUBLIC"],
 )
 

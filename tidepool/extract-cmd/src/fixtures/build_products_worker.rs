@@ -1,8 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-const REQUEST_FLAG: &str = "@WORKER_REQUEST_FLAG@";
-
 fn u32(r: &mut impl Read) -> usize {
     let mut b = [0; 4];
     r.read_exact(&mut b).unwrap();
@@ -49,6 +47,13 @@ fn request(payload: &[u8]) -> Vec<u8> {
     .into_bytes()
 }
 fn main() {
+    let command = tidepool_extract_cmd::ExtractCmd::with_bin(
+        tidepool_extract_cmd::ResolvedExtractBin::assume_resolved("unused-fixture-worker"),
+    );
+    let worker_argv = command.worker_argv();
+    let request_flag = worker_argv[0]
+        .to_str()
+        .expect("production worker flag is UTF-8");
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--observe-owned-environment") {
         let names = [
@@ -69,10 +74,10 @@ fn main() {
         std::process::exit(args[4].parse().unwrap());
     }
     if args.get(1).map(String::as_str) == Some("--print-worker-request-flag") {
-        println!("{REQUEST_FLAG}");
+        println!("{request_flag}");
         return;
     }
-    if args.get(1).map(String::as_str) == Some(REQUEST_FLAG) {
+    if args.get(1).map(String::as_str) == Some(request_flag) {
         std::io::stdout()
             .write_all(&request(args[2].as_bytes()))
             .unwrap();

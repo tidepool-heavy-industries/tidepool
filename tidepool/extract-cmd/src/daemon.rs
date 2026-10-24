@@ -5949,29 +5949,12 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     fn build_products_fixture() -> &'static Path {
-        static FIXTURE: std::sync::OnceLock<(tempfile::TempDir, std::path::PathBuf)> =
-            std::sync::OnceLock::new();
-        &FIXTURE
-            .get_or_init(|| {
-                let dir = tempfile::tempdir().unwrap();
-                let source = dir.path().join("worker.rs");
-                fs::write(&source, include_str!("fixtures/build_products_worker.rs")).unwrap();
-                let binary = dir.path().join("worker");
-                #[allow(
-                    clippy::disallowed_methods,
-                    reason = "compile one immutable test worker fixture"
-                )]
-                let status = std::process::Command::new("rustc")
-                    .arg(&source)
-                    .arg("--edition=2021")
-                    .arg("-o")
-                    .arg(&binary)
-                    .status()
-                    .unwrap();
-                assert!(status.success());
-                (dir, binary)
-            })
-            .1
+        static FIXTURE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            std::env::var_os("TIDEPOOL_TEST_WORKER_FIXTURE")
+                .map(PathBuf::from)
+                .expect("declared immutable build-products worker fixture is required")
+        })
     }
 
     fn products_request(root: &Path, input: &Path) -> Vec<OsString> {

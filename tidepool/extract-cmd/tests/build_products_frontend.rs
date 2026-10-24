@@ -9,12 +9,10 @@ use std::path::Path;
 use std::process::Command;
 use tidepool_extract_cmd::{ExtractCmd, ResolvedExtractBin};
 
-fn worker_fixture_source() -> String {
-    let request =
-        ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("unused-fixture-worker"));
-    let argv = request.worker_argv();
-    include_str!("../src/fixtures/build_products_worker.rs")
-        .replace("@WORKER_REQUEST_FLAG@", argv[0].to_str().unwrap())
+fn worker_fixture() -> std::path::PathBuf {
+    std::env::var_os("TIDEPOOL_TEST_WORKER_FIXTURE")
+        .map(std::path::PathBuf::from)
+        .expect("declared immutable build-products worker fixture is required")
 }
 
 struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -33,21 +31,11 @@ impl Drop for RestoreEnv {
 #[test]
 #[allow(
     clippy::disallowed_methods,
-    reason = "compile one immutable fixture and exercise its frontend"
+    reason = "execute the declared immutable fixture through its frontend"
 )]
 fn direct_frontends_report_placement_and_reclaim_scratch_before_reply() {
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("worker.rs");
-    fs::write(&source, worker_fixture_source()).unwrap();
-    let worker = dir.path().join("worker");
-    assert!(Command::new("rustc")
-        .arg("--edition=2021")
-        .arg(source)
-        .arg("-o")
-        .arg(&worker)
-        .status()
-        .unwrap()
-        .success());
+    let worker = worker_fixture();
     let input = dir.path().join("Expr.hs");
     let products = dir.path().join("products");
     fs::write(&input, "alpha").unwrap();
@@ -117,17 +105,7 @@ fn direct_frontends_report_placement_and_reclaim_scratch_before_reply() {
 )]
 fn owned_daemon_publishes_exact_measurement_identity_and_refuses_inherited_coordinates() {
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("worker.rs");
-    fs::write(&source, worker_fixture_source()).unwrap();
-    let worker = dir.path().join("worker");
-    assert!(Command::new("rustc")
-        .args(["--edition=2021"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&worker)
-        .status()
-        .unwrap()
-        .success());
+    let worker = worker_fixture();
     let frontend = env!("CARGO_BIN_EXE_tidepool-extract");
     let inherited = [
         "TIDEPOOL_EXTRACT_DAEMON_SOCKET",
@@ -311,17 +289,7 @@ fn configured_startup_controls(modes: &[&str]) {
     let directory = retained_directory
         .as_deref()
         .unwrap_or_else(|| temporary.path());
-    let worker_source = directory.join("worker.rs");
-    fs::write(&worker_source, worker_fixture_source()).unwrap();
-    let worker = directory.join("worker");
-    assert!(Command::new("rustc")
-        .args(["--edition=2021"])
-        .arg(&worker_source)
-        .arg("-o")
-        .arg(&worker)
-        .status()
-        .unwrap()
-        .success());
+    let worker = worker_fixture();
     let python = fs::canonicalize(
         std::env::var_os("TIDEPOOL_TEST_PYTHON").expect("declared provider Python is required"),
     )
@@ -389,7 +357,7 @@ fn configured_startup_controls(modes: &[&str]) {
             .arg(&owner)
             .arg("--")
             .arg(std::env::var_os("TIDEPOOL_TEST_BASH").unwrap())
-            .args(["-c", r#"touch "$1""#, "fixture"])
+            .args(["-c", r#"printf ran > "$1""#, "fixture"])
             .arg(&marker)
             .output()
             .unwrap();
