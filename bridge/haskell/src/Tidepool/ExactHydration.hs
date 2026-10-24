@@ -16,7 +16,7 @@ module Tidepool.ExactHydration
   , RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, readCapturedExactIfaceArtifacts
   , readCapturedExactIfaceClosureWithCheckedValues
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
-  , HydratedInterfaceClosure, emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, selectHydratedInterfaceInputs, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior, admitCheckedValueInterface
+  , HydratedInterfaceClosure, emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, selectHydratedInterfaceInputs, hydratedInterfaceProducts, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior, admitCheckedValueInterface
   , HydratedExactInterfaces, hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct
   , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
@@ -65,7 +65,7 @@ import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (mapAccumL)
 import Control.Exception
-  ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO, throw, evaluate )
+  ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO, evaluate )
 import Data.Char (isHexDigit, toLower)
 import Data.Maybe (isJust)
 import Data.List (nub, sortOn)
@@ -304,7 +304,7 @@ captureCompletedInterfaceInputs environment previous captures finalized = do
     pure (VerifiedExactInterface artifact (CompletedHomeInterface (FinalizedHomeInterface completed)) body issuer)
   -- Only this completion owner may replace a hydrated original allocation.
   -- The replacement must preserve all exact interface facts and receiving aliases.
-  let CapturedInterfaceInputs rows = hydratedClosureAsCapturedInputs previous
+  CapturedInterfaceInputs rows <- either throwIO pure (hydratedClosureAsCapturedInputs previous)
   replaced <- foldM (\current fresh@(VerifiedExactInterface artifact _ body issuer) -> do
     let key = (exactUnit artifact,exactModule artifact)
     case Map.lookup key current of
@@ -1626,50 +1626,67 @@ hydratedCompilerHome :: HydratedCompilerInterface -> HomeModInfo
 hydratedCompilerHome (OwnedHomeInterface owner) = completedInterfaceHome owner
 hydratedCompilerHome (UnownedThinHomeInterface home) = home
 
-closureAsCapturedInputs :: Bool -> HydratedInterfaceClosure -> CapturedInterfaceInputs
-closureAsCapturedInputs requireOwned (HydratedInterfaceClosure rows) = CapturedInterfaceInputs (Map.map convert rows)
+-- Non-authorizing selection may inspect a thin interface, but cannot issue a
+-- completed owner for it. Only the explicit owned conversion below can do so.
+closureSelectionInputs :: HydratedInterfaceClosure -> CapturedInterfaceInputs
+closureSelectionInputs (HydratedInterfaceClosure rows) = CapturedInterfaceInputs (Map.map convert rows)
   where
     convert (VerifiedHydratedInterface artifact compiler body issuer,aliases) =
       (VerifiedExactInterface artifact (case compiler of
         OwnedHomeInterface owner -> CompletedHomeInterface owner
-        UnownedThinHomeInterface home
-          | requireOwned -> throw (InterfaceUnownedThinHome (exactUnit artifact,exactModule artifact))
-          | otherwise -> DecodedTypeInterface (hm_iface home)) body issuer,aliases)
+        UnownedThinHomeInterface home -> DecodedTypeInterface (hm_iface home)) body issuer,aliases)
 
-hydratedClosureAsCapturedInputs :: HydratedInterfaceClosure -> CapturedInterfaceInputs
-hydratedClosureAsCapturedInputs = closureAsCapturedInputs True
+hydratedClosureAsCapturedInputs :: HydratedInterfaceClosure -> Either InterfaceInputFailure CapturedInterfaceInputs
+hydratedClosureAsCapturedInputs (HydratedInterfaceClosure rows) = CapturedInterfaceInputs <$> Map.traverseWithKey convert rows
+  where
+    convert key (VerifiedHydratedInterface artifact compiler body issuer,aliases) = case compiler of
+      OwnedHomeInterface owner -> Right (VerifiedExactInterface artifact (CompletedHomeInterface owner) body issuer,aliases)
+      UnownedThinHomeInterface _ -> Left (InterfaceUnownedThinHome key)
+
+hydratedInterfaceProducts :: HydratedInterfaceClosure -> [(ExactIfaceArtifact,ArtifactBytes)]
+hydratedInterfaceProducts (HydratedInterfaceClosure rows) =
+  [(artifact,body) | (VerifiedHydratedInterface artifact _ body _,_) <- Map.elems rows]
+
+capturedInputsAsOwnedClosure :: CapturedInterfaceInputs -> Either InterfaceInputFailure HydratedInterfaceClosure
+capturedInputsAsOwnedClosure (CapturedInterfaceInputs rows) = HydratedInterfaceClosure <$> Map.traverseWithKey convert rows
+  where
+    convert key (VerifiedExactInterface artifact compiler body issuer,aliases) = case compiler of
+      CompletedHomeInterface owner -> Right (VerifiedHydratedInterface artifact (OwnedHomeInterface owner) body issuer,aliases)
+      _ -> Left (InterfaceUnownedThinHome key)
 
 selectHydratedInterfaceInputs :: [ExactIfaceArtifact] -> HydratedInterfaceClosure
   -> Either InterfaceInputFailure HydratedInterfaceClosure
 selectHydratedInterfaceInputs roots closure@(HydratedInterfaceClosure rows) = do
-  CapturedInterfaceInputs selected <- selectCapturedInterfaceInputs (closureAsCapturedInputs False closure) roots
-  pure (HydratedInterfaceClosure (Map.restrictKeys rows (Map.keysSet selected)))
+  CapturedInterfaceInputs selected <- selectCapturedInterfaceInputs (closureSelectionInputs closure) roots
+  let requested = Map.fromList [((exactUnit artifact,exactModule artifact),artifact) | artifact <- roots]
+      receiving key (VerifiedHydratedInterface artifact compiler body issuer,aliases) =
+        (VerifiedHydratedInterface (Map.findWithDefault artifact key requested) compiler body issuer,aliases)
+  pure (HydratedInterfaceClosure (Map.mapWithKey receiving (Map.restrictKeys rows (Map.keysSet selected))))
 
 mergeHydratedInterfaceClosures :: [HydratedInterfaceClosure] -> Either InterfaceInputFailure HydratedInterfaceClosure
 mergeHydratedInterfaceClosures closures = do
-  CapturedInterfaceInputs selected <- mergeCapturedInterfaceInputs (map hydratedClosureAsCapturedInputs closures)
-  let rows = Map.unions [entries | HydratedInterfaceClosure entries <- closures]
-  pure (HydratedInterfaceClosure (Map.mapWithKey
-    (\key (_,aliases) -> let (verified,_) = rows Map.! key in (verified,aliases)) selected))
+  captured <- mapM hydratedClosureAsCapturedInputs closures
+  selected <- mergeCapturedInterfaceInputs captured
+  capturedInputsAsOwnedClosure selected
 
 data HydratedExactInterfaces = HydratedExactInterfaces !HscEnv !HydratedInterfaceClosure
-  [(ExactIfaceArtifact,HomeModInfo)]
 
 hydratedExactEnvironment :: HydratedExactInterfaces -> HscEnv
-hydratedExactEnvironment (HydratedExactInterfaces environment _ _) = environment
+hydratedExactEnvironment (HydratedExactInterfaces environment _) = environment
 
 hydratedExactInputs :: HydratedExactInterfaces -> HydratedInterfaceClosure
-hydratedExactInputs (HydratedExactInterfaces _ inputs _) = inputs
+hydratedExactInputs (HydratedExactInterfaces _ inputs) = inputs
 
 hydratedExactInterfaces :: HydratedExactInterfaces -> [(ExactIfaceArtifact,HomeModInfo)]
-hydratedExactInterfaces (HydratedExactInterfaces _ _ homes) = homes
+hydratedExactInterfaces (HydratedExactInterfaces _ (HydratedInterfaceClosure rows)) =
+  [(artifact,hydratedCompilerHome compiler) | (VerifiedHydratedInterface artifact compiler _ _,_) <- Map.elems rows]
 
 -- Custody may be broad, but each hydration borrows only the closure selected
 -- by this consumer. Unrelated accumulated homes cannot widen its query HPT.
 hydrateInterfaceInputsWithPrior :: HscEnv -> HydratedInterfaceClosure -> CapturedInterfaceInputs -> IO HydratedExactInterfaces
 hydrateInterfaceInputsWithPrior environment prior incoming = do
-  let private = hydratedClosureAsCapturedInputs prior
-      keys = Set.fromList [(exactUnit artifact,exactModule artifact)
+  private <- either throwIO pure (hydratedClosureAsCapturedInputs prior)
+  let keys = Set.fromList [(exactUnit artifact,exactModule artifact)
         | product' <- verifiedInterfaceProducts incoming,let (artifact,_) = verifiedExactInterface product']
       available = [(exactUnit artifact,exactModule artifact)
         | product' <- verifiedInterfaceProducts private,let (artifact,_) = verifiedExactInterface product'
@@ -1713,21 +1730,15 @@ hydrateInterfaceInputs env inputs@(CapturedInterfaceInputs rows) = do
       DecodedTypeInterface _ | mi_iface_hash (mi_final_exts iface) == fingerprint0 -> pure (UnownedThinHomeInterface home)
       DecodedTypeInterface _ -> OwnedHomeInterface <$> makeHydratedOriginalInterface home
     pure (VerifiedHydratedInterface artifact compiler body issuer,aliases)) rows
-  let closure = HydratedInterfaceClosure hydratedRows
-      homes = [(artifact,hydratedCompilerHome compiler)
-        | (VerifiedHydratedInterface artifact compiler _ _,_) <- Map.elems hydratedRows]
-  pure (HydratedExactInterfaces completed closure homes)
+  pure (HydratedExactInterfaces completed (HydratedInterfaceClosure hydratedRows))
 
 -- Completion assembly is retain-only: no decoded product may enter this route.
 completedInputsAsHydratedClosure :: HscEnv -> CapturedInterfaceInputs -> IO HydratedInterfaceClosure
-completedInputsAsHydratedClosure environment (CapturedInterfaceInputs rows) = do
-  owned <- Map.traverseWithKey (\key (VerifiedExactInterface artifact compiler body issuer,aliases) -> do
+completedInputsAsHydratedClosure environment inputs@(CapturedInterfaceInputs rows) = do
+  forM_ (Map.elems rows) $ \(VerifiedExactInterface _ _ _ issuer,_) ->
     unless (issuer == (nsUniqChar (hsc_NC environment),nsNames (hsc_NC environment)))
       (throwIO InterfaceNameCacheMismatch)
-    case compiler of
-      CompletedHomeInterface owner -> pure (VerifiedHydratedInterface artifact (OwnedHomeInterface owner) body issuer,aliases)
-      _ -> throwIO (InterfaceUnownedThinHome key)) rows
-  pure (HydratedInterfaceClosure owned)
+  either throwIO pure (capturedInputsAsOwnedClosure inputs)
 
 retainInstalledInterfaceInputs :: HscEnv -> HydratedInterfaceClosure -> IO HydratedExactInterfaces
 retainInstalledInterfaceInputs environment closure@(HydratedInterfaceClosure rows) = do
@@ -1749,13 +1760,14 @@ retainInstalledInterfaceInputs environment closure@(HydratedInterfaceClosure row
   let retained = hscUpdateHPT_lazy (\table -> foldr
         (\(_,home) current -> addToHpt current (moduleName (mi_module (hm_iface home))) home)
         table homes) environment
-  pure (HydratedExactInterfaces retained closure homes)
+  pure (HydratedExactInterfaces retained closure)
 
 -- Make constructs a phase environment. Borrowing the same selected owner
 -- restores its actual HMI knots after checking the phase's issuer and any
 -- existing same-owner entries; equal fingerprints cannot replace those knots.
 restoreHydratedInterfaceEnvironment :: HydratedExactInterfaces -> HscEnv -> IO HydratedExactInterfaces
-restoreHydratedInterfaceEnvironment (HydratedExactInterfaces original inputs homes) phase = do
+restoreHydratedInterfaceEnvironment previous@(HydratedExactInterfaces original inputs) phase = do
+  let homes = hydratedExactInterfaces previous
   unless ((nsUniqChar (hsc_NC original),nsNames (hsc_NC original))
       == (nsUniqChar (hsc_NC phase),nsNames (hsc_NC phase)))
     (throwIO InterfaceNameCacheMismatch)
@@ -1767,12 +1779,13 @@ restoreHydratedInterfaceEnvironment (HydratedExactInterfaces original inputs hom
         (unitString (moduleUnit (mi_module (hm_iface home))),moduleNameString (moduleName (mi_module (hm_iface home))))))
   let restored = hscUpdateHPT_lazy (\table -> foldr
         (\(_,home) current -> addToHpt current (moduleName (mi_module (hm_iface home))) home) table homes) phase
-  pure (HydratedExactInterfaces restored inputs homes)
+  pure (HydratedExactInterfaces restored inputs)
 
 hydratedInterfaceProduct :: HydratedExactInterfaces -> ExactIfaceArtifact
   -> Either String (VerifiedExactInterface,HomeModInfo)
-hydratedInterfaceProduct (HydratedExactInterfaces _ closure homes) artifact = do
-  let inputs@(CapturedInterfaceInputs captured) = closureAsCapturedInputs False closure
+hydratedInterfaceProduct owner@(HydratedExactInterfaces _ closure) artifact = do
+  let inputs@(CapturedInterfaceInputs captured) = closureSelectionInputs closure
+      homes = hydratedExactInterfaces owner
   if checkedValueOwner artifact
     then do _ <- selectVerifiedValueInterfaces inputs [artifact]; pure ()
     else do _ <- selectVerifiedExactInterfaceProducts inputs [artifact]; pure ()
