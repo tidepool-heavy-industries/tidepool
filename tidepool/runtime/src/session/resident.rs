@@ -11538,7 +11538,7 @@ mod authored_publication_tests {
                             requirement,
                             binding,
                         } if requirement.identity().occurrence == "capturedForNative" => {
-                            Some((owner.clone(), u32::try_from(index).unwrap(), binding))
+                            Some((owner.clone(), u32::try_from(index).unwrap(), binding, requirement))
                         }
                         _ => None,
                     })
@@ -11558,6 +11558,16 @@ mod authored_publication_tests {
             .0
             .matches_retained_checked_value(retained.1, foreign_binding, &produced)
             .unwrap());
+        assert!(matches!(
+            target.verify_retained_slot(&retained.0, retained.1, retained.2, &retained.3).unwrap(),
+            tidepool_toolchain::linked_native::VerifiedRetainedSlotDemander::PriorProgramStage(_)
+        ));
+        assert!(target.verify_retained_slot(&retained.0, u32::MAX, retained.2, &retained.3).is_err());
+        assert!(target.verify_retained_slot(&retained.0, retained.1, foreign_binding, &retained.3).is_err());
+        let wrong_leaf = tidepool_repr::native_code::NativeRetainedRequirement::new(
+            retained.3.identity().clone(), retained.3.generation() + 1, retained.3.type_artifact().copied(),
+        );
+        assert!(target.verify_retained_slot(&retained.0, retained.1, retained.2, &wrong_leaf).is_err());
         source_action(&mut resident, &original, |resident, report| {
             resident.run_bind_with_sites(
                 &bound[0].name,
@@ -11619,12 +11629,16 @@ mod authored_publication_tests {
         })
         .unwrap();
         let scope = execution.private_scope();
+        let producer_target = compiled.certification.as_ref().unwrap().linked_target.as_ref().unwrap().clone();
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Probe { Resolve, RefuseSecond, SubstituteFirst }
+
 
         // This callback exercises traversal only. The neighboring acquired-slot
         // test checks actual row, ordinal and full-binding authentication.
         let probe = |resident: &mut TestSession,
                      compiled: &super::super::turn::CompiledTurn,
-                     refuse_second: bool,
+                     mode: Probe,
                      expect_anchor: bool| {
             let code = compiled.code();
             let certification = code.certification().unwrap();
@@ -11684,6 +11698,7 @@ mod authored_publication_tests {
                 .unwrap();
             let before = resident.state.residency().unwrap();
             let mut resolved = Vec::<NativeOccurrenceId>::new();
+            let mut first_authorization: Option<super::super::admission::AuthorizedRetainedValue> = None;
             let anchors = selection
                 .roots()
                 .keys()
@@ -11702,11 +11717,23 @@ mod authored_publication_tests {
                             assert!(retained_owners.contains(&occurrence));
                             if !resolved.contains(&occurrence) {
                                 resolved.push(occurrence);
-                                if refuse_second && resolved.len() == 2 {
-                                    return Err(PreparedRuntimeError::certified_target_owners());
+                                if resolved.len() == 2 {
+                                    match mode {
+                                        Probe::RefuseSecond => return Err(PreparedRuntimeError::certified_target_owners()),
+                                        Probe::SubstituteFirst => return Ok(first_authorization.as_ref().unwrap().clone()),
+                                        Probe::Resolve => {}
+                                    }
                                 }
                             }
                         }
+                        let digest = prefix.admission().digest();
+                        assert!(value.matches_slot(execution.item(), digest, linked, requirement));
+                        assert!(!value.matches_slot(&checked.checked_item(0).unwrap(), digest, linked, requirement));
+                        let mut wrong_digest = digest;
+                        wrong_digest[0] ^= 0x80;
+                        assert!(!value.matches_slot(execution.item(), wrong_digest, linked, requirement));
+                        assert!(!value.matches_slot(execution.item(), digest, &producer_target, requirement));
+                        if first_authorization.is_none() { first_authorization = Some(value.clone()); }
                         Ok(value)
                     });
             assert_eq!(
@@ -11714,17 +11741,21 @@ mod authored_publication_tests {
                 before,
                 "resolution must finish or refuse before native installation"
             );
-            if refuse_second {
+            if mode != Probe::Resolve {
                 assert!(matches!(
                     result,
                     Err(PreparedRuntimeError::CertifiedTargetOwners { .. })
                 ));
                 assert_eq!(resolved.len(), 2);
             } else {
-                assert!(
-                    result.is_ok(),
-                    "unchanged acquired obligations must resolve"
-                );
+                let instantiation = result.expect("unchanged acquired obligations must resolve");
+                let digest = prefix.admission().digest();
+                inputs.validate_native_values(&resident.state, execution.item(), digest, linked, instantiation.retained_values()).unwrap();
+                assert!(inputs.validate_native_values(&resident.state, &checked.checked_item(0).unwrap(), digest, linked, instantiation.retained_values()).is_err());
+                let mut wrong_digest = digest;
+                wrong_digest[0] ^= 0x80;
+                assert!(inputs.validate_native_values(&resident.state, execution.item(), wrong_digest, linked, instantiation.retained_values()).is_err());
+                assert!(inputs.validate_native_values(&resident.state, execution.item(), digest, &producer_target, instantiation.retained_values()).is_err());
                 assert_eq!(
                     resolved
                         .iter()
@@ -11754,8 +11785,9 @@ mod authored_publication_tests {
             else {
                 panic!("fixture consumer must be a checked binding");
             };
-            probe(&mut resident, &compiled, true, index == 3);
-            probe(&mut resident, &compiled, false, index == 3);
+            probe(&mut resident, &compiled, Probe::RefuseSecond, index == 3);
+            probe(&mut resident, &compiled, Probe::SubstituteFirst, index == 3);
+            probe(&mut resident, &compiled, Probe::Resolve, index == 3);
             source_action(&mut resident, &original, |resident, report| {
                 resident.run_bind_with_sites(
                     &bound[0].name,
