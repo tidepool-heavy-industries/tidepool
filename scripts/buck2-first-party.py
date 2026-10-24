@@ -1386,6 +1386,8 @@ RUNTIME_TYPED_SEGMENT_SEMANTIC_CASES = ["session::turn::scaling_tests::typed_seg
     "warm_target_selects_previously_unselected_original_native_groups",
     "one_four_eight_actions_use_one_completed_inference_segment",
     "produced_capture_types_cross_a_declaration_barrier_without_replaying_effects",
+    "inherited_prior_stage_capture_preserves_effect_metadata_without_replay",
+    "transitive_prior_home_chain_preserves_historical_and_produced_captures",
     "zero_capture_let_executes_without_publishing_a_dummy_binding",
     "zero_capture_bang_let_preserves_forcing_and_prior_effects",
     "zero_capture_action_runs_once_before_the_next_item",
