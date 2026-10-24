@@ -2809,9 +2809,18 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                               -- Product bytes alone do not advance the compiler cursor.
                               withCompiledWorldStage stage (\_ _ -> pure ())
                               completedProducts <- completeWorldProducts pendingProducts Set.empty [] []
-                              _ <- scopedPrepareWorldCellStage compiler firstAdmission >>= maybe
+                              successorIssued <- scopedPrepareWorldCellStage compiler firstAdmission >>= maybe
                                 (fail "metadata control lost its actual successor stage") pure
-                              successor <- scopedCompileWorldCell compiler firstAdmission (PreparedProducts Nothing) Set.empty
+                              successorSource <- maybe (fail "metadata control lost its typed successor plan") pure
+                                (heldWorldCellStageTypedSource successorIssued)
+                              let prepareSuccessor environment admissions segment = do
+                                    batch <- prepareTypedSegmentSessionBindings environment admissions segment
+                                      (metadataDirectory </> "successor-typed-session")
+                                    pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
+                                      typedSegmentSessionInterfaces batch)
+                              successor <- scopedCompileWorldCell compiler firstAdmission
+                                (WithTypedSegmentPreparation prepareSuccessor
+                                  (PreparedSegmentProducts (preparedTypedSegmentPlan successorSource) Nothing)) Set.empty
                               successorStage <- maybe (fail "metadata control lost its compiled successor") pure
                                 (completedCompilerWorldStage successor)
                               successorInputs <- bindWorldStageInputs successorStage (Just completedProducts)
