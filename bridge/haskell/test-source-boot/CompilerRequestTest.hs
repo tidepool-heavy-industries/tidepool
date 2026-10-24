@@ -1,13 +1,13 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries) where
+module CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, compilerScopeCleanupFailure, checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
   , BodyOutcome(..), CleanupStage(..), cleanupStage, cleanupException, withCompletionRelease )
 
-import Control.Exception (AsyncException(ThreadKilled), SomeException, SomeAsyncException, IOException, fromException, throw, throwIO, try)
+import Control.Exception (AsyncException(ThreadKilled), Exception, SomeException, SomeAsyncException, IOException, fromException, throw, throwIO, try)
 import Control.Concurrent (forkFinally, killThread, newEmptyMVar, putMVar, readMVar)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import Data.List (isInfixOf)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString.Char8 as BSC
@@ -600,6 +600,48 @@ completedRequestCancellation = withRequestFixture $ \scope request work -> do
   -- The existing scope guard, rather than a second request lifecycle, refuses
   -- all later compiler effects too.
   requirePhase CompilerTransactionFailed (scopedRunGhc scope (pure ()))
+
+data CompilerScopeControlFailure = GuardedBodyFailure | RecoveryCleanupFailure
+  deriving (Eq, Show)
+instance Exception CompilerScopeControlFailure
+
+-- The actual resident scope owns recovery and admission. Fail only its existing
+-- caller-supplied recovery cleanup, after an ordinary synchronous Ghc failure.
+compilerScopeCleanupFailure :: IO ()
+compilerScopeCleanupFailure = withResidentCompilerScopes [] $ \runScope -> do
+  let guardedFailure compiler = scopedRunGhc compiler (liftIO (throwIO GuardedBodyFailure)) :: IO ()
+      requirePrimary completed = case completionResult completed of
+        BodyFailed failure | fromException failure == Just GuardedBodyFailure -> pure ()
+        _ -> fail "compiler recovery lost the original guarded body failure"
+      requireCleanup completed = case completionFailures completed of
+        [failure] | cleanupStage failure == CompilerScopeRestore
+          , fromException (cleanupException failure) == Just RecoveryCleanupFailure -> pure ()
+        _ -> fail "compiler recovery lost or duplicated its independent cleanup failure"
+  -- Successful recovery permits another operation and a later scope. This
+  -- distinguishes cleanup failure from the guarded body failure itself.
+  runScope (pure ()) $ \compiler -> do
+    recovered <- captureCompletion (guardedFailure compiler)
+    requirePrimary recovered
+    unless (null (completionFailures recovered)) (fail "healthy recovery reported failed cleanup")
+    scopedRunGhc compiler (pure ())
+  runScope (pure ()) $ \compiler -> scopedRunGhc compiler (pure ())
+
+  cleanupCalls <- newIORef (0 :: Int)
+  let failedRecovery = modifyIORef' cleanupCalls (+1) >> throwIO RecoveryCleanupFailure
+  completed <- captureCompletion $ runScope failedRecovery $ \compiler -> do
+    failed <- captureCompletion (guardedFailure compiler)
+    requirePrimary failed
+    requireCleanup failed
+    requirePhase CompilerTransactionFailed (scopedRunGhc compiler (pure ()))
+    finishCompletion failed
+  -- Crossing the scope's release must retain both causes and cannot clear the
+  -- poisoned resident owner, even though no compiler phase remains open.
+  requirePrimary completed
+  requireCleanup completed
+  attempts <- readIORef cleanupCalls
+  unless (attempts == 1) (fail "synchronous compiler cleanup failure was retried or skipped")
+  requirePhase CompilerTransactionPoisoned
+    (runScope (pure ()) (\compiler -> scopedRunGhc compiler (pure ())))
 
 completedRequestRelease :: IO ()
 completedRequestRelease = withScratch $ \work -> do
