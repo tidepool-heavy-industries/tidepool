@@ -2252,9 +2252,13 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
     let collisionModule = BS8.unlines ["module WorldObservationNames where"
           ,"observation0_unit, observation1, observation3_unit, __tidepool_segment_probe_1 :: Int"
           ,"observation0_unit = 0", "observation1 = 1", "observation3_unit = 3", "__tidepool_segment_probe_1 = 9"]
+    generatedRoot <- lookupEnv "TIDEPOOL_TEST_EFFECTS_DIR" >>= maybe
+      (fail "missing declared generated effects source resource") pure
+    generated <- captureWorldSourceFiles generatedRoot generatedRoot
     (packetPath,_primary) <- writeWorldCellAdmissionPacketWithSources handles work producer profile contextParcel
-      [("WorldObservationNames.hs",collisionModule)
+      ([("WorldObservationNames.hs",collisionModule)
       ,("WorldCancellationNames.hs","module WorldCancellationNames where\ncancellationName :: Int\ncancellationName = 1\n")]
+        ++ generated)
     owner <- newExactInputOwner
     facts <- readWorldInputsWithOwner owner packetPath
     let identity = worldInputsIdentity facts
@@ -3164,6 +3168,18 @@ writeWorldCellAdmissionPacket
 writeWorldCellAdmissionPacket handles work producer profile parcelBytes =
   writeWorldCellAdmissionPacketWithSources handles work producer profile parcelBytes []
 
+captureWorldSourceFiles :: FilePath -> FilePath -> IO [(BS.ByteString,BS.ByteString)]
+captureWorldSourceFiles root directory = do
+  children <- listDirectory directory
+  fmap concat $ forM children $ \name -> do
+    let path = directory </> name
+    nested <- doesDirectoryExist path
+    if nested then captureWorldSourceFiles root path
+    else if takeExtension path == ".hs" then do
+      bytes <- BS.readFile path
+      pure [(BS8.pack (makeRelative root path),bytes)]
+    else pure []
+
 writeWorldCellAdmissionPacketWithSources
   :: IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString
   -> [(BS.ByteString,BS.ByteString)] -> IO (FilePath,BS.ByteString)
@@ -3178,7 +3194,7 @@ writeWorldCellAdmissionPacketWithSources handles work producer profile parcelByt
     pure (BS8.pack name,body)
   libraryRoot <- lookupEnv "TIDEPOOL_PRELUDE_DIR" >>= maybe
     (fail "missing declared renderer source resource") pure
-  library <- captureSourceFiles libraryRoot libraryRoot
+  library <- captureWorldSourceFiles libraryRoot libraryRoot
   let capturedFiles = sortOn fst (captured ++ library ++ extraSources)
       word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
       frame bytes = word32 (BS.length bytes) <> bytes
@@ -3198,16 +3214,6 @@ writeWorldCellAdmissionPacketWithSources handles work producer profile parcelByt
   BS.writeFile path (encode packet)
   pure (path,primary)
   where
-    captureSourceFiles root directory = do
-      children <- listDirectory directory
-      fmap concat $ forM children $ \name -> do
-        let path = directory </> name
-        nested <- doesDirectoryExist path
-        if nested then captureSourceFiles root path
-        else if takeExtension path == ".hs" then do
-          bytes <- BS.readFile path
-          pure [(BS8.pack (makeRelative root path),bytes)]
-        else pure []
     fixture operation arguments = do
       path <- issueCodecFixturePacket work (operation ++ ".cbor") (encode
         (TList [TString "TPCODECFIXTURE1",TString (T.pack operation),TList arguments]))
