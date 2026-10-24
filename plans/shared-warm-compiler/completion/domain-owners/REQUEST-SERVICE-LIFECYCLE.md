@@ -31,6 +31,8 @@ Retain one existing wire gate and explicit accounting. Under that gate check
 thread ownership, SOURCE envelope, current borrowed stage and stage monotonicity
 before returning a retained refusal. Record first refusal before unlocking;
 valid later calls return it locally without IO, sequence or budget changes.
+Advance the last authorized stage on local replay, so later stage regression
+still refuses even when no new frame is sent.
 Malformed resolved semantic payload remains distinct from actual wire refusal.
 Interrupted/partial transport commits broken state before releasing the gate;
 do not use rollback-on-exception state helpers that restore Ready.
@@ -42,6 +44,10 @@ write. Semantic refusal permits only failed output; swallowed refusal may not
 emit status zero. Broken transport permits no terminal. Preserve RequestCompletion
 cleanup/cancellation facts. No dependence on DependencyPlan semantic decoding
 inside the framing owner.
+Diagnostic severity does not issue completion classification. In particular,
+ExactInputsRejected is a successful exchange carrying a typed refusal frame;
+converting every returned DiagError to a source failure would erase that frame.
+Keep typed body failure and capture/release failure distinct from diagnostics.
 
 W2 adds NativeDemandSession: NativeDemandResolver + Sized with associated
 Outcome, owner(&self) -> NativeDemandOwner, and complete(self,
@@ -99,6 +105,8 @@ Each slot keeps current and unresolved prior retirement; replacement cannot eras
 uncertainty. No successful-rotation history registry. CompleteServiceRetirement
 is privately issued only from actual matching process and slot evidence. EOF,
 STOP acknowledgement, empty process scans and absent files issue no such proof.
+An observed nonzero process exit can still establish reap and permit settlement;
+action success is a separate qualification requirement.
 The existing native-finalization CLI remains native-only.
 
 W4 issues a durable PackageAcquisitionAttempt before provider spawn, bound to
