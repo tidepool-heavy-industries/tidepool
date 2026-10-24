@@ -88,3 +88,13 @@ The first joined history attempt built successfully but failed during compiler
 service startup on a malformed Nix root-query response. The retry reached the
 actual notebook failure described above; retain those as separate outcomes.
 No passing warm history, frozen bundle, or Persona acceptance is claimed.
+
+B's same-stage and prior-declaration controls pass separately. They do not
+establish reuse of an executable group whose capture was produced in that
+group's original stage. A bounded reachability trace found thin value
+interfaces and excluded executable scaffold owners prevent the obvious
+ordinary notebook example from exercising that branch. This combined positive
+and the independent PriorProgram-without-receiver-selection refusal remain
+unverified, not passing claims; see
+`slots/prior-executable-same-stage-reachability.json`. The private origin and
+CurrentStage-only EarlierItem fallback remain source-reviewed constraints.
