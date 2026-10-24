@@ -30,13 +30,13 @@ interfaces, upstream runtime or facade code, host CLI code, or integration tests
 also require their affected consumer checks.
 
 Then run `just test-native //exomonad/actor:actor_notebook_contract_tests`, which
-builds the actor integration executable and executes four cases. This counted
+builds the actor integration executable and executes five cases. This counted
 integration cohort installs the source-selected notebook policy and checks
 acknowledgement, cancellation, reload refusal, uncertainty, and cleanup through
 the real actor. Unit-only checks cannot exercise dynamic Haskell preparation or
 the installed tool surface.
 
 The named notebook cohort owns the Rooted compiler service resources and selects
-its four ignored cases explicitly. The ordinary actor integration target does not
+its five ignored cases explicitly. The ordinary actor integration target does not
 supply those World resources. Run the named cohort without appending selectors;
 runner argument rejection is zero executed tests, not a test failure.

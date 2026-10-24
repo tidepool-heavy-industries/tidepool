@@ -8,8 +8,8 @@ Later commits change guidance and this handoff only.
 Evidence root: `/srv/swarm/evidence/inanna/g2-import-ownership-closeout-20261024/`.
 
 The accepted A/B/C repairs are integrated. All three joined history cases now
-pass. This is a regional execution checkpoint for external Argon review, not
-G2/G3 qualification. No frozen bundle or fresh Persona/DeepSeek run was made.
+pass. Argon accepted the integrated repairs and their scoped evidence on
+2026-10-24. This regional acceptance is not G2/G3 qualification. No frozen bundle or fresh Persona/DeepSeek run was made.
 
 ## What changed
 
@@ -131,11 +131,14 @@ cleanup evidence and repair options. The same investigation found a reporting
 gap: useful stderr is retained in a file, while the exception's stderr field is
 empty. A controlled isolated-store reproduction and an owned Nix repair are
 separate work; local scanner serialization would not cover external scanners.
+Argon verified the retained upstream citation: `findTempRoots` spans lines
+163–216 and the marker write is at line 200 (the original report says 188).
+The retained report is unchanged so its recorded hash remains reproducible.
 
 ## Next gate
 
-External Argon reviews this candidate and the exercised/refused boundaries.
-After acceptance, follow `plans/shared-warm-compiler/completion/g2-completion.md`
+External Argon accepted this candidate and the exercised/refused boundaries.
+Qualification is now executing against the unchanged code candidate. Follow `plans/shared-warm-compiler/completion/g2-completion.md`
 for ordinary notebook/discovery/reload/lifecycle checks, the matched frozen
 bundle, selected Persona tools/rendered memory, and bounded real DeepSeek use.
 Parallel service startup is not qualified by the serial retry. G3's broader

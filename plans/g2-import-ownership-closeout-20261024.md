@@ -82,7 +82,7 @@ Return consolidated candidate and evidence to external Argon for final adversari
 - [x] B implemented, compiled and focused controls executed (physical control, seven runtime controls, final prior-stage rerun; `slots/evidence.json`)
 - [x] C implemented, compiled and focused controls executed (nine controls plus strengthened ordered-import control; `rows/evidence.json`)
 - [x] Joined deterministic, distinct-value and bounded generated histories executed and passed
-- [x] Integrated deletion/consumer review and Argon handoff prepared (external acceptance pending)
+- [x] Integrated deletion/consumer review and external Argon acceptance complete
 - [ ] Existing G2 bundle and Persona acceptance
 
 Selected joined fixture cohorts passed at `5650c5773b`: one recovered-base
