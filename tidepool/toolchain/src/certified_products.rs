@@ -37040,6 +37040,228 @@ None,
     }
 
     #[test]
+    fn issued_original_binding_overlay_preserves_exact_child_graph() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
+        };
+        use crate::declaration_context::{
+            ExactCompileContext, ExactDeclarationContext, ProductCompilerInputs, ProductInputGroups,
+        };
+        use crate::declaration_join::ExactLexicalNode;
+        const PRODUCER: &[u8] = b"issued-original-overlay";
+        let producer =
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(PRODUCER)
+                .sha256();
+        let child = fixture_finalized_product(
+            original_groups_fixture("OverlayChild", vec![(7, vec![])], 1, &BTreeMap::new()),
+            producer,
+        );
+        let child_entry = Arc::new(ArtifactEntry::original(producer, child.clone()).unwrap());
+        let inventory = ArtifactInventory::default();
+        let child_view = inventory
+            .admit_recovery_selection(
+                &inventory.empty_view(),
+                vec![Arc::clone(&child_entry)],
+                &BTreeSet::from([NativeGroupKey {
+                    artifact: child_entry.descriptor.id,
+                    original_ordinal: 7,
+                }]),
+            )
+            .unwrap();
+        let context = ExactDeclarationContext::retained_execution_fixture(
+            producer,
+            &child_view,
+            CompilerInputProjection::from_issued_entries(&[Arc::clone(&child_entry)]).unwrap(),
+            vec![ExactLexicalNode {
+                owner: child_entry.descriptor.owner.clone(),
+                imports: vec![],
+            }],
+            child_entry.descriptor.owner.clone(),
+            &[],
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(context))
+            .prepare_compilation(directory.path(), PRODUCER)
+            .unwrap();
+        let source = request.compiler_inputs().shared_compiler_source_support();
+        let primary = source
+            .compiler_primary_input(&child_entry.descriptor.owner)
+            .unwrap()
+            .unwrap();
+        let interface = primary.interface();
+        let original = primary.original().unwrap();
+        let binder = child
+            .original_native()
+            .group(7)
+            .unwrap()
+            .group()
+            .binders()
+            .first()
+            .unwrap()
+            .clone();
+        let reference = ReceiptImportOwner::OriginalBinding {
+            unit: child.owner().unit.clone(),
+            module: child.owner().module.clone(),
+            interface,
+            original,
+            binder: binder.clone(),
+        };
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let resolved = ResolvedOriginalBindings::issue(
+            Arc::clone(&source),
+            Arc::clone(&operation),
+            [&reference],
+        )
+        .unwrap();
+        let inputs = ProductCompilerInputs::from_exact(request.compiler_inputs())
+            .with_original_bindings(
+                OriginalBindingSelection::from_resolved(resolved),
+                &operation,
+            )
+            .unwrap();
+        let mut selection =
+            CertifiedSourceSelection::from_product_compiler_inputs(&inputs, &operation).unwrap();
+
+        // Compiler-shaped metadata is not executable authority. The physical
+        // cohort below must earn the exact child edge from the resolved input.
+        let draft = original_groups_fixture(
+            "OverlayParent",
+            vec![(
+                7,
+                vec![PendingImportOwner::Source {
+                    owner: child.owner().clone(),
+                    original_ordinal: 7,
+                    binder,
+                }],
+            )],
+            2,
+            &BTreeMap::new(),
+        );
+        let mut witness = decode_home_witness(draft.certification_bytes()).unwrap();
+        witness.groups[0].2[0].owner = reference;
+        witness.sources.clear();
+        let parent = fixture_finalized_product(
+            crate::recovery_artifacts::OriginalDraft::from_certification(
+                draft.owner().clone(),
+                draft.interface_bytes().to_vec(),
+                draft.product_bytes().to_vec(),
+                draft.package_imports_bytes().to_vec(),
+                encode_home_witness(&witness).unwrap(),
+            ),
+            producer,
+        );
+        let parent_entry = Arc::new(ArtifactEntry::original(producer, parent.clone()).unwrap());
+        assert!(native_requirements_from_witness(&witness)
+            .artifact_edges
+            .is_empty());
+        selection
+            .admit_current(
+                parent.owner(),
+                ProductOrigin::RetainedCore,
+                parent.module_interface(),
+                &operation,
+            )
+            .unwrap();
+        selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), std::slice::from_ref(&parent)).unwrap(),
+            )
+            .unwrap();
+        let mut validation = PackageInterfaceValidation::with_inventory(Arc::clone(&operation));
+        let physical = inventory
+            .bind_segment(
+                request.compiler_inputs().artifacts(),
+                vec![Arc::clone(&parent_entry)],
+                &selection,
+                &mut validation,
+            )
+            .unwrap();
+        let observations = source_target_observations(&[(&parent, 7)]);
+        let prepared = prepared_target_fixture(&observations);
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &observations, &operation).unwrap();
+        let target = inventory
+            .select_native_target(
+                physical.captured_stage().physical_cohort(),
+                observed,
+                None,
+                None,
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
+        let executable = target.artifacts();
+        let issued =
+            crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
+                executable,
+                None,
+                &mut validation,
+            )
+            .unwrap();
+        let rows = ProductInputGroups::Exact(&issued)
+            .issued_rows()
+            .collect::<CertResult<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "the actual cohort must issue both parent and exact child rows"
+        );
+        let parent_binding = rows
+            .iter()
+            .find(|(binding, _)| binding.binding.artifact() == parent_entry.descriptor.id)
+            .unwrap()
+            .0;
+        let child_binding = rows
+            .iter()
+            .find(|(binding, _)| binding.binding.artifact() == child_entry.descriptor.id)
+            .unwrap()
+            .0;
+        assert_eq!(
+            executable
+                .original_group_children(parent_binding, &operation)
+                .unwrap(),
+            vec![child_binding]
+        );
+        assert_eq!(
+            executable
+                .acquired_original_group_carrier_pair(child_binding, interface.artifact)
+                .unwrap(),
+            (original, interface),
+            "native issuance must retain the exact input pair, not reissue the child's scope"
+        );
+        assert!(
+            matches!(rows.iter().find(|(binding, _)| *binding == parent_binding).unwrap().1.imports(),
+            [SelectedNativeImport::Source { binding, .. }] if *binding == child_binding)
+        );
+        let graph = executable.capture_graph_selection();
+        let membership =
+            AvailableOriginalSources::authenticate(&[parent.clone(), child], &operation).unwrap();
+        let overlay = membership
+            .overlay(ProductInputGroups::Exact(&issued), &operation)
+            .unwrap();
+        assert!(overlay.contains_module("fixture", "OverlayParent"));
+        assert!(overlay.contains_module("fixture", "OverlayChild"));
+        assert_eq!(executable.capture_graph_selection(), graph);
+        assert!(
+            matches!(
+                parent
+                    .original_native()
+                    .group(7)
+                    .unwrap()
+                    .source_imports(parent.original_native()),
+                Err(CertificationError::InputDecision {
+                    reason: InputDecisionRefusal::MissingContinuationOwner,
+                    ..
+                })
+            ),
+            "context-free Original metadata still cannot reconstruct the selected child"
+        );
+    }
+
+    #[test]
     fn nominal_original_home_metadata_survives_cold_without_group_permission() {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, ArtifactPayload,
@@ -37241,60 +37463,6 @@ None,
             )
             .unwrap();
         assert_eq!(restored.capture_graph_selection(), projected_graph);
-
-        // An explicit executable acquisition checks the parent's exact child
-        // pair before source membership consumes its already issued rows.
-        let executable = inventory
-            .admit_recovery_selection(
-                &physical,
-                vec![Arc::clone(&parent), Arc::clone(&child)],
-                &BTreeSet::from([
-                    crate::artifact_inventory::NativeGroupKey {
-                        artifact: parent.descriptor.id,
-                        original_ordinal: 7,
-                    },
-                    crate::artifact_inventory::NativeGroupKey {
-                        artifact: child.descriptor.id,
-                        original_ordinal: 7,
-                    },
-                ]),
-            )
-            .unwrap();
-        let mut validation = PackageInterfaceValidation::default();
-        let issued =
-            crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
-                &executable,
-                None,
-                &mut validation,
-            )
-            .unwrap();
-        let products = [product.clone(), child_product.clone()];
-        let membership =
-            AvailableOriginalSources::authenticate(&products, &validation.inventory).unwrap();
-        let before_overlay = executable.capture_graph_selection();
-        let overlay = membership
-            .overlay(
-                crate::declaration_context::ProductInputGroups::Exact(&issued),
-                &validation.inventory,
-            )
-            .unwrap();
-        assert!(overlay.contains_module("fixture", "NominalParent"));
-        assert!(overlay.contains_module("fixture", "NominalChild"));
-        assert_eq!(
-            executable.capture_graph_selection(),
-            before_overlay,
-            "source membership must not reselect the issuing child graph"
-        );
-        assert!(
-            matches!(
-                native.groups[0].source_imports(native),
-                Err(CertificationError::InputDecision {
-                    reason: InputDecisionRefusal::MissingContinuationOwner,
-                    ..
-                })
-            ),
-            "context-free metadata must still refuse to invent OriginalBinding execution"
-        );
 
         // Omitting metadata custody does not alter any selected outgoing row;
         // the full nominal witness independently detects the lost exact pair.
