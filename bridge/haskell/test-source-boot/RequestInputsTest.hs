@@ -1860,20 +1860,22 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
         runScope (pure ()) $ \compiler -> do
           reference <- scopedEnsureWorld compiler (ExactInputsRequest (worldInputsIdentity facts) (CompleteExactInputs packetPath))
             >>= requireReady
-          (_,diagnostics) <- captureDiagnostics $ forM_ ["(1 :: Int)","CanonicalPartialFacadeAgain.usePartial"] $ \expression -> do
-            let query = WorldQueryRequest (worldInputsIdentity facts) reference
-                  (WorldScopedQuery (WorldObservationExpression (InspectionProvenance 1 "carried-import") expression))
-                  (rootB </> "query.bin")
-            args <- decodeWorldArgs [WorldQuery query]
-            answer <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) runBoundWorldQuery
-            case deserialiseFromBytes decodeTerm (BL.fromStrict (BS.drop 12 answer)) of
-              Right (remaining,TList [_,_,_,_,TList [TString "answer",TBytes payload]])
-                | BL.null remaining,"Int" `BS.isInfixOf` payload -> pure ()
-              other -> fail ("source-less carried import did not typecheck: " ++ show other)
-          forM_ ["finalized_core_admitted_seeds","finalized_core_encoding_attempts"
-            ,"world.cell.canonical_body_acquisitions","world.cell.canonical_make_view_core_reads"] $ \counter ->
-            unless (sum (counterValues counter diagnostics) == 0)
-              (fail ("TYPE-only carried import demanded Core: " ++ counter))
+          let typeOnlyCounters = ["finalized_core_admitted_seeds","finalized_core_encoding_attempts"
+                ,"world.cell.canonical_body_acquisitions","world.cell.canonical_make_view_core_reads"]
+          (_,counterEvidence,_) <- captureDiagnosticsWithCounters [(name,2) | name <- typeOnlyCounters] $
+            forM_ ["(1 :: Int)","CanonicalPartialFacadeAgain.usePartial"] $ \expression -> do
+              let query = WorldQueryRequest (worldInputsIdentity facts) reference
+                    (WorldScopedQuery (WorldObservationExpression (InspectionProvenance 1 "carried-import") expression))
+                    (rootB </> "query.bin")
+              args <- decodeWorldArgs [WorldQuery query]
+              answer <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) runBoundWorldQuery
+              case deserialiseFromBytes decodeTerm (BL.fromStrict (BS.drop 12 answer)) of
+                Right (remaining,TList [_,_,_,_,TList [TString "answer",TBytes payload]])
+                  | BL.null remaining,"Int" `BS.isInfixOf` payload -> pure ()
+                other -> fail ("source-less carried import did not typecheck: " ++ show other)
+          forM_ typeOnlyCounters $ \counter ->
+            unless (fmap sum (capturedDiagnosticCounterValues counterEvidence counter) == Just 0)
+              (fail ("TYPE-only carried import demanded Core or lacked complete evidence: " ++ counter))
           completed <- compileDeclaration compiler facts reference rootB template "nominal" 121
             "retainedCall local = CanonicalPartialFacadeAgain.usePartial local"
           completion <- maybe (fail "carried import lost its World completion") pure
@@ -1991,7 +1993,15 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
     withRootedCompilerEnvironment rooted $ do
       -- One universe retains the actual native body cache across two requests.
       withQuietStdout $ withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> do
-        (reference,queryDiagnostics) <- captureDiagnostics $ do
+        let typeOnlyCounters = ["world.cell.canonical_body_acquisitions","world.cell.canonical_body_cache_hits"
+              ,"world.cell.canonical_make_view_core_reads","world.cell.canonical_make_view_core_bytes"
+              ,"finalized_core_admitted_seeds","finalized_core_encoding_attempts"]
+            frontendCounters = [("world.cell.source_frontends.main:" ++ name,1) | name <- names]
+            -- These fixed-cohort native counters have a 64-row observation
+            -- allowance; overflow refuses evidence rather than implying reuse.
+            nativeCounters = frontendCounters ++ [("finalized_core_admitted_seeds",64)
+              ,("world.cell.canonical_body_cache_hits",64),("original_prepared_cache_hits",64)]
+        (reference,queryEvidence,_) <- captureDiagnosticsWithCounters [(name,1) | name <- typeOnlyCounters] $ do
           ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (CompleteExactInputs packetPath))
           reference <- requireReady ready
           let inspection = StructuredInspection (StructuredPublicModule "CanonicalPartialConsumer")
@@ -2007,31 +2017,39 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
               | BL.null remaining,actual == worldInputsIdentityBytes facts,"Int" `BS.isInfixOf` payload -> pure ()
             _ -> fail "real World query did not resolve the canonical value's type"
           pure reference
-        forM_ ["world.cell.canonical_body_acquisitions","world.cell.canonical_body_cache_hits"
-          ,"world.cell.canonical_make_view_core_reads","world.cell.canonical_make_view_core_bytes"
-          ,"finalized_core_admitted_seeds","finalized_core_encoding_attempts"] $ \counter ->
-            unless (sum (counterValues counter queryDiagnostics) == 0)
-              (fail ("TYPE-only World query acquired or encoded native Core: " ++ counter))
-        (first,firstDiagnostics) <- captureDiagnostics (prepare compiler identity reference rootB "native-first" 81)
+        forM_ typeOnlyCounters $ \counter -> do
+          values <- observed queryEvidence counter
+          unless (sum values == 0)
+            (fail ("TYPE-only World query acquired or encoded native Core: " ++ counter))
+        (first,firstEvidence,firstDiagnostics) <- captureDiagnosticsWithCounters nativeCounters
+          (prepare compiler identity reference rootB "native-first" 81)
         requireProducts expected first `onException` hPutStrLn stderr firstDiagnostics
-        unless (sum (counterValues "finalized_core_admitted_seeds" firstDiagnostics) > 0)
+        firstSeeds <- observed firstEvidence "finalized_core_admitted_seeds"
+        unless (sum firstSeeds > 0)
           (fail "first native World request did not decode the issued canonical body")
-        (warm,warmDiagnostics) <- captureDiagnostics (prepare compiler identity reference rootB "native-warm" 91)
+        (warm,warmEvidence,warmDiagnostics) <- captureDiagnosticsWithCounters nativeCounters
+          (prepare compiler identity reference rootB "native-warm" 91)
         requireProducts expected warm `onException` hPutStrLn stderr warmDiagnostics
-        unless (sum (counterValues "world.cell.canonical_body_cache_hits" warmDiagnostics)
-              + sum (counterValues "original_prepared_cache_hits" warmDiagnostics) > 0
-            && sum (counterValues "finalized_core_admitted_seeds" warmDiagnostics) == 0)
+        bodyHits <- observed warmEvidence "world.cell.canonical_body_cache_hits"
+        preparedHits <- observed warmEvidence "original_prepared_cache_hits"
+        warmSeeds <- observed warmEvidence "finalized_core_admitted_seeds"
+        unless (sum bodyHits + sum preparedHits > 0 && sum warmSeeds == 0)
           (fail "repeated native World request did not reuse its decoded canonical body")
-        noSelectedFrontends names (firstDiagnostics ++ warmDiagnostics)
+        noSelectedFrontends names firstEvidence
+        noSelectedFrontends names warmEvidence
       -- A distinct universe has no body cache or previous HPT to lend this request.
       withQuietStdout $ withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> do
         ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (CompleteExactInputs packetPath))
         reference <- requireReady ready
-        (cold,coldDiagnostics) <- captureDiagnostics (prepare compiler identity reference rootB "native-cold" 101)
+        let coldCounters = [("world.cell.source_frontends.main:" ++ name,1) | name <- names]
+              ++ [("finalized_core_admitted_seeds",64)]
+        (cold,coldEvidence,coldDiagnostics) <- captureDiagnosticsWithCounters coldCounters
+          (prepare compiler identity reference rootB "native-cold" 101)
         requireProducts expected cold `onException` hPutStrLn stderr coldDiagnostics
-        unless (sum (counterValues "finalized_core_admitted_seeds" coldDiagnostics) > 0)
+        coldSeeds <- observed coldEvidence "finalized_core_admitted_seeds"
+        unless (sum coldSeeds > 0)
           (fail "cold native World request did not decode its retained canonical Core")
-        noSelectedFrontends names coldDiagnostics
+        noSelectedFrontends names coldEvidence
       -- The packet keeps the same genuine A proof while changing only source
       -- bytes. A new source-domain identity does not endorse that old proof.
       let changedSources = [(name,if name == "CanonicalPartial.hs" then bytes <> "\n-- changed\n" else bytes)
@@ -2055,8 +2073,11 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
     requireReady ready = case ready of
       ExactInputsReady _ reference _ -> pure reference
       other -> fail ("canonical World fixture could not acquire its actual inputs: " ++ show other)
-    noSelectedFrontends names diagnostics = forM_ names $ \name ->
-      unless (sum (counterValues ("world.cell.source_frontends.main:" ++ name) diagnostics) == 0)
+    observed evidence name = maybe (fail ("counter lacked complete selected evidence: " ++ name)) pure
+      (capturedDiagnosticCounterValues evidence name)
+    noSelectedFrontends names evidence = forM_ names $ \name -> do
+      values <- observed evidence ("world.cell.source_frontends.main:" ++ name)
+      unless (sum values == 0)
         (fail ("selected canonical original was recompiled: " ++ name))
     requireProducts expected actual = case actual of
       Right products | Map.keysSet products == Map.keysSet expected ->

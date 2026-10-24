@@ -5108,13 +5108,17 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
           && counterValues "transaction_reused_source_products" warmDiagnostics == [1]) $
         fail "identical empty exact scopes repeated a dependency frontend"
       requireCheckedApplicability "warm check" warmDiagnostics
-      (carried,carriedDiagnostics) <- captureDiagnostics (admittedCheck scope)
+      let scopeMetadataCounter = "hash_bytes.scope_metadata." ++ scopeRequestSha256 admitted
+          scopeRevalidationCounter = "hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted
+          observedScopeCounter = "hash_bytes.observed_file." ++ scopeRequestSha256 admitted
+      (carried,carriedEvidence,carriedDiagnostics) <- captureDiagnosticsWithCounters
+        [(scopeMetadataCounter,1),(scopeRevalidationCounter,1),(observedScopeCounter,2)] (admittedCheck scope)
       -- Carried inputs need no decode. The request envelope is observed once
       -- at preflight and once by the single terminal receipt publication.
       unless (isInt carried && frontends carriedDiagnostics == 0
-          && null (counterValues ("hash_bytes.scope_metadata." ++ scopeRequestSha256 admitted) carriedDiagnostics)
-          && length (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) carriedDiagnostics) == 1
-          && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 admitted) carriedDiagnostics) == 2) $
+          && capturedDiagnosticCounterValues carriedEvidence scopeMetadataCounter == Just []
+          && fmap length (capturedDiagnosticCounterValues carriedEvidence scopeRevalidationCounter) == Just 1
+          && fmap length (capturedDiagnosticCounterValues carriedEvidence observedScopeCounter) == Just 2) $
         fail ("carried admission decoded its manifest again or omitted a compiler proof barrier: " ++ carriedDiagnostics)
       requireCheckedApplicability "carried check" carriedDiagnostics
       mutatingTemplate <- T.pack <$> readFile (fixture "MetadataMutatingScopeTarget.hs")
@@ -5124,7 +5128,9 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
       receiptsBefore <- sort <$> listDirectory (work </> ".exact-compilations")
       let mutatedScopeSha = artifactSha256 (captureArtifactBytes (BS.snoc originalScopeBytes 0))
       (do
-        (refused,mutationDiagnostics) <- captureDiagnostics
+        let observedMutationCounter = "hash_bytes.observed_file." ++ mutatedScopeSha
+        (refused,mutationEvidence,mutationDiagnostics) <- captureDiagnosticsWithCounters
+          [(scopeRevalidationCounter,1),(observedScopeCounter,1),(observedMutationCounter,1)]
           (try (compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile admitted)
             (Just scope) mutatingTarget [work] Nothing)
             :: IO (Either SomeException CheckedEnvironmentResult))
@@ -5136,9 +5142,9 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
                   && "module=\"MetadataMutatingScopeTarget\"" `isInfixOf` line) (lines mutationDiagnostics)
               -- A failed terminal seal emits no successful proof marker, but
               -- it observes the bytes changed by the actual target splice.
-              , null (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) mutationDiagnostics)
-              , length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 admitted) mutationDiagnostics) == 1
-              , length (counterValues ("hash_bytes.observed_file." ++ mutatedScopeSha) mutationDiagnostics) == 1 -> pure ()
+              , capturedDiagnosticCounterValues mutationEvidence scopeRevalidationCounter == Just []
+              , fmap length (capturedDiagnosticCounterValues mutationEvidence observedScopeCounter) == Just 1
+              , fmap length (capturedDiagnosticCounterValues mutationEvidence observedMutationCounter) == Just 1 -> pure ()
           Left reason -> fail ("post-TH manifest mutation had another refusal: " ++ show reason ++ ": " ++ mutationDiagnostics)
           Right _ -> fail "terminal metadata proof accepted an actually mutated manifest"
         mutated <- BS.readFile scopePath
@@ -6282,14 +6288,19 @@ verifyCollectivePackageProof work prepared = withTiming $ do
   let (firstArtifact,firstSidecar,firstSidecarSha) = firstWitness
   forM_ [1::Int .. 3] $ \_ -> do
     writeIORef resolverCalls 0
-    (result,diagnostics) <- captureDiagnostics (revalidateExactScope environment admitted)
+    let noDecodeCounters = ["package_proof.sidecar_decodes","exact_scope.certificate_decodes"
+          ,"package_proof.union_extensions"]
+        interfaceReadCounter = "hash_bytes.observed_file." ++ exactSha256 firstArtifact
+        sidecarReadCounter = "hash_bytes.observed_file." ++ firstSidecarSha
+    (result,proofEvidence,_) <- captureDiagnosticsWithCounters
+      [(name,1) | name <- noDecodeCounters ++ [interfaceReadCounter,sidecarReadCounter]]
+      (revalidateExactScope environment admitted)
     requireRight "admitted input snapshot" result
     calls <- readIORef resolverCalls
-    unless (calls == 1 && count "package_proof.sidecar_decodes" diagnostics == 0
-        && count "exact_scope.certificate_decodes" diagnostics == 0
-        && count "package_proof.union_extensions" diagnostics == 0
-        && null (counterValues ("hash_bytes.observed_file." ++ exactSha256 firstArtifact) diagnostics)
-        && null (counterValues ("hash_bytes.observed_file." ++ firstSidecarSha) diagnostics)) $
+    unless (calls == 1
+        && all (\name -> fmap sum (capturedDiagnosticCounterValues proofEvidence name) == Just 0) noDecodeCounters
+        && capturedDiagnosticCounterValues proofEvidence interfaceReadCounter == Just []
+        && capturedDiagnosticCounterValues proofEvidence sidecarReadCounter == Just []) $
       fail "warm proof reread captured interface/sidecar bytes or skipped current Finder"
   -- Add a second real compiled owner and a previously absent installed root.
   secondInterface <- maybe (fail "snapshot extension lacks its compiled support interface") pure
