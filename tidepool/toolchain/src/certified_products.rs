@@ -37156,10 +37156,17 @@ None,
         assert!(native_requirements_from_witness(&witness)
             .artifact_edges
             .is_empty());
+        assert!(
+            source
+                .compiler_primary_input(&parent_entry.descriptor.owner)
+                .unwrap()
+                .is_none(),
+            "the newly produced Parent must not be an inherited request input"
+        );
         selection
             .admit_current(
                 parent.owner(),
-                ProductOrigin::RetainedCore,
+                ProductOrigin::Fresh,
                 parent.module_interface(),
                 &operation,
             )
