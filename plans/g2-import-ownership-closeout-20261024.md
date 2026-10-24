@@ -19,7 +19,22 @@ Owner: Sol import worker. Own `bridge/haskell` production changes and affected t
 
 Tests: captured wildcard after local narrowing; repeated narrowing identity/clone count/monotonicity; repeated Prelude narrowing; old facade plus new Originals, grouped constructor precedence and qualified historical reads; DuplicateRecordFields across multiple passes; explicit/hiding, duplicate/missing, aliased/package/SOURCE/qualified-only substitution refusals; legal restricted alias beside direct import. Inspect other `selectedImportNames` consumers (Display and quasiquote/provider selection).
 
-Immediate failure is stage 9 compiling G5 with prefix [G4]. Mutual G3/G5 deletion is a separate predicted later-stage defect, not an observed runtime result. Current retained evidence lives in the previous plan's `.tmpXP7zwu` transaction.
+The former stage-9 G5 wildcard failure is repaired. Joined execution at
+`1519173f26714b617305ab3497c5cdaa0c6b7422` compiles that declaration and reaches
+the next segment. Its demand renamer still consumes raw G3/G5 imports before
+the final frontend applies chronological refinement, producing an ambiguous
+`historyCaptured`. Both the deterministic repeat and a distinct-value history
+reach this same boundary; their cold histories succeed. Retained diagnostics:
+`joined-1519-history-two-retry/{4af84036685f91b40a3f31a583d4187c031f56059edf1ad9a601de7a48b2e33d,af7aeb8565ba408173b32b42fd7621d87e6da16cedb4a213dbe50975afcad7d6}/artifacts/compiler-transactions/`.
+
+Bounded follow-up: derive the demand import view from the actual matched
+generated driver after prefix/import/operand restoration. Reuse the local
+declaration and chronological import rules. Project only imports onto the
+original no-quasiquote/root-checked demand declarations, with the same native
+annotations. Keep raw captured imports for source qualification. Do not call
+the complete final transform from demand: completed value aliases depend on
+demand, and typed-segment lowering/inspection normalization belong to final
+checking. Reject mismatched captured sources or refined driver ownership.
 
 ## B: selected values consume exact target-issued slot evidence
 
@@ -60,9 +75,16 @@ Return consolidated candidate and evidence to external Argon for final adversari
 
 ## Progress
 
-- [ ] A implemented, compiled and focused controls executed
-- [ ] B implemented, compiled and focused controls executed
-- [ ] C implemented, compiled and focused controls executed
+- [x] A implemented, compiled and focused controls executed (six named cases; `imports/summary.json`)
+- [x] B implemented, compiled and focused controls executed (physical control, seven runtime controls, final prior-stage rerun; `slots/evidence.json`)
+- [x] C implemented, compiled and focused controls executed (nine controls plus strengthened ordered-import control; `rows/evidence.json`)
 - [ ] Joined deterministic and bounded generated histories executed
 - [ ] Integrated deletion/consumer review and Argon handoff
 - [ ] Existing G2 bundle and Persona acceptance
+
+Selected joined fixture cohorts passed at `5650c5773b`: one recovered-base
+program and eight user-type programs; `rows/joined-fixture-evidence.json`.
+The first joined history attempt built successfully but failed during compiler
+service startup on a malformed Nix root-query response. The retry reached the
+actual notebook failure described above; retain those as separate outcomes.
+No passing warm history, frozen bundle, or Persona acceptance is claimed.
