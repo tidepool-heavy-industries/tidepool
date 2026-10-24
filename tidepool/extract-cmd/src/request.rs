@@ -3315,31 +3315,22 @@ mod tests {
             .unwrap();
             assert_eq!(source.mode(), RequestMode::Source);
             assert!(!source.target_names().is_empty());
-            for (recipe, mode) in [
-                (
-                    vec!["input.hs", "--turn", "--turn-out", "turn.cbor"],
-                    RequestMode::Turn,
-                ),
-                (
-                    vec![
-                        "input.hs",
-                        "--turn",
-                        "--activation-preview",
-                        "--turn-out",
-                        "turn.cbor",
-                    ],
-                    RequestMode::ActivationPreview,
-                ),
-            ] {
-                let valid = ExtractRequest::from_cli(
-                    &recipe
-                        .iter()
-                        .copied()
-                        .map(OsString::from)
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap();
+            for mode in [RequestMode::Turn, RequestMode::ActivationPreview] {
+                let mut command = crate::ExtractCmd::with_bin(
+                    crate::ResolvedExtractBin::assume_resolved("selected-frontend"),
+                );
+                command.input("input.hs").turn().turn_out("turn.cbor");
+                if mode == RequestMode::ActivationPreview {
+                    command.activation_preview();
+                }
+                let valid = command.request;
                 assert_eq!(valid.mode(), mode);
+                assert_eq!(
+                    ExtractRequest::decode_worker_argv(&valid.worker_argv())
+                        .unwrap()
+                        .mode(),
+                    mode
+                );
                 let mut malformed = valid.clone();
                 malformed.fields.extend(
                     source
@@ -3350,20 +3341,28 @@ mod tests {
                 );
                 assert_eq!(malformed.mode(), RequestMode::Invalid);
                 assert!(!malformed.supports_compile_input_identity());
-                let mut invalid = recipe;
-                invalid.extend_from_slice(&target);
-                assert!(ExtractRequest::from_cli(
-                    &invalid.into_iter().map(OsString::from).collect::<Vec<_>>(),
-                )
-                .is_err());
+                assert_eq!(
+                    ExtractRequest::decode_worker_argv(&malformed.worker_argv())
+                        .unwrap()
+                        .mode(),
+                    RequestMode::Invalid
+                );
             }
+            let mut invalid = vec!["input.hs", "--turn", "--turn-out", "turn.cbor"];
+            invalid.extend_from_slice(&target);
+            assert!(ExtractRequest::from_cli(
+                &invalid.into_iter().map(OsString::from).collect::<Vec<_>>(),
+            )
+            .is_err());
         }
     }
 
     #[test]
     fn cli_rejects_unknown_options() {
-        let error = ExtractRequest::from_cli(&["--traget".into(), "answer".into()]).unwrap_err();
-        assert_eq!(error.to_string(), "unknown option: --traget");
+        for option in ["--traget", "--activation-preview"] {
+            let error = ExtractRequest::from_cli(&[option.into(), "answer".into()]).unwrap_err();
+            assert_eq!(error.to_string(), format!("unknown option: {option}"));
+        }
     }
 
     #[test]
