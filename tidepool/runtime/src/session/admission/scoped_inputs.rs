@@ -1020,11 +1020,9 @@ mod tests {
             "the post-shadow consumer must retain the earlier read's exact producer"
         );
         let scope = execution.private_scope();
-        let result_id = resident
-            .state
-            .resolve_in(scope, "sameStageResult")
-            .unwrap()
-            .id;
+        let (result_id, _, _, _) = resident
+            .current_binding_in(scope, "sameStageResult")
+            .unwrap();
         let custody = resident
             .retain_binding_custody_in(scope, "sameStageResult", result_id)
             .unwrap()
