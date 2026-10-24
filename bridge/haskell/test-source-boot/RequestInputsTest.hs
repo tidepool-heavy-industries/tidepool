@@ -128,13 +128,14 @@ import Tidepool.GhcPipeline
   , completedCompilerWorldStage, CompilerRecoveryCaches(..), withCompiledWorldStage
   , completedCompilerResult, completedCompilerWorldCompletion, worldCompilerCompletionInputs
   , worldCellExactImports, pprOriginalBindings, pprOriginalReferences
-  , heldWorldCellStagePath, heldWorldCellStageTypedSource
+  , heldWorldCellStagePath, heldWorldCellStageTypedSource, heldWorldCellStageOriginal
   , heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
   , WorldCellRefusal(..), CompilerTransactionFailure(..), emitWorldAcquisitionRejection
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts, prTargetTcGblEnv
   , preparedExactCompilation, preparedFreshDependencies
   , withResidentCompilerScopes, scopedRunGhc )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
+import Tidepool.PlannedDeclaration (plannedModule)
 import Tidepool.ImportSyntax
   ( CapturedImportSyntax, captureImportSyntax, capturedImportOccurrences
   , matchDriverImports, driverImportOccurrences, importOccurrenceId, importOccurrenceDescriptor
@@ -2677,8 +2678,10 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                                   ,worldCellPrepareDirectory=metadataDirectory
                                   ,worldCellPrepareOutput=metadataDirectory </> "prepared.cbor"}
                             firstAdmission <- scopedValidateWorldCell compiler grant executor metadataPrepare >>= either (fail . show) pure
-                            _ <- scopedPrepareWorldCellStage compiler firstAdmission >>= maybe
+                            issued <- scopedPrepareWorldCellStage compiler firstAdmission >>= maybe
                               (fail "Name control lost its real declaration stage") pure
+                            declaration <- maybe (fail "metadata control lost its planned declaration owner") pure
+                              (heldWorldCellStageOriginal issued)
                             compiled <- scopedCompileWorldCell compiler firstAdmission (PreparedProducts Nothing) Set.empty
                             stage <- maybe (fail "Name control lost its paired compiler stage") pure
                               (completedCompilerWorldStage compiled)
@@ -2701,15 +2704,17 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                               let ownMetadata = currentOriginalGroupMetadata currentInventory
                                   metadataIdentity (constructors,sites) =
                                     (map issuedConstructorIdentity constructors,sites)
-                              let issuedSites = concatMap snd (Map.elems ownMetadata)
+                              let declarationMetadata = Map.filterWithKey
+                                    (\(_,name,_,_) _ -> name == T.pack (plannedModule declaration)) ownMetadata
+                                  issuedSites = concatMap snd (Map.elems declarationMetadata)
                               unless (not (null issuedSites)
                                   && any (not . null . Effect.ysInputTypeWitnesses) issuedSites
                                   && all (all (maybe False (isJust . encodeCheckedTypeWitness))
                                     . Effect.ysInputTypeWitnesses) issuedSites)
                                 (fail "admitted original metadata lost its effect sites or producer-sealed input witnesses")
                               (coordinate,selectedMetadata,otherMetadata) <- case
-                                  [(key,value,other) | (key,value) <- Map.toAscList ownMetadata
-                                    , not (null (fst value))
+                                  [(key,value,other) | (key,value) <- Map.toAscList declarationMetadata
+                                    , not (null (snd value))
                                     , other <- Map.elems ownMetadata
                                     , metadataIdentity value /= metadataIdentity other] of
                                 triple:_ -> pure triple
