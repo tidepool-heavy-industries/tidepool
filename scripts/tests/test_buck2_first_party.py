@@ -1686,6 +1686,12 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         generic = self.rule("tidepool/runtime", "tidepool_runtime_unit_tests_all",
                             "tidepool_rust_test_cases")
         selected = cohort["exact_tests"]
+        opacity_cases = {"session::turn::scaling_tests::typed_segment_tests::" + suffix for suffix in (
+            "native_class_default_keeps_its_captured_seed_after_shadowing",
+            "native_class_default_calls_its_explicit_sibling_after_shadowing",
+            "native_inline_specialized_function_keeps_its_strict_historical_capture",
+        )}
+        self.assertTrue(opacity_cases <= set(selected))
         self.assertTrue(selected)
         self.assertEqual(len(selected), len(set(selected)))
         self.assertEqual(cohort["expected_count"], len(selected))

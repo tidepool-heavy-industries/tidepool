@@ -1367,6 +1367,9 @@ RUNTIME_PARKED_CAPTURE_CASES = ["session::turn::scaling_tests::typed_segment_tes
 
 
 RUNTIME_TYPED_SEGMENT_SEMANTIC_CASES = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
+    "native_class_default_keeps_its_captured_seed_after_shadowing",
+    "native_class_default_calls_its_explicit_sibling_after_shadowing",
+    "native_inline_specialized_function_keeps_its_strict_historical_capture",
     "scaffold_diagnostics::shipped_world_scaffold_scopes_equality_with_a_custom_prelude",
     "scaffold_diagnostics::world_preparation_reports_authored_record_warning_without_imported_warnings",
     "signed_template_helpers_execute_recursion_and_polymorphism_once",
