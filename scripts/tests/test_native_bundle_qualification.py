@@ -4620,6 +4620,31 @@ class CompilerServicePackageTests(unittest.TestCase):
         return SimpleNamespace(**vars(acquire), provider_outcome=outcome,
             provider_outcome_sha256=qualification.sha256(outcome), complete_retirement=complete)
 
+    def test_preboot_cleanup_attempts_each_independent_exact_root(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary), extra_package=True) as provider:
+            acquire = provider.acquire_args()
+            def fail_closure(tools, roots):
+                raise ValueError('primary post-registration closure refusal')
+            original_metadata = qualification.nix_metadata
+            def metadata(tools, roots):
+                if str(provider.record['profile_store_path']) in roots:
+                    return fail_closure(tools, roots)
+                return original_metadata(tools, roots)
+            original_unlink = Path.unlink
+            attempts = []
+            def unlink(path, *args, **kwargs):
+                if path.parent.name == 'gc-roots':
+                    attempts.append(path)
+                    if len(attempts) == 1:
+                        raise PermissionError('first independent unlink refused')
+                return original_unlink(path, *args, **kwargs)
+            with patch.object(qualification, 'nix_metadata', side_effect=metadata), patch.object(Path, 'unlink', new=unlink):
+                outcome = json.loads(qualification.acquire_compiler_service_source(acquire)[12:])
+            self.assertEqual(outcome['settlement'], 'retained_unknown')
+            self.assertIn('primary post-registration', outcome['primary'])
+            self.assertEqual(len(attempts), len(provider.record['acquisition_roots']))
+            self.assertEqual(sum(path.is_symlink() for path in attempts), 1)
+
     def test_matching_partial_settlement_uses_immutable_scope_not_mutable_progress(self):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
             acquire = provider.acquire_args()
@@ -4884,6 +4909,7 @@ class OwnedServiceReportTests(unittest.TestCase):
                          lambda r: r['publication_failures'].append('publication failed'),
                          lambda r: r['action'].update(status='settled'),
                          lambda r: r['source_settlement'].update(status='settled'),
+                         lambda r: r['acquisition'].update(status=[]),
                          lambda r: r.update(acquisition={'status': 'unknown', 'attempt': None, 'failure': 'provider truncated'})]
             for mutate in mutations:
                 report = self.report(owner)

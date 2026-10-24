@@ -1188,16 +1188,26 @@ def _settle_preboot_package_roots(state: dict, plan: Path) -> tuple[str, list[st
             # the optional directory-sync obligation before first registration.
             directory = None
         present = [item for item in state["roots"] if _package_root_present(item)]
+    except BaseException as error:
+        cleanup.append(_package_failure(error))
+    else:
+        # Failed unlink or sync does not prevent independent safe settlement.
         for item in present:
-            Path(item["path"]).unlink()
+            try:
+                Path(item["path"]).unlink()
+            except BaseException as error:
+                cleanup.append(_package_failure(error))
         if directory is not None:
-            _sync_directory(directory)
+            try:
+                _sync_directory(directory)
+            except BaseException as error:
+                cleanup.append(_package_failure(error))
+    if cleanup:
+        state.update(status="retained-unknown", cleanup_failure=cleanup)
+    else:
         for item in state["roots"]:
             item["state"] = "preboot-released"
         state["status"] = "preboot-released"
-    except BaseException as error:
-        cleanup.append(_package_failure(error))
-        state.update(status="retained-unknown", cleanup_failure=cleanup[-1])
     try:
         write_private_json(plan, state)
     except BaseException as error:

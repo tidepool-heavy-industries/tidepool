@@ -72,7 +72,7 @@ def validate_owned_service_report(report: dict, owner: Path) -> dict:
     shapes = {"not_configured": {"status"}, "acquired": {"status", "attempt", "receipt", "profile", "publication"},
               "refused": {"status", "attempt", "primary", "settlement", "cleanup", "publication"},
               "unknown": {"status", "attempt", "failure"}}
-    if status not in shapes or set(acquisition) != shapes[status]:
+    if not isinstance(status, str) or status not in shapes or set(acquisition) != shapes[status]:
         raise ValueError("owned service report has invalid acquisition outcome")
     if status != "not_configured":
         if acquisition["attempt"] is not None:
