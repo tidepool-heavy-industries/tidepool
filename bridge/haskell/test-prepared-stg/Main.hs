@@ -83,7 +83,7 @@ import Tidepool.ExecutionIR
   , renderPreparedInventory )
 import Tidepool.PreparedSites
   ( PreparedSite(..), SiteRejection(..), lookupPreparedVerb, resolvePreparedSiblings )
-import RetainedPluginTest (verifyCompilerReuse, verifyPreparedScope)
+import RetainedPluginTest (verifyCompilerReuse, verifyPreparedScope, verifyNativeBoundary)
 import ModuleProductRoundtripTest
   ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue )
 import TypeEvidenceChecks
@@ -910,6 +910,8 @@ tests = testGroup "prepared-stg-pipeline"
   , testCase "JSON authority refuses dependency shadows" $
       withCaseScratch "json-authority" verifyJsonDependencyAuthority
   , testCase "original prepared pipeline and compiler authority" fullMain
+  , testCase "native declaration opacity and scoped GHC reuse" $
+      withCaseScratch "native-opacity" verifyNativeBoundary
   , testCase "projection interning and constructor conflicts" $
       withCaseScratch "projection-interning" verifyProjectionInterning
   , testCase "module product interface roundtrip" $
