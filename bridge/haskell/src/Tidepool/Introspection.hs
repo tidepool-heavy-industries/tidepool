@@ -20,6 +20,7 @@ module Tidepool.Introspection
     InspectionWork, withInspectionWork, inspectionCompilationWork, runInspection, runInspectionGhc, runWorldInspectionGhc,
     encodeInspectionResults,
     inspectPublicModuleExports,
+    isCleanModuleLookupMiss,
     boundedDistinctNames,
   )
 where
@@ -27,6 +28,7 @@ where
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Monad (foldM, forM, forM_)
+import Control.Exception (throwIO)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.State.Strict (State, evalState, get, put)
 import Data.ByteString qualified as BS
@@ -66,6 +68,8 @@ import GHC.Types.Name.Occurrence (fieldOcc_maybe, isSymOcc, mkTyVarOcc, mkVarOcc
 import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames, mkRdrUnqual, rdrNameOcc, lookupGRE, LookupGRE(..), WhichGREs(..), FieldsOrSelectors(..))
 import GHC.Types.TyThing (tyThingParent_maybe)
 import GHC.Unit.Module (moduleUnit)
+import GHC.Unit.Finder (FindResult(..), findImportedModule)
+import GHC.Types.PkgQual (PkgQual(..))
 import GHC.Unit.Types (unitString)
 import GHC.Types.TyThing.Ppr (pprTyThing, pprTyThingInContext)
 import GHC.Types.FieldLabel (flLabel, flSelector)
@@ -89,7 +93,7 @@ import GHC.Driver.Monad (reflectGhc, Session(..))
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import Tidepool.Timing (readTimingEnabled, emitCount)
 import Tidepool.ExactHydration (forkExactContext)
-import Tidepool.Session (parseSessionModule)
+import Tidepool.Session (isReservedSessionModuleName)
 
 data InfoEntry = InfoEntry
   { infoName :: String,
@@ -461,6 +465,12 @@ inspectionLookupName context name = case lookupTypeEnv (tcg_type_env checked) na
   _ -> lookupName name
   where checked = availabilityTcGblEnv context
 
+-- GHC.lookupName discards lookup diagnostics. An advertised Name without its
+-- declaration is unavailable information, not evidence that the name is absent.
+requireLookupName :: GhcMonad m => Name -> m (Maybe TyThing) -> m TyThing
+requireLookupName name action = action >>= maybe
+  (liftIO (ioError (userError ("inspection declaration information unavailable for " ++ render name)))) pure
+
 searchTypeMatchesWithContext :: (GhcMonad m) => AvailabilityContext -> GlobalRdrEnv -> Name -> Type -> m [TypeMatch]
 searchTypeMatchesWithContext context rdrEnv queryBinder query = do
   let entries =
@@ -642,15 +652,16 @@ runWorldInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionPro
             -- Query the existing occurrence bucket, including qualified-only
             -- imports, then require its exact actual namespace/module below.
             candidates = boundedDistinctNames Nothing
-              (map canonicalName (aliasCandidates ++ canonicalReferenceNames rdrEnv query))
+              (filter relevant (map canonicalName (aliasCandidates ++ canonicalReferenceNames rdrEnv query)))
+            relevant name = maybe "" (moduleNameString . moduleName) (nameModule_maybe name) == owner
+              && occNameString (nameOccName name) == structuredName query
+              && namespaceMatches (structuredNamespace query) name
         things <- fmap catMaybes $ forM candidates $ \name -> do
-          found <- inspectionLookupName context name
-          pure $ do
-            thing <- found
-            let ref = identifierRef name thing
-            if identifierModule ref == owner && identifierName ref == structuredName query
-                && namespaceMatches (structuredNamespace query) name
-                && exactThingMatches (structuredNamespace query) thing then Just (ref,thing) else Nothing
+          thing <- requireLookupName name $ case Map.lookup name aliasNames of
+            Just identifier -> pure (Just (AnId identifier))
+            Nothing -> inspectionLookupName context name
+          pure $ if exactThingMatches (structuredNamespace query) thing
+            then Just (identifierRef name thing,thing) else Nothing
         let requested = IdentifierRef owner (structuredName query) (case structuredNamespace query of
               StructuredTypeName -> TypeIdentifier
               StructuredConstructorName -> ConstructorIdentifier
@@ -666,7 +677,7 @@ runWorldInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionPro
           many -> pure (InspectionStructuredError (StructuredAmbiguous query (map fst many)))
         pure (typeIndex,result:results)
     structured context mode query = do
-      NameSelection _ selection <- namesInScope rdrEnv
+      NameSelection _ selection <- namesInScope tcGblEnv rdrEnv
         (ExactNameInspection (structuredScope query) (structuredNamespace query) (structuredName query))
       case selection of
         Left missingModule -> pure (InspectionStructuredError (StructuredUnknownModule missingModule))
@@ -674,11 +685,10 @@ runWorldInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionPro
           things <- fmap catMaybes $ forM names $ \name -> do
             -- Projection follows actual namespace/winner selection and consumes
             -- only an exact checked local alias Name from this target.
-            found <- case Map.lookup name checkedAliases of
-              Just original -> pure (Just (idName original,AnId original))
-              Nothing -> fmap (name,) <$> inspectionLookupName context name
-            pure (found >>= \selected@(_,thing) ->
-              if exactThingMatches (structuredNamespace query) thing then Just selected else Nothing)
+            selected@(_,thing) <- case Map.lookup name checkedAliases of
+              Just original -> pure (idName original,AnId original)
+              Nothing -> (name,) <$> requireLookupName name (inspectionLookupName context name)
+            pure $ if exactThingMatches (structuredNamespace query) thing then Just selected else Nothing
           pure $ case distinctOn fst things of
             [] -> InspectionStructuredError (StructuredUnknown query)
             [thing] -> inspectResolved mode query visible thing
@@ -697,6 +707,7 @@ runWorldInspectionGhc (InspectionWork work) hscEnv tcGblEnv rdrEnv inspectionPro
         , nameModule_maybe name == Just (tcg_mod tcGblEnv)
         , Just original <- [Map.lookup (occNameString (nameOccName name)) aliases]]
     canonicalName name = maybe name idName (Map.lookup name checkedAliases)
+    aliasNames = Map.fromList [(idName identifier,identifier) | identifier <- Map.elems aliases]
     canonicalize result = case result of
       InspectionTypeMatches query matches -> InspectionTypeMatches query (map canonicalMatch matches)
       answer -> answer
@@ -739,8 +750,8 @@ inspectStructuredCandidates :: GhcMonad m => StructuredMode -> StructuredInspect
   -> m (InspectionResult,Maybe Module)
 inspectStructuredCandidates mode query visibleNames names = do
   things <- fmap catMaybes $ forM names $ \name -> do
-    found <- lookupName name
-    pure ((name,) <$> (found >>= \thing -> if exactThingMatches (structuredNamespace query) thing then Just thing else Nothing))
+    thing <- requireLookupName name (lookupName name)
+    pure $ if exactThingMatches (structuredNamespace query) thing then Just (name,thing) else Nothing
   pure $ case things of
     [] -> (InspectionStructuredError (StructuredUnknown query),Nothing)
     [resolved@(name,_)] -> (inspectResolved mode query visibleNames resolved,nameModule_maybe name)
@@ -749,8 +760,8 @@ inspectStructuredCandidates mode query visibleNames names = do
 -- Selection and attempted-scope evidence are issued by the same search.
 data NameSelection = NameSelection [StructuredNameScope] (Either String ([Name], [Name]))
 
-namesInScope :: GhcMonad m => GlobalRdrEnv -> ExactNameInspection -> m NameSelection
-namesInScope rdrEnv query = case exactNameScope query of
+namesInScope :: GhcMonad m => TcGblEnv -> GlobalRdrEnv -> ExactNameInspection -> m NameSelection
+namesInScope checked rdrEnv query = case exactNameScope query of
   StructuredCurrentScope -> do
     let entries = globalRdrEnvElts rdrEnv
         visible = nub (map greName entries)
@@ -759,7 +770,7 @@ namesInScope rdrEnv query = case exactNameScope query of
           , any (matchesQuery (exactNameQuery query)) (greRdrNames entry)]
     pure (NameSelection [StructuredCurrentScope] (Right (selected,visible)))
   scope -> do
-    (scopes, result) <- visibleNamesInScope rdrEnv scope
+    (scopes, result) <- visibleNamesInScope checked rdrEnv scope
     pure (NameSelection scopes (fmap (\visible -> (filter matches visible, visible)) result))
   where matches name = matchesNameQuery (exactNameQuery query) name
           && namespaceMatches (exactNameNamespace query) name
@@ -776,15 +787,37 @@ canonicalReferenceNames environment query = map greName (lookupGRE environment l
 -- Scope observation is shared by exact selection and discovery inventory.
 -- It issues the names and actual attempts; selecting a projection grants no
 -- additional module/source authority.
-visibleNamesInScope :: GhcMonad m => GlobalRdrEnv -> StructuredNameScope -> m ([StructuredNameScope], Either String [Name])
-visibleNamesInScope rdrEnv scope = case scope of
+visibleNamesInScope :: GhcMonad m => TcGblEnv -> GlobalRdrEnv -> StructuredNameScope -> m ([StructuredNameScope], Either String [Name])
+visibleNamesInScope checked rdrEnv scope = case scope of
   StructuredCurrentScope -> pure ([StructuredCurrentScope], Right (nub (map greName (globalRdrEnvElts rdrEnv))))
   StructuredPublicModule requested
-    | isJust (parseSessionModule requested) -> pure ([], Left requested)
-    | otherwise -> handleSourceError (\_ -> pure ([scope], Left requested)) $ do
-        mdl <- findModule (mkModuleName requested) Nothing
-        resolvedInfo <- getModuleInfo mdl
-        pure ([scope], Right (nub (maybe [] modInfoExports resolvedInfo)))
+    | isReservedSessionModuleName requested -> pure ([], Left requested)
+    | otherwise -> do
+        resolved <- publicModuleExports checked requested
+        pure ([scope], maybe (Left requested) (Right . nub . snd) resolved)
+
+-- Share the held-world resolver's absence contract. Hidden, unusable and
+-- ambiguous providers cannot establish absence, even without a package choice.
+isCleanModuleLookupMiss :: FindResult -> Bool
+isCleanModuleLookupMiss NotFound {fr_pkg=Nothing,fr_mods_hidden=[],fr_pkgs_hidden=[],fr_unusables=[]} = True
+isCleanModuleLookupMiss _ = False
+
+publicModuleExports :: GhcMonad m => TcGblEnv -> String -> m (Maybe (Module,[Name]))
+publicModuleExports checked requested
+  | moduleName (tcg_mod checked) == mkModuleName requested =
+      pure (Just (tcg_mod checked,concatMap availNames (tcg_exports checked)))
+  | otherwise = do
+      resolved <- handleSourceError (\failure -> do
+          environment <- getSession
+          found <- liftIO (findImportedModule environment (mkModuleName requested) NoPkgQual)
+          if isCleanModuleLookupMiss found then pure Nothing else liftIO (throwIO failure))
+        (Just <$> findModule (mkModuleName requested) Nothing)
+      case resolved of
+        Nothing -> pure Nothing
+        Just owner -> do
+          information <- getModuleInfo owner >>= maybe
+            (liftIO (ioError (userError ("inspection module information unavailable for " ++ requested)))) pure
+          pure (Just (owner,modInfoExports information))
 
 matchesNameQuery :: String -> Name -> Bool
 matchesNameQuery query name = query == occurrence
@@ -1023,26 +1056,19 @@ distinctOn key = go Set.empty
 
 inspectModule :: (GhcMonad m) => AvailabilityContext -> String -> Bool -> Maybe Int -> m InspectionResult
 inspectModule context requested expanded budget
-  | isJust (parseSessionModule requested) = pure (InspectionModuleNotFound requested [])
-  | otherwise = handleSourceError
-  (\_ -> pure (InspectionModuleNotFound requested [StructuredPublicModule requested]))
-  $ do
-    let checked = availabilityTcGblEnv context
-        localOwner = tcg_mod checked
-    (mdl, names) <- if moduleName localOwner == mkModuleName requested
-      then pure (localOwner, concatMap availNames (tcg_exports checked))
-      else do
-        owner <- findModule (mkModuleName requested) Nothing
-        resolvedInfo <- getModuleInfo owner
-        pure (owner, maybe [] modInfoExports resolvedInfo)
-    -- A repeated export names the same entity. Deduplicate identities before
-    -- the budget so a truncated answer retains `budget` distinct entries; the
-    -- display-level dedupe below still collapses distinct entities that render
-    -- identically after rendering.
-    rawEntries <- browseEntries context expanded (boundedDistinctNames budget names)
-    let entries = nubBy sameDisplay (sortOn entryKey rawEntries)
-    pure (InspectionBrowse (moduleNameString (moduleName mdl)) expanded entries)
+  | isReservedSessionModuleName requested = pure (InspectionModuleNotFound requested [])
+  | otherwise = do
+    resolved <- publicModuleExports (availabilityTcGblEnv context) requested
+    case resolved of
+      Nothing -> pure (InspectionModuleNotFound requested [StructuredPublicModule requested])
+      Just (mdl,names) -> browse mdl names
   where
+    browse mdl names = do
+      -- Deduplicate identities before the budget, then collapse distinct
+      -- entities that have identical public rendering after presentation.
+      rawEntries <- browseEntries context expanded (boundedDistinctNames budget names)
+      let entries = nubBy sameDisplay (sortOn entryKey rawEntries)
+      pure (InspectionBrowse (moduleNameString (moduleName mdl)) expanded entries)
     sameDisplay left right = infoDisplay left == infoDisplay right
     entryKey entry = (infoName entry, infoKind entry, infoDisplay entry)
 
@@ -1122,16 +1148,16 @@ entriesForMatching context presentation matches visible names = fmap concat $ fo
 
 browseEntries :: (GhcMonad m) => AvailabilityContext -> Bool -> [Name] -> m [InfoEntry]
 browseEntries context expanded names = do
-  found <- fmap catMaybes $ forM names $ \name -> do
+  found <- forM names $ \name -> do
     resolveNameWork context
     let checked = availabilityTcGblEnv context
         local
           | nameIsLocalOrFrom (tcg_mod checked) name = lookupTypeEnv (tcg_type_env checked) name
           | otherwise = Nothing
-    thing <- case local of
+    thing <- requireLookupName name $ case local of
       Just value -> pure (Just value)
       Nothing -> lookupName name
-    pure (fmap (\value -> (name, value)) thing)
+    pure (name,thing)
   let exportedNames = map fst found
       visible =
         if expanded

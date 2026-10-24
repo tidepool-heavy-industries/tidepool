@@ -259,7 +259,7 @@ import Tidepool.ExtractUtil (boundedUtf8, trySynchronous)
 import Tidepool.Logging
   ( LogLevel(LogTrace, LogWarn), LogValue(..), logEvent, logTrace, loggerEnabled, readLogger )
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
-import Tidepool.Introspection (normalizeInspectionWildcards, withInspectionWork, runWorldInspectionGhc, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
+import Tidepool.Introspection (normalizeInspectionWildcards, withInspectionWork, runWorldInspectionGhc, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..), isCleanModuleLookupMiss)
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), validExactInputsRequest, EnsureExactInputsOutcome(..), ExactInputsRejection(..)
   , WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
@@ -2418,7 +2418,7 @@ runWorldPublicModule producer universe baseEnv timing
         found <- liftIO (findImportedModule env (mkModuleName requested) NoPkgQual)
         case found of
           Found _ owner | not (isHomeUnit (hsc_home_unit env) (moduleUnit owner)) -> pure (Just (owner,prepared))
-          NotFound {fr_pkg=Nothing,fr_mods_hidden=[],fr_pkgs_hidden=[],fr_unusables=[]} -> pure Nothing
+          result | isCleanModuleLookupMiss result -> pure Nothing
           _ -> liftIO (throwIO WorldQueryUnavailable)
     case resolved of
       Nothing -> pure (encodeWorldQueryResult facts question WorldAbsent Nothing
