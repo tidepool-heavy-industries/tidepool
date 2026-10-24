@@ -16,7 +16,7 @@ tests = testGroup "worker-response"
   [ testCase "response bounds async unwind and next request" (withScratch check)
   , testCase "SOURCE borrow serializes tasks and rejects foreign thread stale request stage and native queries" (withScratch checkSourceBorrowing)
   , testCase "SOURCE refusal is shared only after authorization and preserves END and fresh requests" (withScratch checkSourceRefusal)
-  , testCase "native refusal admits final errors and rejects swallowed success and warnings" (withScratch checkRefusalTerminal)
+  , testCase "native refusal admits final failures and rejects swallowed success and diagnostics" (withScratch checkRefusalTerminal)
   , testCase "SOURCE borrow cancellation and partial replies poison without deadlock" (withScratch checkSourceBorrowCancellation)
   , testCase "native exchange rejects stale framing and cumulative exhaustion" (withScratch checkNativeExchangeFailures)
   , testCase "source-free cleanup failure suppresses Ready" (withScratch checkSourceFreeCleanup)

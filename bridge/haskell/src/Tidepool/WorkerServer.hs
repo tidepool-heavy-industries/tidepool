@@ -153,7 +153,9 @@ exchangeDemandLocked (NativeDemandExchange header _ input protocol state _) stag
   when (maybe False (> stage) (demandStage accounting)) $
     fail "worker: native demand stage regressed"
   case current of
-    SemanticallyRefused _ reply -> pure (NativeRefused reply)
+    SemanticallyRefused _ reply -> do
+      writeIORef state (SemanticallyRefused (accounting { demandStage = Just stage }) reply)
+      pure (NativeRefused reply)
     _ -> do
       let charged = demandSpent accounting + 331 + toInteger (BS.length payload)
       when (demandSequence accounting == maxBound || charged > maxResponsePayloadBytes) $
