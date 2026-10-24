@@ -1722,18 +1722,16 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
 }
 
 #[test]
-fn historical_source_captures_bind_the_original_value_after_shadowing() {
+fn historical_native_captures_bind_the_original_value_after_shadowing() {
     use tidepool_toolchain::compiler_world::DependencyTerminalOrigin;
-    for (label, source, expected_origin) in [
+    for (label, source) in [
         (
             "inline_historical_capture",
-            include_str!("fixtures/typed-segment-inline-historical-capture.hs"),
-            DependencyTerminalOrigin::NativeOriginal,
+            include_str!("fixtures/typed-segment-inline-native-capture.hs"),
         ),
         (
             "noinline_historical_capture",
-            include_str!("fixtures/typed-segment-noinline-historical-capture.hs"),
-            DependencyTerminalOrigin::NativeOriginal,
+            include_str!("fixtures/typed-segment-noinline-native-capture.hs"),
         ),
     ] {
         let mut session = SemanticSession::new();
@@ -1781,11 +1779,11 @@ fn historical_source_captures_bind_the_original_value_after_shadowing() {
                         })
                         .collect::<Vec<_>>();
                     assert!(terminals.iter().any(|terminal| {
-                        terminal.origin() == expected_origin
+                        terminal.origin() == DependencyTerminalOrigin::NativeOriginal
                             && terminal.identity().module == original.1.module_name()
                             && terminal.generation() == original.1.gen.0
                             && terminal.binding().artifact == original_interface
-                    }), "the actual selected {expected_origin:?} occurrence must retain the historical value");
+                    }), "the actual selected NativeOriginal occurrence must retain the historical value");
                     assert!(terminals.iter().all(|terminal| {
                         terminal.identity().module != replacement.1.module_name()
                     }), "the new visible spelling cannot replace the captured dependency");
@@ -1876,29 +1874,7 @@ fn assert_native_declaration_keeps_its_historical_capture(case: NativeOpacityCas
                 let [certificate] = certificates.as_slice() else {
                     panic!("one actual native-authored declaration");
                 };
-                let owner = certificate.product().owner();
-                let descriptor = certificate
-                    .artifact_view()
-                    .descriptors()
-                    .into_iter()
-                    .find(|descriptor| {
-                        descriptor.kind == ArtifactKind::OriginalModule
-                            && descriptor.owner.unit == owner.unit
-                            && descriptor.owner.module == owner.module
-                    })
-                    .expect("authored certificate retains its own Original carrier");
-                let issuers = certificate
-                    .artifact_view()
-                    .capture_graph_selection()
-                    .native_groups
-                    .into_iter()
-                    .filter(|group| group.binding.artifact() == descriptor.id)
-                    .collect::<BTreeSet<_>>();
-                assert!(
-                    !issuers.is_empty(),
-                    "the declaration owns actual native groups"
-                );
-                declared = Some((descriptor.id, issuers));
+                declared = Some(native_declaration_original(certificate));
             },
         )
         .unwrap();
@@ -2034,37 +2010,42 @@ fn native_inline_specialized_function_keeps_its_strict_historical_capture() {
     });
 }
 
-#[derive(Clone, Default)]
-struct SourceQueryObserver(Arc<CaptureMutex<Vec<(String, u64, String)>>>);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SourceQueryObserver {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _context: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        if event.metadata().target() != "tidepool_toolchain::compiler_world::native_demand" {
-            return;
-        }
-        let mut fields = RequestFields::default();
-        event.record(&mut fields);
-        if fields.0.get("message").map(String::as_str) != Some("source_dependency_query") {
-            return;
-        }
-        self.0.lock().push((
-            fields.0["admission"].clone(),
-            fields.0["stage"].parse().unwrap(),
-            fields.0["binder_occurrence"].clone(),
-        ));
-    }
+// Authored declarations retain their actual issued Original and graph identity;
+// INLINE controls optimization but never grants lexical SOURCE authority.
+fn native_declaration_original(
+    certificate: &tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration,
+) -> (
+    tidepool_toolchain::artifact_inventory::ArtifactId,
+    BTreeSet<tidepool_toolchain::artifact_inventory::NativeGroupBinding>,
+) {
+    let owner = certificate.product().owner();
+    let view = certificate.artifact_view();
+    let artifact = view
+        .descriptors()
+        .into_iter()
+        .find(|descriptor| {
+            descriptor.kind == ArtifactKind::OriginalModule
+                && descriptor.owner.unit == owner.unit
+                && descriptor.owner.module == owner.module
+        })
+        .expect("authored certificate retains its actual Original carrier")
+        .id;
+    let groups = view
+        .capture_graph_selection()
+        .native_groups
+        .into_iter()
+        .filter(|group| group.binding.artifact() == artifact)
+        .collect::<BTreeSet<_>>();
+    assert!(!groups.is_empty(), "the actual Original owns native groups");
+    (artifact, groups)
 }
 
 #[test]
-fn same_cell_source_capture_requeries_only_the_referenced_prior_output() {
+fn same_cell_native_capture_demands_only_the_referenced_prior_output() {
     use tidepool_toolchain::compiler_world::DependencyTerminalOrigin;
     let mut session = SemanticSession::new();
     session
-        .execute("same_cell_source", "historyValue0 <- pure (23 :: Int)", 0)
+        .execute("same_cell_native", "historyValue0 <- pure (23 :: Int)", 0)
         .unwrap();
     let original = session
         .resident
@@ -2076,15 +2057,31 @@ fn same_cell_source_capture_requeries_only_the_referenced_prior_output() {
         .unwrap()
         .certified_interface()
         .artifact_id();
+    let mut historical = None;
     session
-        .execute(
-            "same_cell_source",
-            include_str!("fixtures/typed-segment-inline-historical-capture.hs"),
-            1,
+        .execute_observed(
+            "same_cell_native",
+            include_str!("fixtures/typed-segment-inline-native-capture.hs"),
+            CellDeclarationExpectation::Total(1),
+            SemanticChecks::None,
+            &SourceImports::new(),
+            None,
+            |program| {
+                let declarations = program
+                    .items()
+                    .iter()
+                    .filter_map(|item| item.checked_item().planned_declaration())
+                    .collect::<Vec<_>>();
+                let [certificate] = declarations.as_slice() else {
+                    panic!("one actual historical declaration");
+                };
+                historical = Some(native_declaration_original(certificate));
+            },
         )
         .unwrap();
+    let (historical_artifact, historical_groups) = historical.unwrap();
     session
-        .execute("same_cell_source", "historyValue0 <- pure (91 :: Int)", 0)
+        .execute("same_cell_native", "historyValue0 <- pure (91 :: Int)", 0)
         .unwrap();
     let replacement = session
         .resident
@@ -2093,105 +2090,77 @@ fn same_cell_source_capture_requeries_only_the_referenced_prior_output() {
     assert_ne!(original.0, replacement.0);
     assert_ne!(original.1, replacement.1);
 
-    let observer = SourceQueryObserver::default();
-    let before_effects = Arc::clone(&session.trace);
-    tracing::subscriber::with_default(
-        tracing_subscriber::registry().with(observer.clone()),
-        || {
-            session
-                .execute_observed(
-                    "same_cell_source",
-                    include_str!("fixtures/typed-segment-same-cell-source-capture.hs"),
-                    CellDeclarationExpectation::Total(1),
-                    SemanticChecks::None,
-                    &SourceImports::new(),
-                    None,
-                    |program| {
-                        assert!(before_effects.lock().is_empty());
-                        let terminals = program
-                            .items()
-                            .iter()
-                            .filter(|item| item.native().is_some())
-                            .flat_map(|item| {
-                                item.checked_item().world_stage_dependencies().terminals()
-                            })
-                            .collect::<Vec<_>>();
-                        assert!(
-                            terminals.iter().any(|terminal| {
-                                terminal.origin() == DependencyTerminalOrigin::SourceDefinition
-                                    && terminal.identity().module == original.1.module_name()
-                                    && terminal.generation() == original.1.gen.0
-                                    && terminal.binding().artifact == original_interface
-                            }),
-                            "the executable stage must seal the old exact SOURCE occurrence"
-                        );
-                        assert!(
-                            terminals.iter().all(|terminal| {
-                                terminal.identity().module != replacement.1.module_name()
-                            }),
-                            "the later visible value must not replace the inherited SOURCE capture"
-                        );
-                    },
-                )
-                .unwrap();
-        },
-    );
-    // NativeDemandResolver is borrowed synchronously by the endpoint response
-    // loop. Stage zero proves the subscriber saw this exact resolver admission.
-    let queries = observer.0.lock();
-    let admissions = queries
-        .iter()
-        .filter_map(|(admission, stage, occurrence)| {
-            (*stage == 0 && occurrence == "historicalCapture").then_some(admission)
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        admissions.len(),
-        1,
-        "one actual stage-zero SOURCE operation"
-    );
-    let admission = *admissions.first().unwrap();
-    assert!(
-        queries.iter().any(|(actual, stage, occurrence)| {
-            actual == admission && *stage == 1 && occurrence == "historicalCapture"
-        }),
-        "the used predecessor output must requery its SOURCE use under the new stage fence"
-    );
-    drop(queries);
-    assert_eq!(session.observed(), [23]);
-    session.assert_no_compiler_since_last_effect();
+    for (label, source, used) in [
+        (
+            "same_cell_native",
+            include_str!("fixtures/typed-segment-same-cell-native-capture.hs"),
+            true,
+        ),
+        (
+            "unused_same_cell_native",
+            include_str!("fixtures/typed-segment-unused-same-cell-native-capture.hs"),
+            false,
+        ),
+    ] {
+        let before_effects = Arc::clone(&session.trace);
+        session.execute_observed(
+            label, source, CellDeclarationExpectation::Total(1),
+            SemanticChecks::None, &SourceImports::new(), None,
+            |program| {
+                assert_eq!(before_effects.lock().as_slice(), if used { &[][..] } else { &[23][..] },
+                    "preparation cannot replay or execute the historical observation");
+                let declarations = program.items().iter().filter_map(|item| item.checked_item().planned_declaration()).collect::<Vec<_>>();
+                let [declaration] = declarations.as_slice() else { panic!("one actual same-cell declaration"); };
+                let (same_cell_artifact, _) = native_declaration_original(declaration);
+                let declaration_view = declaration.artifact_view();
+                let retained = declaration_view.selected_native_groups();
+                assert!(retained.iter().any(|group| group.artifact == historical_artifact),
+                    "even an unused declaration retains the captured historical native closure");
+                let retained_issuers = declaration_view.capture_graph_selection().native_groups.into_iter()
+                    .filter(|group| group.binding.artifact() == historical_artifact && retained.contains(&NativeGroupKey {
+                        artifact: historical_artifact, original_ordinal: group.original_ordinal,
+                    })).collect::<BTreeSet<_>>();
+                assert!(!retained_issuers.is_empty());
+                assert!(retained_issuers.is_subset(&historical_groups),
+                    "declaration custody preserves the old Original's exact native issuers");
 
-    let observer = SourceQueryObserver::default();
-    tracing::subscriber::with_default(
-        tracing_subscriber::registry().with(observer.clone()),
-        || {
-            session
-                .execute(
-                    "unused_same_cell_source",
-                    include_str!("fixtures/typed-segment-unused-same-cell-source-capture.hs"),
-                    1,
-                )
-                .unwrap();
-        },
-    );
-    let queries = observer.0.lock();
-    let admissions = queries
-        .iter()
-        .filter_map(|(admission, stage, occurrence)| {
-            (*stage == 0 && occurrence == "historicalCapture").then_some(admission)
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        admissions.len(),
-        1,
-        "the declaration publication must positively observe its actual SOURCE input"
-    );
-    let admission = *admissions.first().unwrap();
-    assert!(queries.iter().all(|(actual, stage, occurrence)| {
-        actual != admission || *stage != 1 || occurrence != "historicalCapture"
-    }), "an unused predecessor output must issue no SOURCE query in the executable stage of the same admission");
-    assert_eq!(session.observed(), [23, 99]);
-    session.assert_no_compiler_since_last_effect();
+                let executable = program.items().iter().filter(|item| item.native().is_some()).collect::<Vec<_>>();
+                assert!(!executable.is_empty(), "the same cell has an actual executable observation");
+                let terminals = executable.iter().flat_map(|item| item.checked_item().world_stage_dependencies().terminals()).collect::<Vec<_>>();
+                assert_eq!(terminals.iter().any(|terminal| {
+                    terminal.origin() == DependencyTerminalOrigin::NativeOriginal
+                        && terminal.identity().module == original.1.module_name()
+                        && terminal.generation() == original.1.gen.0
+                        && terminal.binding().artifact == original_interface
+                }), used, "only the used executable stage demands the exact historical native capture");
+                assert!(terminals.iter().all(|terminal| terminal.identity().module != replacement.1.module_name()),
+                    "the visible replacement never rebinds the captured dependency");
+                if !used {
+                    assert!(terminals.iter().all(|terminal| terminal.identity().module != original.1.module_name()),
+                        "an unused declaration contributes no old value terminal to the executable stage");
+                    assert!(executable.iter().all(|item| item.native().unwrap().required_native_imports().all(|(identity, generation)| {
+                        identity.module != original.1.module_name() || generation != original.1.gen.0
+                    })), "an unused declaration contributes no old runtime value import");
+                }
+                let selected = executable.iter().flat_map(|item| item.native_products().unwrap().artifact_view().selected_native_groups()).collect::<BTreeSet<_>>();
+                for artifact in [historical_artifact, same_cell_artifact] {
+                    assert_eq!(selected.iter().any(|group| group.artifact == artifact), used,
+                        "executable group demand follows actual use, separately from retained declaration custody");
+                }
+                let issuers = executable.iter().flat_map(|item| item.native_products().unwrap().artifact_view().capture_graph_selection().native_groups)
+                    .filter(|group| group.binding.artifact() == historical_artifact && selected.contains(&NativeGroupKey {
+                        artifact: historical_artifact, original_ordinal: group.original_ordinal,
+                    })).collect::<BTreeSet<_>>();
+                assert!(issuers.is_subset(&historical_groups), "executable demand keeps the exact old native issuers");
+                assert_eq!(!issuers.is_empty(), used, "exact old native issuer demand must be nonvacuous only when used");
+            },
+        ).unwrap();
+        assert_eq!(
+            session.observed(),
+            if used { &[23][..] } else { &[23, 99][..] }
+        );
+        session.assert_no_compiler_since_last_effect();
+    }
 }
 
 #[test]

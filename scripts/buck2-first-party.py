@@ -1360,8 +1360,8 @@ RUNTIME_CHECKED_CAPTURE_CASES = ["session::resident::authored_publication_tests:
 )]
 RUNTIME_PARKED_CAPTURE_CASES = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
     "checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects",
-    "historical_source_captures_bind_the_original_value_after_shadowing",
-    "same_cell_source_capture_requeries_only_the_referenced_prior_output",
+    "historical_native_captures_bind_the_original_value_after_shadowing",
+    "same_cell_native_capture_demands_only_the_referenced_prior_output",
     "compiler_issued_binding_survives_capture_and_releases_interface_and_root",
 )]
 
