@@ -59,7 +59,6 @@ import Tidepool.PreparedStg (pmModule, pmBindings, pmOriginalTopNames)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..))
 import Tidepool.SessionArtifacts
 import qualified Tidepool.Session as Session
-import Tidepool.ArtifactBytes (captureArtifactBytes)
 import Tidepool.CheckedPrefixImports (hydrateCompletedValueAliases, transformCompletedValueAliases)
 import Tidepool.CheckedCell (typecheckNativeModule, unannotatedModule)
 import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
@@ -94,17 +93,17 @@ typedValueAliasControl libdir root prepared = do
   captured <- case prProducedSessionInterfaces (pprPipelineResult prepared) of
     value:_ -> pure value
     [] -> fail "typed alias control requires an actual emitted session interface"
-  let (owner,body) = Session.capturedSessionInterfaceBody captured
+  let (owner,_) = Session.capturedSessionInterfaceBody captured
       environment = prHscEnv (pprPipelineResult prepared)
-  (packages,_,required) <- maybe (fail "typed alias control requires actual package evidence") pure
+  (_,_,required) <- maybe (fail "typed alias control requires actual package evidence") pure
     (Session.capturedSessionInterfaceEvidence captured)
   session <- maybe (fail "typed alias control requires an actual canonical Val owner") pure
     (Session.parseSessionModule (moduleNameString (moduleName owner)))
-  (hydrated,identifiers,injectedCapture) <- Session.injectCapturedSessionIfaceWithBindings session body
-    (captureArtifactBytes packages) required environment
+  let hydrated = environment
+      injectedCapture = captured
   home <- maybe (fail "typed alias control lost its installed owner") pure
     (lookupHpt (hsc_HPT hydrated) (moduleName owner))
-  identifier <- case [value | value <- identifiers,getOccString value == "identity"
+  identifier <- case [value | value <- typeEnvIds (md_types (hm_details home)),getOccString value == "identity"
       , varName value `elem` concatMap availNames (mi_exports (hm_iface home))] of
     [value] -> pure value
     _ -> fail "typed alias control requires the actual polymorphic identity export"

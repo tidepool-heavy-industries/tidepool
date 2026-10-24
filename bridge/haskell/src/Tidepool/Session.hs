@@ -64,7 +64,7 @@ module Tidepool.Session
   , mkThinSessionIfaceWithFixities
   , writeSessionIface
   , injectSessionIface
-  , injectSessionIfaceWithBindings, injectCapturedSessionIfaceWithBindings, captureHydratedSessionInterface
+  , injectSessionIfaceWithBindings, captureHydratedSessionInterface
   , injectSessionScope
   , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionInterfaceBody, capturedSessionInterfaceEvidenceBodies, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner
   , injectSessionScopeWithCaptures
@@ -395,25 +395,6 @@ injectSessionIfaceWithBindings root sm hsc0 = do
       unless (not (BS.null bytes) && BS.length bytes <= limit)
         (fail "selected session value payload exceeds bounds or is empty")
       pure bytes
-
--- The closed world reader supplies authenticated interface/package tokens and
--- its exact nominal requirements. This issues type-input custody only; runtime
--- value permission and original/native certification retain their own owners.
-injectCapturedSessionIfaceWithBindings :: SessionModule -> ArtifactBytes -> ArtifactBytes
-  -> [(String,String)] -> HscEnv -> IO (HscEnv,[Id],CapturedSessionInterface)
-injectCapturedSessionIfaceWithBindings sm body packages required hsc0 = do
-  unless (smKind sm == ValMod && not (BS.null (artifactBytes packages))
-      && BS.length (artifactBytes packages) <= 4 * 1024 * 1024)
-    (fail "captured session value has another owner or invalid package evidence")
-  (hydrated,identifiers,owner) <- injectSessionBody sm hsc0 body
-  let actual = sessionNominalOwners hydrated identifiers
-  unless (required == actual)
-    (fail "captured session value nominal requirements differ from its hydrated types")
-  let requirements = captureArtifactBytes (toStrictByteString
-        (encodeListLen (fromIntegral (length actual))
-          <> foldMap (\(unit,name) -> encodeListLen 2 <> encodeString (Text.pack unit) <> encodeString (Text.pack name)) actual))
-  captured <- captureInjectedSessionInterface hydrated owner body (Just (packages,requirements,actual))
-  pure (hydrated,identifiers,captured)
 
 -- The hydration owner has already tied the complete interface closure. This
 -- transition captures that installed allocation; it never decodes or typechecks.

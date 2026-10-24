@@ -77,7 +77,7 @@ import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceA
   InterfaceInputFailure(..))
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), Generation(..), sessionModuleString, sessionHiPath
-  , mkThinSessionIface, writeSessionIface, injectSessionIfaceWithBindings, injectCapturedSessionIfaceWithBindings
+  , mkThinSessionIface, writeSessionIface, injectSessionIfaceWithBindings
   , capturedSessionInterfaceBody, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner )
 import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactSha256)
 import Tidepool.ExtractUtil (getLibdir)
@@ -89,6 +89,12 @@ import Tidepool.PreparedStg
   (newPreparedBodyCache, prepareRecoveredBodies, pmBindings, pmStableTopSpellings
   , newPreparedComponentUnitsPreparer, runPreparedComponentTask, preparedComponentModules, selectPreparedBodyCaches)
 import Tidepool.ExecutionProjection (topBinders)
+import Tidepool.GhcPipeline
+  ( withResidentCompilerScopes, scopedCompile, PipelineSelection(..), CompilePurpose(..)
+  , pprFinalizedModules, pprPipelineResult, prHscEnv )
+import Tidepool.FinalizedModule
+  ( finalizedHomeModInfo, captureFinalizedInterface, homeInterfaceUsageOwners )
+import Tidepool.FinalizedModule.Internal (retainCompletedModuleInterface)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -115,6 +121,7 @@ tests = testGroup "test-prepared-stg"
         , Tasty.withResource (produced >>= checkInlineFixture) (const (pure ())) $ \inline ->
             testCase "retained HOME and absent-owner INLINE refusal" (inline >>= verifyRetainedHome)
         ]
+  , testCase "hydrated original allocation and exact finalization ownership" verifyHydratedOriginalOwners
   , testCase "completed interface capture ownership" verifyCompletedCaptures
   , testCase "concurrent interface cache lifecycle" verifyCacheConcurrency
   , testCase "selected completed cache merge" verifyCacheMerges
@@ -165,6 +172,83 @@ verifyPrivateComponents = forM_ [0 .. 4] $ \size -> do
                     ++ [left | (left, right) <- edges, right == vertex]
               in reach (Set.insert vertex seen) (adjacent ++ pending)
 
+-- The independent-owner premise uses two original empty-HPT snapshots with a
+-- shared NameCache. Rehydrating the populated result may legitimately reuse HMI.
+verifyHydratedOriginalOwners :: IO ()
+verifyHydratedOriginalOwners = do
+  parent <- getTemporaryDirectory
+  bracket (newFixtureDirectory parent) removePathForcibly $ \work -> do
+    let path = work </> "HydratedOwnerFixture.hs"
+        writeSource value = writeFile path (unlines
+          ["module HydratedOwnerFixture where", "__result :: Int", "__result = " ++ show value])
+        name = mkModuleName "HydratedOwnerFixture"
+    writeSource (41 :: Int)
+    withResidentCompilerScopes [work] $ \runScope -> do
+      (previous,firstBody) <- runScope (pure ()) $ \scope -> do
+        prepared <- scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing path [work] Nothing
+        original <- maybe (fail "actual compiler omitted finalization") pure (Map.lookup name (pprFinalizedModules prepared))
+        let environment = prHscEnv (pprPipelineResult prepared)
+            actualHome = finalizedHomeModInfo original
+        body <- captureFinalizedInterface original
+        let artifact = ExactIfaceArtifact "main" "HydratedOwnerFixture" "selected/original.hi"
+              (artifactSha256 body) (homeInterfaceUsageOwners environment (hm_iface actualHome))
+            alias = artifact {exactPath="receiving/alias.hi"}
+        decoder <- newRequestIfaceDecoder
+        capturedRoles <- forM [artifact,alias] $ \selected ->
+          readCapturedExactIfaceClosureWithCheckedValues decoder
+            (\requested -> if requested == selected then pure body else fail "unexpected original owner")
+            environment [selected] [] >>= either fail pure
+        captured <- either throwIO pure (mergeCapturedInterfaceInputs capturedRoles)
+        emptyA <- freshExactContext environment
+        emptyB <- freshExactContext environment
+        first <- hydrateInterfaceInputs emptyA captured
+        second <- hydrateInterfaceInputs emptyB captured
+        let closure = hydratedExactInputs first
+            retained = hydratedClosureAsCapturedInputs closure
+        _ <- either throwIO pure (mergeCapturedInterfaceInputs [retained,retained])
+        assert (case mergeCapturedInterfaceInputs
+            [retained,hydratedClosureAsCapturedInputs (hydratedExactInputs second)] of
+              Left InterfaceCompletedOwnerConflict{} -> True; _ -> False)
+          "independent equal-byte original allocations silently coalesced"
+        repeated <- hydrateInterfaceInputs (hydratedExactEnvironment first) captured
+        _ <- either throwIO pure (mergeCapturedInterfaceInputs
+          [retained,hydratedClosureAsCapturedInputs (hydratedExactInputs repeated)])
+        selected <- either throwIO pure (selectHydratedInterfaceInputs [alias] closure)
+        fresh <- freshExactContext environment
+        installed <- retainInstalledInterfaceInputs fresh selected
+        firstIdentity <- case hydratedExactInterfaces first of
+          [(_,home)] -> evaluate home >>= makeStableName
+          _ -> fail "original hydration changed its selected owner set"
+        case hydratedExactInterfaces installed of
+          [(_,home)] -> do
+            identity <- evaluate home >>= makeStableName
+            assert (identity == firstIdentity) "alias retention replaced the actual original HMI"
+          _ -> fail "alias retention changed its selected owner set"
+        _ <- either fail pure (selectVerifiedExactInterfaceProducts
+          (hydratedClosureAsCapturedInputs (hydratedExactInputs installed)) [alias])
+        finalized <- retainCompletedModuleInterface environment original actualHome
+        completed <- captureCompletedInterfaceInputs environment closure [] [finalized]
+        completionOwner <- retainInstalledInterfaceInputs fresh completed
+        expectedIdentity <- evaluate actualHome >>= makeStableName
+        case hydratedExactInterfaces completionOwner of
+          [(_,home)] -> do
+            identity <- evaluate home >>= makeStableName
+            assert (identity == expectedIdentity) "finalization did not establish its completed allocation"
+          _ -> fail "finalization changed its selected owner set"
+        _ <- either fail pure (selectVerifiedExactInterfaceProducts (hydratedClosureAsCapturedInputs completed) [alias])
+        pure (closure,artifactSha256 body)
+      writeSource (42 :: Int)
+      runScope (pure ()) $ \scope -> do
+        changed <- scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing path [work] Nothing
+        original <- maybe (fail "changed compiler omitted finalization") pure (Map.lookup name (pprFinalizedModules changed))
+        let environment = prHscEnv (pprPipelineResult changed)
+        body <- captureFinalizedInterface original
+        assert (artifactSha256 body /= firstBody) "changed-byte refusal premise did not change the interface"
+        finalized <- retainCompletedModuleInterface environment original (finalizedHomeModInfo original)
+        refused <- try (captureCompletedInterfaceInputs environment previous [] [finalized])
+        assert (case refused of Left (InterfaceInputConflict key) -> key == ("main","HydratedOwnerFixture"); _ -> False)
+          "finalization retained an old alias for changed interface bytes"
+
 verifyCompletedInterfaceMerges :: FilePath -> FilePath -> HscEnv -> IO ()
 verifyCompletedInterfaceMerges libdir work environment = do
   let selected = SessionModule ValMod (Generation 991337)
@@ -176,7 +260,14 @@ verifyCompletedInterfaceMerges libdir work environment = do
         (artifactSha256 body) []
       packages = captureArtifactBytes (encodePackageImports artifact (PackageImportEvidence [root] []))
       changedPackages = captureArtifactBytes (encodePackageImports artifact (PackageImportEvidence [] []))
-  (injected,_,capture) <- injectCapturedSessionIfaceWithBindings selected body packages [] environment
+  capturedInput <- readVerifiedExactIfaceClosure environment [artifact] >>= either fail pure
+  admittedValues <- mapM (either fail pure . admitCheckedValueInterface packages) (verifiedInterfaceProducts capturedInput)
+  admitted <- either throwIO pure (capturedInterfaceInputs admittedValues)
+  injectedOwner <- hydrateInterfaceInputs environment admitted
+  let injected = hydratedExactEnvironment injectedOwner
+  capture <- either throwIO pure (capturedSessionInterfaceFor
+    (hydratedClosureAsCapturedInputs (hydratedExactInputs injectedOwner)) artifact body packages)
+    >>= maybe (fail "authenticated hydration lost its session issuer") pure
   let (_,actualHome) = capturedSessionCompilerProduct capture
   checked <- either throwIO pure (checkCapturedSessionInterface artifact body packages capture)
   assert (sameCapturedSessionInterfaceOwner capture checked)
@@ -204,6 +295,16 @@ verifyCompletedInterfaceMerges libdir work environment = do
     borrowed <- either throwIO pure (capturedSessionInterfaceFor retained alias body packages)
     assert (maybe False (sameCapturedSessionInterfaceOwner capture) borrowed)
       "completed input retention lost an authenticated logical receiving alias"
+  aliasedInputs <- either throwIO pure (mergeCapturedInterfaceInputs
+    [hydratedClosureAsCapturedInputs (hydratedExactInputs injectedOwner),aliased])
+  aliasedOwner <- hydrateInterfaceInputs injected aliasedInputs
+  selectedAlias <- either throwIO pure (selectHydratedInterfaceInputs [alias] (hydratedExactInputs aliasedOwner))
+  aliasPhase <- freshExactContext environment
+  aliasOwner <- retainInstalledInterfaceInputs aliasPhase selectedAlias
+  aliasCapture <- either throwIO pure (capturedSessionInterfaceFor
+    (hydratedClosureAsCapturedInputs (hydratedExactInputs aliasOwner)) alias body packages)
+  assert (maybe False (sameCapturedSessionInterfaceOwner capture) aliasCapture)
+    "checked hydration/selection/retention dropped its receiving alias"
   actualIdentity <- evaluate actualHome >>= makeStableName
   absentCompleted <- freshExactContext injected
   retainedCompleted <- retainInstalledInterfaceInputs absentCompleted completed
@@ -256,7 +357,11 @@ verifyCompletedInterfaceMerges libdir work environment = do
   assert (case mergeCapturedInterfaceInputs [hydratedClosureAsCapturedInputs completed,foreignInput] of
       Left InterfaceNameCacheMismatch -> True; _ -> False)
     "captured merge accepted an interface from another NameCache"
-  (_,_,otherCapture) <- injectCapturedSessionIfaceWithBindings selected body packages [] environment
+  secondEnvironment <- freshExactContext environment
+  otherOwner <- hydrateInterfaceInputs secondEnvironment admitted
+  otherCapture <- either throwIO pure (capturedSessionInterfaceFor
+    (hydratedClosureAsCapturedInputs (hydratedExactInputs otherOwner)) artifact body packages)
+    >>= maybe (fail "independent checked hydration lost its session issuer") pure
   otherCompleted <- captureCompletedInterfaceInputs injected empty [(artifact,otherCapture)] []
   assert (case mergeCapturedInterfaceInputs (map hydratedClosureAsCapturedInputs [completed,otherCompleted]) of
       Left InterfaceCompletedOwnerConflict{} -> True; _ -> False)
