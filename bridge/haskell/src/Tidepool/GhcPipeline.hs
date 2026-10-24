@@ -57,8 +57,8 @@ module Tidepool.GhcPipeline
   ) where
 
 import Tidepool.RequestCompletion
-  ( CleanupStage(CompilerScopeRestore), captureCompletion, withCompletionRelease
-  , attemptReleases, appendCleanupFailures, finishCompletion, completionResult, BodyOutcome(..) )
+  ( Completion, CleanupStage(CompilerScopeRestore), captureCompletion, withCompletionRelease
+  , attemptReleases, appendCleanupFailures, asCleanupFailures, finishCompletion, completionResult, BodyOutcome(..) )
 
 import GHC hiding (typeKind)
 import GHC.Driver.Main (hscDesugar, hscDesugar', hscSimplify, hscMaybeWriteIface, batchMsg, hscTidy, hscCompileCoreExpr', loadIfaceByteCode, generateFreshByteCode, mkCgInteractiveGuts)
@@ -8628,30 +8628,22 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     CompilerRunning -> throwIO CompilerTransactionBusy
                     CompilerFailed -> throwIO CompilerTransactionFailed
                     CompilerClosed -> throwIO CompilerTransactionReleased
-                runGuarded :: forall result. IO result -> IO result
-                runGuarded operation = mask $ \restore -> do
-                  caller <- myThreadId
-                  unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
-                  previous <- atomicModifyIORef' phase $ \state ->
-                    (if state == CompilerReady then CompilerRunning else state,state)
-                  case previous of
-                    CompilerReady -> pure ()
-                    CompilerRunning -> throwIO CompilerTransactionBusy
-                    CompilerFailed -> throwIO CompilerTransactionFailed
-                    CompilerClosed -> throwIO CompilerTransactionReleased
-                  writeIORef interpreterAttempt InterpreterConfirmed
-                  result <- restore operation `catch` \(failure :: SomeException) -> do
-                    writeIORef phase CompilerFailed
-                    writeIORef availability ResidentPoisoned
-                    case fromException failure :: Maybe SomeAsyncException of
-                      Just _ -> writeIORef interrupted True >> throwIO failure
-                      Nothing -> do
-                        case fromException failure of
-                          Just CompilerTransactionPoisoned -> throwIO failure
-                          _ -> pure ()
-                        -- Failed home/finder/memo choices remain private.
-                        -- Demand-loaded fixed package facts survive on the
-                        -- same owner used by lazy completed interfaces.
+                -- Recovery owns both the fixed release actions and permission
+                -- to resume this scope. Callers receive the original failure,
+                -- never an unconditional resume operation or recovery flag.
+                recoverFailedScope :: forall result. SomeException -> IO result
+                recoverFailedScope failure = mask $ \_ -> do
+                  writeIORef phase CompilerFailed
+                  writeIORef availability ResidentPoisoned
+                  case fromException failure :: Maybe SomeAsyncException of
+                    Just _ -> writeIORef interrupted True >> throwIO failure
+                    Nothing -> do
+                      case fromException failure of
+                        Just CompilerTransactionPoisoned -> throwIO failure
+                        _ -> pure ()
+                      recovery <- captureCompletion $ do
+                        -- Failed home/finder/memo choices remain private. Fixed
+                        -- package facts retain their existing lazy owners.
                         mutation <- readIORef interpreterAttempt
                         failures <- attemptReleases $
                           [(CompilerScopeRestore, clearRecovery)
@@ -8665,11 +8657,29 @@ withResidentCompilerScopes baseIncludes useRequests = do
                                 emitReuse timing (ReuseContext identity purpose)
                                   NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing)]
                           else []) ++ [(CompilerScopeRestore, restoreBase)]
-                        when (null failures) $ do
+                        completed <- captureCompletion (pure ())
+                        finishCompletion (appendCleanupFailures completed failures)
+                      case completionResult recovery of
+                        BodySucceeded () -> do
                           writeIORef phase CompilerReady
                           writeIORef availability ResidentBusy
-                        completed <- captureCompletion (throwIO failure)
-                        finishCompletion (appendCleanupFailures completed failures)
+                        _ -> pure ()
+                      completed <- captureCompletion (throwIO failure)
+                      finishCompletion (appendCleanupFailures completed
+                        (asCleanupFailures CompilerScopeRestore recovery))
+                runGuarded :: forall result. IO result -> IO result
+                runGuarded operation = mask $ \restore -> do
+                  caller <- myThreadId
+                  unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
+                  previous <- atomicModifyIORef' phase $ \state ->
+                    (if state == CompilerReady then CompilerRunning else state,state)
+                  case previous of
+                    CompilerReady -> pure ()
+                    CompilerRunning -> throwIO CompilerTransactionBusy
+                    CompilerFailed -> throwIO CompilerTransactionFailed
+                    CompilerClosed -> throwIO CompilerTransactionReleased
+                  writeIORef interpreterAttempt InterpreterConfirmed
+                  result <- restore operation `catch` recoverFailedScope
                   writeIORef interpreterAttempt InterpreterConfirmed
                   writeIORef phase CompilerReady
                   pure result
@@ -9039,8 +9049,10 @@ withResidentCompilerScopes baseIncludes useRequests = do
                       -- Package cells are shared by the fixed boot owner. The
                       -- helper's HOME table, graph and Finder stay private.
                       pure result)
-                finish = do
-                  writeIORef phase CompilerClosed
+                -- These resources must settle even when interpreter recovery
+                -- failed. Its actual Completion blocks dependent backing release.
+                settleScopeResources :: Maybe (Completion ()) -> IO ()
+                settleScopeResources recovery = do
                   retained <- readIORef heldWorld
                   selected <- readIORef universe
                   let uncached = case retained of
@@ -9049,20 +9061,11 @@ withResidentCompilerScopes baseIncludes useRequests = do
                             Just (HeldCompilerWorld _ issued _ _) | issued == reference -> []
                             _ -> [world]
                         Nothing -> []
-                  cancelled <- readIORef interrupted
-                  initialFailures <- attemptReleases $
-                    (if cancelled then
-                      [(CompilerScopeRestore, recoverCompilerInterpreter interpreter baseEnv True)
-                      ,(CompilerScopeRestore, do
-                          purpose <- readIORef operationPurpose
-                          identity <- readIORef operationIdentity
-                          emitReuse timing (ReuseContext identity purpose)
-                            NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing)
-                      ]
-                    else []) ++
+                  restored <- attemptReleases
                     [(CompilerScopeRestore, writeIORef heldWorld Nothing)
                     ,(CompilerScopeRestore, writeIORef active Nothing)
                     ,(CompilerScopeRestore, restoreBase)]
+                  let initialFailures = maybe [] (asCleanupFailures CompilerScopeRestore) recovery ++ restored
                   endObservations <- attemptReleases
                     [(CompilerScopeRestore, do
                         let event
@@ -9077,12 +9080,41 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   backingFailures <- if null initialFailures && null endObservations then attemptReleases
                     [(CompilerScopeRestore,retireCompilerWorldBacking timing universe world) | world <- uncached]
                     else pure []
-                  let failures = initialFailures ++ endObservations ++ backingFailures
-                  if null failures
-                    then when cancelled (writeIORef availability ResidentBusy)
-                    else writeIORef availability ResidentPoisoned
                   completed <- captureCompletion (pure ())
-                  finishCompletion (appendCleanupFailures completed failures)
+                  finishCompletion (appendCleanupFailures completed
+                    (initialFailures ++ endObservations ++ backingFailures))
+                -- Ordinary cleanup cannot repair an earlier poisoned resident.
+                -- Its successful result leaves admission state unchanged.
+                finishOrdinaryScope = do
+                  settled <- captureCompletion (settleScopeResources Nothing)
+                  case completionResult settled of
+                    BodySucceeded () -> pure ()
+                    _ -> writeIORef availability ResidentPoisoned
+                  finishCompletion settled
+                -- Only this operation performs interrupted interpreter recovery
+                -- and restores resident admission after every release confirms.
+                -- The per-scope phase remains Closed throughout.
+                finishInterruptedScope = do
+                  writeIORef availability ResidentPoisoned
+                  recovery <- captureCompletion $ do
+                    failures <- attemptReleases
+                      [(CompilerScopeRestore, recoverCompilerInterpreter interpreter baseEnv True)
+                      ,(CompilerScopeRestore, do
+                          purpose <- readIORef operationPurpose
+                          identity <- readIORef operationIdentity
+                          emitReuse timing (ReuseContext identity purpose)
+                            NativeImage ReuseEpochRotated Recovery Nothing 1 Nothing)]
+                    completed <- captureCompletion (pure ())
+                    finishCompletion (appendCleanupFailures completed failures)
+                  settled <- captureCompletion (settleScopeResources (Just recovery))
+                  case completionResult settled of
+                    BodySucceeded () -> writeIORef availability ResidentBusy
+                    _ -> pure ()
+                  finishCompletion settled
+                finish = do
+                  writeIORef phase CompilerClosed
+                  cancelled <- readIORef interrupted
+                  if cancelled then finishInterruptedScope else finishOrdinaryScope
             let nativeProvenance = do
                   requireReady
                   case (producer,packageAssociation) of
