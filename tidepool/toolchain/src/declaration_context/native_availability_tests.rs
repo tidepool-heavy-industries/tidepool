@@ -3281,7 +3281,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     let refused = next
         .inputs
         .compiler
-        .resolve_native_demand(&packet, &mut validation)
+        .resolve_native_demand(&packet, &[], &mut validation)
         .err()
         .expect("TYPE-only compiler role cannot acquire an Original reference");
     assert!(
@@ -3317,7 +3317,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     let acquired = acquisition
         .inputs
         .compiler
-        .resolve_native_demand(&packet, &mut validation)
+        .resolve_native_demand(&packet, &[], &mut validation)
         .expect("same exact packet uses the explicitly acquired reusable Original role");
     let bindings = crate::certified_products::OriginalBindingSelection::from_resolved(Arc::clone(
         acquired.groups().resolved_original_bindings().unwrap(),

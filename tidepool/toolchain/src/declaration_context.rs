@@ -3784,10 +3784,22 @@ impl DemandNativeInputs {
     fn certify_receipt_groups(
         &self,
         inputs: &ReceiptNativeInputDemand<'_>,
+        acquisitions: &[Arc<ResolvedNativeDemand>],
         validation: &mut PackageInterfaceValidation,
     ) -> Result<DemandCertifiedGroups, CompileError> {
         let operation = validation.inventory.clone();
         let budget = NativeDemandBudget(Some(&operation));
+        for acquisition in acquisitions {
+            budget.checkpoint()?;
+            if !acquisition.belongs_to(&self.cold)
+                || !Arc::ptr_eq(&acquisition.groups.basis, &self.cold)
+                || !Arc::ptr_eq(&acquisition.groups.operation, &operation)
+            {
+                return Err(failure(
+                    "prior native acquisition belongs to another input operation",
+                ));
+            }
+        }
         if inputs
             .resolved_originals
             .as_ref()
@@ -3975,6 +3987,7 @@ impl DemandNativeInputs {
             );
         for contribution in &selected_contributions {
             let mut held_products = BTreeMap::new();
+            let mut issued_rows = BTreeMap::new();
             for id in contribution.originals() {
                 for binding in contribution.original_groups(*id) {
                     let held_owner = self
@@ -3988,7 +4001,16 @@ impl DemandNativeInputs {
                         }
                         crate::linked_native::NativeCodeGrant::Package { .. } => None,
                     });
-                    let local = certified.get(&binding).map(|row| row.issued.product());
+                    let prior = prior_native_demand_row(acquisitions, binding, &budget)?;
+                    let local = certified.get(&binding).or(prior);
+                    if let Some(row) = local {
+                        budget.reserve::<(
+                            crate::artifact_inventory::NativeGroupBinding,
+                            Arc<IssuedSelectedNativeGroup>,
+                        )>(1)?;
+                        issued_rows.insert(binding, Arc::clone(&row.issued));
+                    }
+                    let local = local.map(|row| row.issued.product());
                     if let (Some(held), Some(local)) = (held, local) {
                         if !held.same_issuance(local) {
                             return Err(failure(
@@ -4017,13 +4039,22 @@ impl DemandNativeInputs {
                     ),
                     &previous,
                     validation,
-                    None,
+                    Some(&issued_rows),
                 )
                 .map_err(compiler_evidence_failure)?;
             for (binding, row) in certification.rows {
+                let dependencies = contribution.original_group_children(binding, &operation)?;
+                if prior_native_demand_row(acquisitions, binding, &budget)?
+                    .is_some_and(|prior| prior.dependencies != dependencies)
+                {
+                    return Err(failure(
+                        "selected native binding changed its issued dependency links",
+                    ));
+                }
                 if let Some(previous) = certified.get(&binding) {
                     if !previous.product().same_issuance(row.product())
                         || previous.imports() != row.imports()
+                        || previous.dependencies != dependencies
                     {
                         return Err(failure(
                             "selected native binding changed its product or ordered imports",
@@ -4036,7 +4067,6 @@ impl DemandNativeInputs {
                     PendingCertifiedGroup,
                     [usize; 4],
                 )>(1)?;
-                let dependencies = contribution.original_group_children(binding, &operation)?;
                 certified.insert(
                     binding,
                     SelectedNativeGroupRow {
@@ -4148,12 +4178,42 @@ impl ResolvedNativeDemand {
     }
 }
 
+/// Borrow only the requested binding from prior acquisitions of this request.
+/// The certifier validates their common cold basis and operation before lookup.
+fn prior_native_demand_row<'a>(
+    acquisitions: &'a [Arc<ResolvedNativeDemand>],
+    binding: crate::artifact_inventory::NativeGroupBinding,
+    budget: &NativeDemandBudget<'_>,
+) -> Result<Option<&'a SelectedNativeGroupRow>, CompileError> {
+    let mut selected: Option<&SelectedNativeGroupRow> = None;
+    for acquisition in acquisitions {
+        budget.checkpoint()?;
+        let Some(row) = acquisition.groups.rows.get(&binding) else {
+            continue;
+        };
+        if let Some(prior) = selected {
+            if !prior.product().same_issuance(row.product())
+                || prior.dependencies != row.dependencies
+                || prior.imports() != row.imports()
+            {
+                return Err(failure(
+                    "prior native acquisitions disagree on an issued occurrence",
+                ));
+            }
+        } else {
+            selected = Some(row);
+        }
+    }
+    Ok(selected)
+}
+
 impl RequestCompilerInputs {
     /// Resolve reached Original references through this same actual input owner.
     /// The daemon can relay the packet but cannot call this without its owner.
     pub(crate) fn resolve_native_demand(
         self: &Arc<Self>,
         packet: &crate::certified_products::NativeDemandPacket,
+        acquisitions: &[Arc<ResolvedNativeDemand>],
         validation: &mut PackageInterfaceValidation,
     ) -> Result<ResolvedNativeDemand, CompileError> {
         let resolved = crate::certified_products::ResolvedOriginalBindings::issue(
@@ -4206,7 +4266,7 @@ impl RequestCompilerInputs {
                 DemandNativeInputsError::Compiler(error) => error,
                 other => failure(format!("native demand refused: {other}")),
             })?;
-        let groups = demand.certify_receipt_groups(&inputs, validation)?;
+        let groups = demand.certify_receipt_groups(&inputs, acquisitions, validation)?;
         Ok(ResolvedNativeDemand {
             demand: Arc::new(demand),
             groups: Arc::new(groups),
@@ -12325,6 +12385,7 @@ impl WorldProgramContinuation {
                 sources: Vec::new(),
                 resolved_originals: None,
             },
+            &[],
             validation,
         )?;
         let metadata = receipt
@@ -24802,7 +24863,7 @@ mod tests {
             "a source observation cannot become an executable acquisition query"
         );
         let acquired = cold
-            .resolve_native_demand(&packet, &mut validation)
+            .resolve_native_demand(&packet, &[], &mut validation)
             .unwrap();
         let before = cold.source_support.artifacts().inventory().metrics();
         let mut narrow = Vec::new();
@@ -24914,7 +24975,10 @@ mod tests {
         use crate::artifact_inventory::NativeArtifactDemand;
         let cold = demanded_native_fixture(1, NativeArtifactDemand::AllGroups, false);
         let mut validation = PackageInterfaceValidation::default();
-        let packet = |module: &str, ordinal, validation: &PackageInterfaceValidation| {
+        let packet = |cold: &Arc<RequestCompilerInputs>,
+                      module: &str,
+                      ordinal,
+                      validation: &PackageInterfaceValidation| {
             let primary = cold
                 .compiler_source_support()
                 .compiler_primary_input(&identity("fixture", module))
@@ -24965,20 +25029,24 @@ mod tests {
             crate::certified_products::NativeDemandPacket::decode(&bytes, &validation.inventory)
                 .unwrap()
         };
-        let parent = packet("DemandParent", 7, &validation);
-        let child = packet("DemandChild", 9, &validation);
+        let parent = packet(&cold, "DemandParent", 7, &validation);
+        let child = packet(&cold, "DemandChild", 9, &validation);
         let (first_packet, second_packet) = if child_first {
             (&child, &parent)
         } else {
             (&parent, &child)
         };
         let first = Arc::new(
-            cold.resolve_native_demand(first_packet, &mut validation)
+            cold.resolve_native_demand(first_packet, &[], &mut validation)
                 .unwrap(),
         );
         let second = Arc::new(
-            cold.resolve_native_demand(second_packet, &mut validation)
-                .unwrap(),
+            cold.resolve_native_demand(
+                second_packet,
+                std::slice::from_ref(&first),
+                &mut validation,
+            )
+            .unwrap(),
         );
         let child_binding = *first
             .groups
@@ -24997,10 +25065,10 @@ mod tests {
         assert_eq!(original.dependencies, repeated.dependencies);
         assert_eq!(original.imports(), repeated.imports());
 
-        let unrelated_packet = packet("UnrelatedNative0", 1, &validation);
+        let unrelated_packet = packet(&cold, "UnrelatedNative0", 1, &validation);
         let mut foreign_validation = PackageInterfaceValidation::default();
         let foreign_operation = cold
-            .resolve_native_demand(&unrelated_packet, &mut foreign_validation)
+            .resolve_native_demand(&unrelated_packet, &[], &mut foreign_validation)
             .unwrap();
         assert!(first
             .groups
@@ -25010,6 +25078,40 @@ mod tests {
         assert!(
             first.groups.merge(&foreign_operation.groups).is_err(),
             "disjoint rows cannot borrow another operation"
+        );
+        assert!(
+            cold.resolve_native_demand(
+                second_packet,
+                std::slice::from_ref(&first),
+                &mut foreign_validation
+            )
+            .is_err(),
+            "prior issuance cannot cross accounting operations"
+        );
+        let foreign_cold = demanded_native_fixture(1, NativeArtifactDemand::AllGroups, false);
+        let foreign_packet = if child_first {
+            packet(&foreign_cold, "DemandParent", 7, &validation)
+        } else {
+            packet(&foreign_cold, "DemandChild", 9, &validation)
+        };
+        let foreign_input = Arc::new(
+            foreign_cold
+                .resolve_native_demand(&foreign_packet, &[], &mut validation)
+                .unwrap(),
+        );
+        assert!(Arc::ptr_eq(
+            &foreign_input.groups.operation,
+            &validation.inventory
+        ));
+        assert!(!foreign_input.belongs_to(&cold));
+        assert!(
+            cold.resolve_native_demand(
+                second_packet,
+                std::slice::from_ref(&foreign_input),
+                &mut validation
+            )
+            .is_err(),
+            "equal original facts cannot borrow another request's issuance"
         );
 
         let mut changed = DemandCertifiedGroups {
@@ -25035,6 +25137,20 @@ mod tests {
         assert!(
             first.groups.merge(&changed).is_err(),
             "the exact issued product cannot excuse changed dependency links"
+        );
+
+        let changed = Arc::new(ResolvedNativeDemand {
+            demand: first.demand.clone(),
+            groups: Arc::new(changed),
+        });
+        assert!(
+            cold.resolve_native_demand(
+                second_packet,
+                std::slice::from_ref(&changed),
+                &mut validation
+            )
+            .is_err(),
+            "reusing the original row must still authenticate its dependency links"
         );
 
         let merged = first
@@ -25112,7 +25228,7 @@ mod tests {
             crate::certified_products::NativeDemandPacket::decode(&bytes, &validation.inventory)
                 .unwrap();
         let acquired = cold
-            .resolve_native_demand(&packet, &mut validation)
+            .resolve_native_demand(&packet, &[], &mut validation)
             .unwrap();
         let before = cold.source_support.artifacts().inventory().metrics();
         let parent = acquired.restrict_uses(&packet.originals()[..1]).unwrap();
@@ -25248,9 +25364,12 @@ mod tests {
                 &validation.inventory,
             )
             .unwrap();
-            let resolved = cold.resolve_native_demand(&packet, &mut validation);
-            let result = selected
-                .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation);
+            let resolved = cold.resolve_native_demand(&packet, &[], &mut validation);
+            let result = selected.certify_receipt_groups(
+                &receipt_input_demand_fixture(&receipt),
+                &[],
+                &mut validation,
+            );
             if matches!(mode, NativeArtifactDemand::ScopeInterfaces) {
                 assert!(
                     resolved.is_err(),
@@ -25286,7 +25405,11 @@ mod tests {
             };
             module_version.as_mut().unwrap().0[0] ^= 1;
             assert!(selected
-                .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation)
+                .certify_receipt_groups(
+                    &receipt_input_demand_fixture(&receipt),
+                    &[],
+                    &mut validation
+                )
                 .is_err());
         }
     }
@@ -25456,7 +25579,11 @@ mod tests {
             .unwrap();
         let receipt = demand_group_receipt_fixture(&cold, &root);
         let groups = selected
-            .certify_receipt_groups(&receipt_input_demand_fixture(&receipt), &mut validation)
+            .certify_receipt_groups(
+                &receipt_input_demand_fixture(&receipt),
+                &[],
+                &mut validation,
+            )
             .unwrap();
 
         // R4: certified rows, not the closure map, are the executable binding

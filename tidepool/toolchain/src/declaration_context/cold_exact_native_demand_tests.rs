@@ -244,7 +244,7 @@ fn cold_interface_only_candidates_refuse_nominal_and_original_role_escalation() 
         );
         let request = packet(&history.reference(0, 9001), &validation.inventory);
         let error = cold
-            .resolve_native_demand(&request, &mut validation)
+            .resolve_native_demand(&request, &[], &mut validation)
             .err()
             .expect("exact pair DATA cannot acquire an Original compiler role");
         assert!(
@@ -269,7 +269,7 @@ fn selected_original_packet_keeps_exact_old_group_and_refuses_foreign_acquisitio
         let reference = history.reference(0, 9001);
         let request = packet(&reference, &validation.inventory);
         let acquired = cold
-            .resolve_native_demand(&request, &mut validation)
+            .resolve_native_demand(&request, &[], &mut validation)
             .unwrap();
         assert!(acquired.belongs_to(&cold));
         let expected = *history.offers[0]
@@ -350,7 +350,11 @@ fn selected_original_packet_keeps_exact_old_group_and_refuses_foreign_acquisitio
         );
         original.selection = other_binding.selection;
         let error = cold
-            .resolve_native_demand(&packet(&changed, &validation.inventory), &mut validation)
+            .resolve_native_demand(
+                &packet(&changed, &validation.inventory),
+                &[],
+                &mut validation,
+            )
             .err()
             .expect("equal-canonical other history cannot rewrite selected binding scope");
         assert!(
@@ -358,7 +362,7 @@ fn selected_original_packet_keeps_exact_old_group_and_refuses_foreign_acquisitio
             "actual refusal: {error:?}"
         );
         assert!(
-            cold.resolve_native_demand(&request, &mut validation)
+            cold.resolve_native_demand(&request, &[], &mut validation)
                 .is_ok(),
             "refusals leave unchanged exact input usable"
         );
@@ -408,7 +412,11 @@ fn original_pair_membership_cannot_expand_explicit_empty_group_permission() {
         "the pair and binder really are authenticated members"
     );
     let error = cold
-        .resolve_native_demand(&packet(&reference, &validation.inventory), &mut validation)
+        .resolve_native_demand(
+            &packet(&reference, &validation.inventory),
+            &[],
+            &mut validation,
+        )
         .err()
         .expect("metadata membership grants no missing body permission");
     assert!(
@@ -551,7 +559,11 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
     };
     let mut validation = PackageInterfaceValidation::default();
     let acquired = cold
-        .resolve_native_demand(&packet(&reference, &validation.inventory), &mut validation)
+        .resolve_native_demand(
+            &packet(&reference, &validation.inventory),
+            &[],
+            &mut validation,
+        )
         .unwrap();
     let rows = acquired.groups().selected_rows();
     assert_eq!(
@@ -576,6 +588,10 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
         "actual refusal: {missing:?}"
     );
     assert!(cold
-        .resolve_native_demand(&packet(&reference, &validation.inventory), &mut validation)
+        .resolve_native_demand(
+            &packet(&reference, &validation.inventory),
+            &[],
+            &mut validation
+        )
         .is_ok());
 }

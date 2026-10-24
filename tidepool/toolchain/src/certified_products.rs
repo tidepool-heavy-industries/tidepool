@@ -26491,7 +26491,7 @@ pub(crate) mod tests {
         .unwrap();
         let packet = NativeDemandPacket::decode(&bytes, &validation.inventory).unwrap();
         let resolved = inputs
-            .resolve_native_demand(&packet, &mut validation)
+            .resolve_native_demand(&packet, &[], &mut validation)
             .unwrap();
         let packet = |uses: Vec<Value>, operation: &InventoryOperation| {
             let bytes = encode_value_with_operation(
@@ -26507,15 +26507,19 @@ pub(crate) mod tests {
             .unwrap();
             NativeDemandPacket::decode(&bytes, operation).unwrap()
         };
-        let first = inputs
-            .resolve_native_demand(
-                &packet(vec![batch_uses[0].clone()], &validation.inventory),
-                &mut validation,
-            )
-            .unwrap();
+        let first = Arc::new(
+            inputs
+                .resolve_native_demand(
+                    &packet(vec![batch_uses[0].clone()], &validation.inventory),
+                    &[],
+                    &mut validation,
+                )
+                .unwrap(),
+        );
         let second = inputs
             .resolve_native_demand(
                 &packet(vec![batch_uses[1].clone()], &validation.inventory),
+                std::slice::from_ref(&first),
                 &mut validation,
             )
             .unwrap();
@@ -26536,6 +26540,7 @@ pub(crate) mod tests {
         let foreign = inputs
             .resolve_native_demand(
                 &packet(vec![batch_uses[0].clone()], &foreign_validation.inventory),
+                &[],
                 &mut foreign_validation,
             )
             .unwrap();
