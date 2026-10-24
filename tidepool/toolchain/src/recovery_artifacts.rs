@@ -264,6 +264,9 @@ impl CertifiedRecoveryProduct {
     pub fn owner(&self) -> &CachedHomeOwner {
         &self.owner
     }
+    /// Source digest witnessed by this acquisition's completed source admission.
+    /// Recovered inputs retain canonical source identity in their module interface,
+    /// but recovery does not issue a current-source witness.
     pub fn source_sha256(&self) -> Option<[u8; 32]> {
         match &self.admission {
             OriginalAdmission::Recovered => None,

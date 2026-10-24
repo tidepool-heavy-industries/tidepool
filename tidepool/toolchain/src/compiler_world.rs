@@ -3931,17 +3931,9 @@ impl WorldInputResources {
                 self.directory.path(),
             ),
         };
-        let block_bytes = primary_blocks
-            .blocks()
-            .try_fold(0u64, |total, (cid, body)| {
-                total
-                    .checked_add(body.len() as u64)
-                    .and_then(|n| n.checked_add(cid.to_bytes().len() as u64 + 32))
-                    .ok_or_else(source_size_failure)
-            })?;
-        let envelope_bytes = block_bytes
-            .checked_add(self.sources.encoded().len() as u64)
-            .and_then(|n| n.checked_add(self.bindings.metadata_bytes))
+        // Reserve source encoding and semantic metadata before staging compiler inputs.
+        let envelope_bytes = (self.sources.encoded().len() as u64)
+            .checked_add(self.bindings.metadata_bytes)
             .and_then(|n| n.checked_add(self.lexical.metadata_bytes))
             .ok_or_else(source_size_failure)?;
         let mut remaining_raw = capture_allowance()?

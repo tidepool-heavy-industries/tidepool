@@ -689,6 +689,8 @@ impl CertifiedModuleInterface {
     pub(crate) fn home_units(&self) -> &BTreeSet<String> {
         &self.home_units
     }
+    /// Source identity authenticated by this canonical interface's certificate.
+    /// It survives recovery without issuing current-source admission for a native original.
     pub(crate) fn source_sha256(&self) -> [u8; 32] {
         self.receipt.source_sha256
     }
