@@ -1644,6 +1644,9 @@ def facade_test_cases(binary):
         ("facade_introspection_service_test", [
             "actor_host::documentation_tests::published_introspection_example_returns_structured_declaration",
         ], host_env, service_host_paths, service_host_resources, True, False, 600),
+        ("facade_ordinary_demand_history_test", [
+            "actor_host::ordinary_demand_history_tests::prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work",
+        ], host_env, service_host_paths, service_host_resources, True, True, 1800),
         ("host_inference_config_tests", [
             "exomonad::inference_selection::tests::legacy_config_remains_openai_and_new_config_is_explicit",
             "exomonad::inference_selection::tests::qualified_config_refuses_cross_backend_and_legacy_effort_ambiguity",
@@ -1800,6 +1803,7 @@ def facade_test_cases(binary):
                           f"    expected_count = {len(tests)},"])
         if name in (
             "facade_introspection_service_test",
+            "facade_ordinary_demand_history_test",
             "facade_reload_default_publication_test",
             "facade_reload_frozen_source_test",
             "facade_reload_cancellation_test",
