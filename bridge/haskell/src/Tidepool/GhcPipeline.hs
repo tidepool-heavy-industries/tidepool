@@ -5297,8 +5297,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       then pure (Just targetOwner)
       else pure Nothing
     targetQuoteProof <- case (pvWorldSources variant,capturedTarget,policyTarget) of
-      (Just (WorldSourceInputBasis _ _ _ proof _ _ _),Just bytes,Just owner)
-        | moduleDemandMatchesSource proof path bytes -> pure (Just (owner,proof))
+      (Just (WorldSourceInputBasis _ _ _ proof _ _ _),Just captured,Just owner)
+        | moduleDemandMatchesSource proof
+            (capturedGeneratedScaffoldPath captured)
+            (capturedGeneratedScaffoldBytes captured) -> pure (Just (owner,proof))
         | otherwise -> liftIO (throwIO WorldCellCorrupt)
       (Nothing,_,_) -> pure Nothing
       _ -> liftIO (throwIO WorldCellCorrupt)
