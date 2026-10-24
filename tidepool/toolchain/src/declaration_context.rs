@@ -9879,10 +9879,56 @@ impl<'a> ProductCompilerInputs<'a> {
     }
 }
 
+/// Physical products remain paired with the exact selected rows that issued
+/// their imports. The payload projection alone cannot authorize an overlay.
+#[derive(Clone, Copy)]
+pub(crate) enum ProductInputGroups<'a> {
+    Exact(&'a CertifiedArtifactGroupBindings),
+    World(&'a DemandCertifiedGroups),
+}
+
+impl<'a> ProductInputGroups<'a> {
+    pub(crate) fn data_only_payloads(self) -> &'a [PendingCertifiedGroup] {
+        match self {
+            Self::Exact(groups) => groups.groups(),
+            Self::World(groups) => groups.groups(),
+        }
+    }
+
+    pub(crate) fn issued_rows(
+        self,
+    ) -> impl Iterator<Item = Result<
+        (crate::artifact_inventory::NativeGroupBinding, &'a IssuedSelectedNativeGroup),
+        crate::certified_products::CertificationError,
+    >> {
+        let (exact, world) = match self {
+            Self::Exact(groups) => (Some(groups), None),
+            Self::World(groups) => (None, Some(groups)),
+        };
+        exact.into_iter().flat_map(|groups| groups.bindings.keys().map(move |binding| {
+            groups.rows.get(binding).map(|row| (*binding, row.as_ref())).ok_or(
+                crate::certified_products::CertificationError::Mismatch("selected binding lacks its issued row"),
+            )
+        })).chain(world.into_iter().flat_map(|groups| groups.rows.iter().map(|(binding, row)| {
+            Ok((*binding, row.issued.as_ref()))
+        })))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mutate_exact_payloads(
+        groups: &mut CertifiedArtifactGroupBindings,
+        mutate: impl FnOnce(&mut Vec<PendingCertifiedGroup>),
+    ) {
+        let mut changed = groups.groups.to_vec();
+        mutate(&mut changed);
+        groups.groups = changed.into();
+    }
+}
+
 struct ProductInputFacts<'a> {
     context: &'a Arc<ExactDeclarationContext>,
     compiler: ProductCompilerInputs<'a>,
-    groups: &'a [PendingCertifiedGroup],
+    groups: ProductInputGroups<'a>,
     program_support: Option<&'a ProgramSourceSupport>,
     source_selected_support: imbl::OrdSet<Arc<ExactModuleIdentity>>,
     source_search_include: Option<&'a [PathBuf]>,
@@ -9896,13 +9942,13 @@ impl<'a> ProductInputFacts<'a> {
         request: &'a ExactCompilationRequest,
         inputs: &'a ExactRequestInputs,
         program: &'a ProgramSourceSupportState,
-        groups: &'a [PendingCertifiedGroup],
+        groups: &'a CertifiedArtifactGroupBindings,
     ) -> Self {
         Self {
             context: inputs.context(),
             compiler: ProductCompilerInputs::from_exact(inputs.compiler())
                 .with_program_support(program.program_support.as_ref()),
-            groups,
+            groups: ProductInputGroups::Exact(groups),
             program_support: program.program_support.as_ref(),
             source_selected_support: program.source_selected_support.clone(),
             source_search_include: request.source_search_include.as_deref(),
@@ -9924,7 +9970,7 @@ impl<'a> ProductInputFacts<'a> {
         Self {
             context,
             compiler,
-            groups: groups.groups(),
+            groups: ProductInputGroups::World(groups),
             program_support,
             source_selected_support: imbl::OrdSet::new(),
             source_search_include: None,
@@ -10452,7 +10498,7 @@ impl<'a> ExactProductAdmission<'a> {
             ProductCompilationBinding::World(_)
         )
     }
-    pub(crate) fn groups(&self) -> &[PendingCertifiedGroup] {
+    pub(crate) fn groups(&self) -> ProductInputGroups<'_> {
         self.facts.groups
     }
 

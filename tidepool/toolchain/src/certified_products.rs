@@ -7507,7 +7507,12 @@ struct SourceGroupMap {
 #[derive(Default)]
 pub(crate) struct AvailableOriginalSources {
     sources: SourceGroupMap,
-    originals: BTreeMap<CachedHomeOwner, Arc<OriginalNativeWitness>>,
+    originals: BTreeMap<CachedHomeOwner, AvailableOriginalSource>,
+}
+
+struct AvailableOriginalSource {
+    artifact: crate::artifact_inventory::ArtifactId,
+    witness: Arc<OriginalNativeWitness>,
 }
 
 impl AvailableOriginalSources {
@@ -7538,12 +7543,14 @@ impl AvailableOriginalSources {
                     product.owner().clone(),
                 ))
             })?;
-            if !product.original_native().matches_original(product) {
+            if original.artifact != crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                product.module_interface().producer_sha256(), product,
+            ) || !product.original_native().matches_original(product) {
                 return Err(failure(OriginalMembershipFailure::OriginalBytes(
                     product.owner().clone(),
                 )));
             }
-            for (expected, actual) in original.anchors.iter().zip(product.original_byte_anchors()) {
+            for (expected, actual) in original.witness.anchors.iter().zip(product.original_byte_anchors()) {
                 if !Arc::ptr_eq(expected, actual) {
                     operation.charge(actual.len())?;
                     if expected != actual {
@@ -7564,10 +7571,11 @@ impl AvailableOriginalSources {
 
     fn overlay(
         self: &Arc<Self>,
-        selected: &[PendingCertifiedGroup],
+        selected: crate::declaration_context::ProductInputGroups<'_>,
         operation: &InventoryOperation,
     ) -> CertResult<SourceGroupMap> {
-        for group in selected {
+        let payloads = selected.data_only_payloads();
+        for group in payloads {
             for binder in group.group.binders() {
                 operation.charge(
                     2 * (group.owner.unit.len() + group.owner.module.len())
@@ -7576,28 +7584,42 @@ impl AvailableOriginalSources {
                 charge_symbol(operation, binder)?;
             }
         }
-        let mut sources = certified_source_map(selected)?;
-        for group in selected {
-            let original = self
-                .originals
-                .get(&group.owner)
-                .and_then(|original| original.group(group.group.original_ordinal()))
-                .ok_or(CertificationError::Mismatch(
-                    "selected original outside availability",
-                ))?;
-            if original.owner != group.owner
+        let mut sources = certified_source_map(payloads)?;
+        operation.reserve::<(&CachedHomeOwner, u32, &PendingCertifiedGroup)>(payloads.len())?;
+        let payload_index = payloads.iter().map(|group| {
+            ((&group.owner, group.group.original_ordinal()), group)
+        }).collect::<BTreeMap<_, _>>();
+        let mut covered = BTreeSet::new();
+        for row in selected.issued_rows() {
+            let (binding, issued) = row?;
+            let group = issued.product();
+            let membership = self.originals.get(&group.owner).ok_or(
+                CertificationError::Mismatch("selected original outside availability"),
+            )?;
+            let original = membership.witness.group(group.group.original_ordinal()).ok_or(
+                CertificationError::Mismatch("selected original outside availability"),
+            )?;
+            if membership.artifact != binding.binding.artifact()
+                || original.owner != group.owner
                 || original.group != group.group
-                || original
-                    .source_imports(self.originals.get(&group.owner).unwrap())?
-                    .as_slice()
-                    != group.imports()
+                || binding.original_ordinal != group.group.original_ordinal()
+                || !payload_index.get(&(&group.owner, group.group.original_ordinal()))
+                    .is_some_and(|payload| payload.same_issuance(group))
             {
                 return Err(CertificationError::Mismatch("shared original home groups"));
             }
+            // The selected-row issuer already checked exact carrier pairs,
+            // children, symbols and ordered imports. Reconstructing imports
+            // from this context-free byte witness would erase that selection.
+            covered.insert((&group.owner, group.group.original_ordinal()));
+        }
+        if covered.len() != payloads.len() {
+            return Err(CertificationError::Mismatch("selected payload lacks its issued row"));
         }
         sources.original = Some(Arc::clone(self));
         Ok(sources)
     }
+
 }
 
 /// A request retains one immutable membership for its current product census
@@ -9244,7 +9266,10 @@ fn available_original_source_map(
     selected: &[PendingCertifiedGroup],
     operation: &InventoryOperation,
 ) -> CertResult<SourceGroupMap> {
-    AvailableOriginalSources::authenticate(products, operation)?.overlay(selected, operation)
+    let issued = tests::issue_source_overlay_groups(products, selected)?;
+    AvailableOriginalSources::authenticate(products, operation)?.overlay(
+        crate::declaration_context::ProductInputGroups::Exact(&issued), operation,
+    )
 }
 
 fn authenticate_original_source_membership(
@@ -9287,7 +9312,12 @@ fn authenticate_original_source_membership(
             ));
         }
         if originals
-            .insert(witness.owner.clone(), Arc::clone(witness))
+            .insert(witness.owner.clone(), AvailableOriginalSource {
+                artifact: crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+                    product.module_interface().producer_sha256(), product,
+                ),
+                witness: Arc::clone(witness),
+            })
             .is_some()
         {
             return Err(CertificationError::Mismatch(
@@ -17949,6 +17979,46 @@ pub(crate) mod tests {
         Recover,
     }
 
+    // Select through the production scope certifier. Raw expected rows are
+    // DATA: only an already issued owner's payload projection is corrupted for
+    // adversarial mismatch controls, never its checked row authority.
+    pub(super) fn issue_source_overlay_groups(
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        expected: &[PendingCertifiedGroup],
+    ) -> CertResult<crate::declaration_context::CertifiedArtifactGroupBindings> {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeGroupKey};
+        let inventory = ArtifactInventory::default();
+        let keys = expected.iter().map(|group| {
+            let product = products.iter().find(|product| product.owner() == group.owner())
+                .ok_or(CertificationError::Mismatch("selected original outside availability"))?;
+            Ok(NativeGroupKey {
+                artifact: ArtifactEntry::original_artifact_id(product.module_interface().producer_sha256(), product),
+                original_ordinal: group.group().original_ordinal(),
+            })
+        }).collect::<CertResult<BTreeSet<_>>>()?;
+        let view = if keys.is_empty() {
+            inventory.empty_view()
+        } else {
+            let entries = products.iter().map(|product| ArtifactEntry::original(
+                product.module_interface().producer_sha256(), product.clone(),
+            ).map(Arc::new).map_err(|error| CertificationError::OriginalClosure(Box::new(error))))
+                .collect::<CertResult<Vec<_>>>()?;
+            inventory.admit_recovery_selection(&inventory.empty_view(), entries, &keys)
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+        };
+        let mut issued = crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
+            &view, None, &mut PackageInterfaceValidation::default(),
+        ).map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        if issued.groups().len() != expected.len()
+            || expected.iter().any(|expected| !issued.groups().iter().any(|actual| actual == expected))
+        {
+            crate::declaration_context::ProductInputGroups::mutate_exact_payloads(&mut issued, |payloads| {
+                *payloads = expected.to_vec();
+            });
+        }
+        Ok(issued)
+    }
+
     fn check_authenticated_source_promotion_history(
         sparse: &[(u32, bool)],
         history: &[SourcePromotionStep],
@@ -18011,7 +18081,7 @@ pub(crate) mod tests {
         current.extend(rows(&retained_group));
         let operation = InventoryOperation::new(Default::default());
         let original = AvailableOriginalSources::authenticate(&products, &operation).unwrap();
-        let mut sources = original.overlay(&selected, &operation).unwrap();
+        let mut sources = original.overlay(crate::declaration_context::ProductInputGroups::Exact(&issue_source_overlay_groups(&products, &selected).unwrap()), &operation).unwrap();
         for (key, value) in current
             .iter()
             .filter(|(_, (_, origin))| *origin != ProductOrigin::Cached)
@@ -18110,7 +18180,7 @@ pub(crate) mod tests {
                         .collect::<Vec<_>>();
                     let recovered_original =
                         AvailableOriginalSources::authenticate(&recovered, &operation).unwrap();
-                    sources = recovered_original.overlay(&selected, &operation).unwrap();
+                    sources = recovered_original.overlay(crate::declaration_context::ProductInputGroups::Exact(&issue_source_overlay_groups(&products, &selected).unwrap()), &operation).unwrap();
                     for (key, value) in current
                         .iter()
                         .filter(|(_, (_, origin))| *origin != ProductOrigin::Cached)
@@ -18225,15 +18295,15 @@ pub(crate) mod tests {
                     .map(|group| group.admitted(product.original_native()).unwrap()).collect::<Vec<_>>();
                 let membership = retained.admit(&basis, &products, &operation).unwrap();
                 assert!(Arc::ptr_eq(&original, &membership));
-                let overlay = membership.overlay(&selected, &operation).unwrap();
+                let overlay = membership.overlay(crate::declaration_context::ProductInputGroups::Exact(&issue_source_overlay_groups(&products, &selected).unwrap()), &operation).unwrap();
                 assert_eq!(overlay.groups.len(), count);
                 assert_eq!(overlay.iter().map(|(key, _)| key.clone()).collect::<BTreeSet<_>>(), expected,
                     "selected prefix overlay cannot omit or add full available membership");
                 if let Some(group) = selected.first() {
                     let mut foreign = group.clone();
                     foreign.owner.unit = "foreign".into();
-                    assert!(membership.overlay(&[foreign], &operation).is_err());
-                    assert!(membership.overlay(&[group.clone(), group.clone()], &operation).is_err());
+                    assert!(available_original_source_map(&products, &[foreign], &operation).is_err());
+                    assert!(available_original_source_map(&products, &[group.clone(), group.clone()], &operation).is_err());
                 }
                 assert!(matches!(retained.admit(&basis, &products[..1], &operation),
                     Err(CertificationError::OriginalMembership(reason))
@@ -19008,7 +19078,7 @@ pub(crate) mod tests {
             .compiler_inputs()
             .available_original_sources(std::slice::from_ref(product), &operation)
             .unwrap();
-        let sources = membership.overlay(&request.groups, &operation).unwrap();
+        let sources = membership.overlay(crate::declaration_context::ProductInputGroups::Exact(&request.groups), &operation).unwrap();
         // Availability may issue a fresh sibling whose exact child proof is
         // held, while preserving the other sibling as nominal metadata only.
         let held_groups = source
@@ -23045,7 +23115,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|group| group.admitted(product.original_native()).unwrap())
                 .collect::<Vec<_>>();
-            let overlay = first.overlay(&groups, &operation).unwrap();
+            let overlay = first.overlay(crate::declaration_context::ProductInputGroups::Exact(&issue_source_overlay_groups(std::slice::from_ref(&product), &groups).unwrap()), &operation).unwrap();
             assert_eq!(overlay.groups.len(), count);
             assert_eq!(
                 overlay
@@ -23272,7 +23342,7 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             original
-                .overlay(&selected, &operation)
+                .overlay(crate::declaration_context::ProductInputGroups::Exact(&issue_source_overlay_groups(std::slice::from_ref(&first_product), &selected).unwrap()), &operation)
                 .unwrap()
                 .iter()
                 .map(|(key, _)| key.clone())
@@ -24185,7 +24255,7 @@ pub(crate) mod tests {
         let membership =
             AvailableOriginalSources::authenticate(std::slice::from_ref(&original), &operation)
                 .unwrap();
-        let mut sources = membership.overlay(&selected, &operation).unwrap();
+        let mut sources = membership.overlay(crate::declaration_context::ProductInputGroups::Exact(&issue_source_overlay_groups(std::slice::from_ref(&original), &selected).unwrap()), &operation).unwrap();
         let mut staged = original.owner().clone();
         staged.module_version = ModuleVersion([0; 32]);
         let binder = native.groups[0].group.binders()[0].clone();
@@ -24217,7 +24287,7 @@ pub(crate) mod tests {
         let mut different = original.owner().clone();
         different.product_sha256[0] ^= 1;
         different.module_version = ModuleVersion([0; 32]);
-        let mut distinct = membership.overlay(&selected, &operation).unwrap();
+        let mut distinct = membership.overlay(crate::declaration_context::ProductInputGroups::Exact(&issue_source_overlay_groups(std::slice::from_ref(&original), &selected).unwrap()), &operation).unwrap();
         distinct.insert(
             (different.clone(), 3, binder.clone()),
             (different.clone(), ProductOrigin::RetainedCore),
@@ -24458,7 +24528,7 @@ pub(crate) mod tests {
                     binder: testing::identity("BoundedHelper", "entry_9001"),
                 };
                 let sources = membership
-                    .overlay(&request.groups, &validation.inventory)
+                    .overlay(crate::declaration_context::ProductInputGroups::Exact(&request.groups), &validation.inventory)
                     .unwrap();
                 let checked = validate_original_group_receipts(
                     original.group(),
