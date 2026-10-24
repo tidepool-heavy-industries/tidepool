@@ -2009,8 +2009,18 @@ mod tests {
         }
     }
 
+    fn owned_invocation_property_config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
     proptest::proptest! {
-        #![proptest_config(owned_evidence_property_config())]
+        #![proptest_config(owned_invocation_property_config())]
         #[test]
         fn owned_compiler_allowances_refuse_values_outside_daemon_domain(
             count in (u64::from(u32::MAX) + 1)..=u64::MAX,
