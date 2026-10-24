@@ -4,19 +4,20 @@ module Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
   , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
   , ParsedModuleDemand, prepareModuleDemand, moduleDemandMatchesSource, moduleDemandCapturedImports
+  , projectRefinedDemandImports
   , moduleInputOccurrences, moduleImportRequests, segmentModuleDemand, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName
   ) where
 
 import Control.Exception (throwIO)
-import Control.Monad (forM, foldM)
+import Control.Monad (forM, foldM, unless)
 import qualified Data.ByteString as BS
 import Data.Data (Data)
 import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import GHC (ParsedSource)
+import GHC (ParsedSource, ParsedModule(..), ModSummary(..), ModLocation(..))
 import GHC.Parser.Annotation (getLocA)
 import GHC.Data.Strict qualified as Strict
 import GHC.Driver.Session (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset, xopt)
@@ -43,11 +44,17 @@ import GHC.Unit.Module (ModuleName, mkModuleName)
 import GHC.Types.PkgQual (RawPkgQual)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface)
 import GHC.Utils.Outputable (ppr, text, (<+>))
+import GHC.Utils.Fingerprint (fingerprintByteString)
+import System.Directory (canonicalizePath)
 import Tidepool.TypedSegment.Types
 import Tidepool.ExactHydration
   ( CapturedGeneratedImports, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
   , capturedGeneratedImportSource, capturedGeneratedImportFlags, capturedGeneratedImportSyntax )
 import Tidepool.ImportSyntax (capturedParsedSource)
+import Tidepool.ImportSyntax.Internal
+  ( DriverImportSyntax, driverParsedModule, RefinedImportSyntax, refinedParsedModule
+  , refinedCapturedSyntax, capturedImportOccurrences, importOccurrenceId, importOccurrenceDescriptor
+  , sameImportSourcePolicy )
 import Tidepool.CheckedCell (ResolvedNativeSlots, applyNativeAnnotations)
 import Tidepool.CheckedPrefixImports (parsedDeclarationOccurrences)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
@@ -62,13 +69,12 @@ data ParsedModuleDemand = ParsedModuleDemand
 moduleDemandCapturedImports :: ParsedModuleDemand -> CapturedGeneratedImports
 moduleDemandCapturedImports (ParsedModuleDemand captured _) = captured
 
--- Import selection consumes the same parsed source as the demand renamer.
--- Package qualifiers and SOURCE identity are preserved until the active
--- World environment resolves them; rendering cannot create an import here.
+-- Source qualification always consumes the immutable captured requests.
+-- Later lexical refinement cannot create source or package import authority.
 moduleImportRequests :: ParsedModuleDemand -> [(ModuleName, RawPkgQual, IsBootInterface)]
-moduleImportRequests (ParsedModuleDemand _ parsed) =
+moduleImportRequests (ParsedModuleDemand captured _) =
   [(unLoc (ideclName declaration), ideclPkgQual declaration, ideclSource declaration)
-  | L _ declaration <- hsmodImports (unLoc parsed)]
+  | L _ declaration <- hsmodImports (unLoc (capturedParsedSource (capturedGeneratedImportSyntax captured)))]
 
 -- Typed segments add their actual plan's unique root check to the same parsed
 -- module fact. A module fact alone grants no typed-item or declaration authority.
@@ -81,6 +87,40 @@ moduleDemandMatchesSource :: ParsedModuleDemand -> FilePath -> BS.ByteString -> 
 moduleDemandMatchesSource (ParsedModuleDemand captured _) path bytes =
   capturedGeneratedScaffoldPath source == path && capturedGeneratedScaffoldBytes source == bytes
   where source = capturedGeneratedImportSource captured
+
+-- Import decisions come from the actual matched driver. The demand renamer
+-- keeps its original quote-free declarations and native type annotations;
+-- segment lowering and completed aliases never enter this projection.
+projectRefinedDemandImports
+  :: CapturedGeneratedImports -> DriverImportSyntax -> RefinedImportSyntax
+  -> ParsedModuleDemand -> IO ParsedModuleDemand
+projectRefinedDemandImports matched driver refined demand@(ParsedModuleDemand captured parsed) = do
+  let source = capturedGeneratedImportSource matched
+      admitted = pm_mod_summary (driverParsedModule driver)
+      projected = refinedParsedModule refined
+      actual = pm_mod_summary projected
+      census syntax = [(importOccurrenceId occurrence,importOccurrenceDescriptor occurrence)
+        | occurrence <- capturedImportOccurrences syntax]
+      reject = throwIO ModuleDemandImportSourceMismatch
+  admittedPath <- traverse canonicalizePath (ml_hs_file (ms_location admitted))
+  actualPath <- traverse canonicalizePath (ml_hs_file (ms_location actual))
+  capturedPath <- canonicalizePath (capturedGeneratedScaffoldPath source)
+  unless (moduleDemandMatchesSource demand (capturedGeneratedScaffoldPath source)
+      (capturedGeneratedScaffoldBytes source)
+      && ms_hs_hash admitted == fingerprintByteString (capturedGeneratedScaffoldBytes source)
+      && (unLoc <$> hsmodName (unLoc (capturedParsedSource (capturedGeneratedImportSyntax matched))))
+        == Just (ms_mod_name admitted)
+      && ms_mod actual == ms_mod admitted
+      && ms_hsc_src actual == ms_hsc_src admitted
+      && ms_hs_hash actual == ms_hs_hash admitted
+      && admittedPath == Just capturedPath && actualPath == admittedPath
+      && sameImportSourcePolicy (capturedGeneratedImportFlags captured) (capturedGeneratedImportFlags matched)
+      && sameImportSourcePolicy (capturedGeneratedImportFlags matched) (ms_hspp_opts admitted)
+      && sameImportSourcePolicy (ms_hspp_opts actual) (ms_hspp_opts admitted)
+      && census (refinedCapturedSyntax refined) == census (capturedGeneratedImportSyntax matched)) reject
+  let L location syntax = parsed
+  pure (ParsedModuleDemand captured (L location syntax
+    {hsmodImports=hsmodImports (unLoc (pm_parsed_source projected))}))
 
 -- Physical rendered-source boundaries are independent of user LINE pragmas.
 -- These closed modes constrain an operand to its generated expression/type

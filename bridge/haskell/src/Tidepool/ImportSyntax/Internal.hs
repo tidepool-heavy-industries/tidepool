@@ -9,6 +9,7 @@ module Tidepool.ImportSyntax.Internal
   , RefinedImportSyntax, beginImportRefinement, refinedParsedModule, refinedImportOccurrences, refinedCapturedSyntax
   , ImportLineage(..), importOccurrenceLineage
   , ImportRefinement(..), mapRefinedImportsM, insertSyntheticPrelude, mapImportPreservingSource
+  , sameImportSourcePolicy
   , ImportOrigin(..), ImportRendering(..)
   , AuthoredImports(..), InheritedImports(..), ProtectedImports(..)
   , authoredImportsRendering, inheritedImportsRendering, protectedImportsRendering
@@ -18,6 +19,8 @@ module Tidepool.ImportSyntax.Internal
   ) where
 
 import Control.Monad (unless, forM)
+import qualified GHC.Data.EnumSet as EnumSet
+import GHC.Driver.Session (DynFlags, language, extensionFlags, safeHaskell, importPaths)
 import GHC (GhcPs, ImportDecl(..), HsModule(..), Located, ParsedModule(..), ParsedSource, unLoc)
 import GHC.Data.FastString (FastString)
 import GHC.Hs
@@ -32,6 +35,13 @@ import GHC.Types.SrcLoc (SrcSpan, GenLocated(..), getBufSpan)
 import GHC.Unit.Module (ModuleName, moduleNameString, mkModuleName)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Utils.Outputable (defaultSDocContext, ppr, showSDocOneLine)
+
+sameImportSourcePolicy :: DynFlags -> DynFlags -> Bool
+sameImportSourcePolicy left right =
+  language left == language right
+    && EnumSet.toList (extensionFlags left) == EnumSet.toList (extensionFlags right)
+    && safeHaskell left == safeHaskell right
+    && importPaths left == importPaths right
 
 -- Only actual issuer modules import this representation. Public renderers
 -- accept opaque values; they cannot label arbitrary text as prior/protected.
