@@ -216,7 +216,15 @@ pub(super) fn assert_actual_borrowed_type_admission(
             "the borrowed TYPE row must refuse at its exact source-admission boundary: {error:?}"
         );
     }
-    eprintln!("actual World borrowed TYPE source-admission controls: stage {}, positive 1, omitted 1, changed 1, lexical 0", segment.stage.index());
+    tracing::debug!(
+        stage = segment.stage.index(),
+        owner = ?owner,
+        positive = 1,
+        omitted = 1,
+        changed = 1,
+        lexical = 0,
+        "actual World borrowed TYPE source-admission controls"
+    );
 }
 
 /// The named repeated-source fixture chooses an actually available prior group.
