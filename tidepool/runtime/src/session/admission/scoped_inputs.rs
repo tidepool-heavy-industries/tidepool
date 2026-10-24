@@ -349,10 +349,7 @@ impl ScopedResolvedInputs {
                     session_var = ?value.id,
                     defining_scope = value.defining_scope.0,
                     selected_count = item.world_selected_runtime_inputs().inputs().len(),
-                    selected = ?item.world_selected_runtime_inputs().inputs().iter().take(16).map(|input| (
-                        input.symbol(), input.generation(), input.session_var(), input.defining_scope(), input.origin(),
-                    )).collect::<Vec<_>>(),
-                    "retained native slot is absent from the stage's selected runtime inputs"
+                    "retained native slot lacks a selected stage or earlier-item input"
                 );
                 PreparedRuntimeError::certified_target_owners()
             })?;
@@ -371,7 +368,7 @@ impl ScopedResolvedInputs {
                     ) => {
                         let expected = selected
                             .checked_row()
-                            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+                            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
                         if !Arc::ptr_eq(expected, row) {
                             return Err(PreparedRuntimeError::certified_target_owners());
                         }
