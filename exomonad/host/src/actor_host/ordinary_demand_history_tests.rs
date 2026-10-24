@@ -2,6 +2,10 @@
 //! Exporter breadth and source-free host reopen are separate histories.
 
 use super::hosted_test_context::HostedTestRuntime;
+use super::operation_identity_oracle::{
+    assert_committed_cell_operation, assert_operation_submissions_match, dispatch_execution,
+    line_carries_execution, physical_key, same_request,
+};
 use super::test_campaign::{
     actor_output_origin, commit_workspace, hosted_script_provider, hosted_test_settings,
     next_hosted_script_round, prepare_performance_traces, record_phase,
@@ -130,15 +134,6 @@ fn trace_rows(path: &Path, offset: u64) -> Vec<Value> {
     result
 }
 
-fn execution_matches(row: &Value, execution: &str) -> bool {
-    row["spans"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .chain(std::iter::once(&row["span"]))
-        .any(|span| span["name"] == "cell" && span["execution"] == execution)
-}
-
 type ImageKey = (u64, String, u64);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
@@ -230,43 +225,6 @@ fn flattened(row: &Value) -> Value {
         }
     }
     Value::Object(fields)
-}
-
-fn same_request(fields: &Value, request: &Value) -> bool {
-    [
-        "daemon_epoch",
-        "admission_id",
-        "request_ordinal",
-        "compile_request",
-    ]
-    .iter()
-    .all(|key| !fields[key].is_null() && fields[key] == request[key])
-}
-
-fn physical_key(fields: &Value) -> (String, u64, u64) {
-    let epoch = fields["daemon_epoch"]
-        .as_str()
-        .expect("attribution UNKNOWN: daemon epoch");
-    let admission = fields["admission_id"]
-        .as_u64()
-        .expect("attribution UNKNOWN: admission identity");
-    let ordinal = fields["request_ordinal"]
-        .as_u64()
-        .expect("attribution UNKNOWN: physical request ordinal");
-    let logical = fields["compile_request"]
-        .as_str()
-        .expect("attribution UNKNOWN: logical request correlation");
-    assert!(
-        admission > 0 && ordinal > 0,
-        "attribution UNKNOWN: invalid physical identity"
-    );
-    for (value, length) in [(epoch, 64), (logical, 16)] {
-        assert!(
-            value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "attribution UNKNOWN: malformed request identity"
-        );
-    }
-    (epoch.to_owned(), admission, ordinal)
 }
 
 fn daemon_work(rows: &[Value], requests: &[Value], unrelated: &[Value]) -> Vec<Value> {
@@ -402,7 +360,7 @@ fn attribute_requests(rows: &[Value], execution: &str) -> (Vec<Value>, Vec<Value
             fields["transport"], "daemon",
             "unclassified compiler transport"
         );
-        if execution_matches(row, execution) {
+        if line_carries_execution(row, execution) {
             requests.push(fields.clone());
         } else {
             let issuer = rows
@@ -412,7 +370,7 @@ fn attribute_requests(rows: &[Value], execution: &str) -> (Vec<Value>, Vec<Value
                     issued["message"] == "workbench cell dispatched to its actor"
                         && issued["execution"]
                             .as_str()
-                            .is_some_and(|other| execution_matches(row, other))
+                            .is_some_and(|other| line_carries_execution(row, other))
                         && issued["turn_id"].as_str().is_some()
                         && issued["context_call_id"]
                             .as_str()
@@ -431,26 +389,12 @@ fn observe_cell(
     expected: &ExpectedOriginal,
     ordinal: u32,
 ) -> (Vec<Value>, BTreeMap<ImageKey, u64>, Vec<Value>) {
-    let dispatch = rows
-        .iter()
-        .filter(|row| {
-            let fields = &row["fields"];
-            fields["message"] == "workbench cell dispatched to its actor"
-                && fields["turn_id"] == operation.request.0
-                && fields["context_call_id"] == operation.call.0
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        dispatch.len(),
-        1,
-        "one actual dispatch for the issued operation"
-    );
-    let execution = dispatch[0]["fields"]["execution"].as_str().unwrap();
+    let execution = dispatch_execution(rows, &operation.request.0, &operation.call.0);
     let observed = rows
         .iter()
-        .filter(|row| execution_matches(row, execution))
+        .filter(|row| line_carries_execution(row, &execution))
         .collect::<Vec<_>>();
-    let (requests, unrelated) = attribute_requests(rows, execution);
+    let (requests, unrelated) = attribute_requests(rows, &execution);
     let uses = observed
         .iter()
         .filter(|row| row["fields"]["message"] == "certified source import resolved")
@@ -603,6 +547,14 @@ async fn prepared_actor_entry_late_binding_and_warm_repeat_observe_actual_work()
             let rows = trace_rows(&host_trace, offset);
             let (physical, images, unrelated) = observe_cell(&rows, &operation, &expected, ordinal);
             let work = daemon_work(&trace_rows(&compiler_trace, compiler_offset), &physical, &unrelated);
+            if label == "later" {
+                let operation_evidence = assert_committed_cell_operation(
+                    &rows, &operation.request.0, &operation.call.0);
+                assert_operation_submissions_match(&operation_evidence, &physical, &work);
+                record_phase(&phases, json!({"phase":"later-operation-attribution",
+                    "operation":operation, "execution":operation_evidence.execution,
+                    "exact_submission_maps_match":true}));
+            }
             if label == "warm-repeat" {
                 for row in &rows {
                     let fields = &row["fields"];
@@ -731,6 +683,17 @@ fn completed_request_census_preserves_absent_groups_and_refuses_missing_identifi
         &[]
     ))
     .is_err());
+    let overlapping = [json!({"physical_request":request.clone(),
+        "issuer":{"context_call_id":"other"}})];
+    assert!(
+        std::panic::catch_unwind(|| daemon_work(
+            &rows,
+            std::slice::from_ref(&request),
+            &overlapping
+        ))
+        .is_err(),
+        "one physical attempt cannot belong to both operation and companion work"
+    );
     let unrelated = [json!({"physical_request":request, "issuer":{"context_call_id":"other"}})];
     let work = daemon_work(&rows, &[], &unrelated);
     assert_eq!(work[0]["attribution"], "explicit_unrelated");
