@@ -53,6 +53,25 @@ class PackageProviderLifetimeTests(unittest.TestCase):
         self.assertEqual(observations[1]["child"]["pdeathsig"], signal.SIGKILL)
         self.retain("actual-parent-death", observations)
 
+    def test_broken_or_missing_fact_cannot_bypass_fixture_cleanup(self):
+        observations=[]
+        for publication in ("malformed","missing"):
+            with self.subTest(publication=publication):
+                for name in ("child.json","issued.json"):
+                    (self.root / name).unlink(missing_ok=True)
+                environment={**self.environment,"PACKAGE_LIFETIME_PUBLICATION":publication}
+                result=subprocess.run([sys.executable,str(HELPER),"supervise",str(SCRIPT),
+                                       str(self.root),"raw"],env=environment,
+                                      capture_output=True,text=True,timeout=15)
+                self.assertEqual(result.returncode,0,result.stderr)
+                observation=json.loads(result.stdout)
+                self.assertEqual(observation["issued"]["pdeathsig"],0)
+                self.assertEqual(observation["provider_exit"],-signal.SIGKILL)
+                self.assertEqual(observation["actual_child_reaps"][str(observation["issued"]["pid"])],-signal.SIGKILL)
+                self.assertTrue(observation["fact_failure"])
+                observations.append(observation)
+        self.retain("broken-fact-cleanup",observations)
+
     def test_parent_exit_before_arm_refuses_executable(self):
         result = subprocess.run([sys.executable, str(HELPER), "supervise", str(SCRIPT),
                                  str(self.root), "late-arm"], env=self.environment,

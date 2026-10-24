@@ -21,6 +21,12 @@ def library():
     return result
 
 
+def publish_json(path, value):
+    temporary = path.with_name(path.name + ".publishing")
+    temporary.write_text(json.dumps(value))
+    temporary.replace(path)
+
+
 def wait_file(path):
     deadline = time.monotonic() + 5
     while not path.exists():
@@ -37,7 +43,14 @@ def fake_nix():
     root = Path(os.environ["PACKAGE_LIFETIME_FIXTURE"])
     fact = {"pid": os.getpid(), "parent": os.getppid(), "pdeathsig": configured.value,
             "argv": sys.argv, "stage": "executed"}
-    (root / "child.json").write_text(json.dumps(fact))
+    publish_json(root / "issued.json", fact)
+    publication=os.environ.get("PACKAGE_LIFETIME_PUBLICATION","normal")
+    if publication=="malformed":
+        temporary=root / "child.json.publishing"
+        temporary.write_text("{malformed")
+        temporary.replace(root / "child.json")
+    elif publication!="missing":
+        publish_json(root / "child.json", fact)
     mode = os.environ.get("PACKAGE_LIFETIME_MODE", "block")
     if mode == "failure":
         print("declared stdout", flush=True)
@@ -63,8 +76,8 @@ def provider(source, root, policy):
         parent = os.getpid()
         class DelayedLibrary:
             def prctl(self, *args):
-                (root / "child.json").write_text(json.dumps({
-                    "pid": os.getpid(), "parent": os.getppid(), "stage": "before-arm"}))
+                publish_json(root / "child.json", {
+                    "pid": os.getpid(), "parent": os.getppid(), "stage": "before-arm"})
                 deadline = time.monotonic() + 5
                 while os.getppid() == parent:
                     if time.monotonic() >= deadline:
@@ -83,19 +96,30 @@ def provider(source, root, policy):
 def supervise(source, root, policy):
     assert library().prctl(36, 1, 0, 0, 0) == 0, "fixture requires a child subreaper"
     owner = None
+    owner_reaped = False
     child = None
-    child_reaped = False
+    reaped = {}
+    failure = None
+    result = None
+    publication=os.environ.get("PACKAGE_LIFETIME_PUBLICATION","normal")
     try:
+        # Keep the exact group leader unreaped until failure cleanup has killed
+        # its isolated group. Fact publication is not a cleanup prerequisite.
         owner = subprocess.Popen([sys.executable, __file__, "provider", str(source),
                                   str(root), policy], stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                 start_new_session=True)
         fact = wait_file(root / "child.json")
         child = fact["pid"]
         assert fact["parent"] == owner.pid
         owner.kill()
-        assert owner.wait(timeout=5) == -signal.SIGKILL
+        provider_exit=owner.wait(timeout=5)
+        owner_reaped=True
+        assert provider_exit == -signal.SIGKILL
         if policy == "raw":
-            waited, _ = os.waitpid(child, os.WNOHANG)
+            waited, status = os.waitpid(child, os.WNOHANG)
+            if waited:
+                reaped[waited]=status
             assert waited == 0, "negative control must remain alive after provider reap"
             (root / "allow-mutation").write_text("allow fake mutation")
             deadline = time.monotonic() + 5
@@ -103,22 +127,18 @@ def supervise(source, root, policy):
                 assert time.monotonic() < deadline
                 time.sleep(.005)
             os.kill(child, signal.SIGKILL)
-            waited, status = os.waitpid(child, 0)
-        else:
-            deadline = time.monotonic() + 5
-            while True:
-                waited, status = os.waitpid(child, os.WNOHANG)
-                if waited:
-                    break
-                assert time.monotonic() < deadline, "owned child did not retire"
-                time.sleep(.005)
-            assert not (root / "late-mutation").exists()
-        child_reaped = True
-        assert waited == child
-        result = {"policy": policy, "provider_pid": owner.pid, "provider_exit": owner.returncode,
+        deadline = time.monotonic() + 5
+        while child not in reaped:
+            waited, status = os.waitpid(child, os.WNOHANG)
+            if waited:
+                reaped[waited]=status
+                break
+            assert time.monotonic() < deadline, "owned child did not retire"
+            time.sleep(.005)
+        result = {"policy": policy, "provider_pid": owner.pid, "provider_exit": provider_exit,
                   "qualification_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-                  "child": fact, "child_reaped": True,
-                  "child_exit": os.waitstatus_to_exitcode(status),
+                  "child": fact, "child_reaped": child in reaped,
+                  "child_exit": os.waitstatus_to_exitcode(reaped[child]),
                   "late_mutation": (root / "late-mutation").exists(),
                   "real_nix_used": False}
         if policy == "late-arm":
@@ -126,20 +146,58 @@ def supervise(source, root, policy):
         else:
             assert result["child_exit"] == -signal.SIGKILL, result
             assert fact["pdeathsig"] == (0 if policy == "raw" else signal.SIGKILL), result
-        print(json.dumps(result))
+            assert result["late_mutation"] == (policy == "raw"), result
+    except (ValueError, AssertionError) as error:
+        if publication not in ("malformed","missing"):
+            raise
+        failure=type(error).__name__ + ": " + str(error)
     finally:
-        if owner is not None and owner.poll() is None:
-            owner.kill()
-            owner.wait(timeout=5)
-        if child is not None and not child_reaped:
+        if owner is not None and not owner_reaped:
+            # The retained unreaped leader reserves this PID/PGID even if it
+            # has exited. No unrelated process can take this group identity.
             try:
-                os.kill(child, signal.SIGKILL)
+                os.killpg(owner.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            owner.wait(timeout=5)
+            owner_reaped=True
+        if child is not None and child not in reaped:
             try:
-                os.waitpid(child, 0)
+                waited,status=os.waitpid(child,os.WNOHANG)
+                if waited:
+                    reaped[waited]=status
+                else:
+                    # A positive owned-child observation precedes this signal.
+                    os.kill(child,signal.SIGKILL)
             except ChildProcessError:
-                pass
+                raise AssertionError("fixture lost its exact child reap")
+        # The isolated subreaper owns every adopted child, including one whose
+        # publication was absent/broken. Collect actual waits, never proc absence.
+        deadline=time.monotonic()+5
+        while True:
+            try:
+                waited,status=os.waitpid(-1,os.WNOHANG)
+            except ChildProcessError:
+                break
+            if waited:
+                reaped[waited]=status
+                continue
+            assert time.monotonic()<deadline,"fixture child reap remains unconfirmed"
+            time.sleep(.005)
+        if owner is not None:
+            owner.stderr.close()
+    if failure is not None:
+        # This independent audit fact is read only AFTER cleanup; it cannot
+        # supply any PID or other authority to the cleanup path above.
+        issued=json.loads((root / "issued.json").read_text())
+        assert issued["pid"] in reaped
+        assert os.waitstatus_to_exitcode(reaped[issued["pid"]]) == -signal.SIGKILL
+        result={"publication":publication,"fact_failure":failure,"provider_pid":owner.pid,
+                "provider_exit":owner.returncode,"issued":issued,
+                "qualification_sha256":hashlib.sha256(source.read_bytes()).hexdigest(),
+                "actual_child_reaps":{str(pid):os.waitstatus_to_exitcode(status) for pid,status in reaped.items()},
+                "real_nix_used":False}
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":
