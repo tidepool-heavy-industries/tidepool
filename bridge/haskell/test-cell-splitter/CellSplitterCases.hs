@@ -46,7 +46,7 @@ import GHC.Types.Name (nameModule_maybe, nameOccName, getOccString, nameUnique)
 import GHC.Tc.Types (TcGblEnv, tcg_rn_decls, tcg_mod, tcg_type_env, tcg_insts, tcg_rdr_env)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
-import GHC.Types.SourceText (il_value)
+import GHC.Types.SourceText (il_value, sl_fs)
 import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.Fixity (Fixity(..))
 import GHC.LanguageExtensions (Extension(ImportQualifiedPost))
@@ -82,7 +82,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
   , originalInterfaceBytes, originalInterfaceSha256, CheckedTemplateImports(..)
   , captureProtectedTemplateImportsAt, renderProtectedTemplateImports
-  , generatedCheckingTemplateRecipeWithImportRendering, captureGeneratedScaffoldSource
+  , generatedCheckingTemplateRecipe, generatedCheckingTemplateRecipeWithImportRendering, captureGeneratedScaffoldSource
   , parseCapturedGeneratedImports, capturedGeneratedImportSyntax
   , capturedGeneratedImportOccurrences, capturedGeneratedImportOccurrenceOrigin )
 import Tidepool.ImportSyntax (capturedParsedSource)
@@ -726,7 +726,10 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         unless (case rawQuery of Left (InputDemandRenameRejected message) -> "Ambiguous occurrence" `isInfixOf` message; _ -> False)
           (fail "demand composition control omitted its raw conflicting declaration imports")
         projectedDemand <- liftIO (projectRefinedDemandImports whole driver (nativeImportSyntax repeated) demand)
-        unless (moduleImportRequests projectedDemand == moduleImportRequests demand)
+        let qualifierName NoRawPkgQual = Nothing
+            qualifierName (RawPkgQual literal) = Just (sl_fs literal)
+            requestKey (name,qualifier,boot) = (name,qualifierName qualifier,boot)
+        unless (map requestKey (moduleImportRequests projectedDemand) == map requestKey (moduleImportRequests demand))
           (fail "refined demand changed the captured source qualification requests")
         projectedQuery <- liftIO (moduleInputOccurrences environment demandScope projectedDemand)
         unless (projectedQuery == Right [("b",())])
