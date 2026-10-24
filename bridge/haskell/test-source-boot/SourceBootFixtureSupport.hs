@@ -3,6 +3,8 @@ module SourceBootFixtureSupport
   ( rootedProfilePath, rootedProfileSha256, rootedProfileIdentity, withRootedCompilerEnvironment, withQuietStdout
   , writeExecutionScope, hasIntResultLiteral, withTiming
   , CapturedCompilerFixture, capturePreparedFixture, captureDiagnostics
+  , CapturedDiagnosticCounters, capturedDiagnosticCounterValues, DiagnosticCounterCaptureFailure(..)
+  , captureDiagnosticsWithCounters
   , acquireFixtureScratch, releaseFixtureScratch, releaseFixtureScratchAfterFailure
   , withScratchFailureEvidence
   , requireOriginalSourceRejection, requireOriginalSourceBytesChanged
@@ -13,9 +15,12 @@ module SourceBootFixtureSupport
 import Control.Exception
   ( Exception(..), SomeAsyncException, SomeException, IOException, bracket, bracketOnError
   , finally, fromException, mask, onException, throwIO, try, evaluate )
-import Control.Monad (filterM, void)
+import Control.Monad (filterM, foldM, unless, void)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BS8
+import Data.Char (isSpace)
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Data.List (sort)
@@ -38,7 +43,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>), makeRelative)
 import System.IO
   ( openTempFile, hClose, hFlush, hPutStr, hPutStrLn, hSeek, hFileSize, withBinaryFile
-  , IOMode(ReadMode), SeekMode(AbsoluteSeek), stderr, stdout )
+  , Handle, IOMode(ReadMode), SeekMode(AbsoluteSeek), stderr, stdout )
 import System.IO.Error (isUserError, ioeGetErrorString)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
@@ -251,7 +256,101 @@ retainScratchFailure root = do
 -- Compiler diagnostics are scoped process state. Failure replay is bounded,
 -- restores stderr first, and cannot replace the original compiler exception.
 captureDiagnostics :: IO a -> IO (a, String)
-captureDiagnostics action = mask $ \restore -> do
+captureDiagnostics action = do
+  (result,_,diagnostics) <- captureDiagnosticsWithCounters [] action
+  pure (result,diagnostics)
+
+newtype CapturedDiagnosticCounters = CapturedDiagnosticCounters (Map.Map String [Integer])
+
+capturedDiagnosticCounterValues :: CapturedDiagnosticCounters -> String -> Maybe [Integer]
+capturedDiagnosticCounterValues (CapturedDiagnosticCounters counters) name = Map.lookup name counters
+
+data DiagnosticCounterCaptureFailure
+  = DiagnosticCounterSelectionInvalid String
+  | DiagnosticCounterMalformed String
+  | DiagnosticCounterOccurrenceOverflow String Int Int
+  deriving (Eq, Show)
+instance Exception DiagnosticCounterCaptureFailure
+
+data DiagnosticCounterSlot = DiagnosticCounterSlot String Int Int [Integer]
+
+-- Counter rows are small protocol records, independent of arbitrarily long
+-- diagnostic/source lines. This fixture budget bounds only selected record
+-- parsing; unrelated lines are streamed and discarded without retaining them.
+diagnosticCounterLineBudget :: Int
+diagnosticCounterLineBudget = 4096
+
+selectDiagnosticCounters :: [(String,Int)] -> IO (Map.Map BS.ByteString DiagnosticCounterSlot)
+selectDiagnosticCounters requested = do
+  let selected = Map.fromList
+        [(TextEncoding.encodeUtf8 (Text.pack name), DiagnosticCounterSlot name bound 0 [])
+        | (name,bound) <- requested]
+  unless (Map.size selected == length requested)
+    (throwIO (DiagnosticCounterSelectionInvalid "duplicate requested counter"))
+  mapM_ (\(name,bound) -> unless (not (null name) && not (any isSpace name) && bound >= 0
+      && BS.length (TextEncoding.encodeUtf8 (Text.pack name)) <= diagnosticCounterLineBudget - 128)
+    (throwIO (DiagnosticCounterSelectionInvalid name))) requested
+  pure selected
+
+readDiagnosticCounters :: Map.Map BS.ByteString DiagnosticCounterSlot -> Handle
+  -> IO CapturedDiagnosticCounters
+readDiagnosticCounters selected output
+  | Map.null selected = pure (CapturedDiagnosticCounters Map.empty)
+  | otherwise = do
+      hSeek output AbsoluteSeek 0
+      complete <- go selected (Just BS.empty)
+      pure (CapturedDiagnosticCounters (Map.fromList
+        [(name,reverse values) | DiagnosticCounterSlot name _ _ values <- Map.elems complete]))
+  where
+    requested line = case BS8.words line of
+      marker:field:_ | marker == BS8.pack "tidepool-count"
+        , Just name <- BS8.stripPrefix (BS8.pack "name=") field -> Map.lookup name selected
+      _ -> Nothing
+    admit known line = case requested line of
+      Nothing -> pure known
+      Just (DiagnosticCounterSlot name _ _ _) -> do
+        value <- case [raw | field <- BS8.words line
+            , Just raw <- [BS8.stripPrefix (BS8.pack "count=") field]] of
+          [raw] -> case reads (BS8.unpack raw) of
+            [(value,"")] -> pure value
+            _ -> throwIO (DiagnosticCounterMalformed name)
+          _ -> throwIO (DiagnosticCounterMalformed name)
+        let key = TextEncoding.encodeUtf8 (Text.pack name)
+        case Map.lookup key known of
+          Just (DiagnosticCounterSlot _ bound count values)
+            | count >= bound -> throwIO (DiagnosticCounterOccurrenceOverflow name (count+1) bound)
+            | otherwise -> pure (Map.insert key (DiagnosticCounterSlot name bound (count+1) (value:values)) known)
+          Nothing -> throwIO (DiagnosticCounterSelectionInvalid name)
+    consume complete (known,carry) piece = case carry of
+      Nothing -> pure (known,if complete then Just BS.empty else Nothing)
+      Just previous -> do
+        let line = previous <> piece
+        if BS.length line > diagnosticCounterLineBudget then do
+          case requested line of
+            Just (DiagnosticCounterSlot name _ _ _) -> throwIO (DiagnosticCounterMalformed name)
+            Nothing -> pure ()
+          pure (known,if complete then Just BS.empty else Nothing)
+        else if complete then do
+          next <- admit known line
+          pure (next,Just BS.empty)
+        else pure (known,Just line)
+    go known carry = do
+      chunk <- BS.hGetSome output (64 * 1024)
+      if BS.null chunk then case carry of
+        Just line -> admit known line
+        Nothing -> pure known
+      else do
+        let pieces = BS.split 10 chunk
+        state <- foldM (consume True) (known,carry) (init pieces)
+        (next,pending) <- consume False state (last pieces)
+        go next pending
+
+-- Requested counters are read from the complete temporary file before its
+-- independent display prefix is truncated. Occurrence bounds are explicit
+-- fixture expectations; overflow and malformed selected rows refuse evidence.
+captureDiagnosticsWithCounters :: [(String,Int)] -> IO a -> IO (a, CapturedDiagnosticCounters, String)
+captureDiagnosticsWithCounters requested action = mask $ \restore -> do
+  selected <- selectDiagnosticCounters requested
   temporary <- getTemporaryDirectory
   (path, output) <- openTempFile temporary "source-boot-diagnostics.log"
   let cleanup = hClose output `finally` removeFile path
@@ -279,9 +378,10 @@ captureDiagnostics action = mask $ \restore -> do
         Left (failure :: SomeException) -> bestEffort restoreStderr >> throwIO failure
   case outcome of
     Right result -> do
+      counters <- readDiagnosticCounters selected output `onException` bestEffort cleanup
       diagnostics <- readDiagnostics `onException` bestEffort cleanup
       cleanup
-      pure (result, diagnostics)
+      pure (result,counters,diagnostics)
     Left (failure :: SomeException) -> do
       bestEffort $ readDiagnostics >>= hPutStrLn stderr .
         ("source-boot compiler diagnostics (bounded):\n" ++)

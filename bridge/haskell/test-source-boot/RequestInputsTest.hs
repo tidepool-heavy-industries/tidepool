@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
+module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
 
 import Tidepool.RequestCompletion (finishCompletion, captureCompletion, completionResult, completionFailures, completionAsync, BodyOutcome(..), CleanupStage(CompilerScopeRestore), cleanupStage, cleanupException)
 import Tidepool.WorkerServer (runWorkerLoop, WorkerResponse(..), requireNativeDemandOwner)
@@ -183,7 +183,8 @@ import SourceBootCases (admitInspectionScope, counterValues)
 import CodecFixtureSupport
   ( readCodecTerm, readScopeCodecFixture, scopeCodecField, scopeCodecAcquisition
   , ScopeCodecField(..), ScopeCodecAcquisition(..), replaceScopeCodecAcquisition, scopeCodecTerm )
-import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics, requireUserError
+import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics, captureDiagnosticsWithCounters, capturedDiagnosticCounterValues
+  , CapturedDiagnosticCounters, DiagnosticCounterCaptureFailure(..), requireUserError
   , rootedProfileIdentity, rootedProfilePath, rootedProfileSha256, withRootedCompilerEnvironment, withQuietStdout)
 
 -- These controls prove syntax correspondence, not source permission. The disk
@@ -2248,6 +2249,42 @@ sourceBasisConcurrency facts environment = do
           takeMVar done >>= either throwIO pure
   unless (completed == Just ()) (fail "SOURCE basis concurrency exceeded its control safeguard")
 
+diagnosticCounterCapture :: IO ()
+diagnosticCounterCapture = do
+  let wanted = "fixture.selected"
+      row name count = hPutStrLn stderr ("tidepool-count name=" ++ name ++ " count=" ++ show (count :: Integer))
+  (_,counters,display) <- captureDiagnosticsWithCounters [(wanted,2),("fixture.absent",0)] $ do
+    -- Cross both the display limit and a streaming chunk boundary with one
+    -- unrelated line. Selected rows must remain complete and separately owned.
+    hPutStrLn stderr (replicate (4 * 1024 * 1024 + 65526) 'x')
+    row wanted 7
+    row wanted 9
+  unless (capturedDiagnosticCounterValues counters wanted == Just [7,9]
+      && capturedDiagnosticCounterValues counters "fixture.absent" == Just []
+      && capturedDiagnosticCounterValues counters "unrequested" == Nothing
+      && "[compiler diagnostics truncated at 4 MiB]" `isInfixOf` display
+      && length display < 4 * 1024 * 1024 + 100
+      && null (counterValues wanted display))
+    (fail "selected counters depended on the bounded diagnostic display prefix")
+  overflow <- try (captureDiagnosticsWithCounters [(wanted,1)] (row wanted 1 >> row wanted 2))
+    :: IO (Either DiagnosticCounterCaptureFailure ((),CapturedDiagnosticCounters,String))
+  unless (case overflow of
+      Left (DiagnosticCounterOccurrenceOverflow name observed bound) -> name == wanted && observed == 2 && bound == 1
+      _ -> False)
+    (fail "counter occurrence overflow returned partial evidence")
+  forM_ ["", " count=broken", " count=1 count=2", " count=" ++ replicate 4096 '1'] $ \fields -> do
+    malformed <- try (captureDiagnosticsWithCounters [(wanted,1)]
+      (hPutStrLn stderr ("tidepool-count name=" ++ wanted ++ fields)))
+      :: IO (Either DiagnosticCounterCaptureFailure ((),CapturedDiagnosticCounters,String))
+    unless (case malformed of Left (DiagnosticCounterMalformed name) -> name == wanted; _ -> False)
+      (fail "malformed selected counter returned partial evidence")
+  attempted <- newIORef False
+  invalid <- try (captureDiagnosticsWithCounters [(wanted,1),(wanted,1)] (writeIORef attempted True))
+    :: IO (Either DiagnosticCounterCaptureFailure ((),CapturedDiagnosticCounters,String))
+  ran <- readIORef attempted
+  unless (not ran && case invalid of Left (DiagnosticCounterSelectionInvalid _) -> True; _ -> False)
+    (fail "invalid counter selection ran its action or returned ambiguous evidence")
+
 worldCellAdmissionParse :: IO ()
 worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer profile contextParcel _scopePath -> do
     let collisionModule = BS8.unlines ["module WorldObservationNames where"
@@ -2265,7 +2302,14 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
     let identity = worldInputsIdentity facts
     worldDirectory <- canonicalizePath work
     withRootedCompilerEnvironment worldDirectory $ do
-      (outcome,diagnostics) <- withQuietStdout $ captureDiagnostics $
+      let requestedCounters =
+            [("world.cell.source_frontends.main:" ++ name,1) | name <- ["CacheEntry","CacheEven","CacheOdd"]]
+            ++ [("world.cell.source_frontends.main:WorldCancellationNames",2)
+              ,("world.cell.admission_parses",15)
+              -- Recovery has a separate finite observation budget for this
+              -- fixed staged fixture; overflow refuses incomplete evidence.
+              ,("world.cell.prior_source_preparations",256)]
+      (outcome,counterEvidence,diagnostics) <- withQuietStdout $ captureDiagnosticsWithCounters requestedCounters $
         withResidentCompilerScopes [] $ \runScope -> do
           admission <- runScope (pure ()) $ \compiler -> do
             ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (CompleteExactInputs packetPath))
@@ -2918,7 +2962,8 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
               (beforeFault,fromFault) = T.breakOn marker (T.pack cancelledLog)
               beforeCounts = counterValues "worlds.completed_source_modules" (T.unpack beforeFault)
               afterCounts = counterValues "worlds.completed_source_modules" (T.unpack fromFault)
-          unless (not (T.null fromFault) && not (null beforeCounts) && not (null afterCounts)
+          unless (not ("[compiler diagnostics truncated at 4 MiB]" `isInfixOf` cancelledLog)
+              && not (T.null fromFault) && not (null beforeCounts) && not (null afterCounts)
               && all (== last beforeCounts) afterCounts)
             (fail "cancelled expression plan lost its settlement observations or committed a source module")
           -- Recovery opens a fresh phase; the poisoned phase is never retried.
@@ -2929,17 +2974,21 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
             counterValues "world.cell.source_frontends.main:WorldCancellationNames" retryLog,
             beforeCounts,afterCounts)
       outcome `seq` pure ()
-      forM_ ["CacheEntry","CacheEven","CacheOdd"] $ \name ->
-        unless (counterValues ("world.cell.source_frontends.main:" ++ name) diagnostics == [1])
+      let observed name = maybe (fail ("counter was not selected for complete capture: " ++ name)) pure
+            (capturedDiagnosticCounterValues counterEvidence name)
+      forM_ ["CacheEntry","CacheEven","CacheOdd"] $ \name -> do
+        frontends <- observed ("world.cell.source_frontends.main:" ++ name)
+        unless (frontends == [1])
           (fail "later native demand replayed an already finalized SOURCE owner")
-      unless (sum (counterValues "world.cell.prior_source_preparations" diagnostics) > 0)
+      priorPreparations <- observed "world.cell.prior_source_preparations"
+      unless (sum priorPreparations > 0)
         (fail "SOURCE history did not prepare its newly demanded prior source body")
-      let cancellationFrontends = counterValues "world.cell.source_frontends.main:WorldCancellationNames" diagnostics
+      cancellationFrontends <- observed "world.cell.source_frontends.main:WorldCancellationNames"
       unless (cancellationFrontends == [1,1])
         (fail ("cancelled expression plan published its pending captured source preparation: frontends="
           ++ show cancellationFrontends ++ "; cancellation/retry/publication=" ++ show outcome
           ++ "; globalCaptureTruncated=" ++ show ("[compiler diagnostics truncated at 4 MiB]" `isInfixOf` diagnostics)))
-      let admissionParses = counterValues "world.cell.admission_parses" diagnostics
+      admissionParses <- observed "world.cell.admission_parses"
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
       unless (admissionParses == replicate 15 1)
         (fail ("real preparation did not parse its recipe exactly once: "

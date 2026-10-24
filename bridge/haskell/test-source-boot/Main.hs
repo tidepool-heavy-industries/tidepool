@@ -6,7 +6,7 @@ import SourceBootCases
 import CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, compilerScopeCleanupFailure)
 import CompilerRequestTest (checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
-import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries)
+import RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries)
 import RequestInputsTest (compilerServiceBootBoundaries, worldCanonicalOriginalReuse, worldCarriedImportTypes)
 import RequestInputsTest (bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage)
 import SourceBootFixtureSupport (withTiming, withScratch)
@@ -36,6 +36,7 @@ tests = testGroup "source-boot"
   , testCase "completed compiler cancellation preserves facts and fences effects" completedRequestCancellation
   , testCase "closed executor refuses completed cached preparation" completedRequestRelease
   , testCase "compiler recovery cleanup failure preserves causes and poisons later scopes" compilerScopeCleanupFailure
+  , testCase "diagnostic counter capture separates complete evidence from bounded display" diagnosticCounterCapture
   , testCase "owned arena range reads" ownedArenaRangeReads
   , testCase "artifact byte ownership" artifactByteOwnership
   , testCase "request input custody histories" requestInputHistories
