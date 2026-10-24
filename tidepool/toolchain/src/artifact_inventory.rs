@@ -499,7 +499,7 @@ pub(crate) struct TargetNativeInputs {
 }
 
 impl TargetNativeInputs {
-    pub(crate) fn belongs_to_cohort(
+    pub(crate) fn shares_compiler_inputs_with(
         &self,
         cohort: crate::declaration_context::PhysicalCohortInputs<'_>,
     ) -> bool {

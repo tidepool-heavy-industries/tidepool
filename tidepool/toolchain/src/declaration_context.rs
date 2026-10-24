@@ -1027,8 +1027,8 @@ impl<'a> PhysicalCohortInputs<'a> {
         baseline: Option<CertifiedNativeGroupBaseline<'_>>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
-        if !target.belongs_to_cohort(*self) {
-            return Err(failure("native target belongs to another physical cohort"));
+        if !target.shares_compiler_inputs_with(*self) {
+            return Err(failure("native target has another compiler-input owner"));
         }
         let view = target.artifacts();
         if !Arc::ptr_eq(&self.stage.operation, &validation.inventory) {
