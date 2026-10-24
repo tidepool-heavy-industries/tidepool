@@ -1081,9 +1081,6 @@ impl PreparedEngine {
                             }
                         }
                         ScopedNativeSlot::Retained(authorized) => {
-                            if !Arc::ptr_eq(authorized.target(), &plan.linked) {
-                                return Err(PreparedRuntimeError::certified_target_owners());
-                            }
                             let capture = authorized.value();
                             Ok(BatchImport::Existing {
                                 handle: capture.handle,
