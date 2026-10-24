@@ -51,14 +51,16 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         let config = parse_daemon(&args[1..])?;
         // Named binding: dropping the guard would close the trace appender's
         // flush channel before the daemon serves its first request.
-        let _trace_guard = daemon::init_tracing(&config)?;
+        let mut _trace_guard = None;
         let result = if std::env::var_os("TIDEPOOL_OWNED_COMPILER_SERVICE").is_some() {
             let owner =
                 std::sync::Arc::new(read_owned_service_startup().map_err(FrontendError::Io)?);
             daemon::serve_owned(&config, owner.clone(), || {
+                _trace_guard = Some(daemon::init_tracing(&config)?);
                 PreparedWorker::prepare_until(owner.deadline)
             })
         } else {
+            _trace_guard = Some(daemon::init_tracing(&config)?);
             prepare_worker().and_then(|worker| daemon::serve(&config, worker))
         };
         match &result {

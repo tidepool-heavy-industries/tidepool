@@ -73,14 +73,29 @@ pub(crate) fn send(
     message: ServiceMessage,
     deadline: Instant,
 ) -> io::Result<()> {
-    let bytes = serde_json::to_vec(&Envelope {
-        schema: 2,
-        operation,
-        message,
-    })?;
-    if bytes.len() > MAX_FRAME {
-        return Err(invalid("service control frame exceeds budget"));
+    struct BoundedFrame(Vec<u8>);
+    impl Write for BoundedFrame {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.0.len().saturating_add(bytes.len()) > MAX_FRAME {
+                return Err(invalid("service control frame exceeds budget"));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
+    let mut bytes = BoundedFrame(Vec::new());
+    serde_json::to_writer(
+        &mut bytes,
+        &Envelope {
+            schema: 2,
+            operation,
+            message,
+        },
+    )?;
+    let bytes = bytes.0;
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(io::Error::new(
@@ -310,8 +325,7 @@ impl Observation {
         }
     }
 }
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Serialize)]
 pub(crate) struct OwnedServiceReport {
     pub schema: u32,
     pub kind: String,
