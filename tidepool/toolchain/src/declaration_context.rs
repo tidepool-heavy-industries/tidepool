@@ -24855,6 +24855,157 @@ mod tests {
     }
 
     #[test]
+    fn split_native_demand_reuses_transitive_child_issuance() {
+        assert_split_native_demand_issuance(false);
+    }
+
+    #[test]
+    fn split_native_demand_reuses_direct_child_issuance_when_parent_arrives_later() {
+        assert_split_native_demand_issuance(true);
+    }
+
+    fn assert_split_native_demand_issuance(child_first: bool) {
+        use crate::artifact_inventory::NativeArtifactDemand;
+        let cold = demanded_native_fixture(1, NativeArtifactDemand::AllGroups, false);
+        let mut validation = PackageInterfaceValidation::default();
+        let packet = |module: &str, ordinal, validation: &PackageInterfaceValidation| {
+            let primary = cold
+                .compiler_source_support()
+                .compiler_primary_input(&identity("fixture", module))
+                .unwrap()
+                .unwrap();
+            let artifact = primary.original().unwrap().artifact;
+            let row = &cold.native_selection.availability.0[&artifact];
+            let ArtifactPayload::Original(product) = &row.original.payload else {
+                unreachable!()
+            };
+            let binder = crate::certified_products::original_available_groups(product)
+                .unwrap()
+                .find(|group| group.original_ordinal() == ordinal)
+                .unwrap()
+                .binders()
+                .iter()
+                .next()
+                .unwrap()
+                .clone();
+            let pair = |binding: crate::artifact_inventory::ArtifactBinding| {
+                Value::Array(vec![
+                    Value::Bytes(binding.artifact.0.to_vec()),
+                    Value::Bytes(binding.selection.0.to_vec()),
+                ])
+            };
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(
+                &Value::Array(vec![
+                    text("TPDEPENDENCYQUERY1"),
+                    Value::Integer(1u64.into()),
+                    Value::Array(vec![Value::Array(vec![
+                        text("fixture"),
+                        text(module),
+                        pair(primary.interface()),
+                        pair(primary.original().unwrap()),
+                        Value::Array(vec![
+                            text(&binder.unit),
+                            text(&binder.module),
+                            text(&binder.namespace),
+                            text(&binder.occurrence),
+                            binder.record_parent.as_ref().map_or(Value::Null, text),
+                        ]),
+                    ])]),
+                ]),
+                &mut bytes,
+            )
+            .unwrap();
+            crate::certified_products::NativeDemandPacket::decode(&bytes, &validation.inventory)
+                .unwrap()
+        };
+        let parent = packet("DemandParent", 7, &validation);
+        let child = packet("DemandChild", 9, &validation);
+        let (first_packet, second_packet) = if child_first {
+            (&child, &parent)
+        } else {
+            (&parent, &child)
+        };
+        let first = Arc::new(
+            cold.resolve_native_demand(first_packet, &mut validation)
+                .unwrap(),
+        );
+        let second = Arc::new(
+            cold.resolve_native_demand(second_packet, &mut validation)
+                .unwrap(),
+        );
+        let child_binding = *first
+            .groups
+            .rows
+            .iter()
+            .find(|(_, row)| row.product().owner().module == "DemandChild")
+            .unwrap()
+            .0;
+        let original = &first.groups.rows[&child_binding];
+        let repeated = &second.groups.rows[&child_binding];
+        assert_eq!(
+            original.product(),
+            repeated.product(),
+            "the overlap is the same authenticated payload"
+        );
+        assert_eq!(original.dependencies, repeated.dependencies);
+        assert_eq!(original.imports(), repeated.imports());
+
+        let unrelated_packet = packet("UnrelatedNative0", 1, &validation);
+        let mut foreign_validation = PackageInterfaceValidation::default();
+        let foreign_operation = cold
+            .resolve_native_demand(&unrelated_packet, &mut foreign_validation)
+            .unwrap();
+        assert!(first
+            .groups
+            .rows
+            .keys()
+            .all(|binding| !foreign_operation.groups.rows.contains_key(binding)));
+        assert!(
+            first.groups.merge(&foreign_operation.groups).is_err(),
+            "disjoint rows cannot borrow another operation"
+        );
+
+        let mut changed = DemandCertifiedGroups {
+            basis: first.groups.basis.clone(),
+            operation: first.groups.operation.clone(),
+            rows: first.groups.rows.clone(),
+            products: first.groups.products.clone(),
+            resolved_originals: first.groups.resolved_originals.clone(),
+            original_use_roots: first.groups.original_use_roots.clone(),
+            retained_bindings: first.groups.retained_bindings.clone(),
+            package_obligations: first.groups.package_obligations.clone(),
+        };
+        changed
+            .rows
+            .get_mut(&child_binding)
+            .unwrap()
+            .dependencies
+            .push(child_binding);
+        assert!(original
+            .product()
+            .same_issuance(changed.rows[&child_binding].product()));
+        assert_eq!(original.imports(), changed.rows[&child_binding].imports());
+        assert!(
+            first.groups.merge(&changed).is_err(),
+            "the exact issued product cannot excuse changed dependency links"
+        );
+
+        let merged = first
+            .groups
+            .merge(&second.groups)
+            .expect("later demand must reuse the original overlapping occurrence");
+        assert!(
+            Arc::ptr_eq(&original.issued, &repeated.issued),
+            "split acquisition must retain the original issued row allocation"
+        );
+        assert!(Arc::ptr_eq(
+            &merged.rows[&child_binding].issued,
+            &original.issued
+        ));
+    }
+
+    #[test]
     fn retained_native_demand_projects_exact_uses_without_reacquiring_or_retaining_siblings() {
         use crate::artifact_inventory::{ArtifactBinding, NativeArtifactDemand};
         let cold = demanded_native_fixture(1, NativeArtifactDemand::AllGroups, false);
