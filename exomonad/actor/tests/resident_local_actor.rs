@@ -385,7 +385,8 @@ async fn resident_command_retain_binding_returns_reference_without_command_prese
 #[tokio::test]
 #[ignore = "requires the dedicated rooted notebook contract execution group"]
 async fn resident_captured_source_retains_the_parked_job_for_a_later_cell() {
-    let markers = ["captured-job"];
+    // The shared cell's final command argument is the keyed backend marker.
+    let markers = ["1"];
     let mut fixture = ConcurrentResident::new(193, &markers).await;
     let mut parked = fixture.spawn_cell(
         markers[0],
