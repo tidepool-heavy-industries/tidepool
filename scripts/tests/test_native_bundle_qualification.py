@@ -17,7 +17,7 @@ import sys
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'build/package/qualification.py'
 SPEC = importlib.util.spec_from_file_location('native_qualification', SCRIPT)
@@ -127,7 +127,8 @@ class RegisteredGcRootTests(unittest.TestCase):
             qualification.verify_registered_gc_roots(self.tools, pins)
         query.assert_called_once_with(
             [str(self.tools / 'bin/nix-store'), '--query', '--roots',
-             str(self.stores[0]), str(self.stores[1])], text=True, timeout=60)
+             str(self.stores[0]), str(self.stores[1])], preexec_fn=ANY, text=True, timeout=60)
+        self.assertTrue(callable(query.call_args.kwargs['preexec_fn']))
 
     def test_missing_pair_refuses_despite_another_registered_root_for_its_store(self):
         output = (f'{self.links[0]} -> {self.stores[0]}\n'

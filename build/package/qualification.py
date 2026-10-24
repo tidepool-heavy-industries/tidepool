@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import ctypes
+import errno
 from contextlib import contextmanager
 from enum import Enum
 import hashlib
@@ -821,12 +823,71 @@ def native_runtime_tools(path: Path) -> Path:
 def store_root(path: Path) -> Path:
     return Path(*nix_path(path).parts[:4])
 
+_package_child_libc = None
+
+
+def _package_subprocess(command, *, stdout_only=False, **options):
+    """Run one direct package-provider child with its actual parent's lifetime.
+
+    The sealed provider is synchronous. Python preexec hooks are unsafe with
+    other threads, so refuse before fork if the kernel observes another thread.
+    The normal subprocess owner still waits, including its timeout kill/wait.
+    Parent death only kills this direct child: it proves neither an observed
+    reap nor cancellation of requests already sent to the shared Nix daemon.
+    """
+    global _package_child_libc
+    if sys.platform != "linux":
+        raise OSError("package-provider child ownership requires Linux")
+    if "preexec_fn" in options or "executable" in options or options.get("shell"):
+        raise ValueError("package-provider child must execute its exact declared program")
+    if not command or not os.path.isabs(executable := os.fspath(command[0])):
+        raise ValueError("package-provider child requires its declared absolute executable")
+    if _package_child_libc is None:
+        library = ctypes.CDLL(None, use_errno=True)
+        library.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+                                  ctypes.c_ulong, ctypes.c_ulong]
+        library.prctl.restype = ctypes.c_int
+        library.getppid.argtypes = []
+        library.getppid.restype = ctypes.c_int
+        _package_child_libc = library
+    library = _package_child_libc
+    if len(os.listdir("/proc/self/task")) != 1:
+        raise RuntimeError("package-provider child spawn requires one kernel thread")
+    parent = os.getpid()
+
+    def inherit_parent_lifetime():
+        # Linux clears this setting at fork. Arm before checking the captured
+        # parent, so parent exit on either side of prctl prevents execution.
+        if library.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or library.getppid() != parent:
+            os._exit(125)
+        try:
+            metadata = os.stat(executable)
+            if (not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_mode & (stat.S_ISUID | stat.S_ISGID)):
+                os._exit(126)
+            try:
+                os.getxattr(executable, "security.capability")
+            except OSError as error:
+                if error.errno not in (errno.ENODATA, errno.ENOTSUP):
+                    os._exit(126)
+            else:
+                # Privileged exec can clear PDEATHSIG. Declared nix-store is
+                # unprivileged; special exec and later credential changes are
+                # outside this direct-child lifetime contract.
+                os._exit(126)
+        except OSError:
+            os._exit(126)
+
+    operation = subprocess.check_output if stdout_only else subprocess.run
+    return operation(command, preexec_fn=inherit_parent_lifetime, **options)
+
+
 def nix_metadata(tools: Path, roots: list[str]) -> dict:
     executable = str(tools / "bin/nix-store")
-    closure = sorted(set(subprocess.check_output(
-        [executable, "--query", "--requisites", *roots], text=True, timeout=60).splitlines()))
-    hashes = subprocess.check_output(
-        [executable, "--query", "--hash", *closure], text=True, timeout=60).splitlines()
+    closure = sorted(set(_package_subprocess(
+        [executable, "--query", "--requisites", *roots], stdout_only=True, text=True, timeout=60).splitlines()))
+    hashes = _package_subprocess(
+        [executable, "--query", "--hash", *closure], stdout_only=True, text=True, timeout=60).splitlines()
     if len(hashes) != len(closure) or not closure or any(not value.startswith("sha256:") for value in hashes):
         raise ValueError("declared Nix closure lacks complete SHA-256 NAR evidence")
     return {"roots": roots, "closure": closure, "nar_hashes": dict(zip(closure, hashes))}
@@ -993,8 +1054,8 @@ def _package_loader_roots(programs: list[Path], environment: dict) -> list[Path]
 
 
 def _package_nar_bytes(tools: Path, closure: list[str]) -> int:
-    values = subprocess.check_output([str(tools / "bin/nix-store"), "--query", "--size", *closure],
-                                     text=True, timeout=60).splitlines()
+    values = _package_subprocess([str(tools / "bin/nix-store"), "--query", "--size", *closure],
+                                 stdout_only=True, text=True, timeout=60).splitlines()
     if len(values) != len(closure) or any(not value.isdecimal() for value in values):
         raise ValueError("package closure lacks complete NAR serialized size evidence")
     return sum(map(int, values))
@@ -1353,8 +1414,8 @@ def _acquire_compiler_service_source(args, attempt: dict, phase: dict) -> tuple[
     try:
         state["nix_profile_import_attempts"] = 1
         write_private_json(plan, state)
-        added = subprocess.check_output([str(tools / "bin/nix-store"), "--add-fixed", "sha256", record["profile_path"]],
-                                        text=True, timeout=60).strip()
+        added = _package_subprocess([str(tools / "bin/nix-store"), "--add-fixed", "sha256", record["profile_path"]],
+                                    stdout_only=True, text=True, timeout=60).strip()
         if added != profile_store:
             raise ValueError("Nix-added immutable profile path differs from the declared profile")
         state["provider_profile_hash_passes"] += 1
@@ -1365,9 +1426,9 @@ def _acquire_compiler_service_source(args, attempt: dict, phase: dict) -> tuple[
         for item in planned:
             item["state"] = "registering"
             write_private_json(plan, state)
-            subprocess.run([str(tools / "bin/nix-store"), "--add-root", item["path"],
-                            "--indirect", "--realise", item["store_path"]],
-                           check=True, capture_output=True, timeout=60)
+            _package_subprocess([str(tools / "bin/nix-store"), "--add-root", item["path"],
+                                 "--indirect", "--realise", item["store_path"]],
+                                check=True, capture_output=True, timeout=60)
             if not _package_root_present(item):
                 raise ValueError("Nix registered another service package root")
             item["state"] = "registered"
@@ -1717,9 +1778,9 @@ class _RegisteredGcRoots:
     @property
     def pairs(self) -> frozenset[tuple[str, ...]]:
         if self._pairs is None:
-            registered = subprocess.check_output(
+            registered = _package_subprocess(
                 [str(self.tools / "bin/nix-store"), "--query", "--roots", *sorted(self.store_paths)],
-                text=True, timeout=60).splitlines()
+                stdout_only=True, text=True, timeout=60).splitlines()
             object.__setattr__(self, "_pairs", frozenset(tuple(line.split(" -> ", 1)) for line in registered))
         return self._pairs
 
