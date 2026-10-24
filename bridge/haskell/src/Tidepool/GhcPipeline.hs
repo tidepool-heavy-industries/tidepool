@@ -8616,6 +8616,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
             phase <- newIORef CompilerReady
             interrupted <- newIORef False
             interpreterAttempt <- newIORef InterpreterConfirmed
+            pendingRecovery <- newIORef Nothing
             operationPurpose <- newIORef "request"
             operationIdentity <- newTimingRequestIdentity >>= newIORef
             heldWorld <- newIORef Nothing
@@ -8639,7 +8640,12 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     Just _ -> writeIORef interrupted True >> throwIO failure
                     Nothing -> do
                       case fromException failure of
-                        Just CompilerTransactionPoisoned -> throwIO failure
+                        Just CompilerTransactionPoisoned -> do
+                          -- This operation already observed an unsettled
+                          -- interpreter. Preserve it without retrying retirement.
+                          assessment <- captureCompletion (throwIO failure :: IO ())
+                          writeIORef pendingRecovery (Just assessment)
+                          throwIO failure
                         _ -> pure ()
                       recovery <- captureCompletion $ do
                         -- Failed home/finder/memo choices remain private. Fixed
@@ -8663,10 +8669,10 @@ withResidentCompilerScopes baseIncludes useRequests = do
                         BodySucceeded () -> do
                           writeIORef phase CompilerReady
                           writeIORef availability ResidentBusy
-                        _ -> pure ()
-                      completed <- captureCompletion (throwIO failure)
-                      finishCompletion (appendCleanupFailures completed
-                        (asCleanupFailures CompilerScopeRestore recovery))
+                        _ -> writeIORef pendingRecovery (Just recovery)
+                      -- The scope owns recovery cleanup reporting at settlement.
+                      -- This call reports only its original operation failure.
+                      throwIO failure
                 runGuarded :: forall result. IO result -> IO result
                 runGuarded operation = mask $ \restore -> do
                   caller <- myThreadId
@@ -9085,8 +9091,8 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     (initialFailures ++ endObservations ++ backingFailures))
                 -- Ordinary cleanup cannot repair an earlier poisoned resident.
                 -- Its successful result leaves admission state unchanged.
-                finishOrdinaryScope = do
-                  settled <- captureCompletion (settleScopeResources Nothing)
+                finishOrdinaryScope recovery = do
+                  settled <- captureCompletion (settleScopeResources recovery)
                   case completionResult settled of
                     BodySucceeded () -> pure ()
                     _ -> writeIORef availability ResidentPoisoned
@@ -9113,8 +9119,15 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   finishCompletion settled
                 finish = do
                   writeIORef phase CompilerClosed
-                  cancelled <- readIORef interrupted
-                  if cancelled then finishInterruptedScope else finishOrdinaryScope
+                  recovery <- atomicModifyIORef' pendingRecovery (\pending -> (Nothing,pending))
+                  case recovery of
+                    -- A failed guarded transition leaves CompilerFailed, so no
+                    -- later operation can overwrite this actual assessment.
+                    -- It controls custody and reports once, even if caught.
+                    Just _ -> finishOrdinaryScope recovery
+                    Nothing -> do
+                      cancelled <- readIORef interrupted
+                      if cancelled then finishInterruptedScope else finishOrdinaryScope Nothing
             let nativeProvenance = do
                   requireReady
                   case (producer,packageAssociation) of

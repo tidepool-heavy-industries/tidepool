@@ -631,7 +631,8 @@ compilerScopeCleanupFailure = withResidentCompilerScopes [] $ \runScope -> do
   completed <- captureCompletion $ runScope failedRecovery $ \compiler -> do
     failed <- captureCompletion (guardedFailure compiler)
     requirePrimary failed
-    requireCleanup failed
+    unless (null (completionFailures failed))
+      (fail "guarded operation reported cleanup owned by final scope settlement")
     requirePhase CompilerTransactionFailed (scopedRunGhc compiler (pure ()))
     finishCompletion failed
   -- Crossing the scope's release must retain both causes and cannot clear the
