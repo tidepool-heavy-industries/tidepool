@@ -3128,7 +3128,7 @@ fn admit_native_target_products(
         .or_else(|| {
             inherited_groups.map(crate::declaration_context::CertifiedNativeGroupBaseline::Target)
         });
-    let selected_groups = Arc::new(physical.certify_groups(
+    let selected_groups = Arc::new(physical.certify_target_groups(
         &artifact_view,
         &certified.data().groups,
         baseline,
@@ -4965,16 +4965,17 @@ fn compile_invocation_inner(
                     &package_catalog,
                     &mut validation,
                 )?;
-                let selected_groups = Arc::new(physical_inputs.physical_cohort().certify_groups(
-                    selected_target.artifacts(),
-                    &certified.data().groups,
-                    exact_request.as_ref().map(|request| {
-                        crate::declaration_context::CertifiedNativeGroupBaseline::Target(
-                            request.groups.as_ref(),
-                        )
-                    }),
-                    &mut validation,
-                )?);
+                let selected_groups =
+                    Arc::new(physical_inputs.physical_cohort().certify_target_groups(
+                        selected_target.artifacts(),
+                        &certified.data().groups,
+                        exact_request.as_ref().map(|request| {
+                            crate::declaration_context::CertifiedNativeGroupBaseline::Target(
+                                request.groups.as_ref(),
+                            )
+                        }),
+                        &mut validation,
+                    )?);
                 let package_closure = package_catalog.select(
                     selected_groups.groups(),
                     selected_target.imports(),

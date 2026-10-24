@@ -1020,7 +1020,7 @@ impl<'a> PhysicalCohortInputs<'a> {
         self.stage.issued_artifacts()
     }
 
-    pub(crate) fn certify_groups(
+    pub(crate) fn certify_target_groups(
         &self,
         view: &ArtifactView,
         candidates: &crate::certified_products::IssuedGroupCandidates,
@@ -1041,6 +1041,7 @@ impl<'a> PhysicalCohortInputs<'a> {
             baseline,
             validation,
             Some(&issued),
+            NativeGroupBaselineScope::SelectedBindings,
         )?;
         for (binding, row) in &groups.rows {
             if let Some(prior) = issued.get(binding) {
@@ -13008,12 +13009,43 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 stage: &segment.inputs.groups,
                 prior: prior.certified_groups(),
             };
-            certify_artifact_view_groups(&combined, None, Some(baseline), &mut validation, None)
-                .expect("both actual issued baselines retain their exact links");
+            certify_artifact_view_groups(
+                &combined,
+                None,
+                Some(baseline),
+                &mut validation,
+                None,
+                NativeGroupBaselineScope::EntirePrefix,
+            )
+            .expect("both actual issued baselines retain their exact links");
             assert!(
-                certify_artifact_view_groups(stage, None, Some(baseline), &mut validation, None)
-                    .is_err(),
+                certify_artifact_view_groups(
+                    stage,
+                    None,
+                    Some(baseline),
+                    &mut validation,
+                    None,
+                    NativeGroupBaselineScope::EntirePrefix
+                )
+                .is_err(),
                 "a stage cannot drop its actual previous target"
+            );
+            let selected = certify_artifact_view_groups(
+                stage,
+                None,
+                Some(baseline),
+                &mut validation,
+                None,
+                NativeGroupBaselineScope::SelectedBindings,
+            )
+            .expect("a consuming target may reuse only the selected part of an available prefix");
+            assert_eq!(
+                selected.bindings.keys().copied().collect::<BTreeSet<_>>(),
+                stage
+                    .selected_native_binding_rows()
+                    .1
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
             );
             let groups = prior.certified_groups();
             let mut changed = CertifiedArtifactGroupBindings {
@@ -13040,15 +13072,37 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 }),
                 &mut validation,
                 None,
+                NativeGroupBaselineScope::EntirePrefix,
             )
             .unwrap_err();
             assert!(error
                 .to_string()
                 .contains("changed an issued native import destination"));
+            let selected_error = certify_artifact_view_groups(
+                &combined,
+                None,
+                Some(CertifiedNativeGroupBaseline::WorldPrefix {
+                    stage: &segment.inputs.groups,
+                    prior: &changed,
+                }),
+                &mut validation,
+                None,
+                NativeGroupBaselineScope::SelectedBindings,
+            )
+            .unwrap_err();
+            assert!(selected_error.to_string().contains("changed an issued native import destination"),
+                "selected-only reuse cannot change an overlapping selected row's exact ordered links");
             let mut foreign = PackageInterfaceValidation::default();
             assert!(
-                certify_artifact_view_groups(&combined, None, Some(baseline), &mut foreign, None)
-                    .is_err(),
+                certify_artifact_view_groups(
+                    &combined,
+                    None,
+                    Some(baseline),
+                    &mut foreign,
+                    None,
+                    NativeGroupBaselineScope::EntirePrefix
+                )
+                .is_err(),
                 "another accounting owner cannot consume the World baseline"
             );
         }
@@ -16940,6 +16994,7 @@ impl ExactDeclarationContext {
             Some(CertifiedNativeGroupBaseline::Rows(&keyed)),
             &mut validation,
             None,
+            NativeGroupBaselineScope::EntirePrefix,
         )?;
         crate::timing::record_stage(
             crate::timing::NO_NODE,
@@ -17649,6 +17704,7 @@ pub(crate) fn certify_selected_artifact_view_groups_with_validation(
         baseline.map(CertifiedNativeGroupBaseline::Target),
         validation,
         None,
+        NativeGroupBaselineScope::EntirePrefix,
     )
 }
 
@@ -17665,7 +17721,14 @@ pub(crate) fn certify_issued_artifact_view_groups_with_validation(
         baseline.map(CertifiedNativeGroupBaseline::Target),
         validation,
         None,
+        NativeGroupBaselineScope::EntirePrefix,
     )
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NativeGroupBaselineScope {
+    EntirePrefix,
+    SelectedBindings,
 }
 
 fn certify_artifact_view_groups(
@@ -17676,6 +17739,7 @@ fn certify_artifact_view_groups(
     issued_rows: Option<
         &BTreeMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
     >,
+    baseline_scope: NativeGroupBaselineScope,
 ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
     if let Some(CertifiedNativeGroupBaseline::WorldPrefix { stage, .. }) = bound_baseline {
         if !Arc::ptr_eq(&stage.operation, &validation.inventory) {
@@ -17756,7 +17820,12 @@ fn certify_artifact_view_groups(
                                group: &PendingCertifiedGroup|
      -> Result<(), CompileError> {
         if !selected.contains(&binding) {
-            return Err(failure("artifact view removed an issued native binding"));
+            match baseline_scope {
+                NativeGroupBaselineScope::SelectedBindings => return Ok(()),
+                NativeGroupBaselineScope::EntirePrefix => {
+                    return Err(failure("artifact view removed an issued native binding"));
+                }
+            }
         }
         inherit(
             NativeGroupKey {
@@ -17822,6 +17891,11 @@ fn certify_artifact_view_groups(
         })
         .collect::<BTreeMap<_, _>>();
     let mut inherit_row = |binding, row: &Arc<IssuedSelectedNativeGroup>| {
+        if baseline_scope == NativeGroupBaselineScope::SelectedBindings
+            && !selected.contains(&binding)
+        {
+            return Ok(());
+        }
         if let Some(previous) = shared_rows.get(&binding) {
             if !previous.product().same_issuance(row.product())
                 || previous.imports() != row.imports()
@@ -17888,6 +17962,11 @@ fn certify_artifact_view_groups(
         .map_err(compiler_evidence_failure)?;
     let rows = certification.rows;
     let check_links = |binding, prior: &[crate::certified_products::SelectedNativeImport]| {
+        if baseline_scope == NativeGroupBaselineScope::SelectedBindings
+            && !selected.contains(&binding)
+        {
+            return Ok(());
+        }
         if rows.get(&binding).map(|row| row.imports()) != Some(prior) {
             return Err(failure(
                 "artifact view changed an issued native import destination",

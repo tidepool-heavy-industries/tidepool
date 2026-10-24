@@ -4205,7 +4205,7 @@ impl ArtifactInventory {
             }
         }
         let snapshot =
-            selection_snapshot_for_lease(&state, &namespace, &exact_roots, &[], &parents);
+            target_selection_snapshot_for_lease(&state, &namespace, &exact_roots, &parents);
         drop(state);
         let mut artifacts = ArtifactView::new(ViewDraft {
             roots: exact_roots,
@@ -6145,6 +6145,29 @@ fn selection_snapshot_for_lease(
         snapshot.scopes.insert(scope, proof);
     }
     Arc::new(snapshot)
+}
+
+/// A consuming target chooses its own execution roots. Prior selections remain
+/// available as custody, including their immutable scope and namespace facts.
+fn target_selection_snapshot_for_lease(
+    state: &InventoryState,
+    namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+    roots: &[InventoryNodeKey],
+    parents: &[Arc<ViewLease>],
+) -> Arc<ExactSelectionSnapshot> {
+    let mut snapshot = selection_snapshot_for_lease(state, namespace, roots, &[], parents);
+    let selected = roots
+        .iter()
+        .map(|root| (*root, ()))
+        .collect::<imbl::OrdMap<_, _>>();
+    let snapshot_mut = Arc::make_mut(&mut snapshot);
+    for prior in snapshot_mut.roots.keys() {
+        if !selected.contains_key(prior) {
+            snapshot_mut.custody_roots.insert(*prior, ());
+        }
+    }
+    snapshot_mut.roots = selected;
+    snapshot
 }
 
 /// Only explicitly held views retain their derived read projections.
@@ -14156,6 +14179,7 @@ mod tests {
             );
             let before = inventory.metrics().issued_scope_nodes;
             let mut first_groups = None;
+            let mut prior_target = None;
             for ordinal in [0, 0, 1] {
                 let mut validation =
                     crate::recovery_artifacts::PackageInterfaceValidation::default();
@@ -14171,14 +14195,40 @@ mod tests {
                         fixed.captured_stage().physical_cohort(),
                         observed,
                         None,
-                        None,
+                        prior_target.as_ref(),
                         &[],
                         &BTreeMap::new(),
                         &mut validation,
                     )
                     .unwrap();
+                let expected = target.resolve().unwrap().groups().clone();
                 let target = target.artifacts();
-                let groups = target.capture_graph_selection().native_groups;
+                let groups = target.selected_native_binding_rows().1;
+                assert_eq!(
+                    groups.iter().copied().collect::<BTreeSet<_>>(),
+                    expected,
+                    "the consuming view selects exactly its issued target demand"
+                );
+                let retained = target.capture_graph_selection();
+                if ordinal == 1 {
+                    let old = own_bindings[&NativeGroupKey {
+                        artifact: consumer.descriptor.id,
+                        original_ordinal: 0,
+                    }];
+                    assert!(!retained.roots.contains(&InventoryNodeKey::Group(old)));
+                    assert!(retained.custody_roots.contains(&InventoryNodeKey::Group(old)),
+                        "the prior root remains exact group custody rather than an executable or carrier root");
+                    assert!(retained.native_groups.contains(&old));
+                    assert!(
+                        retained.native_groups.contains(
+                            &own_bindings[&NativeGroupKey {
+                                artifact: helper.descriptor.id,
+                                original_ordinal: 7,
+                            }]
+                        ),
+                        "retained exact dependencies survive root restriction"
+                    );
+                }
                 assert_eq!(
                     groups.iter().copied().collect::<BTreeSet<_>>(),
                     BTreeSet::from([
@@ -14217,6 +14267,7 @@ mod tests {
                 } else {
                     first_groups = Some(groups);
                 }
+                prior_target = Some(target.clone());
                 super::view_read_properties::check_scoped_projection_closure(target).unwrap();
                 assert_eq!(
                     inventory.metrics().issued_scope_nodes,
