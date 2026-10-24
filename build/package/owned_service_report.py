@@ -35,7 +35,7 @@ def validate_owned_service_report(report: dict, owner: Path) -> dict:
         digest_array(value["sha256"])
     if not isinstance(report["operation"], str) or re.fullmatch(r"[0-9a-f]{64}", report["operation"]) is None:
         raise ValueError("owned service report has invalid operation identity")
-    for key, length in (("daemon_epoch", 64), ("producer", 64), ("endpoint", 192)):
+    for key, length in (("daemon_epoch", 64), ("producer", 64), ("endpoint", 64)):
         value = report[key]
         if value is not None and (not isinstance(value, str) or re.fullmatch("[0-9a-f]{" + str(length) + "}", value) is None):
             raise ValueError("owned service report has invalid identity: " + key)
@@ -44,7 +44,7 @@ def validate_owned_service_report(report: dict, owner: Path) -> dict:
     if report["socket_path"] is not None and (not isinstance(report["socket_path"], str) or not Path(report["socket_path"]).is_absolute()):
         raise ValueError("owned service report has invalid socket path")
     states = {"action": {"not_started", "running", "exited", "failed"},
-              "daemon_reap": {"not_started", "reaped", "unconfirmed"},
+              "daemon_reap": {"not_started", "pending", "reaped", "unconfirmed"},
               "source_settlement": {"pending", "settled", "not_configured", "retained"},
               "artifact_retention": {"pending", "removed", "failed", "retained"}}
     for key in states:

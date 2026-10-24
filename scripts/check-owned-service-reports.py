@@ -15,11 +15,14 @@ def check_reports(fixtures):
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     expected = {
+        'initial': ('not_started', None, False),
+        'live-pending': ('running', None, False),
         'complete': ('exited', 0, True),
         'failed-action': ('exited', 17, True),
         'startup-failed': ('failed', None, True),
         'source-retained': ('exited', 0, False),
         'unknown': ('exited', 0, False),
+        'retirement-unconfirmed': ('exited', 0, False),
     }
     summaries = runner.diagnostic_summaries(fixtures.parent)
     if summaries['issues']:
@@ -27,7 +30,7 @@ def check_reports(fixtures):
     observed = {Path(root['path']): root for root in summaries['owned_compiler_roots']}
     expected_paths = {fixtures / name for name in expected}
     if set(observed) != expected_paths:
-        raise AssertionError(f'expected five exact Rust fixture owners: {set(observed)}')
+        raise AssertionError(f'expected {len(expected)} exact Rust fixture owners: {set(observed)}')
     for name, (action_status, code, complete) in expected.items():
         owner = fixtures / name
         summary = observed[owner]
