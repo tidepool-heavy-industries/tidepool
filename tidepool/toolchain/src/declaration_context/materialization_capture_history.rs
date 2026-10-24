@@ -637,7 +637,8 @@ fn materialization_frontier_preserves_issuer_precedence_and_narrow_release() {
                 .1
                 .into_iter()
                 .collect(),
-        );
+        )
+        .unwrap();
         assert_eq!(selected.len(), 1);
         assert!(Arc::ptr_eq(&selected[0], expected));
     }
@@ -649,6 +650,7 @@ fn materialization_frontier_preserves_issuer_precedence_and_narrow_release() {
         &empty,
         &BTreeSet::new()
     )
+    .unwrap()
     .is_empty());
     let beta = metadata.entries[&identity("fixture", "Beta")].descriptor.id;
     let selected_view = first.artifact_view().select_roots(vec![beta]).unwrap();
@@ -661,7 +663,8 @@ fn materialization_frontier_preserves_issuer_precedence_and_narrow_release() {
             .1
             .into_iter()
             .collect(),
-    );
+    )
+    .unwrap();
     assert_eq!(captured.len(), 1);
     assert!(!Arc::ptr_eq(&captured[0], first_owner));
     assert!(captured[0]._parents.is_empty() && captured[0]._directory.is_none());
@@ -1016,6 +1019,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             &artifacts,
             &BTreeSet::new(),
         )
+        .unwrap()
         .unwrap();
         assert_eq!(flat.graph_paths.len(), 2);
         let all_work = HostWorkObservation::new();
@@ -1302,7 +1306,8 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
                 .1
                 .into_iter()
                 .collect(),
-        );
+        )
+        .unwrap();
         assert_eq!(selected.len(), 2);
         let root = selected
             .iter()
