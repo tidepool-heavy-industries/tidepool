@@ -101,7 +101,7 @@ demandScopeChecks = do
                   -- The parser returns GHC's detailed diagnostic, not a fixed
                   -- refusal label. Correcting the syntax must admit this same
                   -- physical root through a new exact recipe and capture.
-                  let repaired = source ++ ")\n"
+                  let repaired = unlines ["module MalformedModule where", "root = ()"]
                   writeFile path repaired
                   repairedRecipe <- generatedCheckingTemplateRecipe actual (CheckedTemplateImports [] [])
                     repaired repaired path name >>= either fail pure
