@@ -41,7 +41,7 @@ module Tidepool.ExactHydration
   , generatedTypedSegmentRecipeWithProtectedImports
   , generatedCheckingTemplateRecipeWithImportRendering, generatedTypedSegmentRecipeWithImportRendering
   , generatedScaffoldRecipeWithImportRendering
-  , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
+  , generatedActivationPreviewRecipe
   , CapturedGeneratedScaffoldSource, captureGeneratedScaffoldSource
   , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldText, capturedGeneratedScaffoldPath
   , capturedSourceImportOrigins
@@ -870,10 +870,6 @@ captureGeneratedScaffoldSource (GeneratedScaffoldRecipe path _ expected _ _ _ _ 
     then Right (CapturedGeneratedScaffoldSource path expected census)
     else Left "generated scaffold target differs from its protected recipe"
 
-captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String BS.ByteString)
-captureGeneratedScaffoldTarget recipe requested =
-  fmap capturedGeneratedScaffoldBytes <$> captureGeneratedScaffoldSource recipe requested
-
 -- Interface-only template edges never enter the native/source replay inventory.
 data GeneratedScaffoldImportAuthority = GeneratedScaffoldImportAuthority
   [(Module,Fingerprint,SrcSpan,ExactIfaceArtifact)]
@@ -908,7 +904,7 @@ readGeneratedScaffoldImportAuthority (CapturedInterfaceInputs captured)
     (CapturedGeneratedImports (CapturedGeneratedScaffoldSource capturedPath capturedBytes capturedCensus) _ syntax classified)
     driver sourceGraph env = do
   let parsed = driverParsedModule driver
-  checked <- captureGeneratedScaffoldTarget recipe path
+  checked <- captureGeneratedScaffoldSource recipe path
   (source,fingerprint) <- sourceEvidenceWithFingerprint path
   targetPaths <- forM [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph
       , moduleNameString (moduleName (ms_mod summary)) == target] $ \summary ->
