@@ -5,7 +5,7 @@ pending. Regional closeout, G2 and G3 remain unqualified.**
 
 Integration: /srv/swarm/checkouts/tidepool-domain-runtime-join-20261023,
 branch integration/g2-domain-runtime-20261023. Code candidate:
-d387e2f488d22e1fbc1e02ded56b14f942fb5aed; baseline: 9cbdbf44d8.
+06ecb784efe8fce44d1bf5c60419059c95f3cd48; baseline: 9cbdbf44d8.
 [REQUEST-SERVICE-LIFECYCLE.md](REQUEST-SERVICE-LIFECYCLE.md) is the current
 implementation contract, worker partition and gate sequence.
 
@@ -24,22 +24,39 @@ W4's 68 Python tests and W5's runner/generator checks passed on their parcel
 revisions; they do not qualify the joined Rust/Haskell service.
 Evidence: /srv/swarm/evidence/inanna/c-ownership-20261022/validation/9e2a-w1-checkpoint.json.
 
-The validator is assigned d387e2f488 for owner and downstream test compilation,
-focused request/service execution, then the actual maintained G2 history. Record
-failures against that pin before advancing it. No joined passing result yet.
+The first d387e2f488 joined compile exposed a deleted configuration helper still
+used by two property tests. The bounded repair is integrated at 0bbc6ebbf5.
+Its 18-target owner/downstream compile passed; 18 focused native cases have
+passed so far, with the remaining component checks running at that fixed pin.
+The actual Rust-writer-to-Python-reader check failed for all five emitted reports:
+the reader requires a 192-character endpoint, but the production issuer emits 64.
+This is product contract drift, not an invalid Rust fixture. Logs and exact build
+evidence are under /srv/swarm/evidence/inanna/c-ownership-20261022/validation/.
+
+The newest source additionally includes typed source admission and failed-recovery
+custody repairs. Those require compilation and execution after the validator
+releases 0bbc6ebbf5. Do not run G2 on the older pin or relabel its passing evidence.
 
 ## Open follow-ups
 
-- Compiler recovery: review found failed synchronous interpreter recovery can
-  poison admission yet fail to reach final backing-resource settlement. W1 is
-  repairing its unmerged clarity candidate with actual recovery evidence and a
-  real uncached backing regression. Final scope settlement owns cleanup reporting;
-  neither poison nor interruption flags establish release authority. Independent
-  reviewer: astra_compiler_cutover_review.
-- Source admission: typed witness candidate 011e12e56e (on 190ebe64d3) passed
-  source authority review. The new test's owned-resident registration and exact
-  refusal assertions are being repaired. Compilation and execution remain pending;
-  this branch is not included in d387e2f488.
+- Compiler recovery: independently reviewed b702238b9d is integrated, including
+  real uncached backing controls for propagated, swallowed and replaced failures.
+  Final scope settlement carries the actual failed recovery assessment and owns
+  cleanup reporting. Follow-up 256e854b18 deletes the obsolete raw source capture
+  API. New Haskell controls still need execution.
+- Source admission: independently reviewed typed witness plus registered
+  owned-resident controls are integrated through 67cf9ddb20. The old native raw
+  digest accessor is deleted; canonical identity remains distinct from admission.
+  Rust compilation, paired compile contracts and execution remain pending.
+- Joined report boundary: W4 is correcting endpoint length and valid live Pending
+  report parsing, with a maintained actual Rust writer/Python reader control.
+  W5 is migrating compiler-warm-contention.py from the retired lifecycle format.
+  The service reviewer must recheck their combined result.
+- Provider child lifetime: a controlled actual-process reproduction confirmed a
+  Nix client can survive Python-provider death. W3 is implementing a bounded
+  parent-death contract for those exact subprocess edges, with explicit limits:
+  killing a client does not prove descendants reaped or shared-daemon work settled.
+  Missing provider completion continues to retain unknown acquisition custody.
 - Argon's additional dead-code/equality proposals remain investigations, not
   implemented changes or G2 prerequisites. Findings and rejected hypotheses are
   retained in /srv/swarm/evidence/inanna/c-ownership-20261023/audits/PEER-AUDIT-REVIEW.md.
@@ -89,8 +106,8 @@ It has not been rerun on the current candidate. See
 
 ## Build ownership
 
-Warm checkout tidepool-latent-original-stage-join-20261020 released its clean
-9e2abcd26b pin. validation_resume owns its advance and validation at d387e2f488;
+Warm checkout tidepool-latent-original-stage-join-20261020 is held by
+validation_resume for compilation and focused execution at 0bbc6ebbf5;
 other workers must not mutate it. Scratch cleanup reclaimed 110.33 GiB, leaving
 about 214 GiB free at the last observation. Preserve 100 GiB plus expected growth
 and recheck actual headroom before admission. Sources, WIP and evidence survived.
