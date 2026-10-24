@@ -1880,21 +1880,15 @@ impl CompilerEndpoint {
             }
             refuse_native_demand_reentry(&cmd.program)?;
             ensure_scoped_transaction(cmd, &self.identity)?;
-            TRANSACTION_SCOPE.with(|scope| {
-                let mut scope = scope.borrow_mut();
-                let Some(ScopedCompiler::Active { transaction, .. }) =
-                    scope.as_mut().map(|state| &mut state.compiler)
-                else {
-                    return Err(SpawnError::indeterminate(
-                        "compiler transaction",
-                        io::Error::other("compiler scope ended before native demand execution"),
-                    ));
-                };
-                transaction.execute_native_borrowed(cmd, owner, &mut session)
-            })
+            let mut lease = NativeTransactionLease::take(cmd)?;
+            lease
+                .transaction
+                .as_mut()
+                .expect("leased transaction")
+                .execute_native_borrowed(cmd, owner, &mut session)
         })();
-        // Semantic completion may observe the scope. The transaction RefMut above
-        // must be gone before moving the affine session into its completion.
+        // The lease restores the transaction before semantic completion. Neither
+        // resolution nor completion holds the enclosing scope's RefMut.
         session.complete(result)
     }
 
@@ -2042,6 +2036,14 @@ enum ScopedCompiler {
         transaction: CompilerTransaction,
         program: OsString,
     },
+    /// The exact active transaction is temporarily held by NativeTransactionLease.
+    /// Scope identity and input custody stay available to resolver completion.
+    Executing {
+        identity: CompilerIdentity,
+        program: OsString,
+        daemon: bool,
+        rejected: bool,
+    },
     /// An uncertain BEGIN cannot be retried by a later borrowed endpoint.
     AdmissionFailed(BoundDaemonEndpoint),
 }
@@ -2057,6 +2059,9 @@ impl ScopedCompiler {
                 transaction,
                 program,
             } => Some((&transaction.identity, program)),
+            Self::Executing {
+                identity, program, ..
+            } => Some((identity, program)),
         }
     }
 }
@@ -2069,6 +2074,88 @@ struct TransactionScope {
     admission_close: Vec<CompilerTransactionCloseEvidence>,
     reported_close: Vec<CompilerTransactionClose>,
     input_custody: CompilerInputCustody,
+}
+
+/// Temporarily borrows the active compiler without borrowing its enclosing
+/// scope across resolver callbacks. Drop restores it before the original scope
+/// guard can settle END or input custody, including during unwinding.
+struct NativeTransactionLease {
+    transaction: Option<CompilerTransaction>,
+    program: OsString,
+}
+
+impl NativeTransactionLease {
+    fn take(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
+        TRANSACTION_SCOPE.with(|scope| {
+            let mut scope = scope.borrow_mut();
+            let Some(scope) = scope.as_mut() else {
+                return Err(SpawnError::indeterminate(
+                    &cmd.program,
+                    io::Error::other("compiler scope ended before native demand execution"),
+                ));
+            };
+            let ScopedCompiler::Active {
+                transaction,
+                program,
+            } = &scope.compiler
+            else {
+                return Err(SpawnError::indeterminate(
+                    &cmd.program,
+                    io::Error::other("compiler scope has no available native transaction"),
+                ));
+            };
+            let executing = ScopedCompiler::Executing {
+                identity: transaction.identity.clone(),
+                program: program.clone(),
+                daemon: matches!(
+                    &transaction.transport,
+                    Some(TransactionTransport::Daemon { .. })
+                ),
+                rejected: false,
+            };
+            let ScopedCompiler::Active {
+                transaction,
+                program,
+            } = std::mem::replace(&mut scope.compiler, executing)
+            else {
+                unreachable!("active transaction checked before leasing")
+            };
+            Ok(Self {
+                transaction: Some(transaction),
+                program,
+            })
+        })
+    }
+}
+
+impl Drop for NativeTransactionLease {
+    fn drop(&mut self) {
+        let Some(mut transaction) = self.transaction.take() else {
+            return;
+        };
+        TRANSACTION_SCOPE.with(|scope| {
+            let mut scope = scope.borrow_mut();
+            let scope = scope
+                .as_mut()
+                .expect("native lease retains its enclosing compiler scope");
+            let ScopedCompiler::Executing {
+                identity,
+                program,
+                rejected,
+                ..
+            } = &scope.compiler
+            else {
+                unreachable!("native lease restores only its exact executing transaction");
+            };
+            assert_eq!(identity, &transaction.identity);
+            assert_eq!(program, &self.program);
+            transaction.failed |= *rejected;
+            scope.compiler = ScopedCompiler::Active {
+                transaction,
+                program: std::mem::take(&mut self.program),
+            };
+        });
+    }
 }
 
 thread_local! {
@@ -2099,12 +2186,14 @@ impl std::error::Error for CompilerResponseRejection {}
 /// rejected bytes. Its next request is poisoned; END retains all input custody.
 pub fn reject_compiler_response(reason: CompilerResponseRejection) -> SpawnError {
     TRANSACTION_SCOPE.with(|scope| {
-        if let Some(TransactionScope {
-            compiler: ScopedCompiler::Active { transaction, .. },
-            ..
-        }) = scope.borrow_mut().as_mut()
-        {
-            transaction.failed = true;
+        if let Some(scope) = scope.borrow_mut().as_mut() {
+            match &mut scope.compiler {
+                ScopedCompiler::Active { transaction, .. } => transaction.failed = true,
+                ScopedCompiler::Executing { rejected, .. } => *rejected = true,
+                ScopedCompiler::Unbound
+                | ScopedCompiler::DaemonBound(_)
+                | ScopedCompiler::AdmissionFailed(_) => {}
+            }
         }
     });
     SpawnError::indeterminate(
@@ -2238,6 +2327,7 @@ fn bind_scoped_endpoint(
                     &transaction.transport,
                     Some(TransactionTransport::Daemon { .. })
                 ),
+                ScopedCompiler::Executing { daemon, .. } => *daemon,
                 ScopedCompiler::Unbound => false,
             },
         ))
@@ -2358,6 +2448,13 @@ fn ensure_scoped_transaction(
                 state.cancellation.clone(),
             )),
             ScopedCompiler::Active { .. } => Ok((None, state.workload, state.cancellation.clone())),
+            ScopedCompiler::Executing { .. } => Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "compiler transaction is executing native resolution",
+                ),
+            )),
             ScopedCompiler::AdmissionFailed(_) => Err(SpawnError::indeterminate(
                 &cmd.program,
                 io::Error::other("compiler transaction cannot continue after uncertain admission"),
@@ -2434,6 +2531,9 @@ fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
             mut transaction, ..
         } if abandoned => transaction.abandon(),
         ScopedCompiler::Active { transaction, .. } => transaction.finish(),
+        ScopedCompiler::Executing { .. } => {
+            unreachable!("native transaction lease restores before scope close")
+        }
         ScopedCompiler::Unbound
         | ScopedCompiler::DaemonBound(_)
         | ScopedCompiler::AdmissionFailed(_) => {

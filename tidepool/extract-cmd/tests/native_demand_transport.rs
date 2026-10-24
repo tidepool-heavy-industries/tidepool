@@ -291,6 +291,196 @@ fn native_demand_actual_direct_and_daemon_preserve_terminal_counts_and_refusal()
 }
 
 #[test]
+fn native_demand_real_reentry_completion_keeps_scope_custody_rejection_and_unwind_owner() {
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+    use tidepool_extract_cmd::{
+        CompilerEndpoint, CompilerTransactionClose, CompilerTransactionCloseReason, ExtractRun,
+        SpawnError,
+    };
+
+    struct NestedSession<'a> {
+        inputs: Arc<tempfile::TempDir>,
+        calls: &'a Cell<usize>,
+    }
+    impl NativeDemandResolver for NestedSession<'_> {
+        fn resolve_native_demand(
+            &mut self,
+            _: &NativeDemand,
+            _: &NativeDemandControl,
+        ) -> std::io::Result<NativeReply> {
+            panic!("nested compiler request must be refused before IO");
+        }
+    }
+    impl NativeDemandSession for NestedSession<'_> {
+        type Outcome = Result<ExtractRun, SpawnError>;
+        fn owner(&self) -> NativeDemandOwner {
+            owner()
+        }
+        fn complete(self, execution: Self::Outcome) -> Self::Outcome {
+            assert_eq!(self.calls.replace(1), 0);
+            assert!(tidepool_extract_cmd::retain_compiler_input_directory(
+                self.inputs
+            ));
+            let rejection = tidepool_extract_cmd::reject_compiler_response(
+                tidepool_extract_cmd::CompilerResponseRejection::Malformed,
+            );
+            assert!(!rejection.permits_rebind());
+            let error = execution
+                .as_ref()
+                .err()
+                .expect("actual nested execution refused");
+            assert!(error.definitely_unsubmitted());
+            assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidInput);
+            execution
+        }
+    }
+    struct OuterSession<'a> {
+        nested: Option<CompilerEndpoint>,
+        command: &'a ExtractCmd,
+        inputs: Option<Arc<tempfile::TempDir>>,
+        nested_calls: &'a Cell<usize>,
+        complete_calls: &'a Cell<usize>,
+        unwind: bool,
+    }
+    impl NativeDemandResolver for OuterSession<'_> {
+        fn resolve_native_demand(
+            &mut self,
+            _: &NativeDemand,
+            _: &NativeDemandControl,
+        ) -> std::io::Result<NativeReply> {
+            let execution = self
+                .nested
+                .take()
+                .expect("one actual callback")
+                .execute_with_native_demand(
+                    self.command,
+                    NestedSession {
+                        inputs: self.inputs.take().unwrap(),
+                        calls: self.nested_calls,
+                    },
+                );
+            assert!(execution.is_err());
+            if self.unwind {
+                panic!("outer callback unwind control");
+            }
+            Ok(NativeReply::Refused(b"nested refusal control".to_vec()))
+        }
+    }
+    impl NativeDemandSession for OuterSession<'_> {
+        type Outcome = Result<ExtractRun, SpawnError>;
+        fn owner(&self) -> NativeDemandOwner {
+            owner()
+        }
+        fn complete(self, execution: Self::Outcome) -> Self::Outcome {
+            assert_eq!(self.complete_calls.replace(1), 0);
+            execution
+        }
+    }
+
+    let _environment = Environment::set();
+    let scratch = tempfile::tempdir().unwrap();
+    let fixture = fixture(scratch.path());
+    for unwind in [false, true] {
+        let root = scratch.path().join(format!("unwind-{unwind}"));
+        let command = setup(&root, &fixture, 20);
+        let mut daemon = daemon(&root, 5);
+        let inputs = Arc::new(tempfile::tempdir().unwrap());
+        let input = inputs.path().join("nested-input");
+        fs::write(&input, b"same scope custody").unwrap();
+        fs::write(root.join("input-at-end"), input.as_os_str().as_bytes()).unwrap();
+        let weak = Arc::downgrade(&inputs);
+        let nested_calls = Cell::new(0);
+        let complete_calls = Cell::new(0);
+        let sink_calls = Cell::new(0);
+        let observed_close = RefCell::new(None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_compiler_transaction(
+                |close| {
+                    sink_calls.set(sink_calls.get() + 1);
+                    *observed_close.borrow_mut() = Some(close);
+                },
+                || {
+                    let endpoint = command.bind().unwrap();
+                    let nested = command.bind().unwrap();
+                    let result = endpoint.execute_with_native_demand(
+                        &command,
+                        OuterSession {
+                            nested: Some(nested),
+                            command: &command,
+                            inputs: Some(inputs),
+                            nested_calls: &nested_calls,
+                            complete_calls: &complete_calls,
+                            unwind,
+                        },
+                    );
+                    let refused = command.bind().unwrap().execute(&command).unwrap_err();
+                    assert!(
+                        !refused.permits_rebind(),
+                        "pending rejection must survive lease restoration"
+                    );
+                    assert!(refused.source.to_string().contains("failed request"));
+                    result
+                },
+            )
+        }));
+        assert_eq!(
+            sink_calls.get(),
+            1,
+            "original affine close sink settles exactly once"
+        );
+        assert_eq!(nested_calls.get(), 1);
+        let close = observed_close
+            .into_inner()
+            .expect("original scope guard observed close");
+        if unwind {
+            let panic = result.err().expect("callback must unwind");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"outer callback unwind control")
+            );
+            assert_eq!(
+                complete_calls.get(),
+                0,
+                "semantic completion is not a panic handler"
+            );
+        } else {
+            let outcome = result
+                .ok()
+                .expect("normal reentry completion must not panic");
+            assert!(!outcome.action.unwrap().success());
+            assert_eq!(complete_calls.get(), 1);
+            assert!(close.resources_retired());
+            assert_eq!(
+                fs::read(root.join("observed-input")).unwrap(),
+                b"same scope custody"
+            );
+        }
+        let evidence = match &close {
+            CompilerTransactionClose::Retired(evidence)
+            | CompilerTransactionClose::Unconfirmed(evidence) => evidence,
+            other => panic!("rejected/abandoned request cannot close cleanly: {other:?}"),
+        };
+        assert_eq!(
+            evidence.reason,
+            if unwind {
+                CompilerTransactionCloseReason::Abandoned
+            } else {
+                CompilerTransactionCloseReason::FailedRequest
+            }
+        );
+        assert_eq!(weak.upgrade().is_some(), !close.resources_retired());
+        drop(close);
+        assert!(
+            weak.upgrade().is_none(),
+            "exact scope custody releases with close evidence"
+        );
+        stop(&root, &mut daemon);
+        assert_reaped(&root);
+    }
+}
+
+#[test]
 fn native_demand_actual_transports_poison_malformed_frames_and_reap_workers() {
     let _environment = Environment::set();
     let scratch = tempfile::tempdir().unwrap();
