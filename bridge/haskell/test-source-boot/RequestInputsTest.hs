@@ -22,7 +22,7 @@ import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef, writeIORef)
 import Data.Bits (xor)
 import Data.List (sort, sortOn, isInfixOf, isPrefixOf, isSuffixOf, nub, permutations, stripPrefix, tails)
-import Data.Maybe (isNothing)
+import Data.Maybe (isNothing, isJust)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -139,7 +139,7 @@ import Tidepool.ImportSyntax
   ( CapturedImportSyntax, captureImportSyntax, capturedImportOccurrences
   , matchDriverImports, driverImportOccurrences, importOccurrenceId, importOccurrenceDescriptor
   , describeImport, beginImportRefinement, refinedImportOccurrences, ImportLineage(..), importOccurrenceLineage )
-import Tidepool.CheckedCell (nativeImportSyntax, nativeParsedModule, unannotatedModule, mapNativeModule)
+import Tidepool.CheckedCell (encodeCheckedTypeWitness, nativeImportSyntax, nativeParsedModule, unannotatedModule, mapNativeModule)
 import Tidepool.CheckedPrefixImports (refineParsedDeclarationImports)
 import Tidepool.ImportAdmission
   ( compilationScope, compilationSourceSelection
@@ -163,8 +163,12 @@ import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOrigi
   , newPreparedOriginalInterfaceArtifactsWithPrior, writeCertifiedSegmentProducts, withStagedOriginalBindings, StagedProductFailure(..)
   , bindWorldStageInputs, withWorldStageCompilation, newPreparedWorldInterfaceArtifacts
   , withWorldStageInputs, stageWorldProducts, pendingWorldNative, completeWorldProducts
+  , admitCurrentOriginalProducts, preparedCurrentOriginalInventory, currentOriginalGroupMetadata
+  , lookupStageGroupMetadata, selectStageGroupMetadata
   , stagedOriginalOutputFiles, publishStagedOriginalProducts, CertifiedOriginalProducts, certifiedOriginalProducts)
 import Tidepool.ExecutionProjection (ProjectionContext(..))
+import Tidepool.ConstructorIdentity (issuedConstructorIdentity)
+import Tidepool.EffectSchema qualified as Effect
 import Tidepool.PreparedStg (newPreparedBodyCache, pmModule, pmIdentityResolver)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
@@ -2516,12 +2520,16 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                       [("imports","import Data.Maybe (Maybe(..))",[(0,PlannedPrologue 11)],["prologue"])
                       ,("declaration",unlines ["data OwnedStage = OwnedStage Int"
                           ,"class OwnedStageClass value where ownedStageMethod :: value -> Int"
-                          ,"instance OwnedStageClass OwnedStage where ownedStageMethod (OwnedStage value) = value"]
+                          ,"instance OwnedStageClass OwnedStage where ownedStageMethod (OwnedStage value) = value"
+                          ,"unreachedOwnedRequest :: Eff '[Replies] (RequestScope Int Int)"
+                          ,"unreachedOwnedRequest = currentRequest @Int @Int"]
                         ,[(0,PlannedDeclaration 21)],["declaration"])
                       ,("mixed",unlines ["let baseStage = (7 :: Int)"
                           ,"data MixedStage = MixedStage Int"
                           ,"readMixedStage :: MixedStage -> Int"
                           ,"readMixedStage (MixedStage value) = value + baseStage"
+                          ,"unreachedMixedRequest :: Eff '[Replies] (RequestScope Int Int)"
+                          ,"unreachedMixedRequest = currentRequest @Int @Int"
                           ,"let answerStage = MixedStage baseStage"
                           ,"let resultStage = readMixedStage answerStage"]
                         ,[(0,PlannedBind 31),(1,PlannedDeclaration 32),(2,PlannedBind 33)
@@ -2559,10 +2567,11 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                           ,"let packageAnswerStage = readPackageStage 7"]
                         ,[(0,PlannedDeclaration 81),(1,PlannedBind 82)]
                         ,["declaration","exec"])] $ \(label,source,caseSlots,kinds) -> do
-                      let ownTemplate = if label == "mixed"
-                            then T.unpack (T.replace "{{CELL_IMPORTS}}"
-                              "import qualified Tidepool.Inspection.Display\n{{CELL_IMPORTS}}" (T.pack template))
-                            else template
+                      let metadataImports = "import Tidepool.Agent.Reply.Internal (Replies, RequestScope, currentRequest)\n"
+                          ownTemplate = T.unpack (T.replace "{{CELL_IMPORTS}}"
+                            ((if label == "mixed" then "import qualified Tidepool.Inspection.Display\n" else "")
+                              <> (if label `elem` ["mixed","declaration"] then metadataImports else "")
+                              <> "{{CELL_IMPORTS}}") (T.pack template))
                           ownRecipe = recipe {worldCellSource=source,worldCellTemplate=ownTemplate}
                           ownDirectory = work </> ("world-stages-" ++ label)
                           ownPlan = planRequest {worldCellPlanRecipe=ownRecipe
@@ -2587,6 +2596,14 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                           unless (Set.fromList [("main","Tidepool.Inspection.Display",False)
                               ,("main","Tidepool.Session.Lib.G32",False)] `Set.isSubsetOf` owners)
                             (fail "virtualized declaration prefix lost its actual lexical import evidence")
+                        when (label == "mixed") $ do
+                          -- The declaration owns an effect site, but this final
+                          -- target reaches only readMixedStage and its value.
+                          turn <- BS.readFile (ownDirectory </> "item-3" </> "turn.cbor")
+                          case deserialiseFromBytes decodeTerm (BL.fromStrict turn) of
+                            Right (remaining,TList [TString "Bind",TList [_,_,_,TList sites,_]])
+                              | BL.null remaining, null sites -> pure ()
+                            _ -> fail "unreached predecessor effect metadata leaked into the final target"
                         bytes <- BS.readFile (worldCellPrepareOutput ownPrepare)
                         case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
                           Right (remaining,TList [TString "TPCWPREP6",_,_,_
@@ -2642,7 +2659,15 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                         when (label == "declaration") $ do
                           grant <- either fail pure (compilerExecutionGrant 2)
                           (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
-                            firstAdmission <- scopedValidateWorldCell compiler grant executor ownPrepare >>= either (fail . show) pure
+                            let metadataRecipe = ownRecipe {worldCellSource=source ++ "\nlet metadataSuccessor = OwnedStage 7\n"}
+                                metadataPlan = ownPlan {worldCellPlanRecipe=metadataRecipe}
+                            metadataPlanArgs <- decodeWorldArgs [WorldCellPlan metadataPlan]
+                            metadataPlanBytes <- (withBoundCompilerRequest (const (pure ())) compiler
+                              (admitFixtureRequest metadataPlanArgs) >=> finishCompletion) runBoundWorldCellPlan
+                            let metadataPrepare = ownPrepare {worldCellPrepareRecipe=metadataRecipe
+                                  ,worldCellPreparePlan=metadataPlanBytes
+                                  ,worldCellPrepareSlots=caseSlots ++ [(1,PlannedBind 22)]}
+                            firstAdmission <- scopedValidateWorldCell compiler grant executor metadataPrepare >>= either (fail . show) pure
                             _ <- scopedPrepareWorldCellStage compiler firstAdmission >>= maybe
                               (fail "Name control lost its real declaration stage") pure
                             compiled <- scopedCompileWorldCell compiler firstAdmission (PreparedProducts Nothing) Set.empty
@@ -2660,8 +2685,45 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                                 (Just inputs) environment (compilationScope <$> preparedExactCompilation prepared)
                                 (pprProductInterfaces prepared) projection Set.empty (pprModules prepared)
                               originals <- newPreparedWorldInterfaceArtifacts inputs captureDirectory
-                              pendingProducts <- stageWorldProducts originals captureDirectory inputs
+                              admittedProducts <- admitCurrentOriginalProducts originals captureDirectory prepared
                                 (withWorldStageInputs (Just inputs) rawProducts)
+                              currentInventory <- maybe (fail "metadata control lost its admitted inventory") pure
+                                (preparedCurrentOriginalInventory admittedProducts)
+                              let ownMetadata = currentOriginalGroupMetadata currentInventory
+                                  metadataIdentity (constructors,sites) =
+                                    (map issuedConstructorIdentity constructors,sites)
+                              let issuedSites = concatMap snd (Map.elems ownMetadata)
+                              unless (not (null issuedSites)
+                                  && any (not . null . Effect.ysInputTypeWitnesses) issuedSites
+                                  && all (all (maybe False (isJust . encodeCheckedTypeWitness))
+                                    . Effect.ysInputTypeWitnesses) issuedSites)
+                                (fail "admitted original metadata lost its effect sites or producer-sealed input witnesses")
+                              (coordinate,selectedMetadata,otherMetadata) <- case
+                                  [(key,value,other) | (key,value) <- Map.toAscList ownMetadata
+                                    , not (null (fst value))
+                                    , other <- Map.elems ownMetadata
+                                    , metadataIdentity value /= metadataIdentity other] of
+                                triple:_ -> pure triple
+                                [] -> fail "metadata version control lacks distinct actual compiled group metadata"
+                              let (unit,name,_,ordinal) = coordinate
+                                  versionA = (unit,name,Just "metadata-version-a",ordinal)
+                                  versionB = (unit,name,Just "metadata-version-b",ordinal)
+                                  exact = Map.singleton versionA selectedMetadata
+                                  alternative = Map.singleton versionB otherMetadata
+                              -- These are pure selector controls with genuine compiled
+                              -- values; they do not manufacture a compiler-stage owner.
+                              forM_ [[alternative,exact],[exact,alternative]] $ \history -> do
+                                wanted <- either fail pure (selectStageGroupMetadata history versionA)
+                                unrelated <- either fail pure (selectStageGroupMetadata history versionB)
+                                unless (metadataIdentity wanted == metadataIdentity selectedMetadata
+                                    && metadataIdentity unrelated == metadataIdentity otherMetadata)
+                                  (fail "metadata selection ignored an exact version or rejected an unused alternative")
+                              forM_ [versionA,coordinate] $ \missing -> unless
+                                  (either (const True) (const False) (selectStageGroupMetadata [alternative] missing))
+                                (fail "metadata selection accepted only a wrong-version predecessor")
+                              unless (either (const True) (const False) (lookupStageGroupMetadata inputs coordinate))
+                                (fail "current-stage metadata was accepted as predecessor metadata")
+                              pendingProducts <- stageWorldProducts originals captureDirectory inputs admittedProducts
                               let staged = pendingWorldNative pendingProducts
                                   certificates = [path | (path,_) <- stagedOriginalOutputFiles staged
                                     , ".finalized.certificate.cbor" `isSuffixOf` path]
@@ -2733,6 +2795,18 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                               -- Product bytes alone do not advance the compiler cursor.
                               withCompiledWorldStage stage (\_ _ -> pure ())
                               completedProducts <- completeWorldProducts pendingProducts Set.empty [] []
+                              _ <- scopedPrepareWorldCellStage compiler firstAdmission >>= maybe
+                                (fail "metadata control lost its actual successor stage") pure
+                              successor <- scopedCompileWorldCell compiler firstAdmission (PreparedProducts Nothing) Set.empty
+                              successorStage <- maybe (fail "metadata control lost its compiled successor") pure
+                                (completedCompilerWorldStage successor)
+                              successorInputs <- bindWorldStageInputs successorStage (Just completedProducts)
+                              forM_ (Map.toAscList ownMetadata) $ \(key,expected) -> do
+                                retained <- either fail pure (lookupStageGroupMetadata successorInputs key)
+                                unless (metadataIdentity retained == metadataIdentity expected)
+                                  (fail "stage completion dropped metadata outside the declaration checking root")
+                              unless (either (const True) (const False) (lookupStageGroupMetadata successorInputs versionA))
+                                (fail "real stage lookup dropped the requested version")
                               published <- publishStagedOriginalProducts prepared staged
                               publishedBytes <- BS.readFile (captureDirectory </> "certified-products.cbor")
                               unless (not (null (certifiedOriginalProducts published))

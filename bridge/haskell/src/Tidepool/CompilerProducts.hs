@@ -25,7 +25,7 @@ module Tidepool.CompilerProducts
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , CurrentOriginalInventory, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
-  , currentReconciledOriginalProducts, currentOriginalGroupMetadata, lookupStageGroupMetadata
+  , currentReconciledOriginalProducts, currentOriginalGroupMetadata, lookupStageGroupMetadata, selectStageGroupMetadata
   ) where
 
 import Tidepool.RequestCompletion (finishCompletion)
@@ -432,14 +432,21 @@ lookupCompletedCanonical (Just (CompletedWorldProducts _ (StagedOriginalProducts
 -- module/group elsewhere in the chain neither satisfy nor conflict with demand.
 lookupStageGroupMetadata :: WorldStageInputs -> PriorHomeGroup
   -> Either String ([IssuedConstructor], [Effect.YieldSite])
-lookupStageGroupMetadata (WorldStageInputs _ prior _ _ _ _ _) coordinate =
-  maybe (Left ("prior original group lacks producer-sealed metadata: " ++ show coordinate)) Right
-    (lookupCompletedGroupMetadata prior)
+lookupStageGroupMetadata (WorldStageInputs _ prior _ _ _ _ _) =
+  selectStageGroupMetadata (predecessorMetadata prior)
   where
-    lookupCompletedGroupMetadata Nothing = Nothing
-    lookupCompletedGroupMetadata (Just (CompletedWorldProducts _
+    predecessorMetadata Nothing = []
+    predecessorMetadata (Just (CompletedWorldProducts _
         (StagedOriginalProducts _ _ _ _ (StageInputAdditions _ _ metadata)) previous _)) =
-      Map.lookup coordinate metadata <|> lookupCompletedGroupMetadata previous
+      metadata : predecessorMetadata previous
+
+-- Pure coordinate selection does not issue stage ownership or native authority.
+-- Keep the version in every lookup, including while skipping unrelated stages.
+selectStageGroupMetadata :: [Map.Map PriorHomeGroup ([IssuedConstructor], [Effect.YieldSite])]
+  -> PriorHomeGroup -> Either String ([IssuedConstructor], [Effect.YieldSite])
+selectStageGroupMetadata stages coordinate = maybe
+  (Left ("prior original group lacks producer-sealed metadata: " ++ show coordinate)) Right
+  (foldr ((<|>) . Map.lookup coordinate) Nothing stages)
 
 lookupStageType :: WorldStageInputs -> Module -> Maybe (ExactIfaceArtifact,ArtifactBytes)
 lookupStageType (WorldStageInputs _ prior _ current _ _ _) owner =
