@@ -2435,6 +2435,34 @@ fn validate_worker_footprint(workers: usize, budget_mb: u64) -> Result<(), Front
     Ok(())
 }
 
+enum ServicePreparation {
+    NotAttempted,
+    AttemptUnconfirmed,
+    Completed,
+}
+impl ServicePreparation {
+    fn acquire(
+        &mut self,
+        prepare: impl FnOnce() -> Result<PreparedWorker, FrontendError>,
+    ) -> Result<PreparedWorker, FrontendError> {
+        *self = Self::AttemptUnconfirmed;
+        let prepared = prepare()?;
+        *self = Self::Completed;
+        Ok(prepared)
+    }
+    fn workers_retired(&self, slots: &[SlotRetirementOwner]) -> bool {
+        match self {
+            Self::NotAttempted => true,
+            Self::AttemptUnconfirmed => false,
+            Self::Completed => slots.iter().all(|slot| {
+                slot.lock()
+                    .map(|slot| slot.outstanding.is_empty())
+                    .unwrap_or(false)
+            }),
+        }
+    }
+}
+
 enum ServiceSocket {
     NotAttempted,
     Binding,
@@ -2488,7 +2516,7 @@ fn serve_lifecycle(
 ) -> Result<u8, FrontendError> {
     let epoch = boot_epoch()?;
     let mut socket = ServiceSocket::NotAttempted;
-    let mut preparation_completed = false;
+    let mut preparation = ServicePreparation::NotAttempted;
     let mut retirement = Vec::new();
     let mut settlement = Vec::new();
     let result = (|| {
@@ -2497,8 +2525,7 @@ fn serve_lifecycle(
                 .send(crate::service::ServiceMessage::Boot { epoch })
                 .map_err(FrontendError::Io)?;
         }
-        let prepared = prepare()?;
-        preparation_completed = true;
+        let prepared = preparation.acquire(prepare)?;
         serve_inner(
             config,
             prepared,
@@ -2512,12 +2539,7 @@ fn serve_lifecycle(
     if let Some(error) = socket_error {
         settlement.push(error);
     }
-    let workers_retired = preparation_completed
-        && retirement.iter().all(|slot: &SlotRetirementOwner| {
-            slot.lock()
-                .map(|slot| slot.outstanding.is_empty())
-                .unwrap_or(false)
-        });
+    let workers_retired = preparation.workers_retired(&retirement);
     let mut failures: Vec<String> = result
         .as_ref()
         .err()
@@ -5274,6 +5296,15 @@ mod tests {
             error.is_some(),
             "missing returned owner after attempted bind is uncertainty"
         );
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owned.sock");
+        let mut owner = ServiceSocket::NotAttempted;
+        owner.bind(&path).unwrap();
+        assert!(path.exists());
+        let (complete, error) = owner.retire();
+        assert!(complete);
+        assert!(error.is_none());
+        assert!(!path.exists());
     }
 
     #[test]
