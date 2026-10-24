@@ -5,7 +5,8 @@ regional checks pass. One runner-refusal control remains pending; G2 and G3
 remain unqualified.**
 
 Integration checkout: /srv/swarm/checkouts/tidepool-domain-runtime-join-20261023.
-Branch: integration/g2-domain-runtime-20261023; tested code candidate: 3e6ca9b3ef.
+Branch: integration/g2-domain-runtime-20261023. Regional tested candidate:
+3e6ca9b3ef; native-opacity candidate under qualification: 47739467ae.
 Baseline: 9cbdbf44d8.
 [REQUEST-SERVICE-LIFECYCLE.md](REQUEST-SERVICE-LIFECYCLE.md) owns the contract.
 
@@ -39,6 +40,7 @@ Results are revision-specific, not a passing release aggregate.
 | 923cf48862 | Instrumented Haskell compilation passed. G2 reproduced the retained-dependency failure. The strengthened parser positive failed on invalid layout. |
 | 4755a9da61 | Buck analysis refused an omitted generated rule load before compilation/execution; repaired in d18eac6150. Joined Python provider-lifetime/argv checks passed 37 cases. |
 | 3e6ca9b3ef | Five affected targets compiled. SourceBoot 4/4, parser 1/1, rooted GHC lifecycle 1/1, and mixed-stage history 1/1 passed, including outer runner acceptance. Both Rust cases confirm process and compiler cleanup; diagnostic evidence completeness remains false and is not inferred from cleanup. |
+| 47739467ae | Joined native-opacity production worker and prepared-STG test executable compile. Actual G2 and the existing retained-plugin owner test are running; no execution pass claimed yet. |
 
 Passing 20f6 controls include repaired transport 2/2, WorkerResponse 11/11,
 actual report interoperability, catalog/source-admission controls and runtime END
@@ -61,11 +63,12 @@ native declarations. See [NATIVE-REUSE-FRONTIER.md](NATIVE-REUSE-FRONTIER.md).
    executable, including the existing daemon/unit consumer. Then execute the
    ordinary configured-source case and the separate outer-refusal controller.
    Do not weaken cleanup checks or broaden native finalization.
-2. Root: finish the producer-opacity design before implementing the G2 repair.
-   The typed stage owner, plugin and memo must share one policy. Constructors,
-   dictionary/default methods, explicit rewrite rules and pinned GHC OPAQUE
-   semantics require explicit controls. A blanket ordinary-Id rewrite is not
-   yet justified: compulsory default-method unfoldings need separate treatment.
+2. Root: qualify the joined native-opacity candidate. The typed stage owner,
+   plugin and memo now share one policy. The plugin owner adds actual Core,
+   interface and reuse controls; w2 adds real session default-method, dictionary,
+   specialization and shadowing histories. Preserve constructor/DFun/ClassOp
+   representation and imported rules. See NATIVE-REUSE-FRONTIER.md for exact
+   design, owner assignments and acceptance; source review is not semantic proof.
 3. Independently audit the final joined repairs and purge obligations, then run
    the regional gate. G3/frozen-bundle/Persona acceptance follows later.
 
@@ -88,12 +91,14 @@ not implemented changes or prerequisites for this service gate. Dispositions:
 ## Evidence and build ownership
 
 Exact commands, revisions and counts:
- /srv/swarm/evidence/inanna/c-ownership-20261022/validation/{20f6,923c,4755,3e6c}-checkpoint.json.
+ /srv/swarm/evidence/inanna/c-ownership-20261022/validation/.
+The completed checkpoints are {20f6,923c,4755,3e6c}-checkpoint.json; 4773 logs
+are in progress and cannot be aggregated as passing execution yet.
 Review, lifetime and trace evidence:
  /srv/swarm/evidence/inanna/c-ownership-20261023/.
 
 Warm checkout tidepool-latent-original-stage-join-20261020 belongs to
-validation_resume; the 3e6 pin is released with no active test clients.
+validation_resume; the 3e6 pin is released and 47739467ae is now pinned for tests.
 Scratch cleanup reclaimed 110.33 GiB; latest free space is about 228.65 GB.
 Preserve 100 GiB plus expected growth. Sources, WIP and evidence remain retained.
 Integration checkpoints are pushed; main, bundle and Persona are not qualified.

@@ -1,8 +1,9 @@
 # Native-authored declaration reuse: remaining compiler boundary
 
-Status: freshly reproduced at `20f61b99db`; phase tracing at `923cf48862`
-establishes loss of the consumer's exact Original use during simplification.
-The implementation strategy below is under review. G2 remains unqualified.
+Status: phase tracing at `923cf48862` establishes loss of the consumer's exact
+Original use during simplification. Joined production candidate `47739467ae`
+implements the typed producer boundary described below; compilation and real
+history qualification are in progress. G2 remains unqualified.
 
 ## Confirmed current boundary
 
@@ -39,44 +40,11 @@ The real resident history captures `historyValue0 = 23`, authors
 Those stages pass. A second cell `segmentRecord historyCaptured` fails with
 `UnavailableOriginalHomeDependencies` for `Val.G1.historyValue0`.
 
-The b493 trace records, on admission 6 / request f1468d3e86db9446:
-
-- direct retained inputs: 0; SOURCE dependency generations: 0; inherited references: 0;
-- final projection retained map: only the new `Val.G4.observation0 -> 4`;
-- available exact Original reference map: empty;
-- native replies acquired: 0.
-
-Source and event locations:
+Earlier end-of-pipeline evidence is retained at
 `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/b493-world-projection-events.json`.
-The underlying compiler.jsonl lines 9964 and 10260 preserve the raw observations.
-The native declaration dependency is exposed without its captured-value generation
-or a remaining exact Original use. These counters do not establish whether the
-association was absent before optimization or whether optimization erased a use
-whose association was originally available. Inlining/alias propagation is one
-source-supported explanation, not a confirmed cause.
-
-## Discriminating observation used
-
-The actual published-capture history was rerun on the repaired joined worker.
-The bounded, correlated observations cover the existing compiler
-phases: before simplification, after simplification, and after tidy. For the
-relevant free identifiers, record the actual GHC Name identity, native-authored
-classification, and exact `referenceForName` result. Include the owning module
-and fresh/reused compilation route. Use opt-in structured tracing; observing
-references must not perform native acquisition or change compiler inputs.
-
-- Association missing before simplification: trace the actual admitted
-  `nativeOriginalInputs` and World import/Original association. Repair that
-  propagation before changing optimization.
-- Association present initially, then absent with a changed free-identifier set:
-  locate the transformation and evaluate the producer-owned opaque boundary
-  below. GHC may legitimately erase an ordinary Haskell alias; the harness must
-  preserve its required native boundary or carry its exact provenance.
-- Association survives through tidy: inspect projection and retained-generation
-  admission; the empty-reference explanation no longer fits that run.
-
-The diagnostic does not authorize acquisition of dead uses, matching by rendered
-names, or choosing a historical owner from a broader inventory.
+The same-request before/after evidence above now distinguishes optimizer loss
+from missing initial association. Observing Names and existing references must
+not acquire dead uses or choose an owner from a broader inventory.
 
 ## Ownership and ordering
 
@@ -96,7 +64,7 @@ names, or choosing a historical owner from a broader inventory.
   module-local validity fingerprint is built around that fact. Adding imported
   identities to a target's retained set would not implement import masking.
 
-## Design candidates to review
+## Selected design and alternative
 
 1. Preserve an opaque call boundary for authenticated native-authored declarations.
    Prefer enforcement at the actual producer/compilation contract, while all facts
@@ -114,12 +82,21 @@ names, or choosing a historical owner from a broader inventory.
 A narrow reorder/reprojection is viable only when a surviving exact Original use
 is available. The observed empty map makes that insufficient for this case.
 
-The preferred next design extends the existing immutable retained-unfolding
+The implemented candidate extends the existing immutable retained-unfolding
 policy with an authored-module boundary issued by `WorldPlannedDeclarationCompile`
-and the actual stage owner. Do not infer it from `Lib.G*` spelling or a consumer's
-imports. Carry the same per-module policy into both the plugin fingerprint and
-memo validity; the current retained-symbol set alone cannot describe this new
-policy. Preserve ordinary SOURCE and package compilation.
+and the actual stage owner. `ModuleUnfoldingPolicy` couples the module's retained
+identities with the closed ordinary/native definition policy. The plugin,
+dependency witnesses, executable version and memo keys consume that same value.
+Resolved inputs extend the existing context rather than reconstructing it and
+losing the boundary. The old retained-only validity accessor is removed.
+
+The stage owner already couples planned source, purpose and captured recipe.
+Downsweep consumes captured bytes; the plan also checks the actual target summary
+against its issued module before target compilation. This assertion is not before
+every qualification step: the earlier checked recipe supplies that identity.
+Ordinary SOURCE/package producers keep their own policy. Changed worker bytes
+already change compiler producer identity; old Worlds cannot silently become
+new-policy products.
 
 Evaluate pinned GHC's `OPAQUE` semantics rather than merely adding `NOINLINE`:
 [GHC 9.12.2 documents](https://downloads.haskell.org/ghc/9.12.2/docs/users_guide/exts/pragmas.html#opaque-pragma)
@@ -129,8 +106,19 @@ that removing an early unfolding proves the final interface or call is opaque.
 Ordinary value binders, constructors, dictionary functions and generated methods
 need explicit treatment; an exported-name-only set may omit internal methods
 that close over retained values. Constructor and dictionary representation must
-remain valid. This is the unresolved semantic design question, not permission
-to disable optimization globally.
+remain valid. The candidate protects ordinary top binders, including executable
+default methods, while preserving DataCon, DFun and ClassOp representation.
+It updates RHSs and preserved unfolding metadata through the same GHC substitution.
+This is under semantic test, not yet established by the alias reproduction.
+
+Explicit SPECIALIZE and RULES are independent of normal inline activation.
+The native producer pass removes its authored rules and explicit specializations
+before optimization, preserving imported rules and representation BuiltinRules.
+This intentionally suppresses optimization hints within the native boundary;
+it does not promise identical performance or honor unsound user rewrite rules.
+GHC desugaring precedes this pass, so tests must inspect whether a compulsory
+default or newtype dictionary already exposed a captured value. Do not broaden
+retained authority to conceal such a failure.
 
 Do not change global `Opt_OmitInterfacePragmas` as a shortcut: this repository's
 canonical representation policy also uses it to preserve automatic constructor
@@ -155,3 +143,22 @@ private Core, usage fingerprints and memo validity coherent at their issuing own
 
 This is a distinct frontier exposed after selected-row ownership was repaired.
 Do not interpret the phase migration's source/cfg passes as qualification of it.
+
+## Current ownership and acceptance order
+
+- Root owns GhcPipeline policy propagation and joined review.
+- `audit_haskell_dead_work` owns the existing plugin and actual Core/interface,
+  representation and reuse controls. No parallel compiler-policy store.
+- `w2_request_protocol` owns real session histories for default methods,
+  dictionary recursion, explicit specialization, shadowing and no effect replay.
+- `w3_service_owner` owns generated build/resource projection for new fixtures,
+  separately from its service-runner closeout.
+- `validation_resume` compiles the joined worker first, then runs the original G2
+  counterexample with phase tracing; broader controls follow on the joined pin.
+- `astra_compiler_cutover_review` independently checks producer/plugin/consumer
+  semantics. Confirmed source findings are repaired before semantic acceptance.
+
+Read-only design evidence:
+`/srv/swarm/evidence/inanna/c-ownership-20261023/audits/g2-policy-touchpoints-3e6.md`
+and `g2-opacity-rules-design.md`. Compiler/plugin oracles and runtime values must
+both pass: value equality alone does not prove exact issuer retention.
