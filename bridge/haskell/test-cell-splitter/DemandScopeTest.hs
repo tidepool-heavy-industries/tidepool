@@ -96,9 +96,19 @@ demandScopeChecks = do
           case fmap prepareModuleDemand (parseCapturedGeneratedImports actual captured) of
             Left diagnostic
               | expected == SyntaxRefusal && capturedGeneratedScaffoldPath captured == path
-              , diagnostic `elem` ["GHC could not parse the captured generated root"
-                  ,"GHC reported errors in the captured generated root"] ->
+              , not (null diagnostic) -> do
                   putStrLn (name ++ ": " ++ diagnostic)
+                  -- The parser returns GHC's detailed diagnostic, not a fixed
+                  -- refusal label. Correcting the syntax must admit this same
+                  -- physical root through a new exact recipe and capture.
+                  let repaired = source ++ ")\n"
+                  writeFile path repaired
+                  repairedRecipe <- generatedCheckingTemplateRecipe actual (CheckedTemplateImports [] [])
+                    repaired repaired path name >>= either fail pure
+                  repairedCapture <- captureGeneratedScaffoldSource repairedRecipe path >>= either fail pure
+                  _ <- either (\detail -> fail (name ++ ": corrected syntax was refused: " ++ detail)) pure
+                    (parseCapturedGeneratedImports actual repairedCapture)
+                  pure ()
             Left diagnostic -> fail (name ++ ": wrong capture parsing refusal " ++ diagnostic)
             Right (Left (ModuleDemandQuasiQuoteRejected actualPath quotes))
               | expected == QuoteRefusal && actualPath == path && quotes == ["doesNotExist"] -> pure ()
