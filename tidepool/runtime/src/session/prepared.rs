@@ -347,8 +347,10 @@ pub enum PreparedRuntimeError {
         identity: SymbolIdentity,
         generation: u64,
     },
-    #[error("certified target import owners do not match its declared globals")]
-    CertifiedTargetOwners,
+    #[error("certified target ownership refused at {site}")]
+    CertifiedTargetOwners {
+        site: &'static std::panic::Location<'static>,
+    },
     #[error("certified programs disagree on the resident Settled constructor identities")]
     ConflictingSettledConstructors,
     #[error("certified install includes a source group unreachable from its target")]
@@ -547,6 +549,15 @@ impl From<DemandError> for PreparedRuntimeError {
 }
 
 impl PreparedRuntimeError {
+    // Preserve the originating guard even when a higher layer retains only
+    // this error. Diagnostics never decide authority or recovery behavior.
+    #[track_caller]
+    pub(in crate::session) fn certified_target_owners() -> Self {
+        Self::CertifiedTargetOwners {
+            site: std::panic::Location::caller(),
+        }
+    }
+
     pub(in crate::session) fn after_install_abort(self, cleanup: Result<(), Self>) -> Self {
         match cleanup {
             Ok(()) => self,
@@ -577,7 +588,7 @@ impl PreparedRuntimeError {
             | Self::MissingRetainedSource { .. }
             | Self::CertifiedPackageOwnerUnavailable { .. }
             | Self::MissingRetainedCertifiedOwner { .. }
-            | Self::CertifiedTargetOwners
+            | Self::CertifiedTargetOwners { .. }
             | Self::ConflictingSettledConstructors
             | Self::UnreachableCertifiedGroup
             | Self::SourceScopeAdmission
@@ -632,7 +643,7 @@ impl PreparedRuntimeError {
             | Self::MissingRetainedSource { .. }
             | Self::CertifiedPackageOwnerUnavailable { .. }
             | Self::MissingRetainedCertifiedOwner { .. }
-            | Self::CertifiedTargetOwners
+            | Self::CertifiedTargetOwners { .. }
             | Self::ConflictingSettledConstructors
             | Self::UnreachableCertifiedGroup
             | Self::SourceScopeAdmission
@@ -806,19 +817,19 @@ impl NativeImageBundle {
         let certification = compiled
             .certification
             .as_ref()
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
         let proof = certification
             .checked_activation_preview()
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
         if !proof.matches_target(compiled.prepared()) {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            return Err(PreparedRuntimeError::certified_target_owners());
         }
         proof
             .validate_table(compiled.table())
-            .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
+            .map_err(|_| PreparedRuntimeError::certified_target_owners())?;
         proof
             .validate_yield_sites(&compiled.asks)
-            .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
+            .map_err(|_| PreparedRuntimeError::certified_target_owners())?;
         let plan = Arc::new(NativeInstantiationPlan::prepare_code(
             &compiled.code(),
             registry,
@@ -5020,7 +5031,7 @@ pub(super) mod tests {
                     assert!(
                         matches!(
                             raw.resolve_native_turn_in(scope, &code, plan),
-                            Err(PreparedRuntimeError::CertifiedTargetOwners)
+                            Err(PreparedRuntimeError::CertifiedTargetOwners { .. })
                         ),
                         "raw compiler products carry no checked runtime source owner"
                     );

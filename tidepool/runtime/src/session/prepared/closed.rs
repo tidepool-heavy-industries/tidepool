@@ -41,7 +41,7 @@ impl RetainedNativeRequirement {
         if declaration.identity != *leaf.identity()
             || declaration.required_generation != Some(leaf.generation())
         {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            return Err(PreparedRuntimeError::certified_target_owners());
         }
         Ok(Self {
             leaf,
@@ -53,7 +53,7 @@ impl RetainedNativeRequirement {
                     signatures
                         .get(id.0 as usize)
                         .cloned()
-                        .ok_or(PreparedRuntimeError::CertifiedTargetOwners)
+                        .ok_or_else(|| PreparedRuntimeError::certified_target_owners())
                 })
                 .transpose()?,
             required_evaluated: declaration.required_evaluated,
@@ -124,7 +124,7 @@ impl ClosedInstantiationPlan {
                     .any(|import| matches!(import, NativeCodeImport::Retained(_)))
             })
         {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            return Err(PreparedRuntimeError::certified_target_owners());
         }
         BatchProgram::validate_closed(&native.closed_batch()?)
             .map_err(PreparedRuntimeError::Install)?;
@@ -145,9 +145,9 @@ impl NativeInstantiationPlan {
         let linked = code
             .certification()
             .and_then(|certification| certification.linked_target.as_ref())
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
         if !Arc::ptr_eq(linked.prepared(), code.prepared_owner()) {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            return Err(PreparedRuntimeError::certified_target_owners());
         }
         // The issuer has already validated every acquired occurrence. The image
         // projection may share equal code, without replacing those grant owners.
@@ -264,7 +264,7 @@ impl NativeInstantiationPlan {
         PreparedRuntimeError,
     > {
         if globals.len() != imports.len() {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            return Err(PreparedRuntimeError::certified_target_owners());
         }
         let mut owners = Vec::with_capacity(globals.len());
         let mut packages = BTreeMap::new();
@@ -309,7 +309,7 @@ impl NativeInstantiationPlan {
                                 .insert(global.identity.clone(), literal.clone())
                                 .is_some_and(|old| old != literal)
                             {
-                                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                                return Err(PreparedRuntimeError::certified_target_owners());
                             }
                         }
                     }
@@ -332,11 +332,11 @@ impl NativeInstantiationPlan {
                     NativeCodeImport::Code { code, value } => Ok(BatchImport::Source {
                         group: *indices
                             .get(&code.id())
-                            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?,
+                            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?,
                         binding: value,
                     }),
                     NativeCodeImport::Retained(_) => {
-                        Err(PreparedRuntimeError::CertifiedTargetOwners)
+                        Err(PreparedRuntimeError::certified_target_owners())
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -440,7 +440,7 @@ impl NativeInstallationSources {
                 })),
             };
             if programs.insert(acquired.occurrence(), source).is_some() {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                return Err(PreparedRuntimeError::certified_target_owners());
             }
         }
         Ok(Self { target, programs })
@@ -480,7 +480,7 @@ impl NativeInstantiationPlan {
     ) -> Result<(), PreparedRuntimeError> {
         let definitions = owner.code().body().definitions();
         if definitions.globals().len() != owner.imports().len() {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            return Err(PreparedRuntimeError::certified_target_owners());
         }
         for (global_index, (declaration, import)) in definitions
             .globals()
@@ -500,7 +500,7 @@ impl NativeInstantiationPlan {
                     RetainedNativeOrigin::Acquired {
                         owner: owner.clone(),
                         global_index: u32::try_from(global_index)
-                            .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?,
+                            .map_err(|_| PreparedRuntimeError::certified_target_owners())?,
                         binding,
                     },
                 )?;
@@ -536,7 +536,7 @@ impl NativeInstantiationPlan {
     ) -> Result<Vec<ScopedNativeSlot>, PreparedRuntimeError> {
         let imports = owner.imports();
         if definitions.globals().len() != imports.len() {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            return Err(PreparedRuntimeError::certified_target_owners());
         }
         definitions
             .globals()
@@ -558,7 +558,7 @@ impl NativeInstantiationPlan {
                         RetainedNativeOrigin::Acquired {
                             owner: owner.clone(),
                             global_index: u32::try_from(global_index)
-                                .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?,
+                                .map_err(|_| PreparedRuntimeError::certified_target_owners())?,
                             binding,
                         },
                     )?);
@@ -607,7 +607,7 @@ impl NativeInstantiationPlan {
     ) -> Result<NativeInstantiation, PreparedRuntimeError> {
         let definitions = self.linked.prepared().definitions();
         if definitions.globals().len() != self.linked.imports().len() {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            return Err(PreparedRuntimeError::certified_target_owners());
         }
         let target_imports = definitions
             .globals()
@@ -625,7 +625,7 @@ impl NativeInstantiationPlan {
                         leaf.clone(),
                         RetainedNativeOrigin::Target {
                             global_index: u32::try_from(global_index)
-                                .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?,
+                                .map_err(|_| PreparedRuntimeError::certified_target_owners())?,
                         },
                     )?);
                     let value = retained(&requirement)?;
@@ -658,7 +658,7 @@ impl NativeInstantiationPlan {
             let program = self
                 .programs
                 .get(&occurrence.program)
-                .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
             let binding = program.code().id();
             let anchor = selection
                 .roots()
@@ -678,7 +678,7 @@ impl NativeInstantiationPlan {
                 .map_err(PreparedRuntimeError::Install)?;
             let (permit, witness) = native_slot(&request, anchor)?;
             if anchor.is_some() && witness.is_none() {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                return Err(PreparedRuntimeError::certified_target_owners());
             }
             native_permits.insert((occurrence, value), permit);
             let anchored = witness.is_some();
@@ -716,7 +716,7 @@ impl NativeInstantiationPlan {
                 }
                 std::collections::btree_map::Entry::Occupied(entry) => {
                     if !same_import_destinations(entry.get(), &imports) {
-                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        return Err(PreparedRuntimeError::certified_target_owners());
                     }
                 }
             }
@@ -760,7 +760,7 @@ impl NativeInstantiationPlan {
             if witness.as_ref().map(|w| w.instance())
                 != native_anchors.get(&occurrence).map(|w| w.instance())
             {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                return Err(PreparedRuntimeError::certified_target_owners());
             }
             native_permits.insert((occurrence, value), permit);
         }
@@ -876,7 +876,7 @@ impl PreparedEngine {
                     match &sources.programs[acquired] {
                         Some(current) => merged.merge(current),
                         None if program.code().body().definitions().sites().is_empty() => {}
-                        None => return Err(PreparedRuntimeError::CertifiedTargetOwners),
+                        None => return Err(PreparedRuntimeError::certified_target_owners()),
                     }
                 }
                 Ok((*occurrence, merged))
@@ -893,24 +893,24 @@ impl PreparedEngine {
                 let contract = program
                     .image()
                     .export_contract(value)
-                    .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                    .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
                 let permit = instantiation
                     .native_permits
                     .get(&(occurrence, value))
-                    .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                    .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
                 if let Some(witness) = instantiation.native_anchors.get(&occurrence) {
                     let held = self
                         .programs
                         .get(&witness.instance().program())
-                        .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                        .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
                     let Some(NativeProgramCode::Dependency { code: held_code }) = &held.code_owner
                     else {
-                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        return Err(PreparedRuntimeError::certified_target_owners());
                     };
                     if held_code.code().id() != program.code().id()
                         || !Arc::ptr_eq(&held.definitions, program.image().definition_facts())
                     {
-                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        return Err(PreparedRuntimeError::certified_target_owners());
                     }
                 }
                 if contract.rep == RuntimeRep::Address {
@@ -956,15 +956,17 @@ impl PreparedEngine {
                                 let permit = instantiation
                                     .native_permits
                                     .get(&(*occurrence, *value))
-                                    .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                                    .ok_or_else(|| {
+                                        PreparedRuntimeError::certified_target_owners()
+                                    })?;
                                 self.machine
                                     .world_native_literal_import(witness, permit)
                                     .map_err(PreparedRuntimeError::Install)
                             } else {
                                 Ok(BatchImport::Source {
-                                    group: *remapped
-                                        .get(occurrence)
-                                        .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?,
+                                    group: *remapped.get(occurrence).ok_or_else(|| {
+                                        PreparedRuntimeError::certified_target_owners()
+                                    })?,
                                     binding: *value,
                                 })
                             }
@@ -975,7 +977,7 @@ impl PreparedEngine {
                         } => {
                             let entry = bindings
                                 .get(capture.id)
-                                .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                                .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
                             if entry.value.identity != *requirement.identity()
                                 || entry.module
                                     != super::super::SessionModule::val(tidepool_repr::Generation(
@@ -987,7 +989,7 @@ impl PreparedEngine {
                                 || capture.handle.rep() != requirement.rep
                                 || requirement.entry_signature.is_some()
                             {
-                                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                                return Err(PreparedRuntimeError::certified_target_owners());
                             }
                             if requirement.required_evaluated
                                 && !self
@@ -995,7 +997,7 @@ impl PreparedEngine {
                                     .handle_is_evaluated(capture.handle)
                                     .map_err(PreparedRuntimeError::Install)?
                             {
-                                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                                return Err(PreparedRuntimeError::certified_target_owners());
                             }
                             Ok(BatchImport::Existing {
                                 handle: capture.handle,
@@ -1043,12 +1045,12 @@ impl PreparedEngine {
                                 .map(|witness| witness.instance())
                                 .or_else(|| existing.get(&(*occurrence, *value)).map(|lease| lease.instance()));
                             if let Some(instance) = reused {
-                                let held = self.programs.get(&instance.program()).ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                                let held = self.programs.get(&instance.program()).ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
                                 facts.native_sources.merge(&held.native_sources);
                             }
                         }
                         ScopedNativeSlot::Retained { value, .. } => {
-                            facts.native_sources.merge(&value.provenance().map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?.source_custody());
+                            facts.native_sources.merge(&value.provenance().map_err(|_| PreparedRuntimeError::certified_target_owners())?.source_custody());
                         }
                     }
                 }

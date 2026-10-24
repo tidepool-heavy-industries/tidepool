@@ -8205,7 +8205,7 @@ where
                 certification.purpose(),
                 super::turn::TurnPurpose::Ordinary { original: None }
             ) {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                return Err(PreparedRuntimeError::certified_target_owners().into());
             }
             let plan = match images {
                 Some(images) => images.native_plan(&code)?,
@@ -8229,7 +8229,7 @@ where
                         code.table(),
                         code.sites(),
                     ) {
-                        return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                        return Err(PreparedRuntimeError::certified_target_owners().into());
                     }
                     let plan = Arc::new(super::prepared::ClosedInstantiationPlan::restrict(plan)?);
                     let transaction = self
@@ -8245,7 +8245,7 @@ where
                 super::turn::TurnPurpose::ActivationPreview(_)
                 | super::turn::TurnPurpose::HostPrototype(_) => {
                     if plan.has_request_sites() {
-                        return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                        return Err(PreparedRuntimeError::certified_target_owners().into());
                     }
                     let plan = Arc::new(super::prepared::ClosedInstantiationPlan::restrict(plan)?);
                     let transaction = self
@@ -8452,7 +8452,7 @@ where
         self.settle_dropped_custody();
         let CompiledActivationPreview { bound, renderer } = compiled;
         let ActivationRendererNative::Renderable(images) = &renderer.native else {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+            return Err(PreparedRuntimeError::certified_target_owners().into());
         };
         let admission = bound.admission();
         let mounted = &admission.mounted;
@@ -8756,7 +8756,7 @@ where
             .into_parts(),
             NativeTurnAdmission::Portable => {
                 if matches!(images, TurnImageAcquisition::Ready { .. }) {
-                    return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+                    return Err(PreparedRuntimeError::certified_target_owners().into());
                 }
                 let (program, native_sources) =
                     self.install_prepared_with_sources(Arc::unwrap_or_clone(prepared), &metadata)?;
@@ -11703,7 +11703,7 @@ mod authored_publication_tests {
                             if !resolved.contains(&occurrence) {
                                 resolved.push(occurrence);
                                 if refuse_second && resolved.len() == 2 {
-                                    return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                                    return Err(PreparedRuntimeError::certified_target_owners());
                                 }
                             }
                         }
@@ -11717,7 +11717,7 @@ mod authored_publication_tests {
             if refuse_second {
                 assert!(matches!(
                     result,
-                    Err(PreparedRuntimeError::CertifiedTargetOwners)
+                    Err(PreparedRuntimeError::CertifiedTargetOwners { .. })
                 ));
                 assert_eq!(resolved.len(), 2);
             } else {

@@ -872,11 +872,11 @@ impl PersistentSession {
         }
         let certification = code
             .certification()
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
         let current = certification
             .current_native_sources(code.prepared())
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
         let sources = super::prepared::NativeInstallationSources::current(&plan, &current)?;
         let selection = self
             .bindings
@@ -888,7 +888,7 @@ impl PersistentSession {
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
         let super::turn::TurnPurpose::Execution { execution, prefix } = certification.purpose()
         else {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            return Err(PreparedRuntimeError::certified_target_owners());
         };
         let inputs = prefix
             .scoped_inputs_for(self, execution)
@@ -1051,7 +1051,7 @@ impl PersistentSession {
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
         let instantiation =
             self.instantiate_native_plan_in(scope, plan.native(), selection, |_| {
-                Err(PreparedRuntimeError::CertifiedTargetOwners)
+                Err(PreparedRuntimeError::certified_target_owners())
             })?;
         Ok(ResolvedNativeTurn {
             instantiation,

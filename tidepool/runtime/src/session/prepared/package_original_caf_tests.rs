@@ -15,7 +15,7 @@ pub(in crate::session) fn observe_package_instance(
 ) -> Result<PackageRootObservation, PreparedRuntimeError> {
     use tidepool_codegen::prepared_program::NativeInstanceLease;
     let NativeInstanceLease::Package(package) = lease else {
-        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        return Err(PreparedRuntimeError::certified_target_owners());
     };
     let program = lease.instance().program();
     let facts = engine
@@ -51,7 +51,7 @@ pub(in crate::session) fn observe_package_instance(
                 || export.rep != lease.handle().rep()
         })
     {
-        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        return Err(PreparedRuntimeError::certified_target_owners());
     }
     engine
         .machine

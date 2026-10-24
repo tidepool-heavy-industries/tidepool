@@ -295,13 +295,13 @@ impl ScopedResolvedInputs {
                 binding,
             } => {
                 let NativeOccurrenceId::Home(demander) = owner.occurrence() else {
-                    return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                    return Err(PreparedRuntimeError::certified_target_owners());
                 };
                 let stage = item.world_selected_runtime_inputs().stage_first_ordinal();
                 let uses = self
                     .stages
                     .get(&stage)
-                    .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                    .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
                 let mut matched = false;
                 for selected in uses.iter().filter(|selected| {
                     selected.terminal.origin() == DependencyTerminalOrigin::NativeOriginal
@@ -311,7 +311,7 @@ impl ScopedResolvedInputs {
                 }) {
                     matched = true;
                     if selected.value.id != value.id || selected.value.handle != value.handle {
-                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        return Err(PreparedRuntimeError::certified_target_owners());
                     }
                 }
                 if !matched {
@@ -328,7 +328,7 @@ impl ScopedResolvedInputs {
                                 PreparedRuntimeError::NativeSourceEvidence(Box::new(error))
                             })?
                     {
-                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                        return Err(PreparedRuntimeError::certified_target_owners());
                     }
                 }
             }
