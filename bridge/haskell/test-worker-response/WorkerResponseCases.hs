@@ -3,7 +3,7 @@
 module WorkerResponseCases where
 
 import Control.Exception (AsyncException(..), IOException, SomeException, bracket, catch, finally, throwIO, try)
-import Control.Monad (unless, void, forM_, replicateM)
+import Control.Monad (unless, void, forM_, replicateM, when)
 import Control.Concurrent (ThreadId, MVar, forkFinally, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Tidepool.DependencyPlan (sourceDependencyQuery, nativeDependencyQuery, exchangeSourceDependencies, exchangeNativeDependencies)
 import Data.Bits ((.|.), shiftL, shiftR)
@@ -97,6 +97,47 @@ workerChild oneFreeFd scratch = do
           childResult (exchangeSourceDependencies borrowed (sourceDependencyQuery [])) >>= expectFailure "NativeReplyCorrupt"
           actual <- exchangeSourceDependencies borrowed (sourceDependencyQuery [])
           unless (null actual) (fail "corrupt semantic reply acquired rows")
+        ["source-refusal"] -> do
+          exchange <- maybe (fail "missing refusing SOURCE exchange") pure native
+          old <- borrowSourceDemand exchange 2
+          borrowed <- borrowSourceDemand exchange 3
+          writeIORef stale (Just borrowed)
+          (_,firstDone) <- startChild (exchangeSourceDependencies borrowed (sourceDependencyQuery []))
+          awaitFile (scratch ++ "/refusal-frame")
+          (valid,validDone) <- startChild (exchangeSourceDependencies borrowed (sourceDependencyQuery []))
+          (invalid,invalidDone) <- startChild (exchangeSourceDemand old (sourcePayload "stale"))
+          awaitGateWait valid
+          awaitGateWait invalid
+          writeFile (scratch ++ "/refusal-waiters") "ready"
+          forM_ [firstDone,validDone] $ \done ->
+            takeMVar done >>= expectFailure "NativeDemandRejected OriginalUnavailable \"first-diagnostic\""
+          takeMVar invalidDone >>= expectFailure "NativeDemandClosed"
+          childResult (exchangeNativeDemand exchange 3 "foreign") >>= expectFailure "NativeDemandWrongThread"
+          childResult (exchangeSourceDemand borrowed (dependencyPacket "TPDEPENDENCYQUERY1" 1))
+            >>= expectFailure "SOURCE borrow requires"
+          regressed <- try (exchangeNativeDemand exchange 2 "regressed")
+          expectFailure "native demand stage regressed" regressed
+          regressedBorrow <- try (borrowSourceDemand exchange 2)
+          expectFailure "SOURCE borrow stage regressed" regressedBorrow
+          -- A replay neither reserves another round nor consumes wire budget.
+          forM_ [1 :: Int,2] $ \_ -> do
+            reply <- exchangeNativeDemand exchange 3 (BS.replicate limit 114)
+            unless (case reply of NativeRefused bytes -> bytes == firstRefusal; _ -> False)
+              (fail "handler replay lost first opaque refusal")
+          _ <- exchangeNativeDependencies exchange 3 (nativeDependencyQuery [])
+          fail "refusal unexpectedly resolved"
+        ["refusal-malformed"] -> do
+          exchange <- maybe (fail "missing malformed refusal exchange") pure native
+          borrowed <- borrowSourceDemand exchange 0
+          forM_ [1 :: Int,2] $ \_ ->
+            childResult (exchangeSourceDependencies borrowed (sourceDependencyQuery [])) >>= expectFailure "NativeReplyCorrupt"
+          fail "malformed refusal retained"
+        [mode] | mode `elem` ["refusal-error","refusal-warning","refusal-swallowed","refusal-render-failure"] -> do
+          exchange <- maybe (fail "missing terminal refusal exchange") pure native
+          _ <- exchangeNativeDemand exchange 0 "terminal-refusal"
+          when (mode == "refusal-render-failure") (BS.hPut stdout (BS.replicate limit 111))
+        ["diagnostic-error"] -> pure ()
+        ["diagnostic-warning"] -> pure ()
         ["source-cancel"] -> do
           exchange <- maybe (fail "missing cancellation SOURCE exchange") pure native
           borrowed <- borrowSourceDemand exchange 0
@@ -159,6 +200,10 @@ workerChild oneFreeFd scratch = do
         ["next-request"] -> BSC.hPutStr stdout "complete-next-request"
         _ -> fail "unexpected capture fixture request"
       pure $ case args of
+        ["diagnostic-error"] -> DiagnosticResponse [Diag Nothing DiagError "typed-diagnostic-error"]
+        ["diagnostic-warning"] -> DiagnosticResponse [Diag Nothing DiagWarning "typed-diagnostic-warning"]
+        ["refusal-error"] -> DiagnosticResponse [Diag Nothing DiagError "typed-diagnostic-error"]
+        ["refusal-warning"] -> DiagnosticResponse [Diag Nothing DiagWarning "typed-diagnostic-warning"]
         ["source-free"] -> ExactInputsResponse (ExactInputsNeedsAcquisition (replicate 64 'a') WorldNotResidentOnThisWorker)
         ["source-free-rejected"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
         ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (replicate 64 '1' ++ ".7") WorldRetainedAtAdmission)
@@ -166,6 +211,14 @@ workerChild oneFreeFd scratch = do
         ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (replicate 64 '1' ++ ".7") WorldRetainedAtAdmission)
         ["source-free-rejected-capture-failure"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
         _ -> DiagnosticResponse []
+
+awaitFile :: FilePath -> IO ()
+awaitFile path = do
+  present <- doesFileExist path
+  unless present (threadDelay 1000 >> awaitFile path)
+
+firstRefusal :: BS.ByteString
+firstRefusal = BS.singleton 0x83 <> cborText "TPNATIVEREFUSAL1" <> BS.singleton 1 <> cborText "first-diagnostic"
 
 -- Protocol fixtures use semantically inert payloads for transport scheduling;
 -- actual DependencyPlan encoders are checked independently in the same run.
@@ -410,6 +463,79 @@ checkSourceBorrowing scratch = withSourceChild scratch $ \input output child -> 
   hClose input
   status <- waitForProcess child
   unless (status == ExitSuccess) (fail "SOURCE borrowing child did not exit cleanly")
+
+-- Both valid and stale borrowers queue behind the actual outstanding exchange.
+-- The next bytes must be the failed terminal: another demand is a failure.
+checkSourceRefusal :: FilePath -> IO ()
+checkSourceRefusal scratch = withSourceChild scratch $ \input output child -> do
+  beginSource input "source-refusal"
+  (stage,number,payload) <- readDemand output
+  unless (stage == 3 && number == 1 && payload == dependencyPacket "TPDEPENDENCYQUERY1" 0)
+    (fail "first refusal did not reach actual SOURCE demand")
+  writeFile (scratch ++ "/refusal-frame") "observed"
+  awaitFile (scratch ++ "/refusal-waiters")
+  replyDemand input stage number 1 firstRefusal
+  sourceFailedTerminal output "NativeDemandRejected OriginalUnavailable"
+  beginSource input "source-stale"
+  (freshStage,freshNumber,freshPayload) <- readDemand output
+  unless (freshStage == 5 && freshNumber == 1 && freshPayload == sourcePayload "current")
+    (fail "refusal replay leaked state into the next request")
+  replyDemand input freshStage freshNumber 0 "observed"
+  sourceTerminal output
+  beginSource input "refusal-malformed"
+  (badStage,badNumber,_) <- readDemand output
+  replyDemand input badStage badNumber 1 "malformed-semantic-refusal"
+  sourceFailedTerminal output "malformed refusal retained"
+  finishSourceChild input output child
+  removeFile (scratch ++ "/refusal-frame")
+  removeFile (scratch ++ "/refusal-waiters")
+
+checkRefusalTerminal :: FilePath -> IO ()
+checkRefusalTerminal scratch = do
+  -- Typed error diagnostics render nonzero even though the body succeeded;
+  -- warnings remain successful when there is no semantic refusal.
+  withSourceChild scratch $ \input output child -> do
+    forRequest input output "diagnostic-error" $ \code out _ ->
+      unless (code == 1 && BSC.isInfixOf "source-failure" out && BSC.isInfixOf "typed-diagnostic-error" out)
+        (fail "DiagnosticResponse errors did not render a failed terminal")
+    forRequest input output "diagnostic-warning" $ \code out _ ->
+      unless (code == 0 && BSC.isInfixOf "success" out && BSC.isInfixOf "typed-diagnostic-warning" out)
+        (fail "DiagnosticResponse warnings did not preserve success")
+    forM_ ["refusal-error","refusal-render-failure"] $ \mode -> do
+      beginSource input mode
+      (stage,number,_) <- readDemand output
+      replyDemand input stage number 1 firstRefusal
+      sourceFailedTerminal output (if mode == "refusal-error" then "typed-diagnostic-error" else "capture exceeds")
+    finishSourceChild input output child
+  forM_ ["refusal-swallowed","refusal-warning"] $ \mode ->
+    withSourceChild scratch $ \input output child -> do
+      beginSource input mode
+      (stage,number,_) <- readDemand output
+      replyDemand input stage number 1 firstRefusal
+      finished <- timeout 10000000 (waitForProcess child)
+      unless (case finished of Just (ExitFailure _) -> True; _ -> False)
+        (fail "swallowed semantic refusal did not retire instead of succeeding")
+      bytes <- BS.hGet output 1
+      unless (BS.null bytes) (fail "swallowed semantic refusal emitted a terminal or retry")
+
+sourceFailedTerminal :: Handle -> BS.ByteString -> IO ()
+sourceFailedTerminal output expected = do
+  tag <- exact output 1
+  code <- word32 <$> exact output 4
+  out <- readFrame output
+  _ <- readFrame output
+  unless (tag == BS.singleton 0 && code == 1 && BSC.isInfixOf expected out)
+    (fail ("refused request lost its single failed terminal: " ++ show (tag,code,out)))
+
+finishSourceChild :: Handle -> Handle -> ProcessHandle -> IO ()
+finishSourceChild input output child = do
+  BS.hPut input (BS.singleton 0)
+  hFlush input
+  ended <- exact output 1
+  unless (ended == BS.singleton 1) (fail "semantic refusal lost clean END")
+  hClose input
+  status <- waitForProcess child
+  unless (status == ExitSuccess) (fail "semantic refusal poisoned worker transaction")
 
 checkSourceBorrowCancellation :: FilePath -> IO ()
 checkSourceBorrowCancellation scratch = forM_ ["source-cancel","source-partial"] $ \mode ->

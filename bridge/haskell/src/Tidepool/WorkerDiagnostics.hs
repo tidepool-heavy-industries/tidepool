@@ -77,7 +77,10 @@ renderCompletion completed capture = do
     Just failure -> throwIO failure
     Nothing -> pure ()
   let (bodyOutcome, primary, human, failureCode) = case completionResult completed of
-        BodySucceeded warnings -> (ReportSuccess, warnings, "", ExitSuccess)
+        BodySucceeded diagnostics
+          | any ((== DiagError) . dSeverity) diagnostics ->
+              (ReportSourceFailure, diagnostics, "", ExitFailure 1)
+          | otherwise -> (ReportSuccess, diagnostics, "", ExitSuccess)
         BodyFailed failure ->
           let (outcome, diagnostics, debug, code) = failureDiagnostics failure
           in (outcome, diagnostics, debug, code)
