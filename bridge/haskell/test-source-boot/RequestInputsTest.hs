@@ -139,9 +139,10 @@ import Tidepool.PlannedDeclaration (plannedModule)
 import Tidepool.ImportSyntax
   ( CapturedImportSyntax, captureImportSyntax, capturedImportOccurrences
   , matchDriverImports, driverImportOccurrences, importOccurrenceId, importOccurrenceDescriptor
-  , describeImport, beginImportRefinement, refinedImportOccurrences, ImportLineage(..), importOccurrenceLineage )
+  , describeImport, beginImportRefinement, refinedParsedModule, refinedImportOccurrences, ImportLineage(..), importOccurrenceLineage )
 import Tidepool.CheckedCell (encodeCheckedTypeWitness, nativeImportSyntax, nativeParsedModule, unannotatedModule, mapNativeModule)
 import Tidepool.CheckedPrefixImports (refineParsedDeclarationImports)
+import Tidepool.ImportSyntax.Internal (ImportRefinement(..), mapRefinedImportsM)
 import Tidepool.ImportAdmission
   ( compilationScope, compilationSourceSelection
   , writeCheckedExactCompilation, writeRetainedExactCompilation
@@ -292,6 +293,7 @@ bufferedImportRefinementLineage = withTiming $ withScratch $ \work ->
           , "import Data.List as Lists (sort, nub)"
           , "import qualified Data.Maybe as Chosen (Maybe(..))"
           , "sort = ()"
+          , "map = ()"
           , "entry = ()"
           ]
     (captured,matched,environment) <- scopedRunGhc compiler $ do
@@ -319,8 +321,9 @@ bufferedImportRefinementLineage = withTiming $ withScratch $ \work ->
           , importOccurrenceLineage occurrence == NarrowedImport parentId]
         qualified = [declaration | (occurrence,declaration) <- observations
           , importOccurrenceLineage occurrence == QualifiedImport parentId]
-        synthetic = [declaration | (occurrence,declaration) <- observations
-          , importOccurrenceLineage occurrence == SyntheticPrelude]
+        synthetic = [(importOccurrenceLineage occurrence,declaration)
+          | (occurrence,declaration) <- observations
+          , moduleNameString (unLoc (ideclName declaration)) == "Prelude"]
         narrowedNames :: ImportDecl GhcPs -> Maybe [String]
         narrowedNames declaration = case ideclImportList declaration of
           Just (Exactly,entries) -> mapM (\entry -> case unLoc entry of
@@ -332,15 +335,44 @@ bufferedImportRefinementLineage = withTiming $ withScratch $ \work ->
     unless (length occurrences == length imports
         && Set.size (Set.fromList (map importOccurrenceId occurrences)) == length occurrences
         && case (narrowed,qualified,synthetic) of
-          ([unqualified],[clone],[prelude]) ->
+          ([unqualified],[clone],[(NarrowedImport preludeRoot,prelude),(QualifiedImport qualifiedRoot,preludeClone)]) ->
             ideclQualified unqualified == NotQualified
               && narrowedNames unqualified == Just ["nub"]
               && ideclQualified clone == QualifiedPre
               && describeImport (clone {ideclQualified=NotQualified})
                 == Right (importOccurrenceDescriptor parent)
               && moduleNameString (unLoc (ideclName prelude)) == "Prelude"
+              && preludeRoot == qualifiedRoot
+              && ideclQualified prelude == NotQualified
+              && ideclQualified preludeClone == QualifiedPre
           _ -> False)
       (fail "actual refiner lost narrowed/qualified parent selection or synthetic Prelude lineage")
+    repeated <- refineParsedDeclarationImports environment refined
+    let observation value = [(importOccurrenceId occurrence,importOccurrenceDescriptor occurrence)
+          | occurrence <- refinedImportOccurrences (nativeImportSyntax value)]
+    unless (observation repeated == observation refined)
+      (fail "repeated local narrowing changed the original selection, occurrence IDs or clone count")
+    -- At the lineage owner's own boundary, shrink both existing descendants
+    -- again. Their original-selection clones must remain unchanged.
+    let shrink occurrence located = pure $
+          if ideclQualified (unLoc located) == NotQualified
+            && case importOccurrenceLineage occurrence of NarrowedImport _ -> True; _ -> False
+          then NarrowUnqualified [] else KeepImport
+    smaller <- mapRefinedImportsM shrink (nativeImportSyntax repeated)
+    let before = refinedImportOccurrences (nativeImportSyntax repeated)
+        after = refinedImportOccurrences smaller
+        clones occurrences = [(importOccurrenceId occurrence,importOccurrenceDescriptor occurrence)
+          | occurrence <- occurrences
+          , case importOccurrenceLineage occurrence of QualifiedImport _ -> True; _ -> False]
+    unless (map importOccurrenceId before == map importOccurrenceId after
+        && clones before == clones after
+        && all (\located -> ideclQualified (unLoc located) /= NotQualified
+          || case ideclImportList (unLoc located) of
+            Just (Exactly,entries) -> null (unLoc entries)
+            _ -> False) (hsmodImports (unLoc (pm_parsed_source (refinedParsedModule smaller)))))
+      (fail "later narrowing duplicated a clone, changed its selection or widened an unqualified descendant")
+    requireUserError "qualified narrowing" "RefinementRequiresUnqualified" $
+      mapRefinedImportsM (\_ _ -> pure (NarrowUnqualified [])) smaller
     requireUserError "unregistered import reorder" "RefinementChangedImports" $
       mapNativeModule (\(L location syntax) ->
         pure (L location (syntax {hsmodImports=reverse (hsmodImports syntax)}))) native

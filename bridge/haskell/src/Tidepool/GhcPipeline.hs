@@ -248,10 +248,10 @@ import Tidepool.HomeProducts
   , validateCandidateInterfaceRequirements, validateCapturedAdmittedCore )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
-  ( PlannedDeclaration, plannedModule, plannedSource, plannedSourceImports, plannedSourceLineOffset, plannedCheckPlan, certifyPlannedDeclaration, plannedOriginalOwner, preparePlannedDeclaration, originalDeclarationWrapper, replaceTemplateModuleHeader, PlannedDeclarationInventory, transformProgramDeclarationImports )
-import Tidepool.DeclarationJoin (DeclarationExport(..))
+  ( PlannedDeclaration, plannedModule, plannedSource, plannedSourceImports, plannedSourceLineOffset, plannedCheckPlan, certifyPlannedDeclaration, plannedOriginalOwner, preparePlannedDeclaration, originalDeclarationWrapper, replaceTemplateModuleHeader, PlannedDeclarationInventory, plannedDeclarationImportInventory )
+import Tidepool.DeclarationJoin (DeclarationExport)
 import Tidepool.CheckedPrefixImports
-  ( refineParsedDeclarationImports, refineOriginalDeclarationImports, selectedImportNames
+  ( refineParsedDeclarationImports, refineProgramDeclarationImports, selectedImportNames
   , CompletedValueAliases, completedValueAliasIds, hydrateCompletedValueAliases, transformCompletedValueAliases )
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.HostBindingAuthority (hostBindingOriginsRequired)
@@ -335,8 +335,10 @@ import Tidepool.ImportAdmission.Internal
   , CompletedFiniteImportAdmission(..), CompletedWorldImportAdmission(..), WorldImportCompletionIdentity(..), IssuedSourceImports(..) )
 import Tidepool.ImportSyntax
   ( captureImportSyntax, matchDriverImports, beginImportRefinement, driverParsedModule
-  , driverImportOccurrences, importOccurrenceId, capturedParsedSource, refinedImportOccurrences, importOccurrenceLineage, ImportLineage(..) )
-import Tidepool.ImportSyntax.Internal (LocatedImport(..), ImportOccurrenceId(..), DriverImportSyntax(..))
+  , driverImportOccurrences, importOccurrenceId, capturedParsedSource, refinedImportOccurrences )
+import Tidepool.ImportSyntax.Internal
+  ( LocatedImport(..), ImportOccurrenceId(..), DriverImportSyntax(..)
+  , ImportOccurrenceRoot(..), importOccurrenceRoot, rootImportId )
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeProducerSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, scopeValueInterfaces
   , scopeAvailableOriginalProducts
@@ -3134,19 +3136,19 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                 annotateNativeModule annotations transformed
             if ms_mod_name summary /= target then pure annotated else do
               resolved <- requireResolved
-              baseDeclared <- case verifiedDeclaration of
-                Nothing -> pure annotated
+              previousImports <- case verifiedDeclaration of
+                Nothing -> pure []
                 Just declaration -> do
                   let artifact = verifiedWorldDeclarationInterface declaration
                       entries = [entry | entry <- verifiedWorldDeclarationTypeInputs declaration
                         , worldTypeEntryArtifact entry == artifact]
-                      exports = concatMap (\value -> exportHead value : exportChildren value)
-                        (verifiedWorldDeclarationExports declaration)
                   iface <- case entries of
                     [entry] -> pure (worldTypeEntryInterface entry)
                     _ -> throwIO WorldCellCorrupt
-                  refineOriginalDeclarationImports (mi_module iface) (mi_iface_hash (mi_final_exts iface)) exports environment annotated
-              declared <- transformProgramDeclarationImports inventories environment baseDeclared
+                  pure [(mi_module iface,mi_iface_hash (mi_final_exts iface),
+                    verifiedWorldDeclarationExports declaration)]
+              declared <- refineProgramDeclarationImports
+                (previousImports ++ map plannedDeclarationImportInventory inventories) environment annotated
               transformCompletedValueAliases (worldResolvedAliases resolved) environment declared
         , pvPlan = \directory enabled target observation@(SourceGraphObservation graph _) exact resolved -> do
             forM_ nativeDeclarationOwner $ \owner ->
@@ -4228,10 +4230,6 @@ prepareImportAdmission variant target environment actual checkedValues matched@(
     (unannotatedModule (beginImportRefinement activeDriver))
   let occurrences = refinedImportOccurrences (nativeImportSyntax native)
       declarations = hsmodImports (unLoc (pm_parsed_source (nativeParsedModule native)))
-      parent (CapturedImportId index) = CapturedImportId index
-      parent (NarrowedImportId identity) = parent identity
-      parent (QualifiedImportId identity) = parent identity
-      parent SyntheticPreludeId = SyntheticPreludeId
   unless (length occurrences == length declarations) (fail "prepared import census is incomplete")
   forM_ (zip occurrences declarations) $ \(occurrence,located) -> do
     let declaration = unLoc located
@@ -4241,13 +4239,13 @@ prepareImportAdmission variant target environment actual checkedValues matched@(
     owner <- case found of
       Found _ owner -> pure owner
       _ -> fail "prepared import lost its resolved module"
-    case importOccurrenceLineage occurrence of
-      SyntheticPrelude -> case [expected | ResolvedImportOccurrence SyntheticPreludeId _ requested _ raw _ expected <- selected
+    case importOccurrenceRoot (importOccurrenceId occurrence) of
+      SyntheticPreludeRoot -> case [expected | ResolvedImportOccurrence SyntheticPreludeId _ requested _ raw _ expected <- selected
           , requested == name, raw == qualifier] of
         [expected] | expected == owner -> pure ()
         _ -> fail "synthetic Prelude changed its selected driver module"
       _ -> case [expected | ResolvedImportOccurrence identity _ _ _ _ _ expected <- selected
-          , identity == parent (importOccurrenceId occurrence)] of
+          , identity == rootImportId (importOccurrenceRoot (importOccurrenceId occurrence))] of
         [expected] | expected == owner -> pure ()
         _ -> fail "prepared import changed its selected owner"
   pure (PreparedImportAdmission resolved actual native checkedValues)

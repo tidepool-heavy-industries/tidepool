@@ -9,7 +9,7 @@ module Tidepool.PlannedDeclaration
   , plannedOriginalOwner, plannedInterfaceFingerprint, plannedSourceMatches, plannedFamilyClosure
   , renderPlannedDeclarationInventory
   , certifyPlannedDeclaration, admitLocalNativeDeclaration
-  , transformPlannedDeclarationImports, transformProgramDeclarationImports
+  , plannedDeclarationImportInventory
   ) where
 
 import Control.Monad (unless)
@@ -33,15 +33,12 @@ import GHC.Unit.Types (unitString)
 import GHC.Utils.Fingerprint (Fingerprint, fingerprintByteString)
 import GHC.Types.Name.Occurrence
   ( isSymOcc, mkTcOcc, mkVarOcc, mkDataOcc )
-import Tidepool.CheckedPrefixImports
-  ( refineOriginalDeclarationImports, refineProgramDeclarationImports )
 import Tidepool.Binders
   ( CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..), CellSourceSpan(..)
   , StmtBinders(..), TurnKind(..), ExportItem(..)
   , SourcePrologue(..), DeclarationSource(..), renderDeclarationForTemplateWithImports )
 import Tidepool.TurnSource (ImportRendering, importRenderingSource)
 import Tidepool.ImportSyntax.Internal (LocatedImport(..), ImportIntent(..))
-import Tidepool.CheckedCell (NativeParsedModule)
 import Tidepool.DeclarationJoin
   ( DeclarationExport(..), DeclarationKind(..), ExportNamespace(..), ExportIdentity(..), exportIdentity
   , InstanceInventory(..), ClassInstanceEvidence(..), JoinDecision(..)
@@ -274,17 +271,7 @@ readPlannedDeclarationInventory env original = do
         (sort (nub (map (exportIdentity . coAxiomName . fi_axiom) families))))
       JoinRejected _ diagnostic -> Left diagnostic
 
--- The checked recipe gives the certified original authored names lexical
--- precedence while preserving each historical qualified import selection.
-transformPlannedDeclarationImports
-  :: PlannedDeclarationInventory -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
-transformPlannedDeclarationImports inventory = refineOriginalDeclarationImports
-  (inventoryOwner inventory) (inventoryInterface inventory)
-  (concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory))
-
-transformProgramDeclarationImports
-  :: [PlannedDeclarationInventory] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
-transformProgramDeclarationImports inventories = refineProgramDeclarationImports
-  [(inventoryOwner inventory,inventoryInterface inventory,
-      map (\item -> exportHead item : exportChildren item) (plannedExports inventory))
-    | inventory <- inventories]
+plannedDeclarationImportInventory
+  :: PlannedDeclarationInventory -> (Module,Fingerprint,[DeclarationExport])
+plannedDeclarationImportInventory inventory =
+  (inventoryOwner inventory,inventoryInterface inventory,plannedExports inventory)

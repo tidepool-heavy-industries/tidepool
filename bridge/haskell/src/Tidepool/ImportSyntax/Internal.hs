@@ -2,11 +2,11 @@
 -- no permission to load an interface, admit source, or execute native code.
 module Tidepool.ImportSyntax.Internal
   ( ImportDescriptor, describeImport
-  , ImportOccurrenceId(..), ImportOccurrence(..)
-  , importOccurrenceId, importOccurrenceDescriptor, importOccurrenceSpan
+  , ImportOccurrenceRoot(..), ImportOccurrenceId(..), ImportOccurrence(..)
+  , importOccurrenceId, importOccurrenceRoot, rootImportId, importOccurrenceDescriptor, importOccurrenceSpan
   , CapturedImportSyntax(..), captureImportSyntax, capturedImportOccurrences, capturedParsedSource
   , DriverImportSyntax(..), matchDriverImports, driverImportOccurrences, driverParsedModule
-  , RefinedImportSyntax, beginImportRefinement, refinedParsedModule, refinedImportOccurrences
+  , RefinedImportSyntax, beginImportRefinement, refinedParsedModule, refinedImportOccurrences, refinedCapturedSyntax
   , ImportLineage(..), importOccurrenceLineage
   , ImportRefinement(..), mapRefinedImportsM, insertSyntheticPrelude, mapImportPreservingSource
   , ImportOrigin(..), ImportRendering(..)
@@ -205,10 +205,13 @@ describeName name = case name of
   -- Orig/Exact require a certified transformation, never raw parser matching.
   _ -> Left UnsupportedImportName
 
+data ImportOccurrenceRoot = CapturedImportRoot Int | SyntheticPreludeRoot
+  deriving (Eq, Ord, Show)
+
 data ImportOccurrenceId
   = CapturedImportId Int
-  | NarrowedImportId ImportOccurrenceId
-  | QualifiedImportId ImportOccurrenceId
+  | NarrowedImportId ImportOccurrenceRoot
+  | QualifiedImportId ImportOccurrenceRoot
   | SyntheticPreludeId
   deriving (Eq, Ord, Show)
 
@@ -219,20 +222,34 @@ data ImportLineage
   | SyntheticPrelude
   deriving (Eq, Show)
 
-data ImportOccurrence = ImportOccurrence ImportOccurrenceId ImportDescriptor SrcSpan ImportLineage
+data ImportOccurrence = ImportOccurrence ImportOccurrenceId ImportDescriptor SrcSpan
   deriving (Eq)
 
 importOccurrenceId :: ImportOccurrence -> ImportOccurrenceId
-importOccurrenceId (ImportOccurrence identity _ _ _) = identity
+importOccurrenceId (ImportOccurrence identity _ _) = identity
+
+importOccurrenceRoot :: ImportOccurrenceId -> ImportOccurrenceRoot
+importOccurrenceRoot (CapturedImportId index) = CapturedImportRoot index
+importOccurrenceRoot (NarrowedImportId root) = root
+importOccurrenceRoot (QualifiedImportId root) = root
+importOccurrenceRoot SyntheticPreludeId = SyntheticPreludeRoot
+
+rootImportId :: ImportOccurrenceRoot -> ImportOccurrenceId
+rootImportId (CapturedImportRoot index) = CapturedImportId index
+rootImportId SyntheticPreludeRoot = SyntheticPreludeId
 
 importOccurrenceDescriptor :: ImportOccurrence -> ImportDescriptor
-importOccurrenceDescriptor (ImportOccurrence _ descriptor _ _) = descriptor
+importOccurrenceDescriptor (ImportOccurrence _ descriptor _) = descriptor
 
 importOccurrenceSpan :: ImportOccurrence -> SrcSpan
-importOccurrenceSpan (ImportOccurrence _ _ location _) = location
+importOccurrenceSpan (ImportOccurrence _ _ location) = location
 
 importOccurrenceLineage :: ImportOccurrence -> ImportLineage
-importOccurrenceLineage (ImportOccurrence _ _ _ lineage) = lineage
+importOccurrenceLineage (ImportOccurrence identity _ _) = case identity of
+  CapturedImportId _ -> CapturedImport
+  NarrowedImportId root -> NarrowedImport (rootImportId root)
+  QualifiedImportId root -> QualifiedImport (rootImportId root)
+  SyntheticPreludeId -> SyntheticPrelude
 
 data CapturedImportSyntax = CapturedImportSyntax ParsedSource [ImportOccurrence]
 
@@ -242,7 +259,7 @@ captureImportSyntax parsed = CapturedImportSyntax parsed <$> mapM describe
   where
     describe (index, located) = do
       descriptor <- describeImport (unLoc located)
-      pure (ImportOccurrence (CapturedImportId index) descriptor (getLocA located) CapturedImport)
+      pure (ImportOccurrence (CapturedImportId index) descriptor (getLocA located))
 
 capturedImportOccurrences :: CapturedImportSyntax -> [ImportOccurrence]
 capturedImportOccurrences (CapturedImportSyntax _ occurrences) = occurrences
@@ -263,10 +280,10 @@ matchDriverImports capturedSyntax@(CapturedImportSyntax _ captured) parsed = do
     (Left (DriverImportCountChanged (length captured) (length actual)))
   DriverImportSyntax capturedSyntax parsed <$> mapM bind (zip captured actual)
   where
-    bind (ImportOccurrence identity expected _ lineage, located) = do
+    bind (ImportOccurrence identity expected _, located) = do
       actual <- describeImport (unLoc located)
       unless (actual == expected) (Left (DriverImportChanged identity))
-      pure (ImportOccurrence identity expected (getLocA located) lineage)
+      pure (ImportOccurrence identity expected (getLocA located))
 
 driverImportOccurrences :: DriverImportSyntax -> [ImportOccurrence]
 driverImportOccurrences (DriverImportSyntax _ _ occurrences) = occurrences
@@ -288,34 +305,41 @@ refinedParsedModule (RefinedImportSyntax _ parsed _) = parsed
 refinedImportOccurrences :: RefinedImportSyntax -> [ImportOccurrence]
 refinedImportOccurrences (RefinedImportSyntax _ _ occurrences) = occurrences
 
+refinedCapturedSyntax :: RefinedImportSyntax -> CapturedImportSyntax
+refinedCapturedSyntax (RefinedImportSyntax captured _ _) = captured
+
 -- This closed recipe is available only to the actual checked-prefix issuer.
 -- A qualified clone always retains the parent's complete selection.
 data ImportRefinement = KeepImport | NarrowUnqualified [LIE GhcPs]
 
-mapRefinedImportsM :: (LImportDecl GhcPs -> IO ImportRefinement)
+mapRefinedImportsM :: (ImportOccurrence -> LImportDecl GhcPs -> IO ImportRefinement)
   -> RefinedImportSyntax -> IO RefinedImportSyntax
 mapRefinedImportsM choose (RefinedImportSyntax captured parsed occurrences) = do
   let syntax = unLoc (pm_parsed_source parsed)
       imports = hsmodImports syntax
   unless (length imports == length occurrences) (fail (show RefinementChangedImports))
   changed <- forM (zip occurrences imports) $ \(occurrence, located@(L location declaration)) -> do
-    recipe <- choose located
+    recipe <- choose occurrence located
     case recipe of
       KeepImport -> pure [(occurrence,located)]
       NarrowUnqualified entries -> do
         unless (ideclQualified declaration == NotQualified)
           (fail (show (RefinementRequiresUnqualified (importOccurrenceId occurrence))))
-        let parent = importOccurrenceId occurrence
+        let root = importOccurrenceRoot (importOccurrenceId occurrence)
             narrowed = declaration {ideclImportList = Just (Exactly,noLocA entries)}
             qualified = declaration {ideclQualified = QualifiedPre}
         narrowedDescriptor <- either (fail . show) pure (describeImport narrowed)
         qualifiedDescriptor <- either (fail . show) pure (describeImport qualified)
-        pure
-          [ (ImportOccurrence (NarrowedImportId parent) narrowedDescriptor (getLocA located)
-                (NarrowedImport parent), L location narrowed)
-          , (ImportOccurrence (QualifiedImportId parent) qualifiedDescriptor (getLocA located)
-                (QualifiedImport parent), L location qualified)
-          ]
+        if narrowedDescriptor == importOccurrenceDescriptor occurrence
+          then pure [(occurrence,located)]
+          else do
+            let narrowedOccurrence = (ImportOccurrence (NarrowedImportId root)
+                  narrowedDescriptor (getLocA located), L location narrowed)
+            pure $ case importOccurrenceId occurrence of
+              NarrowedImportId _ -> [narrowedOccurrence]
+              _ -> [narrowedOccurrence,
+                (ImportOccurrence (QualifiedImportId root) qualifiedDescriptor
+                  (getLocA located), L location qualified)]
   let flattened = concat changed
       source = case pm_parsed_source parsed of
         L location _ -> L location syntax {hsmodImports = map snd flattened}
@@ -331,7 +355,7 @@ insertSyntheticPrelude (RefinedImportSyntax captured parsed occurrences) = do
       declaration = initial {ideclExt = (ideclExt initial) {ideclImplicit = True}}
       located = noLocA declaration
   descriptor <- either (Left . show) Right (describeImport declaration)
-  let occurrence = ImportOccurrence SyntheticPreludeId descriptor (getLocA located) SyntheticPrelude
+  let occurrence = ImportOccurrence SyntheticPreludeId descriptor (getLocA located)
       source = case pm_parsed_source parsed of
         L location _ -> L location syntax {hsmodImports = located : imports}
   pure (RefinedImportSyntax captured (parsed {pm_parsed_source = source}) (occurrence : occurrences))
