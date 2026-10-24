@@ -2937,7 +2937,8 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
       let cancellationFrontends = counterValues "world.cell.source_frontends.main:WorldCancellationNames" diagnostics
       unless (cancellationFrontends == [1,1])
         (fail ("cancelled expression plan published its pending captured source preparation: frontends="
-          ++ show cancellationFrontends ++ "; cancellation/retry/publication=" ++ show outcome))
+          ++ show cancellationFrontends ++ "; cancellation/retry/publication=" ++ show outcome
+          ++ "; globalCaptureTruncated=" ++ show ("[compiler diagnostics truncated at 4 MiB]" `isInfixOf` diagnostics)))
       let admissionParses = counterValues "world.cell.admission_parses" diagnostics
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
       unless (admissionParses == replicate 15 1)
