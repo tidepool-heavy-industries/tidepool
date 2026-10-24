@@ -1,6 +1,8 @@
 //! Compiled image projection of one issuer-owned linked target.
 
 use super::*;
+use super::super::admission::AuthorizedRetainedValue;
+use tidepool_toolchain::checked_cell::ExactCheckedItem;
 use tidepool_codegen::binding_table::WorldNativeSlotPermit;
 use tidepool_codegen::prepared_program::{
     LiteralOwner, NativeDomainSelection, NativeExportRequest, PreparedNativeCode,
@@ -16,27 +18,21 @@ use tidepool_toolchain::linked_native::{
 
 pub(in crate::session) struct RetainedNativeRequirement {
     leaf: NativeRetainedRequirement,
-    origin: RetainedNativeOrigin,
+    owner: AcquiredNativeCode,
+    global_index: u32,
+    binding: tidepool_toolchain::artifact_inventory::ArtifactBinding,
     rep: RuntimeRep,
     entry_signature: Option<Signature>,
     required_evaluated: bool,
-}
-pub(in crate::session) enum RetainedNativeOrigin {
-    Target {
-        global_index: u32,
-    },
-    Acquired {
-        owner: AcquiredNativeCode,
-        global_index: u32,
-        binding: tidepool_toolchain::artifact_inventory::ArtifactBinding,
-    },
 }
 impl RetainedNativeRequirement {
     fn from_declaration(
         declaration: &tidepool_repr::execution_schema::GlobalDecl,
         signatures: &[Signature],
         leaf: NativeRetainedRequirement,
-        origin: RetainedNativeOrigin,
+        owner: AcquiredNativeCode,
+        global_index: u32,
+        binding: tidepool_toolchain::artifact_inventory::ArtifactBinding,
     ) -> Result<Self, PreparedRuntimeError> {
         if declaration.identity != *leaf.identity()
             || declaration.required_generation != Some(leaf.generation())
@@ -45,7 +41,9 @@ impl RetainedNativeRequirement {
         }
         Ok(Self {
             leaf,
-            origin,
+            owner,
+            global_index,
+            binding,
             rep: declaration.rep,
             entry_signature: declaration
                 .entry_signature
@@ -227,7 +225,7 @@ impl NativeInstantiationPlan {
                 value: *value,
             },
             LinkedNativeTargetImport::RetainedCapture(requirement) => {
-                NativeCodeImport::Retained(requirement.clone())
+                NativeCodeImport::Retained(requirement.requirement().clone())
             }
         })
     }
@@ -371,10 +369,7 @@ enum ScopedNativeSlot {
         acquired: AcquiredNativeCode,
         value: ValueId,
     },
-    Retained {
-        requirement: Arc<RetainedNativeRequirement>,
-        value: Arc<super::super::admission::ScopedResolvedValue>,
-    },
+    Retained(AuthorizedRetainedValue),
 }
 
 fn same_import_destinations(left: &[ScopedNativeSlot], right: &[ScopedNativeSlot]) -> bool {
@@ -396,9 +391,9 @@ fn same_import_destinations(left: &[ScopedNativeSlot], right: &[ScopedNativeSlot
                     },
                 ) => left == right && left_value == right_value,
                 (
-                    ScopedNativeSlot::Retained { value: left, .. },
-                    ScopedNativeSlot::Retained { value: right, .. },
-                ) => left.handle == right.handle,
+                    ScopedNativeSlot::Retained(left),
+                    ScopedNativeSlot::Retained(right),
+                ) => left.value().handle == right.value().handle,
                 _ => false,
             })
 }
@@ -413,6 +408,8 @@ pub(in crate::session) struct NativeInstantiation {
     programs: BTreeMap<NativeOccurrence, Vec<ScopedNativeSlot>>,
     fresh_acquisitions: BTreeMap<NativeOccurrence, BTreeSet<NativeOccurrenceId>>,
     target_imports: Vec<ScopedNativeSlot>,
+    retained_obligations: Vec<AuthorizedRetainedValue>,
+    expected_execution: Option<(ExactCheckedItem, [u8; 32])>,
 }
 
 /// Runtime source evidence selected from the current admitted output. Fresh
@@ -470,14 +467,14 @@ impl NativeInstallationSources {
 
 impl NativeInstantiationPlan {
     fn authorize_retained_imports(
+        expected_execution: Option<(&ExactCheckedItem, [u8; 32])>,
+        linked: &Arc<LinkedNativeTarget>,
         owner: &AcquiredNativeCode,
         retained: &mut impl FnMut(
-            &RetainedNativeRequirement,
-        ) -> Result<
-            Arc<super::super::admission::ScopedResolvedValue>,
-            PreparedRuntimeError,
-        >,
-    ) -> Result<(), PreparedRuntimeError> {
+            &Arc<RetainedNativeRequirement>,
+        ) -> Result<AuthorizedRetainedValue, PreparedRuntimeError>,
+    ) -> Result<Vec<AuthorizedRetainedValue>, PreparedRuntimeError> {
+        let mut authorized = Vec::new();
         let definitions = owner.code().body().definitions();
         if definitions.globals().len() != owner.imports().len() {
             return Err(PreparedRuntimeError::certified_target_owners());
@@ -493,22 +490,38 @@ impl NativeInstantiationPlan {
                 binding,
             } = import
             {
-                let requirement = RetainedNativeRequirement::from_declaration(
+                let requirement = Arc::new(RetainedNativeRequirement::from_declaration(
                     declaration,
                     definitions.signatures(),
                     leaf,
-                    RetainedNativeOrigin::Acquired {
-                        owner: owner.clone(),
-                        global_index: u32::try_from(global_index)
-                            .map_err(|_| PreparedRuntimeError::certified_target_owners())?,
-                        binding,
-                    },
-                )?;
-                retained(&requirement)?;
+                    owner.clone(),
+                    u32::try_from(global_index)
+                        .map_err(|_| PreparedRuntimeError::certified_target_owners())?,
+                    binding,
+                )?);
+                authorized.push(Self::resolve_retained(expected_execution, linked, &requirement, retained)?);
             }
         }
-        Ok(())
+        Ok(authorized)
     }
+
+    fn resolve_retained(
+        expected_execution: Option<(&ExactCheckedItem, [u8; 32])>,
+        linked: &Arc<LinkedNativeTarget>,
+        requirement: &Arc<RetainedNativeRequirement>,
+        retained: &mut impl FnMut(&Arc<RetainedNativeRequirement>) -> Result<AuthorizedRetainedValue, PreparedRuntimeError>,
+    ) -> Result<AuthorizedRetainedValue, PreparedRuntimeError> {
+        let Some((item, admission_digest)) = expected_execution else {
+            return Err(PreparedRuntimeError::certified_target_owners());
+        };
+        let authorized = retained(requirement)?;
+        if !authorized.matches_slot(item, admission_digest, linked, requirement) {
+            return Err(PreparedRuntimeError::certified_target_owners());
+        }
+        Ok(authorized)
+    }
+
+    pub(in crate::session) fn linked(&self) -> &Arc<LinkedNativeTarget> { &self.linked }
 
     pub(in crate::session) fn target_constructors(
         &self,
@@ -523,16 +536,15 @@ impl NativeInstantiationPlan {
             .flat_map(|program| program.image().constructor_declarations())
     }
     fn scoped_slots(
+        expected_execution: Option<(&ExactCheckedItem, [u8; 32])>,
+        linked: &Arc<LinkedNativeTarget>,
         caller: SourceInstanceDomain,
         definitions: DefinitionsView<'_>,
         owner: &AcquiredNativeCode,
         selection: &NativeDomainSelection,
         retained: &mut impl FnMut(
-            &RetainedNativeRequirement,
-        ) -> Result<
-            Arc<super::super::admission::ScopedResolvedValue>,
-            PreparedRuntimeError,
-        >,
+            &Arc<RetainedNativeRequirement>,
+        ) -> Result<AuthorizedRetainedValue, PreparedRuntimeError>,
     ) -> Result<Vec<ScopedNativeSlot>, PreparedRuntimeError> {
         let imports = owner.imports();
         if definitions.globals().len() != imports.len() {
@@ -555,15 +567,13 @@ impl NativeInstantiationPlan {
                         declaration,
                         definitions.signatures(),
                         leaf,
-                        RetainedNativeOrigin::Acquired {
-                            owner: owner.clone(),
-                            global_index: u32::try_from(global_index)
-                                .map_err(|_| PreparedRuntimeError::certified_target_owners())?,
-                            binding,
-                        },
+                        owner.clone(),
+                        u32::try_from(global_index)
+                            .map_err(|_| PreparedRuntimeError::certified_target_owners())?,
+                        binding,
                     )?);
-                    let value = retained(&requirement)?;
-                    Ok(ScopedNativeSlot::Retained { requirement, value })
+                    let authorized = Self::resolve_retained(expected_execution, linked, &requirement, retained)?;
+                    Ok(ScopedNativeSlot::Retained(authorized))
                 }
             })
             .collect()
@@ -590,6 +600,7 @@ impl NativeInstantiationPlan {
     }
     pub(in crate::session) fn instantiate(
         self: &Arc<Self>,
+        expected_execution: Option<(&ExactCheckedItem, [u8; 32])>,
         selection: NativeDomainSelection,
         mut native_slot: impl FnMut(
             &NativeExportRequest,
@@ -599,37 +610,37 @@ impl NativeInstantiationPlan {
             PreparedRuntimeError,
         >,
         mut retained: impl FnMut(
-            &RetainedNativeRequirement,
-        ) -> Result<
-            Arc<super::super::admission::ScopedResolvedValue>,
-            PreparedRuntimeError,
-        >,
+            &Arc<RetainedNativeRequirement>,
+        ) -> Result<AuthorizedRetainedValue, PreparedRuntimeError>,
     ) -> Result<NativeInstantiation, PreparedRuntimeError> {
         let definitions = self.linked.prepared().definitions();
         if definitions.globals().len() != self.linked.imports().len() {
             return Err(PreparedRuntimeError::certified_target_owners());
         }
+        let mut covered_entry_slots = BTreeSet::new();
         let target_imports = definitions
             .globals()
             .iter()
             .zip(self.linked.imports())
-            .enumerate()
-            .map(|(global_index, (declaration, import))| match import {
+            .map(|(declaration, import)| match import {
                 LinkedNativeTargetImport::Code { acquired, value } => {
                     Self::scoped_code(selection.current(), acquired.clone(), *value, &selection)
                 }
-                LinkedNativeTargetImport::RetainedCapture(leaf) => {
+                LinkedNativeTargetImport::RetainedCapture(capture) => {
+                    let entry_owner = capture.entry_owner().ok_or_else(PreparedRuntimeError::certified_target_owners)?;
                     let requirement = Arc::new(RetainedNativeRequirement::from_declaration(
                         declaration,
                         definitions.signatures(),
-                        leaf.clone(),
-                        RetainedNativeOrigin::Target {
-                            global_index: u32::try_from(global_index)
-                                .map_err(|_| PreparedRuntimeError::certified_target_owners())?,
-                        },
+                        capture.requirement().clone(),
+                        entry_owner.owner().clone(),
+                        entry_owner.global_index(),
+                        entry_owner.binding(),
                     )?);
-                    let value = retained(&requirement)?;
-                    Ok(ScopedNativeSlot::Retained { requirement, value })
+                    let authorized = Self::resolve_retained(expected_execution, &self.linked, &requirement, &mut retained)?;
+                    if Some(entry_owner.owner().occurrence()) == self.linked.entry_occurrence() {
+                        covered_entry_slots.insert((entry_owner.global_index(), entry_owner.binding(), capture.requirement().clone()));
+                    }
+                    Ok(ScopedNativeSlot::Retained(authorized))
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -641,7 +652,7 @@ impl NativeInstantiationPlan {
                     acquired,
                     value,
                 } => Some((*occurrence, acquired.clone(), *value)),
-                ScopedNativeSlot::Retained { .. } => None,
+                ScopedNativeSlot::Retained(_) => None,
             })
             .collect::<Vec<_>>();
         let mut visited = BTreeSet::new();
@@ -692,6 +703,8 @@ impl NativeInstantiationPlan {
                 continue;
             }
             let imports = Self::scoped_slots(
+                expected_execution,
+                &self.linked,
                 occurrence.domain,
                 program.code().body().definitions(),
                 &acquired,
@@ -704,7 +717,7 @@ impl NativeInstantiationPlan {
                     acquired,
                     value,
                 } => Some((*occurrence, acquired.clone(), *value)),
-                ScopedNativeSlot::Retained { .. } => None,
+                ScopedNativeSlot::Retained(_) => None,
             }));
             fresh_acquisitions
                 .entry(occurrence)
@@ -725,17 +738,28 @@ impl NativeInstantiationPlan {
         // Authorizing another acquisition must not instantiate those children
         // again. The actual linked owner still supplies every retained import
         // obligation, including descendants behind an anchored parent.
-        let bound = fresh_acquisitions
+        let mut bound = fresh_acquisitions
             .values()
             .flatten()
             .copied()
             .collect::<BTreeSet<_>>();
+        if let Some(entry_occurrence) = self.linked.entry_occurrence()
+            && let Some(entry_owner) = self.linked.get(entry_occurrence)
+        {
+            let expected_entry_slots = entry_owner.imports().enumerate().filter_map(|(index, import)| match import {
+                AcquiredNativeImport::Retained { requirement, binding } =>
+                    u32::try_from(index).ok().map(|slot| (slot, binding, requirement)),
+                AcquiredNativeImport::Code { .. } => None,
+            }).collect::<BTreeSet<_>>();
+            if covered_entry_slots == expected_entry_slots { bound.insert(entry_occurrence); }
+        }
+        let mut retained_obligations = Vec::new();
         for acquired in self
             .linked
             .acquired()
             .filter(|acquired| !bound.contains(&acquired.occurrence()))
         {
-            Self::authorize_retained_imports(&acquired, &mut retained)?;
+            retained_obligations.extend(Self::authorize_retained_imports(expected_execution, &self.linked, &acquired, &mut retained)?);
         }
         let requested = programs
             .values()
@@ -745,7 +769,7 @@ impl NativeInstantiationPlan {
                 ScopedNativeSlot::Local {
                     occurrence, value, ..
                 } => Some((*occurrence, *value)),
-                ScopedNativeSlot::Retained { .. } => None,
+                ScopedNativeSlot::Retained(_) => None,
             })
             .collect::<BTreeSet<_>>();
         for (occurrence, value) in requested {
@@ -772,14 +796,17 @@ impl NativeInstantiationPlan {
             programs,
             fresh_acquisitions,
             target_imports,
+            retained_obligations,
+            expected_execution: expected_execution.map(|(item, digest)| (item.clone(), digest)),
         })
     }
 }
 
 impl RetainedNativeRequirement {
-    pub(in crate::session) fn origin(&self) -> &RetainedNativeOrigin {
-        &self.origin
-    }
+    pub(in crate::session) fn owner(&self) -> &AcquiredNativeCode { &self.owner }
+    pub(in crate::session) fn global_index(&self) -> u32 { self.global_index }
+    pub(in crate::session) fn binding(&self) -> tidepool_toolchain::artifact_inventory::ArtifactBinding { self.binding }
+    pub(in crate::session) fn leaf(&self) -> &NativeRetainedRequirement { &self.leaf }
     pub(in crate::session) fn identity(&self) -> &SymbolIdentity {
         self.leaf.identity()
     }
@@ -799,15 +826,16 @@ impl NativeInstantiation {
 
     pub(in crate::session) fn retained_values(
         &self,
-    ) -> impl Iterator<Item = &Arc<super::super::admission::ScopedResolvedValue>> {
+    ) -> impl Iterator<Item = &AuthorizedRetainedValue> {
         self.programs
             .values()
             .flatten()
             .chain(&self.target_imports)
             .filter_map(|slot| match slot {
-                ScopedNativeSlot::Retained { value, .. } => Some(value),
+                ScopedNativeSlot::Retained(authorized) => Some(authorized),
                 ScopedNativeSlot::Local { .. } => None,
             })
+            .chain(&self.retained_obligations)
     }
 }
 
@@ -821,6 +849,14 @@ impl PreparedEngine {
         scope: tidepool_codegen::scope::ScopeId,
     ) -> Result<CertifiedTurnInstall, PreparedRuntimeError> {
         let plan = &instantiation.plan;
+        for authorized in instantiation.retained_values() {
+            let Some((item, digest)) = &instantiation.expected_execution else {
+                return Err(PreparedRuntimeError::certified_target_owners());
+            };
+            if !authorized.matches_slot(item, *digest, &plan.linked, authorized.requirement()) {
+                return Err(PreparedRuntimeError::certified_target_owners());
+            }
+        }
         // Resolution retains weak choices, including observed vacancies. Check
         // them under the final source/snapshot admission before staging a batch;
         // a caller cannot turn an intervening sibling install into a duplicate.
@@ -859,7 +895,7 @@ impl PreparedEngine {
                 ScopedNativeSlot::Local {
                     occurrence, value, ..
                 } => Some((*occurrence, *value)),
-                ScopedNativeSlot::Retained { .. } => None,
+                ScopedNativeSlot::Retained(_) => None,
             })
             .collect::<BTreeSet<_>>();
         // Resolve historical source custody before acquiring any mutable native
@@ -971,10 +1007,12 @@ impl PreparedEngine {
                                 })
                             }
                         }
-                        ScopedNativeSlot::Retained {
-                            requirement,
-                            value: capture,
-                        } => {
+                        ScopedNativeSlot::Retained(authorized) => {
+                            if !Arc::ptr_eq(authorized.target(), &plan.linked) {
+                                return Err(PreparedRuntimeError::certified_target_owners());
+                            }
+                            let requirement = authorized.requirement();
+                            let capture = authorized.value();
                             let entry = bindings
                                 .get(capture.id)
                                 .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
@@ -987,6 +1025,7 @@ impl PreparedEngine {
                                 || capture.identity != *requirement.identity()
                                 || capture.generation != requirement.generation()
                                 || capture.handle.rep() != requirement.rep
+                                || self.machine.prepared_handle_of(capture.handle.raw()) != Some(capture.handle)
                                 || requirement.entry_signature.is_some()
                             {
                                 return Err(PreparedRuntimeError::certified_target_owners());
@@ -1049,8 +1088,8 @@ impl PreparedEngine {
                                 facts.native_sources.merge(&held.native_sources);
                             }
                         }
-                        ScopedNativeSlot::Retained { value, .. } => {
-                            facts.native_sources.merge(&value.provenance().map_err(|_| PreparedRuntimeError::certified_target_owners())?.source_custody());
+                        ScopedNativeSlot::Retained(authorized) => {
+                            facts.native_sources.merge(&authorized.value().provenance().map_err(|_| PreparedRuntimeError::certified_target_owners())?.source_custody());
                         }
                     }
                 }

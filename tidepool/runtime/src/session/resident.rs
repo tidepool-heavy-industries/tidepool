@@ -11582,7 +11582,7 @@ mod authored_publication_tests {
 
     #[test]
     fn native_retained_resolution_visits_distinct_acquisitions_and_anchored_descendants() {
-        use super::super::prepared::{NativeInstantiationPlan, RetainedNativeOrigin};
+        use super::super::prepared::NativeInstantiationPlan;
         use super::super::turn::{consume_cell_program_item, TurnPurpose, TurnResult};
         use tidepool_toolchain::linked_native::{AcquiredNativeImport, NativeOccurrenceId};
 
@@ -11694,11 +11694,11 @@ mod authored_publication_tests {
             let result =
                 resident
                     .state
-                    .instantiate_native_plan_in(scope, &plan, selection, |requirement| {
+                    .instantiate_native_plan_in(scope, &plan, Some((execution.item(), prefix.admission().digest())), selection, |requirement| {
                         let value =
-                            inputs.resolve_native_requirement(execution.item(), requirement)?;
-                        if let RetainedNativeOrigin::Acquired { owner, .. } = requirement.origin() {
-                            let occurrence = owner.occurrence();
+                            inputs.resolve_native_requirement(prefix, execution, linked, requirement)?;
+                        {
+                            let occurrence = requirement.owner().occurrence();
                             assert!(retained_owners.contains(&occurrence));
                             if !resolved.contains(&occurrence) {
                                 resolved.push(occurrence);

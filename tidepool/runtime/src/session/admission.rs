@@ -16,7 +16,7 @@ use tidepool_toolchain::compiler_world::{
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
 
 mod scoped_inputs;
-pub(super) use scoped_inputs::{ScopedResolvedInputs, ScopedResolvedValue};
+pub(super) use scoped_inputs::{AuthorizedRetainedValue, ScopedResolvedInputs};
 
 /// Native execution admission for one originally admitted durable public owner.
 /// The attachment owns its lifetime. A surviving shared run store does not

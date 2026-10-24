@@ -92,7 +92,11 @@ pub(crate) struct ResolvedNativeTurn {
 }
 
 enum ResolvedNativeInputs {
-    Scoped(super::admission::ScopedResolvedInputs),
+    Scoped {
+        inputs: super::admission::ScopedResolvedInputs,
+        item: tidepool_toolchain::checked_cell::ExactCheckedItem,
+        admission_digest: [u8; 32],
+    },
     Closed,
 }
 
@@ -105,7 +109,7 @@ impl ResolvedNativeTurn {
         &self,
     ) -> impl Iterator<Item = &Arc<super::resident::ProgramProvenance>> {
         self.instantiation.retained_values().map(|value| {
-            value
+            value.value()
                 .provenance()
                 .expect("scoped native resolution retained actual provenance")
         })
@@ -894,13 +898,17 @@ impl PersistentSession {
             .scoped_inputs_for(self, execution)
             .map_err(|error| PreparedRuntimeError::CheckedInputs(Box::new(error)))?;
         let instantiation =
-            self.instantiate_native_plan_in(scope, &plan, selection, |requirement| {
-                inputs.resolve_native_requirement(execution.item(), requirement)
+            self.instantiate_native_plan_in(scope, &plan, Some((execution.item(), prefix.admission().digest())), selection, |requirement| {
+                inputs.resolve_native_requirement(prefix, execution, plan.linked(), requirement)
             })?;
         Ok(ResolvedNativeTurn {
             instantiation,
             sources,
-            inputs: ResolvedNativeInputs::Scoped(inputs),
+            inputs: ResolvedNativeInputs::Scoped {
+                inputs,
+                item: execution.item().clone(),
+                admission_digest: prefix.admission().digest(),
+            },
             snapshot,
         })
     }
@@ -909,11 +917,11 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         plan: &Arc<super::prepared::NativeInstantiationPlan>,
+        expected_execution: Option<(&tidepool_toolchain::checked_cell::ExactCheckedItem, [u8; 32])>,
         selection: tidepool_codegen::prepared_program::NativeDomainSelection,
         retained: impl FnMut(
-            &super::prepared::RetainedNativeRequirement,
-        )
-            -> Result<Arc<super::admission::ScopedResolvedValue>, PreparedRuntimeError>,
+            &Arc<super::prepared::RetainedNativeRequirement>,
+        ) -> Result<super::admission::AuthorizedRetainedValue, PreparedRuntimeError>,
     ) -> Result<super::prepared::NativeInstantiation, PreparedRuntimeError> {
         let Self {
             bindings,
@@ -923,6 +931,7 @@ impl PersistentSession {
         } = self;
         Self::settle_native_domain_retirements(bindings, machine.as_mut());
         plan.instantiate(
+            expected_execution,
             selection,
             |request, selected| {
                 let permit = bindings
@@ -966,9 +975,9 @@ impl PersistentSession {
         {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
-        if let ResolvedNativeInputs::Scoped(inputs) = &resolved.inputs {
+        if let ResolvedNativeInputs::Scoped { inputs, item, admission_digest } = &resolved.inputs {
             inputs
-                .validate_native_values(self, resolved.instantiation.retained_values())
+                .validate_native_values(self, item, *admission_digest, resolved.instantiation.plan().linked(), resolved.instantiation.retained_values())
                 .map_err(|error| PreparedRuntimeError::CheckedInputs(Box::new(error)))?;
         }
         let plan = resolved.instantiation.plan();
@@ -1050,7 +1059,7 @@ impl PersistentSession {
             .scope_snapshot(&self.scopes, scope)
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
         let instantiation =
-            self.instantiate_native_plan_in(scope, plan.native(), selection, |_| {
+            self.instantiate_native_plan_in(scope, plan.native(), None, selection, |_| {
                 Err(PreparedRuntimeError::certified_target_owners())
             })?;
         Ok(ResolvedNativeTurn {
