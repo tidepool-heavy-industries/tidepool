@@ -970,7 +970,10 @@ pub(crate) fn link_native_target(
     enum DraftTarget {
         Home(NativeGroupBinding, ValueId),
         Package(u32, ValueId),
-        Retained(NativeRetainedRequirement),
+        Retained {
+            identity: tidepool_repr::execution_schema::SymbolIdentity,
+            generation: u64,
+        },
     }
     let package_product = |occurrence: u32| {
         occurrence_products
@@ -1163,11 +1166,10 @@ pub(crate) fn link_native_target(
                         "target retained capture differs from its issued global",
                     ));
                 }
-                DraftTarget::Retained(NativeRetainedRequirement::new(
-                    identity.clone(),
-                    *generation,
-                    None,
-                ))
+                DraftTarget::Retained {
+                    identity: identity.clone(),
+                    generation: *generation,
+                }
             }
             SelectedNativeTargetImport::Package {
                 identity,
@@ -1356,20 +1358,29 @@ pub(crate) fn link_native_target(
                     value,
                 })
                 .ok_or_else(|| failure("issued target lost its package root")),
-            DraftTarget::Retained(requirement) => {
-                let association = entry_owner
-                    .as_ref()
-                    .map(|owner| {
+            DraftTarget::Retained {
+                identity,
+                generation,
+            } => {
+                let (requirement, association) = match &entry_owner {
+                    Some(owner) => {
+                        // The target authenticates the nominal capture. Its
+                        // actual entry slot supplies the complete immutable
+                        // leaf, including the selected type artifact.
                         let mut matches = owner.imports().enumerate().filter_map(
                             |(index, import)| match import {
                                 crate::linked_native::AcquiredNativeImport::Retained {
-                                    requirement: expected,
+                                    requirement,
                                     binding,
-                                } if expected == requirement => Some((index, binding)),
+                                } if requirement.identity() == &identity
+                                    && requirement.generation() == generation =>
+                                {
+                                    Some((index, binding, requirement))
+                                }
                                 _ => None,
                             },
                         );
-                        let (index, binding) = matches.next().ok_or_else(|| {
+                        let (index, binding, requirement) = matches.next().ok_or_else(|| {
                             failure("typed entry does not own target retained capture")
                         })?;
                         if matches.next().is_some() {
@@ -1379,13 +1390,20 @@ pub(crate) fn link_native_target(
                         }
                         let global_index = u32::try_from(index)
                             .map_err(|_| failure("typed entry retained slot index overflows"))?;
-                        Ok(crate::linked_native::LinkedEntryRetainedOwner {
-                            owner: owner.clone(),
-                            global_index,
-                            binding,
-                        })
-                    })
-                    .transpose()?;
+                        (
+                            requirement,
+                            Some(crate::linked_native::LinkedEntryRetainedOwner {
+                                owner: owner.clone(),
+                                global_index,
+                                binding,
+                            }),
+                        )
+                    }
+                    None => (
+                        NativeRetainedRequirement::new(identity, generation, None),
+                        None,
+                    ),
+                };
                 Ok(LinkedNativeTargetImport::RetainedCapture(
                     crate::linked_native::LinkedEntryRetainedCapture {
                         requirement,

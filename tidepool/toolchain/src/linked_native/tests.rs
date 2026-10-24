@@ -40,6 +40,29 @@ pub(crate) fn assert_actual_target_authentication(
         ),
         "record byte admission preserves a typed operational refusal"
     );
+    for import in target.imports() {
+        let LinkedNativeTargetImport::RetainedCapture(capture) = import else {
+            continue;
+        };
+        let Some(entry) = capture.entry_owner() else {
+            assert!(target.entry_occurrence().is_none());
+            continue;
+        };
+        assert_eq!(Some(entry.owner().occurrence()), target.entry_occurrence());
+        assert_eq!(
+            capture.requirement().type_artifact(),
+            Some(&entry.binding().artifact.0),
+            "direct target captures retain the complete leaf issued by their actual entry slot"
+        );
+        target
+            .verify_retained_slot(
+                entry.owner(),
+                entry.global_index(),
+                entry.binding(),
+                capture.requirement(),
+            )
+            .expect("direct target capture carries the exact full entry-owned retained slot");
+    }
     let nodes = actual
         .occurrences
         .values()
