@@ -2272,12 +2272,19 @@ diagnosticCounterCapture = do
       Left (DiagnosticCounterOccurrenceOverflow name observed bound) -> name == wanted && observed == 2 && bound == 1
       _ -> False)
     (fail "counter occurrence overflow returned partial evidence")
-  forM_ ["", " count=broken", " count=1 count=2", " count=" ++ replicate 4096 '1'] $ \fields -> do
+  forM_ ["", " count=broken", " count=1 count=2"] $ \fields -> do
     malformed <- try (captureDiagnosticsWithCounters [(wanted,1)]
       (hPutStrLn stderr ("tidepool-count name=" ++ wanted ++ fields)))
       :: IO (Either DiagnosticCounterCaptureFailure ((),CapturedDiagnosticCounters,String))
     unless (case malformed of Left (DiagnosticCounterMalformed name) -> name == wanted; _ -> False)
       (fail "malformed selected counter returned partial evidence")
+  oversized <- try (captureDiagnosticsWithCounters [(wanted,1)]
+    (hPutStrLn stderr ("tidepool-count name=" ++ wanted ++ " count=" ++ replicate 4096 '1')))
+    :: IO (Either DiagnosticCounterCaptureFailure ((),CapturedDiagnosticCounters,String))
+  unless (case oversized of
+      Left (DiagnosticCounterRecordTooLong name observed bound) -> name == wanted && observed > bound && bound == 4096
+      _ -> False)
+    (fail "oversized selected counter omitted its observed usage or returned partial evidence")
   attempted <- newIORef False
   invalid <- try (captureDiagnosticsWithCounters [(wanted,1),(wanted,1)] (writeIORef attempted True))
     :: IO (Either DiagnosticCounterCaptureFailure ((),CapturedDiagnosticCounters,String))

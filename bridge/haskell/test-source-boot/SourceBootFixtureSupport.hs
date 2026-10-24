@@ -268,6 +268,7 @@ capturedDiagnosticCounterValues (CapturedDiagnosticCounters counters) name = Map
 data DiagnosticCounterCaptureFailure
   = DiagnosticCounterSelectionInvalid String
   | DiagnosticCounterMalformed String
+  | DiagnosticCounterRecordTooLong String Int Int
   | DiagnosticCounterOccurrenceOverflow String Int Int
   deriving (Eq, Show)
 instance Exception DiagnosticCounterCaptureFailure
@@ -327,7 +328,8 @@ readDiagnosticCounters selected output
         let line = previous <> piece
         if BS.length line > diagnosticCounterLineBudget then do
           case requested line of
-            Just (DiagnosticCounterSlot name _ _ _) -> throwIO (DiagnosticCounterMalformed name)
+            Just (DiagnosticCounterSlot name _ _ _) ->
+              throwIO (DiagnosticCounterRecordTooLong name (BS.length line) diagnosticCounterLineBudget)
             Nothing -> pure ()
           pure (known,if complete then Just BS.empty else Nothing)
         else if complete then do
