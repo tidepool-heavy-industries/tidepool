@@ -55,7 +55,11 @@ else:
     receipt = {"schema": 2, "kind": "compiler-service-package-acquisition",
                "status": "acquired", "service_epoch": attempt["service_epoch"],
                "source_id": attempt["source_id"], "profile_id": attempt["profile_id"],
-               "attempt_sha256": sha(attempt_bytes).hex(), "roots": attempt["roots"],
+               "attempt_sha256": sha(attempt_bytes).hex(),
+               "source_record_sha256": attempt["source_record_sha256"],
+               "provider_guard_store_path": record["provider_guard_store_path"],
+               "acquire_count": 1, "release_count": 0,
+               "roots": [{**root, "state": "registered"} for root in attempt["roots"]],
                "fixture_mode": mode}
     receipt_path = owner / "package-source" / "receipt.json"
     receipt_bytes = json.dumps(receipt).encode()
