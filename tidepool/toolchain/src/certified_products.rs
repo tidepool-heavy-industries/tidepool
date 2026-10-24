@@ -37067,7 +37067,15 @@ None,
             .find(|binding| binding.artifact != child.descriptor.id)
             .copied()
             .unwrap();
-        let binder = testing::identity("NominalChild", "entry");
+        let binder = child_product
+            .original_native()
+            .group(7)
+            .expect("the fixture declares child group 7")
+            .group()
+            .binders()
+            .first()
+            .expect("the child group exports its actual binder")
+            .clone();
         let reference = ReceiptImportOwner::OriginalBinding {
             unit: child_product.owner().unit.clone(),
             module: child_product.owner().module.clone(),
