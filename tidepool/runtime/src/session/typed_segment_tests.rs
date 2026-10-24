@@ -1728,7 +1728,7 @@ fn historical_source_captures_bind_the_original_value_after_shadowing() {
         (
             "inline_historical_capture",
             include_str!("fixtures/typed-segment-inline-historical-capture.hs"),
-            DependencyTerminalOrigin::SourceDefinition,
+            DependencyTerminalOrigin::NativeOriginal,
         ),
         (
             "noinline_historical_capture",
@@ -1807,6 +1807,231 @@ fn historical_source_captures_bind_the_original_value_after_shadowing() {
             "retiring the runtime owner releases its actual prepared binding roots"
         );
     }
+}
+
+struct NativeOpacityCase {
+    label: &'static str,
+    declaration: &'static str,
+    instance: Option<&'static str>,
+    observation: &'static str,
+    strict_argument: Option<&'static str>,
+    expected: &'static [i64],
+}
+
+fn assert_native_declaration_keeps_its_historical_capture(case: NativeOpacityCase) {
+    use std::collections::BTreeSet;
+    use tidepool_toolchain::artifact_inventory::{ArtifactKind, NativeGroupKey};
+    use tidepool_toolchain::compiler_world::DependencyTerminalOrigin;
+
+    let declarations = [
+        include_str!("fixtures/typed-segment-opacity-oracle-seed.hs"),
+        case.declaration,
+        case.instance.unwrap_or(""),
+    ]
+    .join("\n");
+    let oracle = [
+        include_str!("fixtures/typed-segment-opacity-oracle-actions.hs"),
+        case.observation,
+        include_str!("fixtures/typed-segment-opacity-visible-seed.hs"),
+    ]
+    .join("\n");
+    assert_eq!(
+        ghc_trace_with_declarations(&declarations, &oracle),
+        case.expected
+    );
+
+    let mut session = SemanticSession::new();
+    session
+        .execute(
+            case.label,
+            include_str!("fixtures/typed-segment-opacity-seed.hs"),
+            0,
+        )
+        .unwrap();
+    let original = session
+        .resident
+        .current_binding_in(session.public, "opacitySeed")
+        .unwrap();
+    let original_interface = session
+        .resident
+        .retained_checked_value_artifact(original.1)
+        .unwrap()
+        .certified_interface()
+        .artifact_id();
+    let mut declared = None;
+    session
+        .execute_observed(
+            case.label,
+            case.declaration,
+            CellDeclarationExpectation::Total(1),
+            SemanticChecks::None,
+            &SourceImports::new(),
+            None,
+            |program| {
+                let certificates = program
+                    .items()
+                    .iter()
+                    .filter_map(|item| item.checked_item().planned_declaration())
+                    .collect::<Vec<_>>();
+                let [certificate] = certificates.as_slice() else {
+                    panic!("one actual native-authored declaration");
+                };
+                let owner = certificate.product().owner();
+                let descriptor = certificate
+                    .artifact_view()
+                    .descriptors()
+                    .into_iter()
+                    .find(|descriptor| {
+                        descriptor.kind == ArtifactKind::OriginalModule
+                            && descriptor.owner.unit == owner.unit
+                            && descriptor.owner.module == owner.module
+                    })
+                    .expect("authored certificate retains its own Original carrier");
+                let issuers = certificate
+                    .artifact_view()
+                    .capture_graph_selection()
+                    .native_groups
+                    .into_iter()
+                    .filter(|group| group.binding.artifact() == descriptor.id)
+                    .collect::<BTreeSet<_>>();
+                assert!(
+                    !issuers.is_empty(),
+                    "the declaration owns actual native groups"
+                );
+                declared = Some((descriptor.id, issuers));
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        session.observed(),
+        [23],
+        "declaration preparation cannot replay the seed effect"
+    );
+    session
+        .execute(
+            case.label,
+            include_str!("fixtures/typed-segment-opacity-shadow.hs"),
+            0,
+        )
+        .unwrap();
+    let replacement = session
+        .resident
+        .current_binding_in(session.public, "opacitySeed")
+        .unwrap();
+    assert_ne!(original.0, replacement.0);
+    assert_ne!(original.1, replacement.1);
+    if let Some(instance) = case.instance {
+        session.execute(case.label, instance, 1).unwrap();
+    }
+    assert_eq!(
+        session.observed(),
+        [23],
+        "later instance preparation cannot replay the seed effect"
+    );
+    if let Some(strict_argument) = case.strict_argument {
+        let oracle = [
+            include_str!("fixtures/typed-segment-opacity-oracle-actions.hs"),
+            strict_argument,
+        ]
+        .join("\n");
+        let oracle = ghc_oracle_with_language("", &declarations, &oracle);
+        assert!(!oracle.status.success());
+        assert!(String::from_utf8_lossy(&oracle.stderr).contains("strict historical argument"));
+        let error = session.execute(case.label, strict_argument, 0).unwrap_err();
+        assert!(
+            is_raised_exception(&error),
+            "strict native argument must fail before observation: {error:?}"
+        );
+        assert_eq!(session.observed(), [23]);
+    }
+    let (artifact, issued_groups) = declared.unwrap();
+    let before_effects = Arc::clone(&session.trace);
+    session.execute_observed(
+        case.label, case.observation, CellDeclarationExpectation::Total(0),
+        SemanticChecks::None, &SourceImports::new(), None,
+        |program| {
+            assert_eq!(before_effects.lock().as_slice(), &[23], "compilation cannot execute the consumer");
+            let terminals = program.items().iter().flat_map(|item| {
+                item.checked_item().world_stage_dependencies().terminals()
+            }).collect::<Vec<_>>();
+            assert!(terminals.iter().any(|terminal| {
+                terminal.origin() == DependencyTerminalOrigin::NativeOriginal
+                    && terminal.identity().module == original.1.module_name()
+                    && terminal.generation() == original.1.gen.0
+                    && terminal.binding().artifact == original_interface
+            }), "native code must retain the original seed's exact interface and generation");
+            assert!(terminals.iter().all(|terminal| terminal.identity().module != replacement.1.module_name()),
+                "the visible replacement cannot rebind the captured native dependency");
+            let mut demanded_original = false;
+            for products in program.items().iter().filter_map(|item| item.native_products()) {
+                let selected = products.artifact_view().selected_native_groups();
+                let selected_original = selected.iter().any(|group| group.artifact == artifact);
+                demanded_original |= selected_original;
+                if selected_original {
+                    let groups = products.artifact_view().capture_graph_selection().native_groups.into_iter()
+                        .filter(|group| group.binding.artifact() == artifact && selected.contains(&NativeGroupKey {
+                            artifact, original_ordinal: group.original_ordinal,
+                        })).collect::<BTreeSet<_>>();
+                    assert!(!groups.is_empty());
+                    assert!(groups.is_subset(&issued_groups), "later executable demand must keep the declaration's exact native issuers");
+                }
+            }
+            assert!(demanded_original, "the later consumer must select that actual Original, including authored INLINE code");
+        },
+    ).unwrap();
+    assert_eq!(session.observed(), case.expected[..case.expected.len() - 1]);
+    session.assert_no_compiler_since_last_effect();
+    session
+        .execute(
+            case.label,
+            include_str!("fixtures/typed-segment-opacity-visible-seed.hs"),
+            0,
+        )
+        .unwrap();
+    assert_eq!(session.observed(), case.expected);
+    session.assert_no_compiler_since_last_effect();
+}
+
+#[test]
+fn native_class_default_keeps_its_captured_seed_after_shadowing() {
+    assert_native_declaration_keeps_its_historical_capture(NativeOpacityCase {
+        label: "native_single_default_capture",
+        declaration: include_str!("fixtures/typed-segment-opacity-default-class.hs"),
+        instance: Some(include_str!(
+            "fixtures/typed-segment-opacity-default-instance.hs"
+        )),
+        observation: include_str!("fixtures/typed-segment-opacity-default-observe.hs"),
+        strict_argument: None,
+        expected: &[23, 23, 91],
+    });
+}
+
+#[test]
+fn native_class_default_calls_its_explicit_sibling_after_shadowing() {
+    assert_native_declaration_keeps_its_historical_capture(NativeOpacityCase {
+        label: "native_sibling_default_capture",
+        declaration: include_str!("fixtures/typed-segment-opacity-sibling-class.hs"),
+        instance: Some(include_str!(
+            "fixtures/typed-segment-opacity-sibling-instance.hs"
+        )),
+        observation: include_str!("fixtures/typed-segment-opacity-sibling-observe.hs"),
+        strict_argument: None,
+        expected: &[23, 28, 5, 91],
+    });
+}
+
+#[test]
+fn native_inline_specialized_function_keeps_its_strict_historical_capture() {
+    assert_native_declaration_keeps_its_historical_capture(NativeOpacityCase {
+        label: "native_inline_specialized_capture",
+        declaration: include_str!("fixtures/typed-segment-opacity-specialized-function.hs"),
+        instance: None,
+        observation: include_str!("fixtures/typed-segment-opacity-specialized-observe.hs"),
+        strict_argument: Some(include_str!(
+            "fixtures/typed-segment-opacity-specialized-bottom.hs"
+        )),
+        expected: &[23, 23, 91],
+    });
 }
 
 #[derive(Clone, Default)]
