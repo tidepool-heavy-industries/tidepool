@@ -617,7 +617,7 @@ impl NativeInstantiationPlan {
         if definitions.globals().len() != self.linked.imports().len() {
             return Err(PreparedRuntimeError::certified_target_owners());
         }
-        let mut covered_entry_slots = BTreeSet::new();
+        let mut covered_entry_slots = BTreeMap::new();
         let target_imports = definitions
             .globals()
             .iter()
@@ -638,7 +638,7 @@ impl NativeInstantiationPlan {
                     )?);
                     let authorized = Self::resolve_retained(expected_execution, &self.linked, &requirement, &mut retained)?;
                     if Some(entry_owner.owner().occurrence()) == self.linked.entry_occurrence() {
-                        covered_entry_slots.insert((entry_owner.global_index(), entry_owner.binding(), capture.requirement().clone()));
+                        covered_entry_slots.insert(entry_owner.global_index(), (entry_owner.binding(), capture.requirement().clone()));
                     }
                     Ok(ScopedNativeSlot::Retained(authorized))
                 }
@@ -748,9 +748,9 @@ impl NativeInstantiationPlan {
         {
             let expected_entry_slots = entry_owner.imports().enumerate().filter_map(|(index, import)| match import {
                 AcquiredNativeImport::Retained { requirement, binding } =>
-                    u32::try_from(index).ok().map(|slot| (slot, binding, requirement)),
+                    u32::try_from(index).ok().map(|slot| (slot, (binding, requirement))),
                 AcquiredNativeImport::Code { .. } => None,
-            }).collect::<BTreeSet<_>>();
+            }).collect::<BTreeMap<_, _>>();
             if covered_entry_slots == expected_entry_slots { bound.insert(entry_occurrence); }
         }
         let mut retained_obligations = Vec::new();

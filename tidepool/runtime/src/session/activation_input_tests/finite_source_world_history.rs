@@ -468,7 +468,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
             .iter()
             .any(|import| matches!(import,
         LinkedNativeTargetImport::RetainedCapture(requirement)
-            if requirement.identity() == &callable)),
+            if requirement.requirement().identity() == &callable)),
         "the common installer must consume an actual retained callable, not recompile its body"
     );
     let public_second = observed_package_cafs(&mut resident, public_b, "public_second");
@@ -631,7 +631,7 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
             .iter()
             .any(|import| matches!(import,
         LinkedNativeTargetImport::RetainedCapture(requirement)
-            if requirement.identity() == &callable)),
+            if requirement.requirement().identity() == &callable)),
         "a package callback keeps the SAME actual retained callable after independent A retires"
     );
     let (restored_domain, restored_roots) = selected_package_roots(&resident, public_b);
@@ -827,7 +827,7 @@ fn public_package_expression_pair(resident: &mut TestSession, recipe: &InputReci
         assert!(
             selection.imports().iter().any(|import| matches!(import,
             LinkedNativeTargetImport::RetainedCapture(requirement)
-                if requirement.identity() == &identity)),
+                if requirement.requirement().identity() == &identity)),
             "each result must apply its actual retained expression capture"
         );
         let after = resident.public_visibility_snapshot_in(public).unwrap();

@@ -6823,7 +6823,7 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
             body.owner().module == f_owner
                 && code.imports().any(|import| matches!(import,
                     tidepool_toolchain::linked_native::AcquiredNativeImport::Retained { requirement, .. }
-                    if requirement.identity() == &held_identity
+                    if requirement.requirement().identity() == &held_identity
                         && requirement.generation() == held_generation))
         }),
         "the original HOME body really captures the old exact value generation"
@@ -6929,7 +6929,7 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
     assert!(
         later_target.imports().iter().any(|import| matches!(import,
         tidepool_toolchain::linked_native::LinkedNativeTargetImport::RetainedCapture(requirement)
-            if requirement.identity() == &fb_identity)),
+            if requirement.requirement().identity() == &fb_identity)),
         "later Val use crosses the exact retained callable boundary"
     );
     assert!(
