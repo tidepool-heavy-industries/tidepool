@@ -2659,14 +2659,19 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                         when (label == "declaration") $ do
                           grant <- either fail pure (compilerExecutionGrant 2)
                           (withCompilerExecutor (const (pure ())) grant >=> finishCompletion) $ \executor -> do
-                            let metadataRecipe = ownRecipe {worldCellSource=source ++ "\nlet metadataSuccessor = OwnedStage 7\n"}
-                                metadataPlan = ownPlan {worldCellPlanRecipe=metadataRecipe}
+                            let metadataDirectory = ownDirectory </> "metadata-history-control"
+                                metadataRecipe = ownRecipe {worldCellSource=source ++ "\nlet metadataSuccessor = (7 :: Int)\n"}
+                                metadataPlan = ownPlan {worldCellPlanRecipe=metadataRecipe
+                                  ,worldCellPlanOutput=metadataDirectory </> "plan.cbor"}
+                            createDirectory metadataDirectory
                             metadataPlanArgs <- decodeWorldArgs [WorldCellPlan metadataPlan]
                             metadataPlanBytes <- (withBoundCompilerRequest (const (pure ())) compiler
                               (admitFixtureRequest metadataPlanArgs) >=> finishCompletion) runBoundWorldCellPlan
                             let metadataPrepare = ownPrepare {worldCellPrepareRecipe=metadataRecipe
                                   ,worldCellPreparePlan=metadataPlanBytes
-                                  ,worldCellPrepareSlots=caseSlots ++ [(1,PlannedBind 22)]}
+                                  ,worldCellPrepareSlots=caseSlots ++ [(1,PlannedBind 22)]
+                                  ,worldCellPrepareDirectory=metadataDirectory
+                                  ,worldCellPrepareOutput=metadataDirectory </> "prepared.cbor"}
                             firstAdmission <- scopedValidateWorldCell compiler grant executor metadataPrepare >>= either (fail . show) pure
                             _ <- scopedPrepareWorldCellStage compiler firstAdmission >>= maybe
                               (fail "Name control lost its real declaration stage") pure
@@ -2677,7 +2682,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                             withWorldStageCompilation inputs $ \prepared recovery actualExecutor -> do
                               let environment = prHscEnv (pprPipelineResult prepared)
                                   owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
-                                  captureDirectory = ownDirectory </> "name-projection-control"
+                                  captureDirectory = metadataDirectory </> "name-projection-control"
                               createDirectory captureDirectory
                               projection <- prepareCompilerProjectionContext prepared Map.empty owner scaffoldTargetName [] Nothing
                               (_,rawProducts) <- prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
