@@ -772,6 +772,9 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-extract-cmd" and (unit or target_name == "build_products_frontend"):
         env["TIDEPOOL_TEST_BASH"] = "$(exe toolchains//:bash)"
         resources.append("toolchains//:bash")
+    if package_name == "tidepool-extract-cmd" and target_name == "build_products_frontend":
+        env["TIDEPOOL_TEST_PYTHON"] = "$(exe toolchains//:python)"
+        resources.append("toolchains//:python")
     if package_name == "tidepool-extract-cmd" and target_name == "no_open_coded_extract_spawns":
         env["TIDEPOOL_WORKSPACE_SOURCE_ROOT"] = "$(location //build/rust:native_qualification_sources)"
         resources.append("//build/rust:native_qualification_sources")
@@ -963,6 +966,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR",
     "TIDEPOOL_TEST_FIXTURE_ROOT",
     "TIDEPOOL_TEST_BASH",
+    "TIDEPOOL_TEST_PYTHON",
 )
 
 

@@ -379,10 +379,13 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         for name in ("build_products_frontend", "build_products_ownership", "response_cleanup"):
             source = f"tests/{name}.rs"
             self.write("tidepool/extract-cmd/" + source,
-                       'const FRONTEND: &str = env!("CARGO_BIN_EXE_tidepool-extract");')
+                       'const FRONTEND: &str = env!("CARGO_BIN_EXE_tidepool-extract");'
+                       + ('const PROVIDER: &[u8] = include_bytes!("fixtures/service_provider.py");'
+                          if name == "build_products_frontend" else ''))
             package["targets"].extend(self.package("unused", "tidepool/extract-cmd", [
                 (name, "test", source),
             ])["targets"])
+        self.write("tidepool/extract-cmd/tests/fixtures/service_provider.py", "raise SystemExit(0)\n")
         self.metadata.write_text(json.dumps(metadata))
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -395,6 +398,12 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn("//build/package:compiler_deployment", owner["resources"])
         for name in ("build_products_frontend", "response_cleanup"):
             self.assertNotIn("TIDEPOOL_EXTRACT_WORKER", self.rule("tidepool/extract-cmd", name).get("resource_env", {}))
+        frontend = self.rule("tidepool/extract-cmd", "build_products_frontend")
+        self.assertEqual(frontend["resource_env"]["TIDEPOOL_TEST_PYTHON"], "$(exe toolchains//:python)")
+        self.assertIn("toolchains//:python", frontend["resources"])
+        _, sources = self.groups("tidepool/extract-cmd")
+        self.assertEqual(sources["build_products_frontend_sources"]["tests/fixtures/service_provider.py"],
+                         "tidepool/extract-cmd/tests/fixtures/service_provider.py")
         self.assertNotIn("compile_env", self.rule("tidepool/extract-cmd", "tidepool_extract_cmd", "tidepool_rust_library"))
 
     def test_integration_executable_input_without_a_binary_owner_refuses_publication(self):

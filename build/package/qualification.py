@@ -2769,6 +2769,7 @@ def freeze(args) -> Path:
     (root / "share/exomonad/runtime-tools").symlink_to((args.bundle / "share/exomonad/runtime-tools").resolve(strict=True))
     shutil.copy2(source / "build/rust/isolated-libtest.py", root / "share/exomonad/isolated-libtest.py")
     shutil.copy2(source / "build/package/qualification.py", root / "share/exomonad/qualification.py")
+    shutil.copy2(source / "build/package/owned_service_report.py", root / "share/exomonad/owned_service_report.py")
     shutil.copy2(source / "scripts/harness-usecase-perf-report.py",
                  root / "share/exomonad/harness-usecase-perf-report.py")
     shutil.copy2(source / "build/package/packaged-catalog-consumer.sh", root / "share/exomonad/packaged-catalog-consumer.sh")

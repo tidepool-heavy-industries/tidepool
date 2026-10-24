@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -809,6 +810,28 @@ class IsolatedLibtestTests(unittest.TestCase):
                 if not passed:
                     self.assertFalse(record['acceptance_before_disposal'])
                     self.assertEqual(record['disposal']['status'], 'not_requested')
+
+    def test_exported_report_consumers_require_their_declared_sibling_codec(self):
+        owner = Path(self.tmp.name) / 'service-owner'
+        owner.mkdir(mode=0o700)
+        write_owned_service_report(owner)
+        for source in (SCRIPT, SCRIPT.parent.parent / 'package/qualification.py'):
+            with self.subTest(entrypoint=source.name):
+                exported = Path(self.tmp.name) / source.stem
+                exported.mkdir()
+                entrypoint = exported / source.name
+                shutil.copy2(source, entrypoint)
+                codec = exported / 'owned_service_report.py'
+                shutil.copy2(SCRIPT.parent.parent / 'package/owned_service_report.py', codec)
+                spec = importlib.util.spec_from_file_location('exported_report_consumer', entrypoint)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                self.assertTrue(module.read_owned_service_report(owner)['complete'])
+                codec.unlink()
+                if source == SCRIPT:
+                    module._OWNED_SERVICE_READER = None
+                with self.assertRaises(FileNotFoundError):
+                    module.read_owned_service_report(owner)
 
     def test_mixed_harness_selects_only_its_declared_mode_manifest(self):
         resources = self.owned_service_resources()

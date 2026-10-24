@@ -1257,9 +1257,9 @@ def read_owned_service_report(owner):
     global _OWNED_SERVICE_READER
     if _OWNED_SERVICE_READER is None:
         directory = Path(__file__).resolve().parent
-        codec = directory / 'owned_service_report.py'
-        if not codec.is_file():
-            codec = directory.parent / 'package/owned_service_report.py'
+        codec = (directory.parent / 'package/owned_service_report.py'
+                 if directory.name == 'rust' and directory.parent.name == 'build'
+                 else directory / 'owned_service_report.py')
         spec = importlib.util.spec_from_file_location('isolated_libtest_owned_service_report', codec)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
