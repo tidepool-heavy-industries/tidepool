@@ -1,10 +1,11 @@
 # Current implementation and qualification
 
-Updated 2026-10-23. **Option C source is consolidated. Regional closeout, G2
-and G3 remain unqualified.**
+Updated 2026-10-23. **Option C source is consolidated and the seven repaired
+regional checks pass. One runner-refusal control remains pending; G2 and G3
+remain unqualified.**
 
 Integration checkout: /srv/swarm/checkouts/tidepool-domain-runtime-join-20261023.
-Branch: integration/g2-domain-runtime-20261023; code candidate: 3a07b35041.
+Branch: integration/g2-domain-runtime-20261023; tested code candidate: 3e6ca9b3ef.
 Baseline: 9cbdbf44d8.
 [REQUEST-SERVICE-LIFECYCLE.md](REQUEST-SERVICE-LIFECYCLE.md) owns the contract.
 
@@ -37,6 +38,7 @@ Results are revision-specific, not a passing release aggregate.
 | 20f61b99db | 20 owner/cfg/worker/Haskell targets compiled. Three paired contracts each compiled one positive and refused one negative. 22 unique native/libtest leaves: 18 native passes, 4 native failures; 17 runner-accepted and 5 refused because one passing native assertion deliberately retained cleanup. |
 | 923cf48862 | Instrumented Haskell compilation passed. G2 reproduced the retained-dependency failure. The strengthened parser positive failed on invalid layout. |
 | 4755a9da61 | Buck analysis refused an omitted generated rule load before compilation/execution; repaired in d18eac6150. Joined Python provider-lifetime/argv checks passed 37 cases. |
+| 3e6ca9b3ef | Five affected targets compiled. SourceBoot 4/4, parser 1/1, rooted GHC lifecycle 1/1, and mixed-stage history 1/1 passed, including outer runner acceptance. Both Rust cases confirm process and compiler cleanup; diagnostic evidence completeness remains false and is not inferred from cleanup. |
 
 Passing 20f6 controls include repaired transport 2/2, WorkerResponse 11/11,
 actual report interoperability, catalog/source-admission controls and runtime END
@@ -52,26 +54,32 @@ native declarations. See [NATIVE-REUSE-FRONTIER.md](NATIVE-REUSE-FRONTIER.md).
 
 ## Remaining work and owners
 
-1. validation_resume: on the next clean joined pin, execute demandScopeChecks,
-   four SourceBoot controls, //tidepool/extract-cmd:owned_compiler_lifecycle_test,
-   and the actual mixed-stage test. The lifecycle case owns its rooted services;
-   do not wrap it in another owned service.
-2. w3_service_owner: finish review/integration of 92fdd75c61, the maintained
+1. w3_service_owner: finish review/integration of 92fdd75c61, the maintained
    expected-runner-refusal control. Its deliberately retained child stays
    unqualified; parent success proves the normal runner rejects that state.
+   Replace runtime compilation of its fixed worker fixture with a declared test
+   executable, including the existing daemon/unit consumer. Then execute the
+   ordinary configured-source case and the separate outer-refusal controller.
    Do not weaken cleanup checks or broaden native finalization.
-3. Root: finish the producer-opacity design before implementing the G2 repair.
+2. Root: finish the producer-opacity design before implementing the G2 repair.
    The typed stage owner, plugin and memo must share one policy. Constructors,
-   dictionary methods and pinned GHC OPAQUE semantics require explicit controls.
-4. Independently audit the final joined repairs and purge obligations, then run
+   dictionary/default methods, explicit rewrite rules and pinned GHC OPAQUE
+   semantics require explicit controls. A blanket ordinary-Id rewrite is not
+   yet justified: compulsory default-method unfoldings need separate treatment.
+3. Independently audit the final joined repairs and purge obligations, then run
    the regional gate. G3/frozen-bundle/Persona acceptance follows later.
+
+The independent 3e6 consumer audit found no unchecked alternate ownership route
+in its inspected request/worker/service/settlement scope. This is bounded source
+evidence, not a release claim. Its report is
+ /srv/swarm/evidence/inanna/domain-astra-tests-20261023/option-c-3e6-opacity-review.md.
 
 The mixed fixture now performs destructive retirement after comparisons requiring
 the same compiler realization; all equality and wrong-issuer assertions remain.
 The real GHC lifecycle case declares rooted package resources and compares two
 independent rooted services instead of the unsupported direct-product path.
 The generated-rule regression now rejects omitted loads. The parser positive
-uses a complete layout-valid module; actual rerun remains required.
+uses a complete layout-valid module and passed its actual rerun.
 
 Argon's further dead-code/equality proposals remain recorded investigations,
 not implemented changes or prerequisites for this service gate. Dispositions:
@@ -80,12 +88,12 @@ not implemented changes or prerequisites for this service gate. Dispositions:
 ## Evidence and build ownership
 
 Exact commands, revisions and counts:
- /srv/swarm/evidence/inanna/c-ownership-20261022/validation/{20f6,923c,4755}-checkpoint.json.
+ /srv/swarm/evidence/inanna/c-ownership-20261022/validation/{20f6,923c,4755,3e6c}-checkpoint.json.
 Review, lifetime and trace evidence:
  /srv/swarm/evidence/inanna/c-ownership-20261023/.
 
 Warm checkout tidepool-latent-original-stage-join-20261020 belongs to
-validation_resume; advance only after its recorded pin is released.
+validation_resume; the 3e6 pin is released with no active test clients.
 Scratch cleanup reclaimed 110.33 GiB; latest free space is about 228.65 GB.
 Preserve 100 GiB plus expected growth. Sources, WIP and evidence remain retained.
 Integration checkpoints are pushed; main, bundle and Persona are not qualified.
