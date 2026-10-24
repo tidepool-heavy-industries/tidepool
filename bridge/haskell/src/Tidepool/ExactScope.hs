@@ -91,7 +91,7 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, CapturedInterfaceInputs, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, verifiedExactInterfaceBody, capturedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, CapturedInterfaceInputs, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, verifiedExactInterfaceBody, capturedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, admitCheckedValueInterface, HydratedInterfaceClosure, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
 import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, withCapturedRequestInputTokens, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies, editDirectRequestInputBodies)
@@ -2257,10 +2257,10 @@ worldBindingInterfaceArtifact binding =
   in artifact
 
 -- Select by submitted occurrences in the already admitted namespace. Value
--- bodies remain undecoded for the checked-value injection owner; only their
--- demanded primary type closure enters the shared interface decoder here.
+-- bodies and their authenticated checked-value role enter the shared decoder
+-- together with the demanded primary TYPE closure.
 readWorldBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> [String]
-  -> IO (Either String ([(String,WorldBinding)],[(ExactIfaceArtifact,ArtifactBytes,ArtifactBytes)],
+  -> IO (Either String ([(String,WorldBinding)],[(VerifiedExactInterface,ArtifactBytes)],
       Map.Map InterfaceOwner WorldTypeClosureEntry))
 readWorldBindingInputs owner env facts occurrences = do
   let selected = [(name,value) | name <- occurrences,Just value <- [Map.lookup name (worldInputsBindings facts)]]
@@ -2272,7 +2272,7 @@ readWorldBindingInputs owner env facts occurrences = do
 -- Selected operands and namespace demands use the same checked-row reader. The
 -- held primary facts alone supply TYPE closure; incoming custody cannot add it.
 readWorldSelectedBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> RequestOriginalInputs -> [WorldBinding]
-  -> IO (Either String ([(ExactIfaceArtifact,ArtifactBytes,ArtifactBytes)],Map.Map InterfaceOwner WorldTypeClosureEntry))
+  -> IO (Either String ([(VerifiedExactInterface,ArtifactBytes)],Map.Map InterfaceOwner WorldTypeClosureEntry))
 readWorldSelectedBindingInputs owner env facts tokens selected = do
   let rows = [worldBindingRowInterface (worldBindingRow value) | value <- selected]
       key (artifact,_,_) = (exactUnit artifact,exactModule artifact)
@@ -2289,10 +2289,25 @@ readWorldSelectedBindingInputs owner env facts tokens selected = do
           case packages of
             Left reason -> pure (Left reason)
             Right _ -> do
+              let ExactInputOwner _ retained = owner
+              RetainedOriginalInputs _ decoder _ _ <- readMVar retained
               captured <- forM (Map.elems distinct) $ \(artifact,path,sha) -> do
                 body <- capturedRequestInputToken tokens (exactPath artifact) (exactSha256 artifact)
                 packageBody <- capturedRequestInputToken tokens path sha
-                pure (artifact,body,packageBody)
+                let dependencies = map worldTypeEntryArtifact (Map.elems types)
+                    readBody requested
+                      | requested == artifact = pure body
+                      | otherwise = case Map.lookup (exactUnit requested,exactModule requested) types of
+                          Just entry | worldTypeEntryArtifact entry == requested -> pure (worldTypeEntryInterfaceBody entry)
+                          _ -> worldCorrupt "checked value TYPE input lacks its captured owner"
+                closure <- readCapturedExactIfaceClosureWithCheckedValues decoder readBody env dependencies [artifact]
+                  >>= either worldCorrupt pure
+                verified <- either worldCorrupt pure (selectVerifiedExactInterfaceProducts closure [artifact])
+                case verified of
+                  [value] -> do
+                    admitted <- either worldCorrupt pure (admitCheckedValueInterface packageBody value)
+                    pure (admitted,packageBody)
+                  _ -> worldCorrupt "checked value lost its selected decoded interface"
               pure (Right (captured,types))
 
 -- A sealed operand is one selected checked row, not an additional World or an
@@ -2352,22 +2367,11 @@ readWorldCellOperandWithOwner owner@(ExactInputOwner _ state) env facts path exp
       inputs <- readWorldSelectedBindingInputs owner env facts custody [binding]
       case inputs of
         Left reason -> worldCorrupt reason
-        Right ([(artifact,body,packages)],types)
-          | artifact == worldBindingInterfaceArtifact binding -> do
-              let ExactInputOwner _ retained = owner
-              RetainedOriginalInputs _ decoder _ _ <- readMVar retained
-              let dependencies = map worldTypeEntryArtifact (Map.elems types)
-                  readBody requested
-                    | requested == artifact = pure body
-                    | otherwise = case Map.lookup (exactUnit requested,exactModule requested) types of
-                        Just entry | worldTypeEntryArtifact entry == requested -> pure (worldTypeEntryInterfaceBody entry)
-                        _ -> worldCorrupt "operand TYPE input lacks its captured owner"
-              capturedInputs <- readCapturedExactIfaceClosureWithCheckedValues decoder readBody env dependencies [artifact]
-                >>= either worldCorrupt pure
-              selected <- either worldCorrupt pure (selectVerifiedExactInterfaceProducts capturedInputs [artifact])
-              case selected of
-                [verified] -> pure (WorldCellOperandInputs exposure binding verified packages types capturedInputs)
-                _ -> worldCorrupt "operand lost its one decoded checked interface"
+        Right ([(verified,packages)],types)
+          | fst (verifiedExactInterface verified) == worldBindingInterfaceArtifact binding -> do
+              capturedInputs <- either throwIO pure (capturedInterfaceInputs
+                (verified:map worldTypeEntryVerifiedInterface (Map.elems types)))
+              pure (WorldCellOperandInputs exposure binding verified packages types capturedInputs)
         Right _ -> worldCorrupt "world operand lost its one selected checked interface"
 
 decodeWorldCellOperand :: Int -> Decoder s (WorldCellOperandExposure,
@@ -2458,6 +2462,9 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
           pure (exactPath artifact,body)) artifacts
         let selectedBody artifact = maybe (fail "world type closure lost its captured interface token") pure
               (Map.lookup (exactPath artifact) bodies)
+        packageBodies <- Map.fromList <$> forM (Map.elems rows) (\(ScopeInterfaceInput (_,path,sha) _) -> do
+          body <- capturedRequestInputToken (worldInputsCustody facts) path sha
+          pure ((path,sha),body))
         closure <- readCapturedExactIfaceClosureWithCheckedValues decoder selectedBody env originals values
         pure $ do
           verified <- closure
@@ -2473,7 +2480,13 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
             evidence <- maybe (Left "world type closure lost its package proof") Right (Map.lookup key packageFacts)
             body <- maybe (Left "world type closure lost its captured interface token") Right
               (Map.lookup (exactPath artifact) bodies)
-            pure (WorldTypeClosureEntry row iface evidence body)) rows
+            admitted <- case row of
+              ScopeInterfaceInput (_,path,sha) CheckedValueEvidence -> do
+                packageBody <- maybe (Left "world checked TYPE input lost its package token") Right
+                  (Map.lookup (path,sha) packageBodies)
+                admitCheckedValueInterface packageBody iface
+              _ -> Right iface
+            pure (WorldTypeClosureEntry row admitted evidence body)) rows
   where
     validate rows = do
       let seals = Map.map (\(ScopeInterfaceInput (artifact,_,_) _) -> exactSha256 artifact) rows
@@ -2501,21 +2514,21 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
 
 -- An offered export vector is passive until it has been compared to GHC's
 -- normalized exports from the selected, hydrated exact interface.
-data VerifiedWorldDeclarationSurface = VerifiedWorldDeclarationSurface ExactIfaceArtifact [DeclarationExport] [WorldTypeClosureEntry]
+data VerifiedWorldDeclarationSurface = VerifiedWorldDeclarationSurface ExactIfaceArtifact [DeclarationExport] [WorldTypeClosureEntry] !HydratedInterfaceClosure
 
 verifiedWorldDeclarationInterface :: VerifiedWorldDeclarationSurface -> ExactIfaceArtifact
-verifiedWorldDeclarationInterface (VerifiedWorldDeclarationSurface artifact _ _) = artifact
+verifiedWorldDeclarationInterface (VerifiedWorldDeclarationSurface artifact _ _ _) = artifact
 
 verifiedWorldDeclarationExports :: VerifiedWorldDeclarationSurface -> [DeclarationExport]
-verifiedWorldDeclarationExports (VerifiedWorldDeclarationSurface _ exports _) = exports
+verifiedWorldDeclarationExports (VerifiedWorldDeclarationSurface _ exports _ _) = exports
 
 verifiedWorldDeclarationTypeInputs :: VerifiedWorldDeclarationSurface -> [WorldTypeClosureEntry]
-verifiedWorldDeclarationTypeInputs (VerifiedWorldDeclarationSurface _ _ entries) = entries
+verifiedWorldDeclarationTypeInputs (VerifiedWorldDeclarationSurface _ _ entries _) = entries
 
-hydrateWorldDeclarationInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts
-  -> IO (Either String (HscEnv,Maybe VerifiedWorldDeclarationSurface))
-hydrateWorldDeclarationInputs owner env facts = case worldLexicalDeclaration (worldInputsLexicalSurface facts) of
-  Nothing -> pure (Right (env,Nothing))
+hydrateWorldDeclarationInputs :: ExactInputOwner -> HydratedInterfaceClosure -> HscEnv -> WorldInputFacts
+  -> IO (Either String (HscEnv,HydratedInterfaceClosure,Maybe VerifiedWorldDeclarationSurface))
+hydrateWorldDeclarationInputs owner prior env facts = case worldLexicalDeclaration (worldInputsLexicalSurface facts) of
+  Nothing -> pure (Right (env,prior,Nothing))
   Just offered -> do
     let artifact = worldDeclarationInterface offered
         key = (exactUnit artifact,exactModule artifact)
@@ -2529,11 +2542,13 @@ hydrateWorldDeclarationInputs owner env facts = case worldLexicalDeclaration (wo
         Just entry -> do
           inputs <- either throwIO pure (capturedInterfaceInputs
             [worldTypeEntryVerifiedInterface value | value <- Map.elems entries])
-          hydrated <- hydratedExactEnvironment <$> hydrateInterfaceInputs env inputs
+          ownerInputs <- hydrateInterfaceInputsWithPrior env prior inputs
+          closure <- either throwIO pure (mergeHydratedInterfaceClosures [prior,hydratedExactInputs ownerInputs])
+          let hydrated = hydratedExactEnvironment ownerInputs
           actual <- interfaceExports hydrated (worldTypeEntryInterface entry)
           let exports = normalizeDeclarationExports actual
           pure $ if exports == normalizeDeclarationExports (worldDeclarationExports offered)
-            then Right (hydrated,Just (VerifiedWorldDeclarationSurface artifact exports (Map.elems entries)))
+            then Right (hydrated,closure,Just (VerifiedWorldDeclarationSurface artifact exports (Map.elems entries) closure))
             else Left "world declaration exports differ from its selected exact interface"
 
 -- The Rust-issued primary role and acquired binding selected this row at cold

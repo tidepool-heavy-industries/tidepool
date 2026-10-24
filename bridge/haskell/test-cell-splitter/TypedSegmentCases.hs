@@ -63,7 +63,7 @@ import Tidepool.ArtifactBytes (captureArtifactBytes)
 import Tidepool.CheckedPrefixImports (hydrateCompletedValueAliases, transformCompletedValueAliases)
 import Tidepool.CheckedCell (typecheckNativeModule, unannotatedModule)
 import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), depanalSourceModules, capturedInterfaceInputs, captureCompletedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), depanalSourceModules, emptyHydratedInterfaceClosure, retainInstalledInterfaceInputs, captureCompletedInterfaceInputs, hydratedExactEnvironment
   , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , generatedTypedSegmentRecipeWithImportRendering)
 import Tidepool.Identity (nameSymbolIdentity)
@@ -113,9 +113,9 @@ typedValueAliasControl libdir root prepared = do
   let artifact = ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
         (Session.sessionHiPath (root </> "stage0") session) (shaHex (snd (Session.capturedSessionInterface captured))) required
       requested = [("renamed",symbol,artifact),("synonym",symbol,artifact)]
-  empty <- either (fail . show) pure (capturedInterfaceInputs [])
+  let empty = emptyHydratedInterfaceClosure
   inputs <- captureCompletedInterfaceInputs hydrated empty [(artifact,injectedCapture)] []
-  ownerInputs <- hydrateInterfaceInputs hydrated inputs
+  ownerInputs <- retainInstalledInterfaceInputs hydrated inputs
   aliases <- hydrateCompletedValueAliases requested ownerInputs >>= either fail pure
   let ready = hydratedExactEnvironment ownerInputs
   forM_ [symbol {symbolUnit=Text.pack "different-unit"},symbol {symbolNamespace=Text.pack "var"}] $ \changed -> do

@@ -64,7 +64,7 @@ module Tidepool.Session
   , mkThinSessionIfaceWithFixities
   , writeSessionIface
   , injectSessionIface
-  , injectSessionIfaceWithBindings, injectCapturedSessionIfaceWithBindings
+  , injectSessionIfaceWithBindings, injectCapturedSessionIfaceWithBindings, captureHydratedSessionInterface
   , injectSessionScope
   , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionInterfaceBody, capturedSessionInterfaceEvidenceBodies, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner
   , injectSessionScopeWithCaptures
@@ -124,7 +124,8 @@ import GHC.Utils.Outputable (text, showSDocUnsafe)
 import GHC.Types.SrcLoc (noSrcSpan)
 import qualified GHC.Data.Maybe as MErr
 
-import Control.Exception (bracket)
+import Control.Exception (bracket, evaluate)
+import System.Mem.StableName (makeStableName)
 import qualified Data.ByteString as BS
 import Control.Monad (foldM, unless)
 import Control.Concurrent.MVar (MVar)
@@ -413,6 +414,29 @@ injectCapturedSessionIfaceWithBindings sm body packages required hsc0 = do
           <> foldMap (\(unit,name) -> encodeListLen 2 <> encodeString (Text.pack unit) <> encodeString (Text.pack name)) actual))
   captured <- captureInjectedSessionInterface hydrated owner body (Just (packages,requirements,actual))
   pure (hydrated,identifiers,captured)
+
+-- The hydration owner has already tied the complete interface closure. This
+-- transition captures that installed allocation; it never decodes or typechecks.
+captureHydratedSessionInterface :: SessionModule -> ModIface -> ArtifactBytes -> ArtifactBytes
+  -> [(String,String)] -> HscEnv -> IO CapturedSessionInterface
+captureHydratedSessionInterface sm iface body packages required environment = do
+  let owner = mi_module iface
+  unless (smKind sm == ValMod && owner == mkModule (homeUnitAsUnit (hsc_home_unit environment)) (renderSessionModule sm)
+      && not (BS.null (artifactBytes packages)) && BS.length (artifactBytes packages) <= 4 * 1024 * 1024)
+    (fail "hydrated session value has another owner or invalid package evidence")
+  home <- maybe (fail "hydrated session value lost its installed HOME") pure
+    (lookupHpt (hsc_HPT environment) (moduleName owner))
+  selectedIdentity <- evaluate iface >>= makeStableName
+  installedIdentity <- evaluate (hm_iface home) >>= makeStableName
+  unless (mi_module (hm_iface home) == owner && selectedIdentity == installedIdentity)
+    (fail "hydrated session value has another installed interface allocation")
+  let actual = sessionNominalOwners environment (typeEnvIds (md_types (hm_details home)))
+  unless (required == actual)
+    (fail "hydrated session value nominal requirements differ from its hydrated types")
+  let requirements = captureArtifactBytes (toStrictByteString
+        (encodeListLen (fromIntegral (length actual))
+          <> foldMap (\(unit,name) -> encodeListLen 2 <> encodeString (Text.pack unit) <> encodeString (Text.pack name)) actual))
+  captureInjectedSessionInterface environment owner body (Just (packages,requirements,actual))
 
 capturedSessionCompilerProduct :: CapturedSessionInterface -> ((Char,MVar OrigNameCache),HomeModInfo)
 capturedSessionCompilerProduct (CapturedSessionInterface _ _ _ issuer home _) = (issuer,home)

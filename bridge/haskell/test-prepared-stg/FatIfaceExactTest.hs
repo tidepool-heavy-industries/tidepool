@@ -70,7 +70,8 @@ import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
 import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceArtifact(..), hydrateExactScope,
   RequestIfaceDecoder, CapturedInterfaceInputs, verifiedInterfaceProducts, newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
   selectVerifiedExactInterfaceProducts, verifiedExactInterface, capturedInterfaceInputs,
-  hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactInterfaces, hydratedExactEnvironment, restoreHydratedInterfaceEnvironment,
+  hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactInterfaces, hydratedExactEnvironment, hydratedExactInputs, restoreHydratedInterfaceEnvironment,
+  emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, selectHydratedInterfaceInputs, admitCheckedValueInterface,
   readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface,
   newOriginalInterfaceArtifactsWithSessionCaptures, serializeOriginalInterface,
   InterfaceInputFailure(..))
@@ -189,7 +190,7 @@ verifyCompletedInterfaceMerges libdir work environment = do
   assert (case checkCapturedSessionInterface artifact body packages bareCapture of
       Left InterfaceSessionAliasMismatch{} -> True; _ -> False)
     "completed issuer reuse accepted absent package evidence"
-  empty <- either throwIO pure (capturedInterfaceInputs [])
+  let empty = emptyHydratedInterfaceClosure
   completed <- captureCompletedInterfaceInputs injected empty [(artifact,capture)] []
   decoded <- readVerifiedExactIfaceClosure environment [artifact] >>= either fail pure
   decoder <- newRequestIfaceDecoder
@@ -197,9 +198,9 @@ verifyCompletedInterfaceMerges libdir work environment = do
   aliased <- readCapturedExactIfaceClosureWithCheckedValues decoder
     (\requested -> if requested == alias then pure body else fail "unexpected receiving alias")
     environment [] [alias] >>= either fail pure
-  forM_ [[completed,aliased],[aliased,completed]] $ \inputs -> do
+  forM_ [[hydratedClosureAsCapturedInputs completed,aliased],[aliased,hydratedClosureAsCapturedInputs completed]] $ \inputs -> do
     merged <- either throwIO pure (mergeCapturedInterfaceInputs inputs)
-    retained <- captureCompletedInterfaceInputs injected merged [] []
+    retained <- hydratedClosureAsCapturedInputs . hydratedExactInputs <$> hydrateInterfaceInputs injected merged
     borrowed <- either throwIO pure (capturedSessionInterfaceFor retained alias body packages)
     assert (maybe False (sameCapturedSessionInterfaceOwner capture) borrowed)
       "completed input retention lost an authenticated logical receiving alias"
@@ -213,13 +214,14 @@ verifyCompletedInterfaceMerges libdir work environment = do
       assert (retainedIdentity == actualIdentity)
         "retain-only completion reconstructed its actual HMI when absent from the phase"
     _ -> fail "retain-only completion changed the selected owner set"
-  thinRefusal <- try (retainInstalledInterfaceInputs injected decoded >> pure ())
+  thinOwner <- hydrateInterfaceInputs injected decoded
+  thinRefusal <- try (retainInstalledInterfaceInputs injected (hydratedExactInputs thinOwner) >> pure ())
     :: IO (Either InterfaceInputFailure ())
   assert (case thinRefusal of
       Left (InterfaceUnownedThinHome owner) -> owner == ("main",sessionModuleString selected)
       _ -> False)
     "retain-only decoded thin input borrowed an unowned zero-fingerprint HMI"
-  forM_ [[completed,decoded],[decoded,completed]] $ \inputs -> do
+  forM_ [[hydratedClosureAsCapturedInputs completed,decoded],[decoded,hydratedClosureAsCapturedInputs completed]] $ \inputs -> do
     merged <- either throwIO pure (mergeCapturedInterfaceInputs inputs)
     reused <- either throwIO pure (capturedSessionInterfaceFor merged artifact body packages)
     assert (maybe False (sameCapturedSessionInterfaceOwner capture) reused)
@@ -251,12 +253,12 @@ verifyCompletedInterfaceMerges libdir work environment = do
   assert (case foreignRetain of Left InterfaceNameCacheMismatch -> True; _ -> False)
     "retain-only completion accepted another NameCache"
   foreignInput <- readVerifiedExactIfaceClosure foreignEnvironment [artifact] >>= either fail pure
-  assert (case mergeCapturedInterfaceInputs [completed,foreignInput] of
+  assert (case mergeCapturedInterfaceInputs [hydratedClosureAsCapturedInputs completed,foreignInput] of
       Left InterfaceNameCacheMismatch -> True; _ -> False)
     "captured merge accepted an interface from another NameCache"
   (_,_,otherCapture) <- injectCapturedSessionIfaceWithBindings selected body packages [] environment
   otherCompleted <- captureCompletedInterfaceInputs injected empty [(artifact,otherCapture)] []
-  assert (case mergeCapturedInterfaceInputs [completed,otherCompleted] of
+  assert (case mergeCapturedInterfaceInputs (map hydratedClosureAsCapturedInputs [completed,otherCompleted]) of
       Left InterfaceCompletedOwnerConflict{} -> True; _ -> False)
     "equal interface bytes silently selected another completed owner"
   _ <- newOriginalInterfaceArtifactsWithSessionCaptures injected Map.empty [] [capture,capture] work
@@ -543,8 +545,9 @@ verifyRetainedHome (InlineOriginalFixture fixture identifier) = do
   actualIdentity <- evaluate actualHome >>= makeStableName
   assert (maybe False (const True) (lookupHpt (hsc_HPT environment) (mkModuleName "FatFixture")))
     "retain-only exclusion premise lacks an unrelated actual HPT owner"
+  hydrated <- hydrateInterfaceInputs environment captured
   withFixtureFileRemoved fixture "MissingFixture" $ do
-    installed <- retainInstalledInterfaceInputs environment captured
+    installed <- retainInstalledInterfaceInputs environment (hydratedExactInputs hydrated)
     case hydratedExactInterfaces installed of
       [(selectedArtifact,retainedHome)] -> do
         assert (selectedArtifact == artifact)
@@ -553,16 +556,12 @@ verifyRetainedHome (InlineOriginalFixture fixture identifier) = do
         assert (retainedIdentity == actualIdentity) "retain-only TYPE rebuilt its existing HMI"
       _ -> fail "retain-only TYPE included unrelated HPT owners"
     missingPhase <- freshExactContext environment
-    missing <- try (retainInstalledInterfaceInputs missingPhase captured >> pure ())
-      :: IO (Either InterfaceInputFailure ())
-    assert (case missing of
-        Left (InterfaceHydratedHomeMissing owner) -> owner == (exactUnit artifact,exactModule artifact)
-        _ -> False)
-      "retain-only TYPE refilled a missing installed HMI"
-    -- The same captured bytes remain sufficient for the separate hydration owner.
-    hydrated <- hydrateInterfaceInputs missingPhase captured
-    assert (length (hydratedExactInterfaces hydrated) == 1)
-      "valid captured TYPE could not be hydrated after the retain-only refusal"
+    missing <- retainInstalledInterfaceInputs missingPhase (hydratedExactInputs hydrated)
+    case hydratedExactInterfaces missing of
+      [(_,home)] -> do
+        identity <- evaluate home >>= makeStableName
+        assert (identity == actualIdentity) "retention into an empty HPT replaced the actual hydrated allocation"
+      _ -> fail "retention into an empty HPT lost the hydrated owner"
     retainedCache <- newFatIfaceCache
     retained <- lookupFatIfaceExact environment retainedCache (varName identifier)
     assert (isFound retained) "unlink invalidated its retained HOME interface owner"

@@ -89,7 +89,7 @@ import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, prologueImports
   , preparedTypedSegmentTemplate, preparedTypedSegmentLineOffset, preparedTypedSegmentImports)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..) )
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), hydrateExactScope
+import Tidepool.ExactHydration (emptyHydratedInterfaceClosure, ExactIfaceArtifact(..), hydrateExactScope
   , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , generatedTypedSegmentRecipeWithImportRendering)
 import Tidepool.DeclarationJoin (DeclarationExport(..), ExportIdentity(..), interfaceExports, encodeDeclarationExports, normalizeDeclarationExports)
@@ -1010,9 +1010,9 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
         environment <- getSession
         owner <- liftIO newExactInputOwner
-        result <- liftIO (hydrateWorldDeclarationInputs owner environment facts)
+        result <- liftIO (hydrateWorldDeclarationInputs owner emptyHydratedInterfaceClosure environment facts)
         liftIO $ case result of
-          Right (_,Just verified) | accept
+          Right (_,_,Just verified) | accept
             , (exactUnit (verifiedWorldDeclarationInterface verified),exactModule (verifiedWorldDeclarationInterface verified)) == key
             , verifiedWorldDeclarationExports verified == normalizeDeclarationExports exports -> pure ()
           Left _ | not accept -> pure ()

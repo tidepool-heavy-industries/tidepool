@@ -272,7 +272,7 @@ import Tidepool.Session
   , Generation(..), sessionModuleString, capturedSessionInterfaceEvidence
   , isSessionScopeActive, injectSessionScopeWithCaptures, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceBody, capturedSessionCompilerProduct, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule, isReservedSessionModuleName
-  , injectCapturedSessionIfaceWithBindings )
+  )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, emitCount
   , timeDetailPhase, timeTaskDetailPhase, TaskOwner(..), TaskComponent(..), ResourceTimingStart, beginResourceTiming, endResourceTiming
@@ -313,7 +313,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , renderDependencyQualifier, sourceEvidenceWithFingerprint, selectedFreshHomeRequirements, revalidateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, HydratedInterfaceClosure, emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, selectHydratedInterfaceInputs, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
@@ -1304,7 +1304,7 @@ installLexicalInterfaces views hydrated inputs = do
         ExactLexicalInputs _ graph lexical checked scaffold ->
           projectExactLexicalGraph graph lexical checked scaffold environment
         CheckedValueLexicalInputs _ graph artifacts -> do
-          _ <- selectVerifiedValueInterfaces (hydratedExactInputs hydrated) artifacts
+          _ <- selectVerifiedValueInterfaces (hydratedClosureAsCapturedInputs (hydratedExactInputs hydrated)) artifacts
           pure (environment {hsc_mod_graph=graph},[(artifact,[]) | artifact <- artifacts])
         SourceCompatibilityInputs _ graph artifacts ->
           pure (environment {hsc_mod_graph=graph},[(artifact,[]) | artifact <- artifacts])
@@ -1366,7 +1366,7 @@ data PipelineVariant = PipelineVariant
 -- explicit selected-source receipt leaves the compile; no callback owns a world.
 data WorldSourceInputBasis = WorldSourceInputBasis ExactInputOwner WorldInputFacts
   (IORef (Maybe (WorldSourceSelection, CompletedWorldImportAdmission)))
-  ParsedModuleDemand CapturedInterfaceInputs WorldImportBasis WorldPrefixLexicalOwners
+  ParsedModuleDemand (IORef HydratedInterfaceClosure) WorldImportBasis WorldPrefixLexicalOwners
 
 -- Issued only from the actual completed declaration prefix. This projection
 -- retains lexical ownership without its GHC homes, source paths or buffers.
@@ -1511,21 +1511,22 @@ readWorldImportBasis owner environment facts declaration intents parsed = do
 worldImportEntries :: WorldImportBasis -> [WorldTypeClosureEntry]
 worldImportEntries (WorldImportBasis entries _) = Map.elems entries
 
-qualifyWorldImportSources :: PendingWorldImportBasis -> Ghc WorldImportBasis
-qualifyWorldImportSources (PendingWorldImportBasis entries lexical [] _) = pure (WorldImportBasis entries lexical)
-qualifyWorldImportSources (PendingWorldImportBasis entries lexical sources roots) = do
+qualifyWorldImportSources :: IORef HydratedInterfaceClosure -> PendingWorldImportBasis -> Ghc WorldImportBasis
+qualifyWorldImportSources _ (PendingWorldImportBasis entries lexical [] _) = pure (WorldImportBasis entries lexical)
+qualifyWorldImportSources accumulated (PendingWorldImportBasis entries lexical sources roots) = do
   environment <- getSession
   let selected = Map.restrictKeys entries (Set.fromList sources)
       proofs = Map.mapMaybe (\entry -> case worldTypeEntryEvidence entry of
         ModuleInterfaceEvidence proof -> Just proof
         _ -> Nothing) selected
-  empty <- either (liftIO . throwIO) pure (capturedInterfaceInputs [])
-  inputs <- either (liftIO . throwIO) pure (worldSourceValidationInputs entries empty proofs)
+  private <- liftIO (readIORef accumulated)
+  inputs <- either (liftIO . throwIO) pure (worldSourceValidationInputs entries (hydratedClosureAsCapturedInputs private) proofs)
   (validated,selectedKeys) <- withHeldWorldSourceRefusal $
     validateCanonicalSourceInputs inputs Nothing (hsc_mod_graph environment) sources
   qualified <- either (\detail -> liftIO $ do
     emitWorldAcquisitionRejection "world source lexical qualification" "<held captured source>" detail
     throwIO WorldCellCorrupt) pure (projectWorldQualifiedSources entries lexical roots validated selectedKeys)
+  liftIO (accumulateHydratedInterfaces accumulated (hydratedExactInputs (validatedOriginalInputs validated)))
   pure (WorldImportBasis entries (lexical ++ maybe [] (pure . WorldQualifiedSourceLexicalImports) qualified))
 
 projectWorldQualifiedSources :: Map.Map (String,String) WorldTypeClosureEntry -> [WorldLexicalImport]
@@ -1611,17 +1612,16 @@ worldQualifiedSourceGraph (WorldImportBasis _ lexical) actual = do
   (_,selected) <- foldM insert (initial,[]) additional
   pure (mkModuleGraph (current ++ selected))
 
-hydrateWorldImportBasis :: CapturedInterfaceInputs -> WorldImportBasis -> HscEnv -> IO HydratedExactInterfaces
+accumulateHydratedInterfaces :: IORef HydratedInterfaceClosure -> HydratedInterfaceClosure -> IO ()
+accumulateHydratedInterfaces reference addition = do
+  previous <- readIORef reference
+  combined <- either throwIO pure (mergeHydratedInterfaceClosures [previous,addition])
+  writeIORef reference combined
+
+hydrateWorldImportBasis :: HydratedInterfaceClosure -> WorldImportBasis -> HscEnv -> IO HydratedExactInterfaces
 hydrateWorldImportBasis private basis environment = do
   inputs <- either throwIO pure (capturedInterfaceInputs (map worldTypeEntryVerifiedInterface (worldImportEntries basis)))
-  let demanded = Set.fromList [(exactUnit artifact,exactModule artifact)
-        | entry <- worldImportEntries basis,let artifact = worldTypeEntryArtifact entry]
-      completed = [(exactUnit artifact,exactModule artifact)
-        | product' <- verifiedInterfaceProducts private,let (artifact,_) = verifiedExactInterface product'
-        , (exactUnit artifact,exactModule artifact) `Set.member` demanded]
-  retained <- either throwIO pure (selectCapturedInterfaceOwners private completed)
-  selected <- either throwIO pure (mergeCapturedInterfaceInputs [inputs,retained])
-  hydrateInterfaceInputs environment selected
+  hydrateInterfaceInputsWithPrior environment private inputs
 
 -- Make rebuilds phase environments from its load graph. Reinstall the same
 -- admitted interfaces there, while keeping lexical instance reachability on
@@ -2978,20 +2978,20 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     WorldCellSource _ _ prefix _ _ _ -> restoreWorldCellPrefixHomes initialBase prefix
     WorldObservationSource {} -> pure initialBase
     WorldCellNameSource {} -> pure initialBase
-  operandInputs <- liftIO $ case operand of
-    Nothing -> either throwIO pure (capturedInterfaceInputs [])
-    Just value -> pure (worldCellOperandCapturedInputs value)
-  priorInputs <- liftIO $ case operation of
+  priorInputs <- case operation of
     WorldCellSource _ _ (WorldCellPrefix _ (PrefixHomeInterfaces _ captures) _ _ _ _ _ _) _ _ _ -> pure captures
-    _ -> either throwIO pure (capturedInterfaceInputs [])
-  privateInputs <- either (liftIO . throwIO) pure (mergeCapturedInterfaceInputs [priorInputs,operandInputs])
-  (withOperand,operandProjection) <- liftIO (hydrateWorldCellOperand privateInputs initial operand)
+    _ -> pure emptyHydratedInterfaceClosure
+  (operandOwner,operandProjection) <- liftIO (hydrateWorldCellOperand priorInputs initial operand)
+  let withOperand = hydratedExactEnvironment operandOwner
+  operandInputs <- either (liftIO . throwIO) pure
+    (mergeHydratedInterfaceClosures [priorInputs,hydratedExactInputs operandOwner])
   setSession withOperand
-  declarationInputs <- liftIO (hydrateWorldDeclarationInputs (universeOriginalInputs universe) withOperand facts)
-  (current,verifiedDeclaration) <- either (\reason -> liftIO $ do
+  declarationInputs <- liftIO (hydrateWorldDeclarationInputs (universeOriginalInputs universe) operandInputs withOperand facts)
+  (current,privateInputs,verifiedDeclaration) <- either (\reason -> liftIO $ do
     emitWorldAcquisitionRejection "world declaration type input" path reason
     traceStageIO "declaration-inputs-refused" [("detail", LogText reason)]
     throwIO WorldCellCorrupt) pure declarationInputs
+  accumulated <- liftIO (newIORef privateInputs)
   traceStage "declaration-inputs-propagated" []
   let importFailure :: WorldInputsFailure -> IO value
       importFailure (WorldInputsFailure cause detail) = do
@@ -3010,12 +3010,14 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     WorldObservationSource {} -> pure (WorldPrefixLexicalOwners Map.empty)
     WorldCellNameSource {} -> pure (WorldPrefixLexicalOwners Map.empty)
   setSession current
-  importBasis@(WorldImportBasis _ lexicalImports) <- qualifyWorldImportSources pendingImports
+  importBasis@(WorldImportBasis _ lexicalImports) <- qualifyWorldImportSources accumulated pendingImports
   traceStage "import-sources-qualified" []
   liftIO (emitCount timing "world.cell.qualified_source_owners" (toInteger (sum
     [length rows | WorldQualifiedSourceLexicalImports (WorldQualifiedSourceImports _ _ rows) <- lexicalImports])))
   qualified <- getSession
-  importHydrated <- liftIO (hydrateWorldImportBasis privateInputs importBasis qualified `catch` importFailure)
+  importPrivate <- liftIO (readIORef accumulated)
+  importHydrated <- liftIO (hydrateWorldImportBasis importPrivate importBasis qualified `catch` importFailure)
+  liftIO (accumulateHydratedInterfaces accumulated (hydratedExactInputs importHydrated))
   setSession (hydratedExactEnvironment importHydrated)
   traceStage "import-basis-hydrated" []
   resolvedRef <- liftIO (newIORef Nothing)
@@ -3067,7 +3069,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               (worldLexicalObservation (worldInputsLexicalSurface facts) >>= worldObservationRequestTypes) inputAnnotation
             annotatedDemand <- annotateModuleDemand annotations parsedDemand
             writeIORef nativeRef (Just annotations)
-            (ready,resolved) <- resolveWorldCellInputs (universeOriginalInputs universe) facts privateInputs path
+            (ready,resolved) <- resolveWorldCellInputs (universeOriginalInputs universe) facts accumulated path
               offset sourceOwners available demandScope annotatedDemand (case operation of
                 WorldCellSource {} -> WorldCellInputDemand
                 WorldObservationSource {} -> WorldObservationInputDemand
@@ -3102,7 +3104,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               Just (WorldPrivateCompletion previous (WorldCompletedDependencies policy versions canonicalRecovery) sources outputs)
             _ -> Nothing
         , pvDependencyBasis=dependencyBasis
-        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand privateInputs importBasis prefixImports)
+        , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand accumulated importBasis prefixImports)
         , pvHostBindingTypeInputs=do
             resolved <- requireResolved
             pure (worldResolvedTypes resolved ++ worldImportEntries importBasis
@@ -3231,15 +3233,11 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
       resolved <- liftIO requireResolved
       (pending,recovery,WorldSourceSelection sourceSelection imports sourceTypes _ _,sourceImports) <- completeDependencies
       traceStage "dependencies-completed" []
-      selectedTypeBodies <- liftIO $ do
-        let entries = worldResolvedTypes resolved ++ sourceTypes ++ worldImportEntries importBasis ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
-              ++ maybe [] (Map.elems . worldCellOperandTypes) operand
-            selected = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,worldTypeEntryInterfaceBody entry))
-              | entry <- entries, let artifact = worldTypeEntryArtifact entry]
-        unless (all (\entry -> let artifact = worldTypeEntryArtifact entry in
-          maybe False (\(actual,body) -> actual == artifact && artifactSha256 body == artifactSha256 (worldTypeEntryInterfaceBody entry))
-            (Map.lookup (exactUnit artifact,exactModule artifact) selected)) entries) (throwIO WorldCellCorrupt)
-        pure (Map.elems selected)
+      selectedInterfaces <- liftIO (readIORef accumulated)
+      let selectedTypeArtifacts = nub [worldTypeEntryArtifact entry
+            | entry <- worldResolvedTypes resolved ++ sourceTypes ++ worldImportEntries importBasis
+                ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
+                ++ maybe [] (Map.elems . worldCellOperandTypes) operand]
       traceStage "selected-type-bodies-validated" []
       original <- liftIO $ traverse (\planned -> do
         inventory <- certifyPlannedDeclaration planned final >>= either fail pure
@@ -3249,7 +3247,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         (WorldCompilerCompletion
           (WorldCellInputs (worldResolvedGenerations resolved) (worldResolvedReferences resolved)
             sourceImports imports sourceSelection roots
-            selectedTypeBodies frozenDependencies)
+            selectedInterfaces selectedTypeArtifacts frozenDependencies)
           pending original) Nothing)
     WorldCellNameSource {} -> do
       checked <- runStage CheckedEnvironment
@@ -3426,11 +3424,11 @@ restoreWorldCellPrefixFor views observation summary environment prefix@(WorldCel
           demanded = close Set.empty roots
       let demandedModules = Set.fromList [ms_mod current | node@(ModuleNode _ current) <- originalRetained
             , mkNodeKey node `Set.member` demanded, ms_hsc_src current == HsSrcFile]
-          demandedArtifacts = [artifact | product' <- verifiedInterfaceProducts captured
+          demandedArtifacts = [artifact | product' <- verifiedInterfaceProducts (hydratedClosureAsCapturedInputs captured)
             , let (artifact,iface) = verifiedExactInterface product'
             , mi_module iface `Set.member` demandedModules]
       selected <- either throwIO pure
-        (selectCapturedInterfaceInputs captured demandedArtifacts)
+        (selectCapturedInterfaceInputs (hydratedClosureAsCapturedInputs captured) demandedArtifacts)
       owner <- hydrateInterfaceInputs ready selected
       let retained = [node | node <- mgModSummaries' graph,mkNodeKey node `Set.member` demanded]
           present = Set.fromList (map mkNodeKey (mgModSummaries' (hsc_mod_graph ready)))
@@ -3475,13 +3473,7 @@ retainWorldCellOriginal prepared completion (PrefixHomeInterfaces homes previous
         , mkNodeKey node `Set.member` selected, mkNodeKey node `Set.notMember` known]
       modules = Set.fromList [ms_mod summary | ModuleNode _ summary <- added]
   retained <- retainHomes Set.empty homes (Set.toList modules)
-  let offered = worldCellTypeInterfaces (worldCompilerCompletionInputs completion)
-      byOwner = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,body)) | (artifact,body) <- offered]
-      readOffered requested = case Map.lookup (exactUnit requested,exactModule requested) byOwner of
-        Just (artifact,body) | artifact == requested -> pure (artifactBytes body)
-        _ -> throwIO (InterfaceCapturedSelectionFailure "completed stage lost its captured TYPE owner")
-  imported <- readVerifiedExactIfaceClosureWithCheckedValuesReader readOffered environment (map fst offered) []
-    >>= either (throwIO . InterfaceCapturedSelectionFailure) pure
+  let imported = worldCellHydratedInterfaces (worldCompilerCompletionInputs completion)
   let sessionCaptures = prInjectedSessionInterfaces (pprPipelineResult prepared)
         ++ prProducedSessionInterfaces (pprPipelineResult prepared)
       sessionRows = [ (ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
@@ -3491,9 +3483,9 @@ retainWorldCellOriginal prepared completion (PrefixHomeInterfaces homes previous
   -- Existing imported rows supply the dependency closure before completed
   -- session/source products replace only their own actual compiler allocation.
   importedInputs <- either throwIO pure
-    (mergeCapturedInterfaceInputs [previousInputs,imported])
+    (mergeHydratedInterfaceClosures [previousInputs,imported])
   let alreadyCaptured = Set.fromList [(exactUnit artifact,exactModule artifact)
-        | product' <- verifiedInterfaceProducts previousInputs,let (artifact,_) = verifiedExactInterface product']
+        | product' <- verifiedInterfaceProducts (hydratedClosureAsCapturedInputs previousInputs),let (artifact,_) = verifiedExactInterface product']
       selectedFinalized = [original | original <- Map.elems (pprFinalizedModules prepared)
         , let owner = mi_module (hm_iface (finalizedHomeModInfo original))
         , (unitString (moduleUnit owner),moduleNameString (moduleName owner)) `Set.notMember` alreadyCaptured
@@ -3510,8 +3502,10 @@ retainWorldCellOriginal prepared completion (PrefixHomeInterfaces homes previous
   -- products already carry their authoritative closure, including source-less
   -- Join reexports which cannot be recovered from mi_usages. Select that
   -- closure once, then retain its existing compiler allocations as one owner.
-  captured <- either throwIO pure (selectCapturedInterfaceOwners allInputs retainedOwners)
-  installed <- retainInstalledInterfaceInputs environment captured
+  captured <- either throwIO pure (selectCapturedInterfaceOwners (hydratedClosureAsCapturedInputs allInputs) retainedOwners)
+  selectedClosure <- either throwIO pure (selectHydratedInterfaceInputs
+    [artifact | product' <- verifiedInterfaceProducts captured, let (artifact,_) = verifiedExactInterface product'] allInputs)
+  installed <- retainInstalledInterfaceInputs environment selectedClosure
   let closedHomes = foldr
         (\(_,home) table -> addToHpt table (moduleName (mi_module (hm_iface home))) home)
         emptyHomePackageTable (hydratedExactInterfaces installed)
@@ -3691,26 +3685,18 @@ worldNeedsAlias _ = True
 -- Source-less type availability is required even when the helper is unused.
 -- The exact exported Name is only a reverse demand association; no GRE or
 -- executable input obligation is issued by installing this interface.
-hydrateWorldCellOperand :: CapturedInterfaceInputs -> HscEnv -> Maybe WorldCellOperandInputs
-  -> IO (HscEnv,Maybe WorldCellOperandProjection)
-hydrateWorldCellOperand _ environment Nothing = pure (environment,Nothing)
-hydrateWorldCellOperand available environment (Just operand) = do
+hydrateWorldCellOperand :: HydratedInterfaceClosure -> HscEnv -> Maybe WorldCellOperandInputs
+  -> IO (HydratedExactInterfaces,Maybe WorldCellOperandProjection)
+hydrateWorldCellOperand _ environment Nothing = do
+  empty <- either throwIO pure (capturedInterfaceInputs [])
+  owner <- hydrateInterfaceInputs environment empty
+  pure (owner,Nothing)
+hydrateWorldCellOperand prior environment (Just operand) = do
   let artifact = worldCellOperandInterface operand
-  selectedInputs <- either throwIO pure (selectCapturedInterfaceInputs available [artifact])
-  retained <- either throwIO pure (capturedSessionInterfaceFor selectedInputs artifact (worldCellOperandBody operand) (worldCellOperandPackages operand))
-  (owner,capture) <- case retained of
-    Just actual -> do
-      hydrated <- hydrateInterfaceInputs environment selectedInputs
-      pure (hydrated,actual)
-    Nothing -> do
-      selected <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
-      dependencies <- either throwIO pure (selectCapturedInterfaceOwners selectedInputs (exactRequirements artifact))
-      typedOwner <- hydrateInterfaceInputs environment dependencies
-      (ready,_,actual) <- injectCapturedSessionIfaceWithBindings selected (worldCellOperandBody operand)
-        (worldCellOperandPackages operand) (exactRequirements artifact) (hydratedExactEnvironment typedOwner)
-      captured <- captureCompletedInterfaceInputs ready selectedInputs [(artifact,actual)] []
-      hydrated <- hydrateInterfaceInputs ready captured
-      pure (hydrated,actual)
+  owner <- hydrateInterfaceInputsWithPrior environment prior (worldCellOperandCapturedInputs operand)
+  let selectedInputs = hydratedClosureAsCapturedInputs (hydratedExactInputs owner)
+  capture <- either throwIO pure (capturedSessionInterfaceFor selectedInputs artifact
+    (worldCellOperandBody operand) (worldCellOperandPackages operand)) >>= maybe (throwIO WorldCellCorrupt) pure
   home <- either (const (throwIO WorldCellCorrupt)) (pure . snd) (hydratedInterfaceProduct owner artifact)
   unless (mi_module (hm_iface home) == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact)))
     (throwIO WorldCellCorrupt)
@@ -3718,7 +3704,7 @@ hydrateWorldCellOperand available environment (Just operand) = do
       , nameSymbolIdentity "value" name == Just (worldBindingSymbol (worldCellOperandBinding operand))] of
     [actual] -> pure actual
     _ -> throwIO WorldCellCorrupt
-  pure (hydratedExactEnvironment owner,Just (WorldCellOperandProjection operand owner capture name))
+  pure (owner,Just (WorldCellOperandProjection operand owner capture name))
 
 -- The operand's held TYPE owner supplies its exact HMI, while explicit imports
 -- also need the active cycle's physical view. This installs only that checked
@@ -3793,10 +3779,10 @@ hydrateWorldCellResolvedInputs environment (WorldCellResolvedInputs inputs _ _ p
 
 data WorldSourceDemand = WorldCellInputDemand | WorldObservationInputDemand
 
-resolveWorldCellInputs :: ExactInputOwner -> WorldInputFacts -> CapturedInterfaceInputs -> FilePath -> Int -> Set.Set (String,String)
+resolveWorldCellInputs :: ExactInputOwner -> WorldInputFacts -> IORef HydratedInterfaceClosure -> FilePath -> Int -> Set.Set (String,String)
   -> HscEnv -> SegmentDemandScope WorldDemandBinding -> ParsedModuleDemand -> WorldSourceDemand
   -> IO (HscEnv,WorldCellResolvedInputs)
-resolveWorldCellInputs owner facts privateInputs path consumer sourceOwners environment scope parsedDemand mode = do
+resolveWorldCellInputs owner facts accumulated path consumer sourceOwners environment scope parsedDemand mode = do
   demand <- moduleInputOccurrences environment scope parsedDemand
   demanded <- either (\failure -> do
     emitWorldAcquisitionRejection "world cell demand" path (case failure of
@@ -3811,6 +3797,8 @@ resolveWorldCellInputs owner facts privateInputs path consumer sourceOwners envi
       reject reason = emitWorldAcquisitionRejection "world value import" path reason >> throwIO WorldCellCorrupt
   readback <- readWorldBindingInputs owner environment facts [name | (name,WorldBaseBinding _) <- demanded]
   (_,bodies,typeInputs) <- either reject pure readback
+  private <- readIORef accumulated
+  let privateInputs = hydratedClosureAsCapturedInputs private
   let inputs = demanded
       prior = [value | (_,WorldPriorBinding value) <- inputs]
       operands = [value | (_,WorldOperandBinding value) <- inputs]
@@ -3820,12 +3808,12 @@ resolveWorldCellInputs owner facts privateInputs path consumer sourceOwners envi
     (reject "prior value is not before the consuming stage")
   -- Value owners must never be source summaries: adding their retained policy
   -- at the target cannot change a dependency's earlier memo fingerprint.
-  unless (all (\(artifact,_,_) -> (exactUnit artifact,exactModule artifact) `Set.notMember` sourceOwners) bodies
+  unless (all (\(verified,_) -> let (artifact,_) = verifiedExactInterface verified in (exactUnit artifact,exactModule artifact) `Set.notMember` sourceOwners) bodies
       && all (\(_,binding) -> let symbol = worldDemandSymbol binding
         in (Text.unpack (symbolUnit symbol),Text.unpack (symbolModule symbol)) `Set.notMember` sourceOwners) inputs)
     (reject "selected value owner is also a source module")
   primaryTypes <- either throwIO pure (capturedInterfaceInputs
-    [worldTypeEntryVerifiedInterface entry | contribution <- typeContributions,entry <- Map.elems contribution])
+    ([worldTypeEntryVerifiedInterface entry | contribution <- typeContributions,entry <- Map.elems contribution] ++ map fst bodies))
   let privateRequirements = Set.toAscList (Set.fromList (concatMap (exactRequirements . worldDemandArtifact . snd) inputs))
       knownPrimary = Set.fromList [(exactUnit artifact,exactModule artifact)
         | entry <- Map.elems allTypes,let artifact = worldTypeEntryArtifact entry]
@@ -3835,34 +3823,27 @@ resolveWorldCellInputs owner facts privateInputs path consumer sourceOwners envi
     unless (required `Set.member` knownPrimary || required `Set.member` privateOwners)
       (throwIO (InterfaceInputMissing required))
   priorTypes <- either throwIO pure (selectCapturedInterfaceOwners privateInputs
-    [required | required <- privateRequirements,required `Set.member` privateOwners])
+    (Set.toAscList ((Set.fromList privateRequirements `Set.union` knownPrimary) `Set.intersection` privateOwners)))
   available <- either throwIO pure (mergeCapturedInterfaceInputs [primaryTypes,priorTypes])
-  typeOwner <- hydrateInterfaceInputs environment available
+  typeOwner <- hydrateInterfaceInputsWithPrior environment private available
   let withTypes = hydratedExactEnvironment typeOwner
       priorCaptures = [capture | WorldStagedValue _ _ _ _ _ _ capture <- prior]
       operandCaptures = [capture | WorldCellOperandProjection _ _ capture _ <- take 1 operands]
-      existingCaptures = priorCaptures ++ operandCaptures
-  (injected,reversedCaptures) <- foldM (\(current,captures) (artifact,body,packages) -> do
-    case [capture | capture <- existingCaptures
-        , let (actual,bytes) = capturedSessionInterfaceBody capture
-        , actual == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
-        , bytes == body] of
-      capture:_ -> do
-        selected <- either throwIO pure (checkCapturedSessionInterface artifact body packages capture)
-        pure (current,selected:captures)
-      [] -> do
-        selected <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
-        (ready,_,capture) <- injectCapturedSessionIfaceWithBindings selected body packages (exactRequirements artifact) current
-        pure (ready,capture:captures)) (withTypes,[]) bodies
-  let captures = reverse reversedCaptures ++ priorCaptures ++ operandCaptures
+      selectedInputs = hydratedClosureAsCapturedInputs (hydratedExactInputs typeOwner)
+  selectedCaptures <- forM bodies $ \(verified,packages) -> do
+    let (artifact,_) = verifiedExactInterface verified
+    either throwIO pure (capturedSessionInterfaceFor selectedInputs artifact (verifiedExactInterfaceBody verified) packages)
+      >>= maybe (throwIO WorldCellCorrupt) pure
+  let captures = selectedCaptures ++ priorCaptures ++ operandCaptures
       selectedArtifacts = [worldDemandArtifact binding | (_,binding) <- inputs]
       capturedRows = [(artifact,capture) | artifact <- selectedArtifacts, capture <- captures
         , let (module',_) = capturedSessionInterfaceBody capture
         , (unitString (moduleUnit module'),moduleNameString (moduleName module'))
             == (exactUnit artifact,exactModule artifact)]
       requested = [(name,worldDemandSymbol binding,worldDemandArtifact binding) | (name,binding) <- inputs, worldNeedsAlias binding]
-  captured <- captureCompletedInterfaceInputs injected available capturedRows []
-  hydratedOwner <- hydrateInterfaceInputs injected captured
+  captured <- captureCompletedInterfaceInputs withTypes (hydratedExactInputs typeOwner) capturedRows []
+  hydratedOwner <- retainInstalledInterfaceInputs withTypes captured
+  accumulateHydratedInterfaces accumulated captured
   aliases <- hydrateCompletedValueAliases requested hydratedOwner >>= either reject pure
   let resolved = WorldCellResolvedInputs inputs consumer (Map.elems allTypes) hydratedOwner captures aliases
       generations = worldResolvedGenerations resolved
@@ -8281,7 +8262,7 @@ data HeldWorldCellAdmission = HeldWorldCellAdmission (IORef CompilerPhase)
 
 -- Private compiler facts from successfully completed earlier stages. They grant
 -- neither runtime values nor permission to publish a partial cell.
-data PrefixHomeInterfaces = PrefixHomeInterfaces HomePackageTable CapturedInterfaceInputs
+data PrefixHomeInterfaces = PrefixHomeInterfaces HomePackageTable HydratedInterfaceClosure
 
 data WorldCellPrefix = WorldCellPrefix !Int PrefixHomeInterfaces ModuleGraph
   (Maybe WorldPrivateCompletion) [PlannedDeclarationInventory] (SegmentDemandScope WorldDemandBinding) [LocatedImport] WorldCellStageState
@@ -8486,9 +8467,16 @@ data WorldCellInputs = WorldCellInputs
   -- Ordered physical aliases from this completion's held source backing.
   -- They retain no lease and grant no source identity or filesystem authority.
   , worldCellSourceRootAliases :: [FilePath]
-  , worldCellTypeInterfaces :: [(ExactIfaceArtifact,ArtifactBytes)]
+  , worldCellHydratedInterfaces :: HydratedInterfaceClosure
+  , worldCellSelectedTypeArtifacts :: [ExactIfaceArtifact]
   , worldCellDependencyBasis :: Maybe FrozenDependencyBasis
   }
+
+worldCellTypeInterfaces :: WorldCellInputs -> [(ExactIfaceArtifact,ArtifactBytes)]
+worldCellTypeInterfaces inputs =
+  [(artifact,verifiedExactInterfaceBody product') | product' <- either (error . show) id
+    (selectVerifiedExactInterfaceProducts (hydratedClosureAsCapturedInputs (worldCellHydratedInterfaces inputs))
+      (worldCellSelectedTypeArtifacts inputs)),let (artifact,_) = verifiedExactInterface product']
 
 worldCellSourceImports :: WorldCellInputs -> IssuedSourceImports
 worldCellSourceImports inputs = case worldCellImportCompletion inputs of
@@ -8983,7 +8971,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                               selected <- readIORef universe
                               basis <- heldWorldDemandScope selected timing world
                               inherited <- worldCellInheritedImports parserFlags facts (worldCellPrepareRecipe question)
-                              emptyInputs <- either throwIO pure (capturedInterfaceInputs [])
+                              let emptyInputs = emptyHydratedInterfaceClosure
                               prefix <- newIORef (WorldCellPrefix 0 (PrefixHomeInterfaces emptyHomePackageTable emptyInputs) (mkModuleGraph []) Nothing [] basis inherited WorldStagePending)
                               operand <- newIORef Nothing
                               pure (Right (HeldWorldCellAdmission phase
@@ -10088,10 +10076,10 @@ withHeldWorldSourceRefusal action = reifyGhc $ \session ->
       emitWorldAcquisitionRejection "world source import" "<held captured source>" (show failure)
       throwIO WorldCellUnavailable
 
-captureHeldWorldSourceSelection :: ExactInputOwner -> WorldInputFacts -> CapturedInterfaceInputs
+captureHeldWorldSourceSelection :: ExactInputOwner -> WorldInputFacts -> IORef HydratedInterfaceClosure
   -> WorldImportBasis -> WorldPrefixLexicalOwners -> ParsedModule -> ModuleGraph
   -> Ghc WorldSourceSelection
-captureHeldWorldSourceSelection owner facts privateInputs imported (WorldPrefixLexicalOwners prefixOwners) driverRoot graph = do
+captureHeldWorldSourceSelection owner facts accumulated imported (WorldPrefixLexicalOwners prefixOwners) driverRoot graph = do
   environment <- getSession
   let ownerKey owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
       home = unitString (homeUnitId (hsc_home_unit environment))
@@ -10122,7 +10110,8 @@ captureHeldWorldSourceSelection owner facts privateInputs imported (WorldPrefixL
         liftIO (throwIO WorldCellUnsupported)
       Right inputs -> pure inputs
     let proofs = Map.map worldSourceEntryProof entries
-    inputs <- either (liftIO . throwIO) pure (worldSourceValidationInputs typeEntries privateInputs proofs)
+    private <- liftIO (readIORef accumulated)
+    inputs <- either (liftIO . throwIO) pure (worldSourceValidationInputs typeEntries (hydratedClosureAsCapturedInputs private) proofs)
     -- The selected SOURCE roots bring their entire exact TYPE requirement
     -- closure. The shared validator derives source-less Finder locations and
     -- downsweep exclusions from every noncanonical artifact in that closure.
@@ -10161,6 +10150,7 @@ captureHeldWorldSourceSelection owner facts privateInputs imported (WorldPrefixL
         selectedProofs = Map.map (ModuleInterfaceAdmission . worldSourceEntryProof)
           (Map.restrictKeys entries selectedKeys)
     let closure = validatedOriginalInputs validation
+    liftIO (accumulateHydratedInterfaces accumulated (hydratedExactInputs closure))
     canonical <- liftIO $ captureCanonicalOriginalInputs (hexBytes (worldInputsProducer facts)) closure
       [(worldSourceEntryProof entry,worldSourceEntryPackages entry)
       | (key,entry) <- Map.toAscList entries,key `Set.member` selectedKeys]
@@ -10196,7 +10186,13 @@ worldSourceValidationInputs :: Map.Map (String,String) WorldTypeClosureEntry
   -> Either InterfaceInputFailure SourceValidationInputs
 worldSourceValidationInputs entries private proofs = do
   primary <- capturedInterfaceInputs (map worldTypeEntryVerifiedInterface (Map.elems entries))
-  complete <- mergeCapturedInterfaceInputs [primary,private]
+  let keys = Set.fromList [(exactUnit artifact,exactModule artifact)
+        | entry <- Map.elems entries,let artifact = worldTypeEntryArtifact entry]
+      retainedKeys = [(exactUnit artifact,exactModule artifact)
+        | product' <- verifiedInterfaceProducts private,let (artifact,_) = verifiedExactInterface product'
+        , (exactUnit artifact,exactModule artifact) `Set.member` keys]
+  retained <- selectCapturedInterfaceOwners private retainedKeys
+  complete <- mergeCapturedInterfaceInputs [primary,retained]
   pure (SourceValidationInputs WorldSourceValidation complete proofs
     (WorldSourcePackages (Map.map worldTypeEntryPackages entries)))
 
@@ -10717,11 +10713,11 @@ sessionVariant purpose scope = do
                           prior <- liftIO (readIORef injectedInterfacesRef)
                           (rows,products) <- either (liftIO . throwIO) pure
                             (selectPhaseInterfaceInputs hydrated phaseInputs prior captured)
-                          emptyInputs <- either (liftIO . throwIO) pure (capturedInterfaceInputs [])
+                          let emptyInputs = emptyHydratedInterfaceClosure
                           actualProducts <- liftIO $ forM products $ \(product',home) ->
                             retainCompletedModuleInterface hydrated product' home
                           inputs <- liftIO (captureCompletedInterfaceInputs hydrated emptyInputs rows actualProducts)
-                          owner <- liftIO (hydrateInterfaceInputs hydrated inputs)
+                          owner <- liftIO (retainInstalledInterfaceInputs hydrated inputs)
                           installed <- liftIO (installLexicalInterfaces interfaceViews owner
                             (CheckedValueLexicalInputs observation modGraphRaw (map (fst . sessionInterfaceRow) captured)))
                             >>= either (liftIO . fail) pure
