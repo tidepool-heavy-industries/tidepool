@@ -3779,10 +3779,11 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertEqual(command[1], '--owned-daemon-run')
         self.assertEqual(command[3:10], ['--workers', '1', '--foreground-jobs', '1', '--preparation-jobs', '1', '--'])
         root = Path(command[2])
-        qualification.write_json(root / 'owned-compiler-outcome.json',
-                                 {'schema': 1, 'cleanup': {'status': 'confirmed'}})
-        qualification.write_json(root / 'lifecycle.json',
-                                 {'schema': 1, 'cleanup_confirmed': True, 'exit_code': code})
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        root.chmod(0o700)
+        report = OwnedServiceReportTests().report(root)
+        report['action'].update(exit_code=code, success=code == 0)
+        qualification.write_private_json(root / 'owned-service.json', report)
         return command[10:]
 
     def test_root_entry_producer_selects_retained_direct_target_outside_library_roots(self):
@@ -3890,13 +3891,15 @@ class CatalogSourceTests(unittest.TestCase):
                         self.complete_compiler(command, 7 if changed == 'different-exit' else 0)
                         root = Path(command[2])
                         if changed == 'malformed':
-                            (root / 'owned-compiler-outcome.json').write_text('{broken')
+                            (root / 'owned-service.json').write_text('{broken')
                         elif changed == 'unfinished':
-                            qualification.write_json(root / 'owned-compiler-outcome.json',
-                                                     {'schema': 1, 'cleanup': {'status': 'unconfirmed'}})
+                            report = json.loads((root / 'owned-service.json').read_text())
+                            report['complete'] = False
+                            qualification.write_private_json(root / 'owned-service.json', report)
                         elif changed == 'missing-child':
-                            qualification.write_json(root / 'lifecycle.json',
-                                {'schema': 1, 'cleanup_confirmed': True, 'exit_code': None})
+                            report = json.loads((root / 'owned-service.json').read_text())
+                            report['action'].update(exit_code=None, success=None)
+                            qualification.write_private_json(root / 'owned-service.json', report)
                     qualification.write_json(args.output / 'catalog.json',
                         {'schema': 5, 'source_selection': self.selection(original)})
                     return subprocess.CompletedProcess(command, 0)
@@ -3908,7 +3911,7 @@ class CatalogSourceTests(unittest.TestCase):
                 self.assertEqual(outcome['compiler_settlement']['status'],
                                  'confirmed' if changed in ('different-exit', 'missing-child') else 'unconfirmed')
                 self.assertEqual(outcome['producer_exit_code'],
-                                 7 if changed == 'different-exit' else None if changed in ('missing', 'missing-child') else 0)
+                                 7 if changed == 'different-exit' else None if changed in ('missing', 'missing-child', 'malformed') else 0)
                 self.assertFalse(outcome['completed'])
 
     def test_producer_failure_remains_primary_when_native_service_cleanup_is_unknown(self):
@@ -3940,11 +3943,10 @@ class CatalogSourceTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0)
             self.complete_compiler(command, 7)
             root = Path(command[2])
-            qualification.write_json(root / 'lifecycle.json',
-                {'schema': 1, 'cleanup_confirmed': False, 'exit_code': 7,
-                 'execution': {'status': 'exited', 'exit_code': 7}})
-            qualification.write_json(root / 'owned-compiler-outcome.json',
-                                     {'schema': 1, 'cleanup': {'status': 'unconfirmed'}})
+            report = json.loads((root / 'owned-service.json').read_text())
+            report['complete'] = False
+            report['source_settlement']['status'] = 'retained'
+            qualification.write_private_json(root / 'owned-service.json', report)
             return subprocess.CompletedProcess(command, 1)
         with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
             with self.assertRaises(subprocess.CalledProcessError) as failure:
@@ -4368,9 +4370,21 @@ class CompilerServicePackageTests(unittest.TestCase):
             def acquire_args(epoch='03'):
                 owner = root / ('service-' + epoch)
                 owner.mkdir(mode=0o700)
+                attempt = owner / 'compiler-service-source.attempt.json'
+                roots = record['acquisition_roots']
+                qualification.write_private_json(attempt, {
+                    'schema': 1, 'kind': 'compiler-service-package-acquisition-attempt',
+                    'attempt_id': 'ab' * 32, 'owner_directory': str(owner), 'service_epoch': epoch * 32,
+                    'source_id': record['source_id'], 'profile_id': record['profile_id'],
+                    'source_record': str(record_path), 'source_record_sha256': original_hash(record_path),
+                    'launch_configuration_sha256': original_hash(output / 'compiler-service-source.bin'),
+                    'profile_store_path': fixed, 'profile_sha256': record['profile_sha256'],
+                    'roots': [{'path': str(owner / 'package-source/gc-roots' / qualification.hashlib.sha256(value.encode()).hexdigest()),
+                               'store_path': value} for value in roots]})
                 return SimpleNamespace(record=record_path, record_sha256=original_hash(record_path),
                                        source_id=record['source_id'], profile_id=record['profile_id'],
-                                       service_epoch=epoch * 32, owner_directory=owner)
+                                       service_epoch=epoch * 32, owner_directory=owner,
+                                       attempt=attempt, attempt_sha256=original_hash(attempt))
             yield SimpleNamespace(authority=authority, record=record, record_path=record_path,
                                   output=output, acquire_args=acquire_args, commands=commands, run=run)
 
@@ -4399,8 +4413,10 @@ class CompilerServicePackageTests(unittest.TestCase):
             self.assertNotIn(bytes.fromhex(provider.record['source_id']), profile)
             acquire = provider.acquire_args()
             wire = qualification.acquire_compiler_service_source(acquire)
-            self.assertEqual(wire[:8], b'TPSRC001')
-            self.assertEqual(wire[8:40], bytes.fromhex(acquire.service_epoch))
+            self.assertEqual(wire[:8], b'TPSAO001')
+            outcome = json.loads(wire[12:])
+            self.assertEqual(outcome['status'], 'acquired')
+            self.assertEqual(outcome['attempt']['sha256'], list(bytes.fromhex(acquire.attempt_sha256)))
             receipt = json.loads((acquire.owner_directory / 'package-source/receipt.json').read_text())
             self.assertEqual((receipt['acquire_count'], receipt['retained_root_count'], receipt['unique_store_objects']), (1, 2, 2))
             self.assertEqual(receipt['nar_serialized_bytes'], 34)
@@ -4486,8 +4502,11 @@ class CompilerServicePackageTests(unittest.TestCase):
                         provider.run(command, **kwargs)
                         raise subprocess.CalledProcessError(1, command)
                 return provider.run(command, **kwargs)
-            with patch.object(subprocess, 'run', side_effect=fail_second), self.assertRaises(subprocess.CalledProcessError):
-                qualification.acquire_compiler_service_source(acquire)
+            with patch.object(subprocess, 'run', side_effect=fail_second):
+                outcome = json.loads(qualification.acquire_compiler_service_source(acquire)[12:])
+            self.assertEqual(outcome['status'], 'refused')
+            self.assertEqual(outcome['settlement'], 'preboot_released')
+            self.assertIn('status=1', outcome['primary'])
             state = json.loads((acquire.owner_directory / 'package-source/acquisition.json').read_text())
             self.assertEqual(state['status'], 'preboot-released')
             self.assertEqual(list((acquire.owner_directory / 'package-source/gc-roots').iterdir()), [])
@@ -4500,11 +4519,192 @@ class CompilerServicePackageTests(unittest.TestCase):
                 target = Path(command[command.index('--add-root') + 1])
                 target.write_text('not an issued symlink')
                 raise subprocess.CalledProcessError(1, command)
-            with patch.object(subprocess, 'run', side_effect=ambiguous), self.assertRaises(subprocess.CalledProcessError):
-                qualification.acquire_compiler_service_source(acquire)
+            with patch.object(subprocess, 'run', side_effect=ambiguous):
+                outcome = json.loads(qualification.acquire_compiler_service_source(acquire)[12:])
+            self.assertEqual(outcome['settlement'], 'retained_unknown')
+            self.assertTrue(outcome['cleanup'])
             state = json.loads((acquire.owner_directory / 'package-source/acquisition.json').read_text())
             self.assertEqual(state['status'], 'retained-unknown')
             self.assertTrue(state['roots'])
+
+    def test_failure_diagnostics_retain_exact_large_argv_and_bounded_stderr(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            command = ['/nix/bin/nix-store', '--query', *['/nix/store/' + str(index) + '-' + 'x' * 100 for index in range(200)]]
+            failure = subprocess.CalledProcessError(23, command, stderr=b'nix diagnostic' * 1000)
+            primary, publication = qualification._retain_package_failure(SimpleNamespace(owner_directory=owner), failure)
+            evidence = owner / 'package-provider.failure.json'
+            diagnostic = json.loads(evidence.read_text())
+            self.assertEqual(diagnostic['argv'], command)
+            self.assertEqual(diagnostic['returncode'], 23)
+            self.assertEqual(len(diagnostic['stderr']), 4096)
+            self.assertIn('sha256=' + qualification.sha256(evidence), primary)
+            self.assertFalse(publication)
+            self.assertLess(len(primary), 17000)
+
+    def test_provider_failure_preserves_primary_cleanup_and_publication_failures(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            original_write = qualification.write_private_json
+            def fail_command(command, **kwargs):
+                if '--add-root' in command:
+                    provider.run(command, **kwargs)
+                    raise subprocess.CalledProcessError(17, command, stderr=b'original nix stderr')
+                return provider.run(command, **kwargs)
+            def fail_publication(path, state):
+                if state.get('status') == 'retained-unknown':
+                    raise OSError('secondary publication failure')
+                original_write(path, state)
+            with patch.object(subprocess, 'run', side_effect=fail_command), patch.object(
+                    Path, 'unlink', side_effect=PermissionError('secondary cleanup failure')), patch.object(
+                    qualification, 'write_private_json', side_effect=fail_publication):
+                frame = qualification.acquire_compiler_service_source(acquire)
+            self.assertEqual(frame[:8], b'TPSAO001')
+            self.assertEqual(struct.unpack('<I', frame[8:12])[0], len(frame) - 12)
+            outcome = json.loads(frame[12:])
+            self.assertEqual(outcome['status'], 'refused')
+            self.assertEqual(outcome['settlement'], 'retained_unknown')
+            self.assertIn('status=17', outcome['primary'])
+            self.assertIn('original nix stderr', outcome['primary'])
+            self.assertNotIn('secondary', outcome['primary'])
+            self.assertIn('cleanup failure', outcome['cleanup'][0])
+            self.assertIn('publication failure', outcome['publication'][0])
+            self.assertTrue(any((acquire.owner_directory / 'package-source/gc-roots').iterdir()))
+
+    def test_visible_acquired_receipt_never_becomes_preboot_on_sync_failure(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            original_write = qualification.write_private_json
+            def fail_after_receipt(path, state):
+                original_write(path, state)
+                if path.name == 'receipt.json':
+                    raise OSError('receipt directory sync failed after rename')
+            with patch.object(qualification, 'write_private_json', side_effect=fail_after_receipt):
+                outcome = json.loads(qualification.acquire_compiler_service_source(acquire)[12:])
+            self.assertEqual(outcome['status'], 'acquired')
+            self.assertIn('sync failed', outcome['publication'][0])
+            receipt = json.loads((acquire.owner_directory / 'package-source/receipt.json').read_text())
+            self.assertEqual(receipt['status'], 'acquired')
+            self.assertTrue(all(Path(item['path']).is_symlink() for item in receipt['roots']))
+
+    def test_unobservable_receipt_publication_retains_roots(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            original_write = qualification.write_private_json
+            def fail_receipt(path, state):
+                if path.name == 'receipt.json':
+                    raise PermissionError('receipt publication inaccessible')
+                original_write(path, state)
+            with patch.object(qualification, 'write_private_json', side_effect=fail_receipt):
+                outcome = json.loads(qualification.acquire_compiler_service_source(acquire)[12:])
+            self.assertEqual(outcome['settlement'], 'retained_unknown')
+            self.assertIn('receipt publication inaccessible', outcome['primary'])
+            self.assertTrue(all(Path(item['path']).is_symlink() for item in json.loads(
+                (acquire.owner_directory / 'package-source/acquisition.json').read_text())['roots']))
+
+    def test_immutable_attempt_scope_is_checked_before_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            attempt = json.loads(acquire.attempt.read_text())
+            attempt['roots'] = attempt['roots'][:-1]
+            qualification.write_private_json(acquire.attempt, attempt)
+            acquire.attempt_sha256 = qualification.sha256(acquire.attempt)
+            outcome = json.loads(qualification.acquire_compiler_service_source(acquire)[12:])
+            self.assertEqual(outcome['settlement'], 'no_roots_issued')
+            self.assertIn('immutable attempt scope', outcome['primary'])
+            self.assertFalse((acquire.owner_directory / 'package-source').exists())
+
+    def test_changed_attempt_is_unknown_and_cannot_claim_no_roots(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            acquire.attempt.write_text('{}')
+            outcome = json.loads(qualification.acquire_compiler_service_source(acquire)[12:])
+            self.assertEqual(outcome['status'], 'unknown')
+            self.assertNotIn('settlement', outcome)
+            self.assertFalse((acquire.owner_directory / 'package-source').exists())
+
+    def partial_args(self, acquire, frame):
+        outcome = acquire.owner_directory / 'package-provider.stdout'
+        outcome.write_bytes(frame)
+        complete = acquire.owner_directory / 'compiler-service-complete-retirement.json'
+        qualification.write_private_json(complete, {
+            'schema': 2, 'kind': 'compiler-service-attempt-retirement', 'complete': True,
+            'owner_directory': str(acquire.owner_directory), 'service_epoch': acquire.service_epoch,
+            'source_id': acquire.source_id, 'profile_id': acquire.profile_id,
+            'attempt_sha256': acquire.attempt_sha256, 'provider_outcome_sha256': qualification.sha256(outcome)})
+        return SimpleNamespace(**vars(acquire), provider_outcome=outcome,
+            provider_outcome_sha256=qualification.sha256(outcome), complete_retirement=complete)
+
+    def test_preboot_cleanup_attempts_each_independent_exact_root(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary), extra_package=True) as provider:
+            acquire = provider.acquire_args()
+            def fail_closure(tools, roots):
+                raise ValueError('primary post-registration closure refusal')
+            original_metadata = qualification.nix_metadata
+            def metadata(tools, roots):
+                if str(provider.record['profile_store_path']) in roots:
+                    return fail_closure(tools, roots)
+                return original_metadata(tools, roots)
+            original_unlink = Path.unlink
+            attempts = []
+            def unlink(path, *args, **kwargs):
+                if path.parent.name == 'gc-roots':
+                    attempts.append(path)
+                    if len(attempts) == 1:
+                        raise PermissionError('first independent unlink refused')
+                return original_unlink(path, *args, **kwargs)
+            with patch.object(qualification, 'nix_metadata', side_effect=metadata), patch.object(Path, 'unlink', new=unlink):
+                outcome = json.loads(qualification.acquire_compiler_service_source(acquire)[12:])
+            self.assertEqual(outcome['settlement'], 'retained_unknown')
+            self.assertIn('primary post-registration', outcome['primary'])
+            self.assertEqual(len(attempts), len(provider.record['acquisition_roots']))
+            self.assertEqual(sum(path.is_symlink() for path in attempts), 1)
+
+    def test_matching_partial_settlement_uses_immutable_scope_not_mutable_progress(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            def fail_command(command, **kwargs):
+                if '--add-root' in command:
+                    provider.run(command, **kwargs)
+                    raise subprocess.CalledProcessError(17, command)
+                return provider.run(command, **kwargs)
+            with patch.object(subprocess, 'run', side_effect=fail_command), patch.object(
+                    Path, 'unlink', side_effect=PermissionError('controlled partial cleanup refusal')):
+                frame = qualification.acquire_compiler_service_source(acquire)
+            self.assertEqual(json.loads(frame[12:])['settlement'], 'retained_unknown')
+            partial = self.partial_args(acquire, frame)
+            unrelated = acquire.owner_directory / 'unrelated'
+            unrelated.write_text('must survive')
+            qualification.write_private_json(acquire.owner_directory / 'package-source/acquisition.json', {
+                'status': 'acquiring', 'roots': [{'path': str(unrelated), 'store_path': '/unknown'}]})
+            settled = qualification.settle_compiler_service_attempt(partial)
+            self.assertEqual(json.loads(settled.read_text())['status'], 'preboot-released')
+            self.assertEqual(list((acquire.owner_directory / 'package-source/gc-roots').iterdir()), [])
+            self.assertEqual(unrelated.read_text(), 'must survive')
+            self.assertEqual(qualification.settle_compiler_service_attempt(partial), settled)
+
+    def test_partial_settlement_rejects_crossed_retirement_and_issued_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
+            acquire = provider.acquire_args()
+            def fail_command(command, **kwargs):
+                if '--add-root' in command:
+                    provider.run(command, **kwargs)
+                    raise subprocess.CalledProcessError(17, command)
+                return provider.run(command, **kwargs)
+            with patch.object(subprocess, 'run', side_effect=fail_command), patch.object(
+                    Path, 'unlink', side_effect=PermissionError('controlled partial cleanup refusal')):
+                frame = qualification.acquire_compiler_service_source(acquire)
+            partial = self.partial_args(acquire, frame)
+            complete = json.loads(partial.complete_retirement.read_text())
+            qualification.write_private_json(partial.complete_retirement, {**complete, 'service_epoch': '09' * 32})
+            with self.assertRaisesRegex(ValueError, 'matching native retirement'):
+                qualification.settle_compiler_service_attempt(partial)
+            self.assertTrue(any((acquire.owner_directory / 'package-source/gc-roots').iterdir()))
+            qualification.write_private_json(partial.complete_retirement, complete)
+            (acquire.owner_directory / 'package-source/receipt.json').write_text('ambiguous issued receipt')
+            with self.assertRaisesRegex(ValueError, 'issued or ambiguous acquired receipt'):
+                qualification.settle_compiler_service_attempt(partial)
+            self.assertTrue(any((acquire.owner_directory / 'package-source/gc-roots').iterdir()))
 
     def test_retirement_other_epoch_refuses_before_root_removal(self):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
@@ -4599,8 +4799,9 @@ class CompilerServicePackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, self.declared_provider(Path(temporary)) as provider:
             acquire = provider.acquire_args()
             (provider.output / 'compiler-package-profile-v1').write_bytes(b'changed')
-            with self.assertRaisesRegex(ValueError, 'input changed: profile_path'):
-                qualification.acquire_compiler_service_source(acquire)
+            outcome = json.loads(qualification.acquire_compiler_service_source(acquire)[12:])
+            self.assertIn('input changed: profile_path', outcome['primary'])
+            self.assertEqual(outcome['settlement'], 'no_roots_issued')
             self.assertFalse((acquire.owner_directory / 'package-source').exists())
 
     def test_profile_reader_rejects_counts_duplicates_trailing_and_budget(self):
@@ -4659,6 +4860,103 @@ class CompilerServicePackageTests(unittest.TestCase):
                 qualification._package_nix_roots(root / '..')
             with self.assertRaisesRegex(ValueError, 'non-directory'):
                 qualification._package_nix_roots(root / 'file/../settings')
+
+
+
+class OwnedServiceReportTests(unittest.TestCase):
+    def report(self, owner):
+        def observation(status, code=None):
+            return {'status': status, 'exit_code': code, 'success': code == 0 if code is not None else None,
+                    'signal': None, 'failure': None}
+        return {'schema': 2, 'kind': 'owned-compiler-service', 'owner_directory': str(owner),
+                'operation': '01' * 32, 'daemon_epoch': '02' * 32, 'daemon_pid': 42,
+                'producer': '03' * 32, 'endpoint': '04' * 96, 'socket_path': str(owner / 'socket'),
+                'action': observation('exited', 0), 'acquisition': {'status': 'not_configured'},
+                'daemon_reap': observation('reaped', 0), 'service_terminal': {
+                    'epoch': [2] * 32, 'workers_retired': True, 'socket_retired': True, 'failures': []},
+                'source_settlement': observation('not_configured'), 'artifact_retention': observation('removed'),
+                'settlement_failures': [], 'publication_failures': [], 'complete': True}
+
+    def test_schema2_cleanup_and_workload_are_independent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            report = self.report(owner)
+            report['action'].update(exit_code=19, success=False)
+            report['daemon_reap'].update(exit_code=1, success=False)
+            report['service_terminal']['failures'] = ['startup action refused']
+            qualification.write_private_json(owner / 'owned-service.json', report)
+            result = qualification.catalog_compiler_settlement(owner, 19)
+            self.assertEqual(result['status'], 'confirmed')
+            self.assertEqual(result['producer_exit_code'], 19)
+            self.assertTrue(result['invocation_result_consistent'])
+
+    def test_operation_bytes_follow_native_codec_without_reserved_zero(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            report = self.report(owner)
+            report['operation'] = '00' * 32
+            self.assertEqual(qualification.validate_owned_service_report(report, owner), report)
+            for invalid in ('0' * 63, 'g' * 64, [], None):
+                report['operation'] = invalid
+                with self.subTest(operation=invalid), self.assertRaises(ValueError):
+                    qualification.validate_owned_service_report(report, owner)
+
+    def test_schema1_pair_cannot_qualify_new_invocation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            qualification.write_json(owner / 'lifecycle.json', {'schema': 1, 'exit_code': 0, 'cleanup_confirmed': True})
+            qualification.write_json(owner / 'owned-compiler-outcome.json', {'schema': 1, 'cleanup': {'status': 'confirmed'}})
+            self.assertEqual(qualification.catalog_compiler_settlement(owner, 0)['status'], 'unconfirmed')
+            old = self.report(owner)
+            old['schema'] = 1
+            qualification.write_json(owner / 'owned-service.json', old)
+            self.assertEqual(qualification.catalog_compiler_settlement(owner, 0)['status'], 'unconfirmed')
+
+    def test_report_reader_refuses_symlinked_report_and_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            actual = owner / 'report.json'
+            qualification.write_private_json(actual, self.report(owner))
+            (owner / 'owned-service.json').symlink_to(actual)
+            with self.assertRaises((ValueError, OSError)):
+                qualification.read_owned_service_report(owner)
+            other = owner / 'alias'
+            other.symlink_to(owner, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                qualification.read_owned_service_report(other)
+
+    def test_crossed_or_incomplete_observation_cannot_claim_completion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            mutations = [lambda r: r.update(owner_directory=str(owner / 'other')),
+                         lambda r: r['service_terminal'].update(epoch=[9] * 32),
+                         lambda r: r['service_terminal'].update(workers_retired=False),
+                         lambda r: r['daemon_reap'].update(status='unconfirmed'),
+                         lambda r: r['publication_failures'].append('publication failed'),
+                         lambda r: r['action'].update(status='settled'),
+                         lambda r: r['source_settlement'].update(status='settled'),
+                         lambda r: r['acquisition'].update(status=[]),
+                         lambda r: r.update(acquisition={'status': 'unknown', 'attempt': None, 'failure': 'provider truncated'})]
+            for mutate in mutations:
+                report = self.report(owner)
+                mutate(report)
+                with self.subTest(report=report), self.assertRaises(ValueError):
+                    qualification.validate_owned_service_report(report, owner)
+
+    def test_acquired_publication_failure_is_preserved_without_confirmation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            report = self.report(owner)
+            def reference(path):
+                return {'path': str(path), 'sha256': [3] * 32}
+            report['acquisition'] = {'status': 'acquired', 'attempt': reference(owner / 'compiler-service-source.attempt.json'),
+                'receipt': reference(owner / 'package-source/receipt.json'),
+                'profile': reference(Path('/nix/store/' + 'a' * 32 + '-profile')), 'publication': ['receipt fsync failed']}
+            report['source_settlement']['status'] = 'settled'
+            with self.assertRaises(ValueError):
+                qualification.validate_owned_service_report(report, owner)
+            report['complete'] = False
+            self.assertEqual(qualification.validate_owned_service_report(report, owner), report)
 
 
 if __name__ == '__main__':

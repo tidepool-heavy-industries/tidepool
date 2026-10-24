@@ -1,9 +1,11 @@
 //! The existing owned daemon's retained package source and authenticated launcher.
 
+use crate::service::{AcquisitionObservation, CompleteServiceRetirement, ServiceReference};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,6 +24,9 @@ pub(crate) const BOOT_ENV: [&str; 6] = [
     "TIDEPOOL_COMPILER_WORKER_INSTANCE",
 ];
 const LIMIT: usize = 16 * 1024 * 1024;
+const ATTEMPT: &str = "compiler-service-source.attempt.json";
+const PROVIDER_COMPLETE: &str = "compiler-service-source.provider-complete.bin";
+const ACQUIRED: &str = "compiler-service-source.acquired.bin";
 const HANDOFF: &str = "compiler-service-source.receipt.bin";
 const FINALIZATION: &str = "compiler-service-source.finalization.bin";
 const FINALIZED: &str = "compiler-service-source.finalized.bin";
@@ -238,54 +243,310 @@ impl ConfiguredSource {
         command
     }
 
+    fn attempt(&self, epoch: [u8; 32], owner: &Path) -> io::Result<ServiceReference> {
+        if std::fs::canonicalize(owner)? != owner {
+            return Err(invalid("acquisition owner is not canonical"));
+        }
+        let record_bytes = read_bounded(&File::open(&self.record)?)?;
+        if digest(&record_bytes) != self.record_sha {
+            return Err(invalid("acquisition source record changed"));
+        }
+        let record: serde_json::Value = serde_json::from_slice(&record_bytes)?;
+        let text = |key: &str| {
+            record[key]
+                .as_str()
+                .ok_or_else(|| invalid(format!("missing source {key}")))
+        };
+        if record["schema"] != 2 || record["kind"] != "compiler-service-package-source" {
+            return Err(invalid("unsupported declared acquisition scope version"));
+        }
+        if text("source_id")? != crate::endpoint::hex(&self.source)
+            || text("profile_id")? != crate::endpoint::hex(&self.profile)
+        {
+            return Err(invalid("acquisition record association differs"));
+        }
+        if Path::new(text("provider_guard_store_path")?) != self.python_object {
+            return Err(invalid(
+                "declared provider guard differs from authenticated Python",
+            ));
+        }
+        let objects = record["acquisition_roots"]
+            .as_array()
+            .ok_or_else(|| invalid("missing declared exact acquisition scope"))?;
+        if objects.is_empty() {
+            return Err(invalid("empty declared acquisition scope"));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let roots = objects.iter().map(|value| {
+            let value=value.as_str().ok_or_else(||invalid("invalid declared acquisition root"))?;
+            if !seen.insert(value) {return Err(invalid("duplicate declared acquisition root"));}
+            let path = Path::new(value);
+            if nix_object(path)? != path { return Err(invalid("acquisition root is not a top-level Nix object")); }
+            Ok(serde_json::json!({"path": owner.join("package-source/gc-roots").join(crate::endpoint::hex(&digest(value.as_bytes()))), "store_path":value}))
+        }).collect::<io::Result<Vec<_>>>()?;
+        let mut nonce = [0; 32];
+        File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+        let attempt = serde_json::json!({"schema":1,"kind":"compiler-service-package-acquisition-attempt",
+            "attempt_id":crate::endpoint::hex(&nonce),"owner_directory":owner,
+            "service_epoch":crate::endpoint::hex(&epoch),"source_id":crate::endpoint::hex(&self.source),
+            "profile_id":crate::endpoint::hex(&self.profile),"source_record":self.record,
+            "source_record_sha256":crate::endpoint::hex(&self.record_sha),
+            "launch_configuration_sha256":crate::endpoint::hex(&self.launch_sha),
+            "profile_store_path":text("profile_store_path")?,"profile_sha256":text("profile_sha256")?,"roots":roots});
+        let bytes = serde_json::to_vec(&attempt)?;
+        let path = owner.join(ATTEMPT);
+        // This fresh owner's attempt is never replaced by provider progress.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        File::open(owner)?.sync_all()?;
+        Ok(ServiceReference {
+            path,
+            sha256: digest(&bytes),
+        })
+    }
+
     pub(crate) fn acquire(
         self: &Arc<Self>,
         epoch: [u8; 32],
-        owner: crate::frontend::OwnedServiceStartup,
-    ) -> io::Result<Arc<ServicePackageSource>> {
-        for key in ["LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"] {
-            if std::env::var_os(key).is_some_and(|value| !value.is_empty()) {
+        owner: Arc<crate::frontend::OwnedServiceStartup>,
+    ) -> Result<Arc<ServicePackageSource>, AcquisitionFailure> {
+        let mut observation = AcquisitionObservation::Unknown {
+            attempt: None,
+            failure: "provider not started".into(),
+        };
+        let result = (|| -> io::Result<Arc<ServicePackageSource>> {
+            let attempt = self.attempt(epoch, owner.directory())?;
+            observation = AcquisitionObservation::Unknown {
+                attempt: Some(attempt.clone()),
+                failure: "provider outcome not validated".into(),
+            };
+            for key in ["LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"] {
+                if std::env::var_os(key).is_some_and(|value| !value.is_empty()) {
+                    return Err(invalid(format!(
+                        "rooted Nix-only service refuses ambient {key}"
+                    )));
+                }
+            }
+            // File-backed capture bounds native materialization even for a broken provider.
+            let stdout_path = owner.directory().join("package-provider.stdout");
+            let stderr_path = owner.directory().join("package-provider.stderr");
+            let capture = |path: &Path| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+            };
+            let mut command = self.command();
+            command
+                .arg("acquire-compiler-service-source")
+                .arg("--record")
+                .arg(&self.record)
+                .arg("--record-sha256")
+                .arg(crate::endpoint::hex(&self.record_sha))
+                .arg("--source-id")
+                .arg(crate::endpoint::hex(&self.source))
+                .arg("--profile-id")
+                .arg(crate::endpoint::hex(&self.profile))
+                .arg("--service-epoch")
+                .arg(crate::endpoint::hex(&epoch))
+                .arg("--owner-directory")
+                .arg(owner.directory())
+                .arg("--attempt")
+                .arg(&attempt.path)
+                .arg("--attempt-sha256")
+                .arg(crate::endpoint::hex(&attempt.sha256))
+                .stdout(capture(&stdout_path)?)
+                .stderr(capture(&stderr_path)?);
+            let status = provider_status(&mut command, owner.deadline, true)?;
+            let bytes = read_bounded(&File::open(&stdout_path)?)?;
+            let parsed = decode_provider_frame(&bytes)?;
+            self.validate_outcome(&parsed, &attempt, epoch, owner.directory())?;
+            if !status.success() {
                 return Err(invalid(format!(
-                    "rooted Nix-only service refuses ambient {key}"
+                    "compiler source provider exit/frame mismatch: {status}; stderr retained at {}",
+                    stderr_path.display()
                 )));
             }
+            observation = parsed;
+            let mut completion = b"TPSPC001".to_vec();
+            for hash in [epoch, attempt.sha256, digest(&bytes)] {
+                completion.extend_from_slice(&hash);
+            }
+            if let Err(publication_error) = tidepool_atomic_write::write_durable(
+                &owner.directory().join(PROVIDER_COMPLETE),
+                &completion,
+            ) {
+                if let AcquisitionObservation::Refused {
+                    primary,
+                    publication,
+                    ..
+                } = &mut observation
+                {
+                    publication.push(publication_error.to_string());
+                    return Err(invalid(primary.clone()));
+                }
+                return Err(io::Error::other(publication_error));
+            }
+            let AcquisitionObservation::Acquired {
+                receipt, profile, ..
+            } = &observation
+            else {
+                return Err(invalid(match &observation {
+                    AcquisitionObservation::Refused { primary, .. } => primary.clone(),
+                    _ => "provider did not acquire source".into(),
+                }));
+            };
+            let carrier = self.receipt_carrier(epoch, receipt, profile)?;
+            // Retain validated receipt metadata before opening the profile or publishing HANDOFF.
+            tidepool_atomic_write::write_durable(&owner.directory().join(ACQUIRED), &carrier)
+                .map_err(io::Error::other)?;
+            if let AcquisitionObservation::Acquired { publication, .. } = &observation {
+                if !publication.is_empty() {
+                    return Err(invalid(format!(
+                        "acquired receipt publication incomplete: {}",
+                        publication.join("; ")
+                    )));
+                }
+            }
+            let mut source = self.decode_receipt(&carrier, epoch)?;
+            source.acquisition = observation.clone();
+            source._owner = Some(Arc::clone(&owner));
+            tidepool_atomic_write::write_durable(&owner.directory().join(HANDOFF), &carrier)
+                .map_err(io::Error::other)?;
+            Ok(Arc::new(source))
+        })();
+        result.map_err(|error| {
+            if let AcquisitionObservation::Unknown { failure, .. } = &mut observation {
+                *failure = error.to_string();
+            }
+            AcquisitionFailure { observation, error }
+        })
+    }
+
+    fn validate_outcome(
+        &self,
+        outcome: &AcquisitionObservation,
+        attempt: &ServiceReference,
+        epoch: [u8; 32],
+        owner: &Path,
+    ) -> io::Result<()> {
+        if attempt.path != owner.join(ATTEMPT) {
+            return Err(invalid("source attempt belongs to another owner"));
         }
-        let output = self
-            .command()
-            .arg("acquire-compiler-service-source")
-            .arg("--record")
-            .arg(&self.record)
-            .arg("--record-sha256")
-            .arg(crate::endpoint::hex(&self.record_sha))
-            .arg("--source-id")
-            .arg(crate::endpoint::hex(&self.source))
-            .arg("--profile-id")
-            .arg(crate::endpoint::hex(&self.profile))
-            .arg("--service-epoch")
-            .arg(crate::endpoint::hex(&epoch))
-            .arg("--owner-directory")
-            .arg(owner.directory())
-            .output()?;
-        if !output.status.success() {
-            return Err(invalid(format!(
-                "compiler source acquisition failed: {}; retained owner {}",
-                output.status,
-                owner.directory().display()
-            )));
+        let attempt_bytes = read_bounded(&File::open(&attempt.path)?)?;
+        if digest(&attempt_bytes) != attempt.sha256 {
+            return Err(invalid("source attempt digest differs"));
         }
-        let mut source = self.decode_receipt(&output.stdout, epoch)?;
-        source._owner = Some(Arc::new(owner));
-        tidepool_atomic_write::write_durable(
-            &source
-                ._owner
-                .as_ref()
-                .expect("actual owner")
-                .directory()
-                .join(HANDOFF),
-            &output.stdout,
-        )
-        .map_err(io::Error::other)?;
-        Ok(Arc::new(source))
+        let plan: serde_json::Value = serde_json::from_slice(&attempt_bytes)?;
+        if plan["schema"] != 1
+            || plan["kind"] != "compiler-service-package-acquisition-attempt"
+            || plan["owner_directory"] != owner.to_string_lossy().as_ref()
+            || plan["service_epoch"] != crate::endpoint::hex(&epoch)
+            || plan["source_id"] != crate::endpoint::hex(&self.source)
+            || plan["profile_id"] != crate::endpoint::hex(&self.profile)
+            || plan["launch_configuration_sha256"] != crate::endpoint::hex(&self.launch_sha)
+            || plan["source_record_sha256"] != crate::endpoint::hex(&self.record_sha)
+        {
+            return Err(invalid("source attempt association differs"));
+        }
+        match outcome {
+            AcquisitionObservation::Acquired {
+                attempt: actual,
+                receipt,
+                profile,
+                ..
+            } => {
+                if actual != attempt || receipt.path != owner.join("package-source/receipt.json") {
+                    return Err(invalid("provider acquired another attempt"));
+                }
+                let bytes = read_bounded(&File::open(&receipt.path)?)?;
+                if digest(&bytes) != receipt.sha256 {
+                    return Err(invalid("provider receipt digest differs"));
+                }
+                let state: serde_json::Value = serde_json::from_slice(&bytes)?;
+                if state["schema"] != 2
+                    || state["kind"] != "compiler-service-package-acquisition"
+                    || state["status"] != "acquired"
+                    || state["service_epoch"] != crate::endpoint::hex(&epoch)
+                    || state["source_id"] != crate::endpoint::hex(&self.source)
+                    || state["profile_id"] != crate::endpoint::hex(&self.profile)
+                    || state["attempt_sha256"] != crate::endpoint::hex(&attempt.sha256)
+                    || state["source_record_sha256"] != crate::endpoint::hex(&self.record_sha)
+                    || state["provider_guard_store_path"]
+                        != self.python_object.to_string_lossy().as_ref()
+                    || state["acquire_count"] != 1
+                    || state["release_count"] != 0
+                    || profile.path
+                        != PathBuf::from(
+                            plan["profile_store_path"]
+                                .as_str()
+                                .ok_or_else(|| invalid("missing attempt profile"))?,
+                        )
+                    || crate::endpoint::hex(&profile.sha256) != plan["profile_sha256"]
+                {
+                    return Err(invalid("provider receipt association differs"));
+                }
+                let roots = state["roots"]
+                    .as_array()
+                    .ok_or_else(|| invalid("missing receipt roots"))?;
+                if roots.iter().any(|item| item["state"] != "registered") {
+                    return Err(invalid(
+                        "provider acquired receipt contains unregistered roots",
+                    ));
+                }
+                let exact=roots.iter().map(|item|serde_json::json!({"path":item["path"],"store_path":item["store_path"]})).collect::<Vec<_>>();
+                if serde_json::Value::Array(exact) != plan["roots"] {
+                    return Err(invalid("provider receipt scope differs"));
+                }
+                Ok(())
+            }
+            AcquisitionObservation::Refused {
+                attempt: actual, ..
+            } if actual == attempt => Ok(()),
+            _ => Err(invalid("invalid provider acquisition outcome")),
+        }
+    }
+
+    fn receipt_carrier(
+        &self,
+        epoch: [u8; 32],
+        receipt: &ServiceReference,
+        profile: &ServiceReference,
+    ) -> io::Result<Vec<u8>> {
+        let mut bytes = b"TPSRC001".to_vec();
+        for hash in [epoch, self.source, self.profile] {
+            bytes.extend_from_slice(&hash);
+        }
+        encode_path(&mut bytes, &receipt.path)?;
+        bytes.extend_from_slice(&receipt.sha256);
+        encode_path(&mut bytes, &profile.path)?;
+        bytes.extend_from_slice(&profile.sha256);
+        Ok(bytes)
+    }
+
+    fn retained_carrier(&self, owner: &Path, epoch: [u8; 32]) -> io::Result<Vec<u8>> {
+        let attempt_path = owner.join(ATTEMPT);
+        let attempt_bytes = read_bounded(&File::open(&attempt_path)?)?;
+        let attempt = ServiceReference {
+            path: attempt_path,
+            sha256: digest(&attempt_bytes),
+        };
+        let bytes = read_bounded(&File::open(owner.join("package-provider.stdout"))?)?;
+        let outcome = decode_provider_frame(&bytes)?;
+        self.validate_outcome(&outcome, &attempt, epoch, owner)?;
+        let AcquisitionObservation::Acquired {
+            receipt, profile, ..
+        } = outcome
+        else {
+            return Err(invalid("retained provider did not issue acquired receipt"));
+        };
+        self.receipt_carrier(epoch, &receipt, &profile)
     }
 
     fn decode_receipt(
@@ -330,6 +591,7 @@ impl ConfiguredSource {
             profile_path,
             profile_sha,
             commitment: digest(facts),
+            acquisition: AcquisitionObservation::NotConfigured,
             _owner: None,
         })
     }
@@ -368,9 +630,101 @@ impl ConfiguredSource {
     pub(crate) fn release_after_complete(
         self: &Arc<Self>,
         owner: &Path,
-        epoch: [u8; 32],
+        retirement: &CompleteServiceRetirement,
     ) -> io::Result<()> {
-        let bytes = read_bounded(&File::open(owner.join(HANDOFF))?)?;
+        if retirement.owner() != owner {
+            return Err(invalid("source retirement owner differs"));
+        }
+        let epoch = retirement.epoch();
+        // Acquired metadata remains usable after profile validation or HANDOFF publication failed.
+        let attempt_path = owner.join(ATTEMPT);
+        let attempt_bytes = read_bounded(&File::open(&attempt_path)?)?;
+        let attempt = ServiceReference {
+            path: attempt_path,
+            sha256: digest(&attempt_bytes),
+        };
+        let provider_bytes = read_bounded(&File::open(owner.join("package-provider.stdout"))?)?;
+        let complete = read_bounded(&File::open(owner.join(PROVIDER_COMPLETE))?)?;
+        let mut expected = b"TPSPC001".to_vec();
+        for hash in [epoch, attempt.sha256, digest(&provider_bytes)] {
+            expected.extend_from_slice(&hash);
+        }
+        if complete != expected {
+            return Err(invalid(
+                "provider successful completion differs from retained attempt/outcome",
+            ));
+        }
+        let outcome = decode_provider_frame(&provider_bytes)?;
+        self.validate_outcome(&outcome, &attempt, epoch, owner)?;
+        match outcome {
+            AcquisitionObservation::Refused {
+                settlement:
+                    crate::service::SourceSettlement::NoRootsIssued
+                    | crate::service::SourceSettlement::PrebootReleased,
+                ..
+            } => return Ok(()),
+            AcquisitionObservation::Refused {
+                settlement: crate::service::SourceSettlement::RetainedUnknown,
+                ..
+            } => {
+                let json = serde_json::json!({"schema":2,"kind":"compiler-service-attempt-retirement","complete":true,
+                    "owner_directory":owner,"service_epoch":crate::endpoint::hex(&epoch),
+                    "source_id":crate::endpoint::hex(&self.source),"profile_id":crate::endpoint::hex(&self.profile),
+                    "attempt_sha256":crate::endpoint::hex(&attempt.sha256),"provider_outcome_sha256":crate::endpoint::hex(&digest(&provider_bytes))});
+                let complete_path = owner.join(COMPLETION);
+                tidepool_atomic_write::write_durable(&complete_path, &serde_json::to_vec(&json)?)
+                    .map_err(io::Error::other)?;
+                let mut command = self.command();
+                command
+                    .arg("settle-compiler-service-attempt")
+                    .arg("--record")
+                    .arg(&self.record)
+                    .arg("--record-sha256")
+                    .arg(crate::endpoint::hex(&self.record_sha))
+                    .arg("--source-id")
+                    .arg(crate::endpoint::hex(&self.source))
+                    .arg("--profile-id")
+                    .arg(crate::endpoint::hex(&self.profile))
+                    .arg("--service-epoch")
+                    .arg(crate::endpoint::hex(&epoch))
+                    .arg("--owner-directory")
+                    .arg(owner)
+                    .arg("--attempt")
+                    .arg(&attempt.path)
+                    .arg("--attempt-sha256")
+                    .arg(crate::endpoint::hex(&attempt.sha256))
+                    .arg("--provider-outcome")
+                    .arg(owner.join("package-provider.stdout"))
+                    .arg("--provider-outcome-sha256")
+                    .arg(crate::endpoint::hex(&digest(&provider_bytes)))
+                    .arg("--complete-retirement")
+                    .arg(complete_path)
+                    .stdout(Stdio::inherit());
+                let status = provider_status(
+                    &mut command,
+                    std::time::Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
+                    false,
+                )?;
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(invalid(format!(
+                        "partial source settlement failed: {status}"
+                    )))
+                };
+            }
+            AcquisitionObservation::Unknown { .. } | AcquisitionObservation::NotConfigured => {
+                return Err(invalid("source acquisition settlement remains unknown"))
+            }
+            AcquisitionObservation::Acquired { .. } => {}
+        }
+        let bytes = self.retained_carrier(owner, epoch)?;
+        // The exact provider output and attempt suffice even when HANDOFF was
+        // never published. This durable native carrier supports final guard recovery.
+        tidepool_atomic_write::write_durable(&owner.join(ACQUIRED), &bytes)
+            .map_err(io::Error::other)?;
+        tidepool_atomic_write::write_durable(&owner.join(HANDOFF), &bytes)
+            .map_err(io::Error::other)?;
         let source = self.decode_receipt_metadata(&bytes, epoch)?;
         if source.receipt != owner.join("package-source/receipt.json") {
             return Err(invalid("service receipt is outside the exact owner"));
@@ -384,8 +738,8 @@ impl ConfiguredSource {
         let json = format!("{{\"schema\":1,\"kind\":\"compiler-service-complete-retirement\",\"service_epoch\":\"{}\",\"source_id\":\"{}\",\"profile_id\":\"{}\",\"receipt_sha256\":\"{}\",\"complete\":true}}\n",crate::endpoint::hex(&epoch),crate::endpoint::hex(&self.source),crate::endpoint::hex(&self.profile),crate::endpoint::hex(&source.receipt_sha));
         tidepool_atomic_write::write_durable(&completion, json.as_bytes())
             .map_err(io::Error::other)?;
-        let status = self
-            .command()
+        let mut command = self.command();
+        command
             .arg("release-compiler-service-source")
             .arg("--receipt")
             .arg(&source.receipt)
@@ -393,8 +747,12 @@ impl ConfiguredSource {
             .arg(crate::endpoint::hex(&source.receipt_sha))
             .arg("--complete-retirement")
             .arg(&completion)
-            .stdout(Stdio::inherit())
-            .status()?;
+            .stdout(Stdio::inherit());
+        let status = provider_status(
+            &mut command,
+            std::time::Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT,
+            false,
+        )?;
         if !status.success() {
             return Err(invalid(format!(
                 "service package source release failed: {status}"
@@ -435,6 +793,95 @@ impl ConfiguredSource {
             .map_err(io::Error::other)?;
         finish_retirement(owner)
     }
+}
+
+fn provider_status(
+    command: &mut Command,
+    deadline: std::time::Instant,
+    observe_cancellation: bool,
+) -> io::Result<std::process::ExitStatus> {
+    if observe_cancellation {
+        crate::compiler_host_checkpoint()?;
+    }
+    if std::time::Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "provider startup deadline expired before spawn",
+        ));
+    }
+    let mut child = crate::process::OwnedChild(command.spawn()?);
+    let result = (|| loop {
+        if observe_cancellation {
+            crate::compiler_host_checkpoint()?;
+        }
+        if std::time::Instant::now() >= deadline {
+            break Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "provider absolute deadline expired",
+            ));
+        }
+        match child.observe()? {
+            Some(reaped) => break Ok(reaped.status()),
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    })();
+    match result {
+        Ok(status) => Ok(status),
+        Err(primary) => {
+            let (kill, reap) =
+                child.terminate(std::time::Instant::now() + crate::endpoint::DIRECT_CLOSE_TIMEOUT);
+            let cleanup = match reap {
+                crate::CompilerWorkerRetirement::Reaped(_) => "reaped".to_owned(),
+                crate::CompilerWorkerRetirement::WaitUnconfirmed(cause) => {
+                    format!("reap unconfirmed: {cause:?}")
+                }
+            };
+            Err(io::Error::new(
+                primary.kind(),
+                format!("{primary}; provider termination: {kill:?}; {cleanup}"),
+            ))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct AcquisitionFailure {
+    observation: AcquisitionObservation,
+    pub(crate) error: io::Error,
+}
+impl AcquisitionFailure {
+    pub(crate) fn observation(&self) -> AcquisitionObservation {
+        self.observation.clone()
+    }
+}
+impl std::fmt::Display for AcquisitionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+impl std::error::Error for AcquisitionFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+fn encode_path(bytes: &mut Vec<u8>, path: &Path) -> io::Result<()> {
+    let value = path.as_os_str().as_encoded_bytes();
+    bytes.extend_from_slice(&u32::try_from(value.len()).map_err(invalid)?.to_le_bytes());
+    bytes.extend_from_slice(value);
+    Ok(())
+}
+fn decode_provider_frame(bytes: &[u8]) -> io::Result<AcquisitionObservation> {
+    let mut decoder = Decoder(bytes);
+    if decoder.take(8)? != b"TPSAO001" {
+        return Err(invalid("unsupported provider outcome version"));
+    }
+    let payload = decoder.frame()?;
+    if payload.len() > 65536 {
+        return Err(invalid("provider outcome exceeds 64 KiB"));
+    }
+    let result = serde_json::from_slice(payload)?;
+    decoder.end()?;
+    Ok(result)
 }
 
 fn nix_object(path: &Path) -> io::Result<PathBuf> {
@@ -564,10 +1011,14 @@ pub(crate) struct ServicePackageSource {
     profile_path: PathBuf,
     profile_sha: [u8; 32],
     commitment: [u8; 32],
+    acquisition: AcquisitionObservation,
     _owner: Option<Arc<crate::frontend::OwnedServiceStartup>>,
 }
 
 impl ServicePackageSource {
+    pub(crate) fn acquisition_observation(&self) -> AcquisitionObservation {
+        self.acquisition.clone()
+    }
     pub(crate) fn configure_worker(
         &self,
         command: &mut Command,
@@ -771,6 +1222,144 @@ mod tests {
         assert!(capture_provider(&original, &digest(b"print('captured')\n")).is_err());
     }
 
+    fn configured_attempt(owner: &Path) -> (Arc<ConfiguredSource>, ServiceReference) {
+        let record = owner.join("source.json");
+        let bytes=serde_json::to_vec(&serde_json::json!({
+            "schema":2,"kind":"compiler-service-package-source",
+            "source_id":crate::endpoint::hex(&[2;32]),"profile_id":crate::endpoint::hex(&[3;32]),
+            "provider_guard_store_path":"/nix/store/00000000000000000000000000000000-python",
+            "profile_store_path":"/nix/store/11111111111111111111111111111111-profile",
+            "profile_sha256":crate::endpoint::hex(&[7;32]),
+            "acquisition_roots":["/nix/store/00000000000000000000000000000000-python","/nix/store/11111111111111111111111111111111-profile"]
+        })).unwrap();
+        std::fs::write(&record, &bytes).unwrap();
+        let config = Arc::new(ConfiguredSource {
+            python: File::open("/dev/null").unwrap(),
+            python_object: "/nix/store/00000000000000000000000000000000-python".into(),
+            provider: File::open("/dev/null").unwrap(),
+            record,
+            record_sha: digest(&bytes),
+            source: [2; 32],
+            profile: [3; 32],
+            launch_sha: [4; 32],
+        });
+        let attempt = config.attempt([5; 32], owner).unwrap();
+        (config, attempt)
+    }
+
+    fn provider_frame(outcome: &AcquisitionObservation) -> Vec<u8> {
+        let payload = serde_json::to_vec(outcome).unwrap();
+        let mut bytes = b"TPSAO001".to_vec();
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend(payload);
+        bytes
+    }
+
+    #[test]
+    fn attempt_is_durable_exact_and_cannot_be_reissued() {
+        let owner = tempfile::tempdir().unwrap();
+        let (config, attempt) = configured_attempt(owner.path());
+        let bytes = std::fs::read(&attempt.path).unwrap();
+        assert_eq!(digest(&bytes), attempt.sha256);
+        let plan: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(plan["roots"].as_array().unwrap().len(), 2);
+        assert!(!owner.path().join("package-source").exists());
+        assert!(config.attempt([5; 32], owner.path()).is_err());
+        assert_eq!(std::fs::read(attempt.path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn provider_frame_rejects_every_truncation_trailing_and_oversize() {
+        let owner = tempfile::tempdir().unwrap();
+        let (_, attempt) = configured_attempt(owner.path());
+        let refused = AcquisitionObservation::Refused {
+            attempt,
+            primary: "exact Nix failure".into(),
+            settlement: crate::service::SourceSettlement::PrebootReleased,
+            cleanup: vec!["independent cleanup".into()],
+            publication: vec!["independent publication".into()],
+        };
+        let bytes = provider_frame(&refused);
+        assert_eq!(decode_provider_frame(&bytes).unwrap(), refused);
+        for end in 0..bytes.len() {
+            assert!(
+                decode_provider_frame(&bytes[..end]).is_err(),
+                "accepted prefix {end}"
+            );
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode_provider_frame(&trailing).is_err());
+        let mut huge = b"TPSAO001".to_vec();
+        huge.extend_from_slice(&65537u32.to_le_bytes());
+        huge.extend(vec![0; 65537]);
+        assert!(decode_provider_frame(&huge).is_err());
+    }
+
+    #[test]
+    fn exact_attempt_and_receipt_survive_missing_handoff_and_profile_failure() {
+        let owner = tempfile::tempdir().unwrap();
+        let (config, attempt) = configured_attempt(owner.path());
+        let plan: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&attempt.path).unwrap()).unwrap();
+        let receipt_path = owner.path().join("package-source/receipt.json");
+        std::fs::create_dir(receipt_path.parent().unwrap()).unwrap();
+        let roots=plan["roots"].as_array().unwrap().iter().map(|item|serde_json::json!({"path":item["path"],"store_path":item["store_path"],"state":"registered"})).collect::<Vec<_>>();
+        let receipt_bytes = serde_json::to_vec(&serde_json::json!({
+            "schema":2,"kind":"compiler-service-package-acquisition","status":"acquired",
+            "service_epoch":crate::endpoint::hex(&[5;32]),
+            "source_id":crate::endpoint::hex(&[2;32]),"profile_id":crate::endpoint::hex(&[3;32]),
+            "attempt_sha256":crate::endpoint::hex(&attempt.sha256),"source_record_sha256":crate::endpoint::hex(&config.record_sha),
+            "provider_guard_store_path":config.python_object,"acquire_count":1,"release_count":0,"roots":roots
+        })).unwrap();
+        std::fs::write(&receipt_path, &receipt_bytes).unwrap();
+        let acquired = AcquisitionObservation::Acquired {
+            attempt: attempt.clone(),
+            receipt: ServiceReference {
+                path: receipt_path,
+                sha256: digest(&receipt_bytes),
+            },
+            profile: ServiceReference {
+                path: plan["profile_store_path"].as_str().unwrap().into(),
+                sha256: [7; 32],
+            },
+            publication: vec![],
+        };
+        config
+            .validate_outcome(&acquired, &attempt, [5; 32], owner.path())
+            .unwrap();
+        std::fs::write(
+            owner.path().join("package-provider.stdout"),
+            provider_frame(&acquired),
+        )
+        .unwrap();
+        let carrier = config.retained_carrier(owner.path(), [5; 32]).unwrap();
+        assert!(!owner.path().join(HANDOFF).exists());
+        assert!(config.decode_receipt(&carrier, [5; 32]).is_err());
+        assert_eq!(
+            config.retained_carrier(owner.path(), [5; 32]).unwrap(),
+            carrier
+        );
+        assert!(config.retained_carrier(owner.path(), [6; 32]).is_err());
+        let other = tempfile::tempdir().unwrap();
+        assert!(config
+            .validate_outcome(&acquired, &attempt, [5; 32], other.path())
+            .is_err());
+        let mut changed: serde_json::Value = serde_json::from_slice(&receipt_bytes).unwrap();
+        changed["roots"][0]["state"] = "planned".into();
+        let changed_bytes = serde_json::to_vec(&changed).unwrap();
+        if let AcquisitionObservation::Acquired { receipt, .. } = &acquired {
+            std::fs::write(&receipt.path, &changed_bytes).unwrap();
+        }
+        let mut forged = acquired.clone();
+        if let AcquisitionObservation::Acquired { receipt, .. } = &mut forged {
+            receipt.sha256 = digest(&changed_bytes);
+        }
+        assert!(config
+            .validate_outcome(&forged, &attempt, [5; 32], owner.path())
+            .is_err());
+    }
+
     fn source() -> Arc<ServicePackageSource> {
         Arc::new(ServicePackageSource {
             configuration: Arc::new(ConfiguredSource {
@@ -789,6 +1378,7 @@ mod tests {
             profile_path: "/unused/profile".into(),
             profile_sha: [7; 32],
             commitment: [8; 32],
+            acquisition: AcquisitionObservation::NotConfigured,
             _owner: None,
         })
     }
