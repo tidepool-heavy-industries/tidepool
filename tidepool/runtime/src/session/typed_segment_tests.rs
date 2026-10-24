@@ -5,9 +5,11 @@ use crate::session::resident::world_cell_test_support::{
     bootstrap_world_for, fixture_cell_recipe, plan_fixture_specification_for,
     source_action_with_original, InputRecipe,
 };
+use std::collections::BTreeSet;
 use tidepool_bridge_derive::FromHaskell;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler, Response};
 use tidepool_effect::EffectError;
+use tidepool_toolchain::artifact_inventory::{ArtifactKind, NativeGroupKey};
 
 #[path = "staged_world_acceptance_tests.rs"]
 mod staged_world_acceptance;
@@ -1817,8 +1819,6 @@ struct NativeOpacityCase {
 }
 
 fn assert_native_declaration_keeps_its_historical_capture(case: NativeOpacityCase) {
-    use std::collections::BTreeSet;
-    use tidepool_toolchain::artifact_inventory::{ArtifactKind, NativeGroupKey};
     use tidepool_toolchain::compiler_world::DependencyTerminalOrigin;
 
     let declarations = [
