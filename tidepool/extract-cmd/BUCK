@@ -110,6 +110,7 @@ rust_filegroup(
         "//bridge/haskell:timing_source": "bridge/haskell/src/Tidepool/Timing.hs",
         "//bridge/haskell:worker_server_source": "bridge/haskell/src/Tidepool/WorkerServer.hs",
         "//bridge/haskell:rust_input_test_cell_splitter_fixtures_logging_producer_shape_txt": "bridge/haskell/test-cell-splitter/fixtures/logging/producer-shape.txt",
+        "//build/package:owned_service_report_source": "build/package/owned_service_report.py",
         "Cargo.toml": "tidepool/extract-cmd/Cargo.toml",
         "src/daemon.rs": "tidepool/extract-cmd/src/daemon.rs",
         "src/diagnostics.rs": "tidepool/extract-cmd/src/diagnostics.rs",
@@ -162,9 +163,11 @@ tidepool_rust_isolated_test(
     ],
     resources = [
         "toolchains//:bash",
+        "toolchains//:python",
     ],
     resource_env = {
         "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
     },
     visibility = ["PUBLIC"],
 )

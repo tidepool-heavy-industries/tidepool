@@ -4870,7 +4870,7 @@ class OwnedServiceReportTests(unittest.TestCase):
                     'signal': None, 'failure': None}
         return {'schema': 2, 'kind': 'owned-compiler-service', 'owner_directory': str(owner),
                 'operation': '01' * 32, 'daemon_epoch': '02' * 32, 'daemon_pid': 42,
-                'producer': '03' * 32, 'endpoint': '04' * 96, 'socket_path': str(owner / 'socket'),
+                'producer': '03' * 32, 'endpoint': '04' * 32, 'socket_path': str(owner / 'socket'),
                 'action': observation('exited', 0), 'acquisition': {'status': 'not_configured'},
                 'daemon_reap': observation('reaped', 0), 'service_terminal': {
                     'epoch': [2] * 32, 'workers_retired': True, 'socket_retired': True, 'failures': []},
@@ -4899,6 +4899,15 @@ class OwnedServiceReportTests(unittest.TestCase):
             for invalid in ('0' * 63, 'g' * 64, [], None):
                 report['operation'] = invalid
                 with self.subTest(operation=invalid), self.assertRaises(ValueError):
+                    qualification.validate_owned_service_report(report, owner)
+
+    def test_report_endpoint_rejects_mistaken_concatenated_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            report = self.report(owner)
+            for invalid in ('04' * 96, '0' * 63, 'g' * 64):
+                report['endpoint'] = invalid
+                with self.subTest(endpoint=invalid), self.assertRaises(ValueError):
                     qualification.validate_owned_service_report(report, owner)
 
     def test_schema1_pair_cannot_qualify_new_invocation(self):

@@ -312,11 +312,15 @@ def render_strings(values, indent=4):
 
 
 LIBRARY_TEST_FIXTURES = {
+    ("tidepool-extract-cmd", "tidepool-extract"): {
+        "build/package/owned_service_report.py",
+    },
     ("tidepool-extract-cmd", "tidepool_extract_cmd"): {
         "bridge/haskell/src/Tidepool/ExtractRequest.hs",
         "bridge/haskell/src/Tidepool/Logging.hs",
         "bridge/haskell/src/Tidepool/Timing.hs",
         "bridge/haskell/src/Tidepool/GhcPipeline.hs",
+        "build/package/owned_service_report.py",
     },
     ("tidepool-toolchain", "tidepool_toolchain"): {
         "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.cbor",
@@ -519,6 +523,7 @@ def testing_fixture_test_cases(binary):
 
 EXTERNAL_SOURCE_LABELS = {
     "Cargo.lock": "//:workspace_cargo_lock",
+    "build/package/owned_service_report.py": "//build/package:owned_service_report_source",
     "bridge/handlers/src/lib.rs": "//bridge/handlers:handler_library_source",
     "bridge/atomic-write/tests/fixtures/directory_fault.c": "//bridge/atomic-write:directory_fault_fixture",
     "exomonad/actor/src/fixtures/quoted-agent-provider.hs": "//exomonad/actor:quoted_agent_provider_fixture",
@@ -772,7 +777,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-extract-cmd" and (unit or target_name == "build_products_frontend"):
         env["TIDEPOOL_TEST_BASH"] = "$(exe toolchains//:bash)"
         resources.append("toolchains//:bash")
-    if package_name == "tidepool-extract-cmd" and target_name == "build_products_frontend":
+    if package_name == "tidepool-extract-cmd" and (unit or target_name == "build_products_frontend"):
         env["TIDEPOOL_TEST_PYTHON"] = "$(exe toolchains//:python)"
         resources.append("toolchains//:python")
     if package_name == "tidepool-extract-cmd" and target_name == "no_open_coded_extract_spawns":

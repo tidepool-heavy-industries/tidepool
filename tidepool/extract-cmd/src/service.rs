@@ -569,18 +569,17 @@ mod tests {
             assert!(pump.poll().is_err());
         }
     }
-    fn emit_owned_service_report_fixtures() {
-        let Some(root) = std::env::var_os("TIDEPOOL_SERVICE_REPORT_FIXTURES") else {
-            return;
-        };
-        let root = PathBuf::from(root);
-        std::fs::create_dir_all(&root).unwrap();
+    fn emit_owned_service_report_fixtures(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
         for name in [
+            "initial",
+            "live-pending",
             "complete",
             "failed-action",
             "startup-failed",
             "source-retained",
             "unknown",
+            "retirement-unconfirmed",
         ] {
             let directory = root.join(name);
             std::fs::create_dir_all(&directory).unwrap();
@@ -590,13 +589,49 @@ mod tests {
             let mut report = OwnedServiceReport::new(
                 directory,
                 [1; 32],
-                name == "source-retained" || name == "unknown",
+                matches!(
+                    name,
+                    "initial"
+                        | "live-pending"
+                        | "source-retained"
+                        | "unknown"
+                        | "retirement-unconfirmed"
+                ),
             );
+            if name == "initial" {
+                report.publish().unwrap();
+                continue;
+            }
+            let epoch = [2; 32];
+            let identity = crate::CompilerIdentity::daemon([3; 32], [4; 32], epoch);
             report.daemon_pid = Some(1234);
-            report.daemon_epoch = Some(crate::endpoint::hex(&[2; 32]));
-            report.producer = Some("a".repeat(64));
-            report.endpoint = Some("b".repeat(64));
+            report.daemon_epoch = Some(crate::endpoint::hex(&epoch));
+            report.producer = Some(identity.producer_hex());
+            report.endpoint = Some(identity.to_hex());
             report.socket_path = Some(root.join(name).join("compiler.sock"));
+            if name == "live-pending" {
+                report.action = Observation::state(ObservationStatus::Running);
+                report.daemon_reap = Observation::state(ObservationStatus::Pending);
+                report.acquisition = AcquisitionObservation::Acquired {
+                    attempt: ServiceReference {
+                        path: report
+                            .owner_directory
+                            .join("compiler-service-source.attempt.json"),
+                        sha256: [5; 32],
+                    },
+                    receipt: ServiceReference {
+                        path: report.owner_directory.join("package-source/receipt.json"),
+                        sha256: [6; 32],
+                    },
+                    profile: ServiceReference {
+                        path: "/nix/store/00000000000000000000000000000000-profile".into(),
+                        sha256: [7; 32],
+                    },
+                    publication: vec![],
+                };
+                report.publish().unwrap();
+                continue;
+            }
             report.action = Observation {
                 exit_code: Some(if name == "failed-action" { 17 } else { 0 }),
                 success: Some(name != "failed-action"),
@@ -608,12 +643,16 @@ mod tests {
                 ..Observation::state(ObservationStatus::Reaped)
             };
             report.service_terminal = Some(ServiceTerminal {
-                epoch: [2; 32],
+                epoch,
                 workers_retired: true,
                 socket_retired: true,
                 failures: vec![],
             });
-            report.artifact_retention = Observation::state(ObservationStatus::Retained);
+            report.artifact_retention = Observation::state(if name == "complete" {
+                ObservationStatus::Removed
+            } else {
+                ObservationStatus::Retained
+            });
             report.complete = true;
             if name == "startup-failed" {
                 report.action = Observation::failed(ObservationStatus::Failed, "startup refusal");
@@ -626,7 +665,28 @@ mod tests {
                     .failures
                     .push("startup refusal".into());
             }
-            if name == "source-retained" || name == "unknown" {
+            if name == "source-retained" {
+                report.acquisition = AcquisitionObservation::Refused {
+                    attempt: ServiceReference {
+                        path: report
+                            .owner_directory
+                            .join("compiler-service-source.attempt.json"),
+                        sha256: [5; 32],
+                    },
+                    primary: "provider refusal".into(),
+                    settlement: SourceSettlement::RetainedUnknown,
+                    cleanup: vec!["source cleanup pending".into()],
+                    publication: vec![],
+                };
+            }
+            if name == "retirement-unconfirmed" {
+                report.daemon_reap =
+                    Observation::failed(ObservationStatus::Unconfirmed, "wait failure");
+            }
+            if matches!(
+                name,
+                "source-retained" | "unknown" | "retirement-unconfirmed"
+            ) {
                 report.source_settlement = Observation::state(ObservationStatus::Retained);
                 report.complete = false;
             }
@@ -635,8 +695,72 @@ mod tests {
     }
 
     #[test]
+    fn published_reports_round_trip_through_python_reader() {
+        let temporary = tempfile::tempdir().unwrap();
+        let fixtures = std::env::var_os("TIDEPOOL_SERVICE_REPORT_FIXTURES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| temporary.path().join("reports"));
+        emit_owned_service_report_fixtures(&fixtures);
+        let fixtures = std::fs::canonicalize(fixtures).unwrap();
+        let codec = temporary.path().join("owned_service_report.py");
+        std::fs::write(
+            &codec,
+            include_bytes!("../../../build/package/owned_service_report.py"),
+        )
+        .unwrap();
+        let script = r#"
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location('owned_service_report', sys.argv[1])
+codec = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(codec)
+fixtures = pathlib.Path(sys.argv[2])
+expected = {'initial': False, 'live-pending': False, 'complete': True,
+            'failed-action': True, 'startup-failed': True,
+            'source-retained': False, 'unknown': False, 'retirement-unconfirmed': False}
+for name, complete in expected.items():
+    owner = fixtures / name
+    emitted = json.loads((owner / 'owned-service.json').read_text())
+    decoded = codec.read_owned_service_report(owner)
+    assert decoded == emitted, name
+    assert decoded['complete'] is complete, name
+    if decoded['endpoint'] is not None:
+        malformed = dict(decoded, endpoint=decoded['endpoint'] * 3)
+        try:
+            codec.validate_owned_service_report(malformed, owner)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('concatenated endpoint accepted')
+    if name == 'live-pending':
+        assert decoded['daemon_reap']['status'] == 'pending'
+        assert decoded['acquisition']['status'] == 'acquired'
+        malformed = dict(decoded, complete=True)
+        try:
+            codec.validate_owned_service_report(malformed, owner)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('pending report claimed completed retirement')
+print('8 Rust-published reports preserved by production Python reader')
+"#;
+        let output = crate::process::command(
+            std::env::var_os("TIDEPOOL_TEST_PYTHON").expect("declared test Python"),
+        )
+        .args(["-I", "-c", script])
+        .arg(codec)
+        .arg(&fixtures)
+        .output()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("8 Rust-published reports"));
+    }
+
+    #[test]
     fn report_writer_keeps_primary_and_independent_observations() {
-        emit_owned_service_report_fixtures();
         let owner = tempfile::tempdir().unwrap();
         let mut report = OwnedServiceReport::new(owner.path().to_owned(), [1; 32], true);
         report.action = Observation::failed(ObservationStatus::Failed, "primary startup failure");

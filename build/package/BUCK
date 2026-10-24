@@ -3,6 +3,8 @@ load(":runtime_shared_libraries.bzl", "tidepool_runtime_shared_libraries")
 load(":native_catalog.bzl", "native_catalog", "native_catalog_sources", "native_prepared_products", "native_runtime_bundle")
 load("//bridge/haskell:components.bzl", "NATIVE_CATALOG_COHORT")
 
+export_file(name = "owned_service_report_source", src = "owned_service_report.py", visibility = ["PUBLIC"])
+
 python_bootstrap_library(
     name = "owned_service_report",
     srcs = ["owned_service_report.py"],
