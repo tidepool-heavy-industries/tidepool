@@ -1983,6 +1983,52 @@ pub(super) fn pinned_jev_workspace_with(
     );
 }
 
+fn require_live_compiler_observation(observation: &Value, expected: &Value) {
+    assert_eq!(observation["schema"], 2, "current owned-service schema");
+    assert_eq!(observation["kind"], "owned-compiler-service");
+    assert_eq!(
+        observation["complete"], false,
+        "service is live for the case"
+    );
+    assert_eq!(observation["action"]["status"], "running");
+    assert_eq!(observation["daemon_reap"]["status"], "pending");
+    assert!(observation["daemon_pid"]
+        .as_u64()
+        .is_some_and(|pid| pid > 0));
+    for field in ["daemon_epoch", "producer", "endpoint"] {
+        let identity = observation[field].as_str().expect("live compiler identity");
+        assert!(
+            identity.len() == 64 && identity.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "malformed live compiler {field}"
+        );
+    }
+    for field in ["owner_directory", "socket_path"] {
+        assert!(
+            observation[field]
+                .as_str()
+                .is_some_and(|path| std::path::Path::new(path).is_absolute()),
+            "live compiler {field} is absolute"
+        );
+    }
+    for field in [
+        "owner_directory",
+        "daemon_pid",
+        "daemon_epoch",
+        "producer",
+        "endpoint",
+        "socket_path",
+    ] {
+        assert!(
+            !expected[field].is_null(),
+            "required owned child identity: {field}"
+        );
+        assert_eq!(
+            observation[field], expected[field],
+            "live report differs from owned child {field}"
+        );
+    }
+}
+
 pub(super) fn prepare_performance_traces() -> (
     std::path::PathBuf,
     std::path::PathBuf,
@@ -2002,15 +2048,23 @@ pub(super) fn prepare_performance_traces() -> (
     let compiler_trace = artifact_root.join("compiler/compiler.jsonl");
     let phase_trace = artifact_root.join("phases.jsonl");
     std::fs::File::create(&phase_trace).expect("create owned phase JSONL");
+    let compiler_root = artifact_root.join("compiler");
     let lifecycle: Value = serde_json::from_slice(
-        &std::fs::read(artifact_root.join("compiler/lifecycle.json"))
+        &std::fs::read(compiler_root.join("owned-service.json"))
             .expect("owned compiler runner records its live daemon identity before the test"),
     )
-    .expect("owned compiler lifecycle record is JSON");
-    assert_eq!(
-        lifecycle["cleanup_confirmed"], false,
-        "daemon is live for the case"
-    );
+    .expect("owned compiler service observation is JSON");
+    let expected = serde_json::json!({
+        "owner_directory": compiler_root,
+        "daemon_pid": std::env::var("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID")
+            .expect("owned child daemon PID").parse::<u32>().expect("numeric daemon PID"),
+        "daemon_epoch": std::env::var("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH").expect("owned child daemon epoch"),
+        "producer": std::env::var("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER").expect("owned child producer"),
+        "endpoint": std::env::var(tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV).expect("owned child endpoint"),
+        "socket_path": std::env::var(tidepool_extract_cmd::DAEMON_SOCKET_ENV).expect("owned child socket"),
+    });
+    // This is a live startup observation, not the runner's later cleanup receipt.
+    require_live_compiler_observation(&lifecycle, &expected);
     assert!(
         compiler_trace.is_file(),
         "owned daemon created its JSONL trace"
@@ -2620,6 +2674,47 @@ pub(crate) fn hosted_test_settings(
 mod tests {
     use super::*;
     use std::future::Future;
+
+    #[test]
+    fn live_compiler_observation_requires_current_running_owned_identity() {
+        let expected = serde_json::json!({
+            "owner_directory":"/owned/compiler", "daemon_pid":17,
+            "daemon_epoch":"a".repeat(64), "producer":"b".repeat(64),
+            "endpoint":"c".repeat(64), "socket_path":"/owned/compiler.sock",
+        });
+        let mut live = expected.clone();
+        live.as_object_mut().unwrap().extend(
+            serde_json::json!({
+                "schema":2, "kind":"owned-compiler-service", "complete":false,
+                "action":{"status":"running"}, "daemon_reap":{"status":"pending"},
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        require_live_compiler_observation(&live, &expected);
+        for (field, changed) in [
+            ("schema", serde_json::json!(1)),
+            ("complete", serde_json::json!(true)),
+            ("action", serde_json::json!({"status":"exited"})),
+            ("daemon_reap", serde_json::json!({"status":"reaped"})),
+            ("daemon_reap", serde_json::json!({"status":"running"})),
+            ("daemon_epoch", serde_json::json!("not-an-epoch")),
+            ("daemon_epoch", serde_json::json!("d".repeat(64))),
+            ("daemon_pid", serde_json::json!(0)),
+            ("daemon_pid", serde_json::json!(18)),
+            ("socket_path", serde_json::json!("/another/compiler.sock")),
+            ("endpoint", Value::Null),
+        ] {
+            let mut invalid = live.clone();
+            invalid[field] = changed;
+            assert!(
+                std::panic::catch_unwind(|| require_live_compiler_observation(&invalid, &expected))
+                    .is_err(),
+                "malformed or foreign {field} must not establish live owned service identity"
+            );
+        }
+    }
 
     #[test]
     fn display_text_resolves_issued_pointer_and_preserves_exact_content() {
