@@ -314,7 +314,7 @@ impl ScopedResolvedInputs {
         Ok(())
     }
 
-    pub(in crate::session) fn value(
+    fn value(
         &self,
         identity: &SymbolIdentity,
         generation: u64,
@@ -443,6 +443,21 @@ impl ScopedResolvedInputs {
         execution
             .validate_runtime_admission(admission_digest)
             .map_err(|_| PreparedRuntimeError::certified_target_owners())?;
+        let issued = prefix
+            .cell_program()
+            .items()
+            .get(item.index())
+            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+        let issued_execution = issued
+            .native()
+            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+        let issued_target = issued
+            .native_products()
+            .and_then(|products| products.linked_native_target())
+            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+        if !Arc::ptr_eq(issued_execution, execution) || !Arc::ptr_eq(issued_target, target) {
+            return Err(PreparedRuntimeError::certified_target_owners());
+        }
         let value = self
             .value(requirement.identity(), requirement.generation())
             .ok_or_else(|| PreparedRuntimeError::MissingRetainedCertifiedOwner {
