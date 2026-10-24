@@ -304,8 +304,9 @@ import Tidepool.TurnSource (generatedScaffoldModuleName)
 import Tidepool.ExecutionEncode (encodeSymbol)
 import Tidepool.TypedSegment.Types (TypedItemPlan(..), typedSegmentPlanItems)
 import Tidepool.RetainedUnfoldings
-  ( RetainedContext, retainedContext
-  , installRetainedUnfoldingsPlugin, retainedDefinedBy
+  ( RetainedContext, retainedContext, ModuleUnfoldingPolicy
+  , extendRetainedContext, withNativeDeclarationBoundary, moduleUnfoldingPolicyFor
+  , installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph, scopeRetainedSummaryHscEnv )
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
@@ -2900,7 +2901,15 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     throwIO WorldCellCorrupt)
   borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeBootEnvironment universe))
   let flags = heldWorldCellFlags baseEnv directory roots
-      policy = retainedContext retained
+      nativeDeclarationOwner = case (operation,worldPlannedDeclaration purpose) of
+        (WorldCellSource {},Just planned) -> Just
+          (mkModule (homeUnitAsUnit (hsc_home_unit borrowed)) (mkModuleName (plannedModule planned)))
+        _ -> Nothing
+      -- The checked stage issues the boundary; a matching module name in an
+      -- ordinary source request cannot acquire it. Resolved value inputs extend
+      -- this same policy before the target compiles.
+      policy = maybe id withNativeDeclarationBoundary nativeDeclarationOwner
+        (retainedContext retained)
   -- Source compatibility runs before the target hook refines value demand.
   -- It must see the same module-scoped plugin as every source issuer.
   setSession (installRetainedUnfoldingsPlugin policy
@@ -3065,8 +3074,8 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                 WorldCellNameSource {} -> WorldObservationInputDemand)
             writeIORef resolvedRef (Just resolved)
             pure (ready,resolved)
-      policyFor resolved = retainedContext
-        (Set.union retained (Map.keysSet (worldResolvedGenerations resolved)))
+      policyFor resolved = extendRetainedContext
+        (Map.keysSet (worldResolvedGenerations resolved)) policy
   importsRef <- liftIO (newIORef Nothing)
   -- Demanded values have source-less owners. Dependencies retain their own
   -- module-local policy; the target hook installs the resolved value policy.
@@ -3127,6 +3136,11 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               declared <- transformProgramDeclarationImports inventories environment baseDeclared
               transformCompletedValueAliases (worldResolvedAliases resolved) environment declared
         , pvPlan = \directory enabled target observation@(SourceGraphObservation graph _) exact resolved -> do
+            forM_ nativeDeclarationOwner $ \owner ->
+              unless (target == moduleName owner
+                && [ms_mod summary | ModuleNode _ summary <- mgModSummaries' graph
+                     , ms_mod_name summary == target, ms_hsc_src summary == HsSrcFile] == [owner])
+                (liftIO (throwIO WorldCellCorrupt))
             environment <- getSession
             prefixEnvironment <- case operation of
               WorldCellSource _ _ prefix _ _ _ -> do
@@ -4533,7 +4547,7 @@ runPipelineSessionSelected selection retained purpose session path includes prod
 -- the complete module owner as well as its source and dependency witnesses.
 data MemoValidity = MemoValidity
   { memoSourceHash :: Fingerprint
-  , memoRetained :: Set.Set SymbolIdentity
+  , memoUnfoldingPolicy :: ModuleUnfoldingPolicy
     -- A source hash does not change when one of its imports switches between
     -- a home module and a package module. Preserve the home-resolution shape
     -- that produced the body so removing a shadow cannot reuse stale Core.
@@ -4561,14 +4575,14 @@ data MemoValidity = MemoValidity
 
 -- The immutable ingress narrows version lookup before checking the saved
 -- GHC usage set. Unrelated historical versions never participate in selection.
-data MemoSelectionKey = MemoSelectionKey Fingerprint (Set.Set SymbolIdentity)
+data MemoSelectionKey = MemoSelectionKey Fingerprint ModuleUnfoldingPolicy
   (Map.Map HomeDependency HomeDependencyDigest) (Maybe String)
   (Map.Map (String,String) HomeDependencyDigest)
   deriving (Eq, Ord)
 
 data MemoSelectionRefusal
   = MemoSelectionOwner | MemoSelectionUnsealedClosure | MemoSelectionUnsealedUsage
-  | MemoSelectionSourceHash | MemoSelectionRetained | MemoSelectionHomeDependencies
+  | MemoSelectionSourceHash | MemoSelectionUnfoldingPolicy | MemoSelectionHomeDependencies
   | MemoSelectionExactEnvironmentAndUsages | MemoSelectionIncarnation
   deriving (Eq, Show)
 
@@ -4578,14 +4592,14 @@ memoSelectionRefusalName reason = case reason of
   MemoSelectionUnsealedClosure -> "unsealed_closure"
   MemoSelectionUnsealedUsage -> "unsealed_usage"
   MemoSelectionSourceHash -> "source_hash"
-  MemoSelectionRetained -> "retained"
+  MemoSelectionUnfoldingPolicy -> "unfolding_policy"
   MemoSelectionHomeDependencies -> "home_dependencies"
   MemoSelectionExactEnvironmentAndUsages -> "exact_environment_and_usages"
   MemoSelectionIncarnation -> "incarnation"
 
 memoSelectionKey :: MemoValidity -> MemoSelectionKey
 memoSelectionKey validity = MemoSelectionKey (memoSourceHash validity)
-  (memoRetained validity) (memoHomeDependencies validity) (memoIncarnation validity)
+  (memoUnfoldingPolicy validity) (memoHomeDependencies validity) (memoIncarnation validity)
   (memoExactImportEnvironment validity)
 
 data HomeSourceKind = OrdinaryHomeSource | BootHomeSource
@@ -5410,7 +5424,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         -- Reusable dependencies keep their authored import closure; imported
         -- exact versions include indirect type, instance and orphan owners.
         summaryPolicies = Map.map (\summary -> BS8.pack (show
-          (retainedDefinedBy (ms_mod summary) retained,incarnationFor summary,
+          (moduleUnfoldingPolicyFor (ms_mod summary) retained,incarnationFor summary,
            [(owner,hexBytes bytes) | (owner,HomeDependencyDigest bytes) <-
              Map.toAscList (exactImportEnvironment summary)]))) summaryByDependency
         (dependencyDigests, digestComputations) =
@@ -5446,21 +5460,21 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
     executableValidRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
     dropMemoInterface <- liftIO (lookupEnv "TIDEPOOL_TEST_DROP_MEMO_INTERFACE")
-    -- The withholding pass can change only a module's own retained
-    -- definitions; retained identities defined elsewhere reach it through
-    -- a dependency, whose invalidity is already covered by 'depsValidSoFar'.
-    let retainedFor modSum = retainedDefinedBy (ms_mod modSum) retained
+    -- The plugin and memo consume the same complete module-local policy.
+    -- Policies of imported definitions reach a consumer through dependency
+    -- witnesses, rather than a request-wide retained-set fingerprint.
+    let unfoldingPolicyFor modSum = moduleUnfoldingPolicyFor (ms_mod modSum) retained
         exactUsages finalized = Map.restrictKeys exactIdentities (Set.fromList
           (homeInterfaceUsageOwners previous (hm_iface (finalizedHomeModInfo finalized))))
         memoValidity modSum finalized = MemoValidity
-          (ms_hs_hash modSum) (retainedFor modSum) (homeDependencyWitnesses modSum)
+          (ms_hs_hash modSum) (unfoldingPolicyFor modSum) (homeDependencyWitnesses modSum)
           (incarnationFor modSum) (exactImportEnvironment modSum) (exactUsages finalized)
         sameExactEnvironment modSum validity =
           memoExactImportEnvironment validity == exactImportEnvironment modSum
           && all (\(owner,digest) -> Map.lookup owner exactIdentities == Just digest)
             (Map.toList (memoExactUsages validity))
         sourceExecutable summary = CompilerExecutableContext
-          (SourceExecutableVersion (MemoValidity (ms_hs_hash summary) (retainedFor summary)
+          (SourceExecutableVersion (MemoValidity (ms_hs_hash summary) (unfoldingPolicyFor summary)
             (homeDependencyWitnesses summary) (incarnationFor summary)
             (exactImportEnvironment summary) Map.empty))
           (Set.fromList
@@ -5497,7 +5511,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                ,(ms_mod summary `Set.notMember` unsealedClosure, MemoSelectionUnsealedClosure)
                ,(not (usesUnsealedSourceInputs unsealedInputs previous entry), MemoSelectionUnsealedUsage)
                ,(memoSourceHash validity == ms_hs_hash summary, MemoSelectionSourceHash)
-               ,(memoRetained validity == retainedFor summary, MemoSelectionRetained)
+               ,(memoUnfoldingPolicy validity == unfoldingPolicyFor summary, MemoSelectionUnfoldingPolicy)
                ,(memoHomeDependencies validity == homeDependencyWitnesses summary, MemoSelectionHomeDependencies)
                ,(sameExactEnvironment summary validity, MemoSelectionExactEnvironmentAndUsages)
                ,(not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
@@ -5506,7 +5520,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     liftIO $ do
       let select summary = do
             byIngress <- Map.lookup (ms_mod summary) versions
-            let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
+            let ingress = MemoSelectionKey (ms_hs_hash summary) (unfoldingPolicyFor summary)
                   (homeDependencyWitnesses summary) (incarnationFor summary)
                   (exactImportEnvironment summary)
             narrowed <- Map.lookup ingress byIngress
@@ -5607,7 +5621,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     let validity = gmeValidity entry
                         sameHash = memoSourceHash validity == ms_hs_hash modSum
                         sameOwner = payloadOwner (gmePayload entry) == ms_mod modSum
-                        sameRetained = memoRetained validity == retainedFor modSum
+                        sameUnfoldingPolicy = memoUnfoldingPolicy validity == unfoldingPolicyFor modSum
                         sameHomeDependencies =
                           memoHomeDependencies validity == homeDependencyWitnesses modSum
                         sameExact = sameExactEnvironment modSum validity
@@ -5630,7 +5644,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         && compileTimeExecutionTracked
                         && sameHash
                         && sameOwner
-                        && sameRetained
+                        && sameUnfoldingPolicy
                         && sameHomeDependencies
                         && sameExact
                         && sameIncarnation
@@ -5648,7 +5662,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             [ "dependent-files=" ++ show (moduleFactHasDependentFiles (payloadFacts (gmePayload entry)))
                             , "same-hash=" ++ show sameHash
                             , "same-owner=" ++ show sameOwner
-                            , "same-retained=" ++ show sameRetained
+                            , "same-unfolding-policy=" ++ show sameUnfoldingPolicy
                             , "same-home-dependencies=" ++ show sameHomeDependencies
                             , "same-exact-environment=" ++ show sameExact
                             , "same-incarnation=" ++ show sameIncarnation
@@ -5657,7 +5671,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                             [ "dependent-files=" ++ show (moduleFactHasDependentFiles (payloadFacts (gmePayload entry)))
                             , "same-hash=" ++ show sameHash
                             , "same-owner=" ++ show sameOwner
-                            , "same-retained=" ++ show sameRetained
+                            , "same-unfolding-policy=" ++ show sameUnfoldingPolicy
                             , "same-home-dependencies=" ++ show sameHomeDependencies
                             , "same-exact-environment=" ++ show sameExact
                             , "same-incarnation=" ++ show sameIncarnation
@@ -6024,7 +6038,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             digestHex = case Map.lookup dependency dependencyDigests of
               Just (HomeDependencyDigest bytes) -> hexBytes bytes
               Nothing -> "<none>"
-            keyFacts = show (ms_hs_hash summary, retainedFor summary,
+            keyFacts = show (ms_hs_hash summary, unfoldingPolicyFor summary,
               [(moduleNameString child, show sourceKind, hexBytes bytes)
                 | (HomeDependency child sourceKind, HomeDependencyDigest bytes) <-
                     Map.toAscList (homeDependencyWitnesses summary)],
@@ -6040,7 +6054,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               | otherwise = case Map.lookup (ms_mod summary) versions of
                     Nothing -> observation MemoOwnerAbsent 0 Nothing [] 0
                     Just byIngress ->
-                      let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
+                      let ingress = MemoSelectionKey (ms_hs_hash summary) (unfoldingPolicyFor summary)
                             (homeDependencyWitnesses summary) (incarnationFor summary)
                             (exactImportEnvironment summary)
                       in case Map.lookup ingress byIngress of
