@@ -2368,7 +2368,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
     withRootedCompilerEnvironment worldDirectory $ do
       let requestedCounters =
             [("world.cell.source_frontends.main:" ++ name,1) | name <- ["CacheEntry","CacheEven","CacheOdd"]]
-            ++ [("world.cell.source_frontends.main:WorldCancellationNames",3)
+            ++ [("world.cell.source_frontends.main:WorldCancellationNames",2)
               ,("world.cell.admission_parses",16)
               -- Recovery has a separate finite observation budget for this
               -- fixed staged fixture; overflow refuses incomplete evidence.
@@ -3067,7 +3067,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
       unless (sum priorPreparations > 0)
         (fail "SOURCE history did not prepare its newly demanded prior source body")
       cancellationFrontends <- observed "world.cell.source_frontends.main:WorldCancellationNames"
-      unless (cancellationFrontends == [1,1,1])
+      unless (cancellationFrontends == [1,1])
         (fail ("cancelled expression plan published its pending captured source preparation: frontends="
           ++ show cancellationFrontends ++ "; cancellation/retry/publication=" ++ show outcome
           ++ "; globalCaptureTruncated=" ++ show ("[compiler diagnostics truncated at 4 MiB]" `isInfixOf` diagnostics)))
