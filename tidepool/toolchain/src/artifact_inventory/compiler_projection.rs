@@ -2776,9 +2776,10 @@ impl crate::declaration_context::RequestCompilerInputs {
             {
                 crate::host_work::checkpoint()?;
                 work.payload_lookups += 1;
-                let retained_entry = retained.artifacts.get(&binding.artifact).ok_or_else(|| {
-                    failure("demanded compiler payload is outside request custody")
-                })?;
+                let retained_entry =
+                    retained.artifacts.get(&binding.artifact).ok_or_else(|| {
+                        failure("demanded compiler payload is outside request custody")
+                    })?;
                 // The catalog retains certified byte facts; the selected row
                 // owns this request's acquisition. Equal facts can have separate
                 // source observations, so catalog object identity cannot choose it.
@@ -8681,7 +8682,14 @@ mod tests {
                 else {
                     unreachable!()
                 };
-                assert_eq!(first.source_sha256(), second.source_sha256());
+                assert_eq!(
+                    first
+                        .source_admission()
+                        .map(|admission| admission.source_sha256()),
+                    second
+                        .source_admission()
+                        .map(|admission| admission.source_sha256())
+                );
                 assert_eq!(
                     Arc::ptr_eq(first.original_native(), second.original_native()),
                     !distinct_witness

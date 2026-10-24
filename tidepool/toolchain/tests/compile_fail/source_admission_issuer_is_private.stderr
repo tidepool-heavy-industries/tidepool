@@ -1,0 +1,2 @@
+error[E0624]: associated function `admit` is private
+ --> tests/compile_fail/source_admission_issuer_is_private.rs:3:38

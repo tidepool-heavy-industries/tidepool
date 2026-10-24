@@ -273,7 +273,10 @@ outer artifact equality as equality of issuing authority.
 direct configured endpoint and build-action source guards as `build`. It writes
 `catalog-inventory.json` only after actual product certification, with canonical
 interfaces and optional Core, native owners, native group counts, and each
-worker module’s `ProductAvailability`. It publishes no catalog or candidates.
+worker module’s `ProductAvailability`. Diagnostic inventory schema 2 names native
+`source_admission_sha256` separately from canonical interface `source_sha256`;
+recovery preserves canonical identity without issuing the native admission witness.
+This deliberately replaces the schema 1 native hash key. It publishes no catalog or candidates.
 `request.json`, `invocation.json`, and `outcome.json` preserve source and producer
 identity, the ordered roots, and refusal stage. Both CLI scratch and the recursive
 compiler transaction under `output-root/raw` are retained, including stdout,

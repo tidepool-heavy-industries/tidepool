@@ -10289,7 +10289,11 @@ fn fixture_finalized_product_inner(
                     .module_interface()
                     .map(|interface| interface.source_sha256())
             })
-            .or_else(|| product.source_sha256())
+            .or_else(|| {
+                product
+                    .source_admission()
+                    .map(|admission| admission.source_sha256())
+            })
             .unwrap_or([1; 32]),
         product.interface_bytes().to_vec(),
         package_bytes.clone(),
@@ -10310,7 +10314,9 @@ fn fixture_finalized_product_inner(
         &interface,
         product.interface_bytes(),
         &package_bytes,
-        product.source_sha256(),
+        product
+            .source_admission()
+            .map(|admission| admission.source_sha256()),
     )
     .unwrap();
     let finalized = crate::recovery_artifacts::OriginalDraft::from_finalized_certification(
@@ -10360,9 +10366,11 @@ pub(crate) fn fixture_finalized_product_with_requirements_and_source(
     )
 }
 
-/// Current-source admission issued only by the physical product certifier.
+/// Completed-source admission for one exact native original, issued only by the
+/// physical product certifier. Canonical identity and recovered bytes cannot
+/// construct this witness; consumers borrow it from their acquired product.
 #[derive(Clone, Debug)]
-pub(crate) struct OriginalSourceAdmission {
+pub struct OriginalSourceAdmission {
     owner: CachedHomeOwner,
     evidence: Arc<crate::cache::CompletedSourceEvidence>,
     source_sha256: [u8; 32],
@@ -10386,15 +10394,19 @@ impl OriginalSourceAdmission {
         }
         Ok(admission)
     }
+    /// Whether this completed observation admits this exact native owner and source.
+    /// A canonical source digest alone cannot issue an admission.
+    pub fn admits_source(&self, owner: &CachedHomeOwner, expected: &[u8; 32]) -> bool {
+        &self.owner == owner && &self.source_sha256 == expected
+    }
     pub(crate) fn matches(
         &self,
         owner: &CachedHomeOwner,
         canonical: &CertifiedModuleInterface,
     ) -> bool {
-        &self.owner == owner
+        self.admits_source(owner, &canonical.source_sha256())
             && canonical.unit() == owner.unit
             && canonical.module() == owner.module
-            && canonical.source_sha256() == self.source_sha256
     }
     pub(crate) fn evidence(&self) -> &Arc<crate::cache::CompletedSourceEvidence> {
         &self.evidence
@@ -10402,6 +10414,20 @@ impl OriginalSourceAdmission {
     pub(crate) fn source_sha256(&self) -> [u8; 32] {
         self.source_sha256
     }
+}
+
+/// Check an existing admission against a companion without issuing source authority.
+pub(crate) fn validate_original_source_admission(
+    admission: Option<&OriginalSourceAdmission>,
+    owner: &CachedHomeOwner,
+    canonical: &CertifiedModuleInterface,
+) -> CertResult<()> {
+    if admission.is_some_and(|admission| !admission.matches(owner, canonical)) {
+        return Err(CertificationError::Mismatch(
+            "original current source admission",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) struct ValidatedModuleBinding(CertifiedModuleInterface);
@@ -10416,9 +10442,9 @@ fn validate_module_binding(
     interface: &CertifiedModuleInterface,
     actual_interface: &[u8],
     actual_packages: &[u8],
-    expected_source_sha256: Option<[u8; 32]>,
+    expected_canonical_source_sha256: Option<[u8; 32]>,
 ) -> CertResult<ValidatedModuleBinding> {
-    if expected_source_sha256.is_some_and(|source| source != interface.source_sha256())
+    if expected_canonical_source_sha256.is_some_and(|source| source != interface.source_sha256())
         || !interface.home_units().contains(&witness.owner.unit)
         || witness
             .sources
@@ -10477,12 +10503,13 @@ pub(crate) fn validate_original_module_interface(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
     interface: &CertifiedModuleInterface,
 ) -> CertResult<()> {
+    validate_original_source_admission(product.source_admission(), product.owner(), interface)?;
     validate_canonical_native_bytes(
         product.owner(),
         product.certification_bytes(),
         product.interface_bytes(),
         product.package_imports_bytes(),
-        product.source_sha256(),
+        None,
         interface,
     )
 }
@@ -10492,7 +10519,7 @@ pub(crate) fn validate_canonical_native_bytes(
     certification: &[u8],
     actual_interface: &[u8],
     actual_packages: &[u8],
-    source_sha256: Option<[u8; 32]>,
+    expected_canonical_source_sha256: Option<[u8; 32]>,
     interface: &CertifiedModuleInterface,
 ) -> CertResult<()> {
     validate_canonical_native_bytes_with_operation(
@@ -10500,7 +10527,7 @@ pub(crate) fn validate_canonical_native_bytes(
         certification,
         actual_interface,
         actual_packages,
-        source_sha256,
+        expected_canonical_source_sha256,
         interface,
         &InventoryOperation::new(Default::default()),
     )
@@ -10511,7 +10538,7 @@ pub(crate) fn validate_canonical_native_bytes_with_operation(
     certification: &[u8],
     actual_interface: &[u8],
     actual_packages: &[u8],
-    source_sha256: Option<[u8; 32]>,
+    expected_canonical_source_sha256: Option<[u8; 32]>,
     interface: &CertifiedModuleInterface,
     operation: &InventoryOperation,
 ) -> CertResult<()> {
@@ -10527,7 +10554,7 @@ pub(crate) fn validate_canonical_native_bytes_with_operation(
         interface,
         actual_interface,
         actual_packages,
-        source_sha256,
+        expected_canonical_source_sha256,
     )
     .map(|_| ())
 }
@@ -12648,15 +12675,17 @@ pub(crate) fn certify_original_draft_with_validation(
     product: crate::recovery_artifacts::OriginalDraft,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<crate::recovery_artifacts::CertifiedRecoveryProduct> {
+    let canonical = product
+        .module_interface()
+        .ok_or(CertificationError::Mismatch("original canonical companion"))?;
+    validate_original_source_admission(product.source_admission(), product.owner(), canonical)?;
     validate_canonical_native_bytes_with_operation(
         product.owner(),
         product.certification_bytes(),
         product.interface_bytes(),
         product.package_imports_bytes(),
-        product.source_sha256(),
-        product
-            .module_interface()
-            .ok_or(CertificationError::Mismatch("original canonical companion"))?,
+        None,
+        canonical,
         &validation.inventory,
     )?;
     let requirements = crate::prepared_artifact::production_requirements()?;
@@ -14891,7 +14920,7 @@ pub(crate) fn certify_products_with_validation(
                             return Ok(product.clone());
                         }
                         let admission = OriginalSourceAdmission::admit(&owner, canonical_interface, Arc::clone(&completed_source))?;
-                        if product.source_admission().is_some_and(|evidence| Arc::ptr_eq(evidence, &completed_source))
+                        if product.source_admission().is_some_and(|evidence| Arc::ptr_eq(evidence.evidence(), &completed_source))
                             && admission.matches(product.owner(), product.module_interface()) {
                             return Ok(product.clone());
                         }
@@ -32449,7 +32478,9 @@ pub(crate) mod tests {
         let mut prior = vec![initial.data().recovery_products[0].clone()];
         assert!(prior[0].source_admission().is_some());
         assert_eq!(
-            prior[0].source_sha256(),
+            prior[0]
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
             Some(prior[0].module_interface().source_sha256())
         );
         let mut context = ExactDeclarationContext::new(&[], &[], vec![])
@@ -32743,7 +32774,6 @@ None,
                 current.module_interface().source_sha256(),
                 canonical.source_sha256()
             );
-            assert!(current.source_sha256().is_none());
             assert!(current.source_admission().is_none());
             assert_eq!(current.original_native().groups.len(), 2);
             assert!(issued

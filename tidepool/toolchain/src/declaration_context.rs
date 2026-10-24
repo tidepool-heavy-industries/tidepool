@@ -14705,15 +14705,14 @@ impl ExactDeclarationContext {
         let entry = fresh
             .implementation_entry(authored.owner())
             .ok_or_else(|| failure("authored source scope lacks its issued output"))?;
-        if !matches!(&entry.payload, ArtifactPayload::Original(product)
-            if product.source_sha256() == Some(authored.source_sha256())
-                && product.module_interface().origin()
-                    == crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: authored.generation() })
-        {
-            return Err(failure(
-                "authored source scope differs from its reserved output",
-            ));
-        }
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(failure("authored source scope lacks its native original"));
+        };
+        crate::declaration_join::require_authored_original_source(
+            product,
+            &authored.source_sha256(),
+            authored.generation(),
+        )?;
         let support = self.compiler_source_support().merge(&fresh)?;
         if let Some(exact) = exact {
             let admission = SourceAdmissionBundle::issue(
@@ -32901,7 +32900,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             )
             .with_module_interface(interface)
             .unwrap();
-            assert!(product.source_sha256().is_none());
+            assert!(product.source_admission().is_none());
             let variant = crate::certified_products::certify_original_draft_with_validation(
                 variant,
                 &mut PackageInterfaceValidation::default(),

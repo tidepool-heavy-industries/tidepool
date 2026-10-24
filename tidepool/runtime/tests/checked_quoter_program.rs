@@ -504,7 +504,7 @@ fn assert_original_durability(
         .collect::<Vec<_>>();
     assert_eq!(matching.len(), 1);
     let reference = matching[0];
-    assert!(original.source_sha256().is_some());
+    assert!(original.source_admission().is_some());
     match replay {
         SourceReplay::Available => assert!(reference.execution_source.is_some()),
         SourceReplay::Unavailable => assert!(reference.execution_source.is_none()),
@@ -580,7 +580,7 @@ fn assert_original_durability(
     assert_eq!(matching.len(), 1);
     let recovered_original = matching[0];
     // Durable recovery preserves the original, not its fresh source admission.
-    assert!(recovered_original.source_sha256().is_none());
+    assert!(recovered_original.source_admission().is_none());
     assert_eq!(original.owner(), recovered_original.owner());
     assert_eq!(
         original.interface_bytes(),

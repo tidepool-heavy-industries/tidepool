@@ -47,7 +47,8 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
         Arc::clone(
             product
                 .source_admission()
-                .expect("a completed source observation"),
+                .expect("a completed source observation")
+                .evidence(),
         )
     };
     let observations = acquisitions.map(|entry| observation(entry));
@@ -991,10 +992,12 @@ fn assert_world_completed_output_keeps_actual_producer(
         assert!(product.module_interface() == prior_product.module_interface());
         assert_eq!(
             Some(product.module_interface().source_sha256()),
-            prior_product.source_sha256(),
+            prior_product
+                .source_admission()
+                .map(|admission| admission.source_sha256()),
         );
         assert!(product.module_interface().core_bytes().is_some());
-        assert!(product.source_sha256().is_none());
+        assert!(product.source_admission().is_none());
         assert!(product.interface_bytes() == prior_product.interface_bytes());
         assert!(product.product_bytes() == prior_product.product_bytes());
         assert!(product.package_imports_bytes() == prior_product.package_imports_bytes());

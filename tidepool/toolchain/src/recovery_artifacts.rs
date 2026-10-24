@@ -200,7 +200,12 @@ impl std::ops::Deref for OriginalDraft {
 }
 impl PartialEq for CertifiedRecoveryProduct {
     fn eq(&self, other: &Self) -> bool {
-        self.source_sha256() == other.source_sha256() && self.same_durable_artifact(other)
+        self.source_admission()
+            .map(|admission| admission.source_sha256())
+            == other
+                .source_admission()
+                .map(|admission| admission.source_sha256())
+            && self.same_durable_artifact(other)
     }
 }
 impl Eq for CertifiedRecoveryProduct {}
@@ -255,20 +260,16 @@ impl CertifiedRecoveryProduct {
             }
     }
 
-    pub(crate) fn source_admission(&self) -> Option<&Arc<crate::cache::CompletedSourceEvidence>> {
+    /// Completed-source admission for this acquisition. Recovery retains canonical
+    /// source identity without issuing this witness.
+    pub fn source_admission(&self) -> Option<&crate::certified_products::OriginalSourceAdmission> {
         match &self.admission {
             OriginalAdmission::Recovered => None,
-            OriginalAdmission::Fresh(admission) => Some(admission.evidence()),
+            OriginalAdmission::Fresh(admission) => Some(admission),
         }
     }
     pub fn owner(&self) -> &CachedHomeOwner {
         &self.owner
-    }
-    pub fn source_sha256(&self) -> Option<[u8; 32]> {
-        match &self.admission {
-            OriginalAdmission::Recovered => None,
-            OriginalAdmission::Fresh(admission) => Some(admission.source_sha256()),
-        }
     }
     pub fn interface_bytes(&self) -> &[u8] {
         &self.interface_bytes
@@ -376,10 +377,10 @@ impl OriginalDraft {
     pub(crate) fn owner(&self) -> &CachedHomeOwner {
         &self.owner
     }
-    pub(crate) fn source_sha256(&self) -> Option<[u8; 32]> {
-        self.source_admission
-            .as_ref()
-            .map(|admission| admission.source_sha256())
+    pub(crate) fn source_admission(
+        &self,
+    ) -> Option<&crate::certified_products::OriginalSourceAdmission> {
+        self.source_admission.as_ref()
     }
     pub(crate) fn interface_bytes(&self) -> &[u8] {
         &self.interface_bytes
@@ -434,12 +435,20 @@ impl OriginalDraft {
         interface: crate::certified_products::CertifiedModuleInterface,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<Self, RecoveryArtifactError> {
+        crate::certified_products::validate_original_source_admission(
+            self.source_admission(),
+            self.owner(),
+            &interface,
+        )
+        .map_err(|error| {
+            recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
+        })?;
         crate::certified_products::validate_canonical_native_bytes_with_operation(
             self.owner(),
             self.certification_bytes(),
             self.interface_bytes(),
             self.package_imports_bytes(),
-            self.source_sha256(),
+            None,
             &interface,
             &validation.inventory,
         )

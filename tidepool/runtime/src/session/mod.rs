@@ -2913,7 +2913,12 @@ impl SessionLib {
                 "authored ancestry lacks its admitted exact context",
             ));
         }
-        if certified.product().source_sha256() != Some(certified.source_sha256())
+        if !certified
+            .product()
+            .source_admission()
+            .is_some_and(|admission| {
+                admission.admits_source(certified.product().owner(), &certified.source_sha256())
+            })
             || certified.product().owner().module != staged.module.module_name()
         {
             return Err(invalid(

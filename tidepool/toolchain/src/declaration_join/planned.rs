@@ -644,20 +644,7 @@ fn certify_admitted_planned_declaration(
                 && product.owner().module == original_owner.module
         })
         .ok_or_else(|| contract("planned original has no sealed recovery product"))?;
-    if selected.source_sha256() != Some(source_sha256) {
-        return Err(contract(
-            "planned original sealed product has a different source digest",
-        ));
-    }
-    if selected.module_interface().origin()
-        != (crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
-            generation: module.gen.0,
-        })
-    {
-        return Err(contract(
-            "planned original sealed product has a different declaration origin",
-        ));
-    }
+    require_authored_original_source(selected, &source_sha256, module.gen.0)?;
     let artifact_context = authored_interface_context(
         Some(baseline),
         output,
@@ -1512,7 +1499,13 @@ mod tests {
         };
         let packages = BTreeMap::new();
         let b = fixture_finalized_product(
-            original_groups_fixture_with_interface("B", vec![(7, vec![])], 7, &packages, vec![0x42]),
+            original_groups_fixture_with_interface(
+                "B",
+                vec![(7, vec![])],
+                7,
+                &packages,
+                vec![0x42],
+            ),
             [1; 32],
         );
         let a = fixture_finalized_product(
@@ -1641,7 +1634,8 @@ mod tests {
             (owner.clone(), vec![b_owner.clone()]),
             (b_owner.clone(), vec![]),
         ]);
-        let mut imported_validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut imported_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::default();
         let imported = ValidatedAuthoredClosure::admit(
             &originals,
             [1; 32],
@@ -1727,7 +1721,13 @@ mod tests {
             "repeated custody cannot issue duplicate compiler roles"
         );
         let wrong_version = fixture_finalized_product(
-            original_groups_fixture_with_interface("B", vec![(7, vec![])], 8, &packages, vec![0x42]),
+            original_groups_fixture_with_interface(
+                "B",
+                vec![(7, vec![])],
+                8,
+                &packages,
+                vec![0x42],
+            ),
             [1; 32],
         );
         let wrong_version = recovered_witness_fixtures(&[wrong_version])
