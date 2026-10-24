@@ -815,7 +815,16 @@ mod tests {
         }));
 
         let mut unselected = inputs.clone();
-        unselected.stages = Arc::new(BTreeMap::new());
+        unselected.stages = Arc::new(BTreeMap::from([(
+            stage + 1,
+            inputs.stages[&stage]
+                .iter()
+                .map(|selected| ScopedTerminalUse {
+                    terminal: selected.terminal.clone(),
+                    value: selected.value.clone(),
+                })
+                .collect(),
+        )]));
         assert!(
             Arc::ptr_eq(
                 unselected
