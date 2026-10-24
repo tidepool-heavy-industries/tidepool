@@ -276,13 +276,13 @@ impl ScopedResolvedInputs {
             .into_iter()
             .collect();
         for authorized in values {
-            if authorized.item() != expected_item
-                || *authorized.admission_digest() != expected_admission_digest
+            if authorized.item() != expected_item {
+                return Err(super::super::SessionTransitionReason::WrongPhase.into());
+            }
+            if *authorized.admission_digest() != expected_admission_digest
                 || !Arc::ptr_eq(authorized.target(), expected_target)
             {
-                return Err(SessionError::Engine(
-                    PreparedRuntimeError::certified_target_owners(),
-                ));
+                return Err(super::super::SessionTransitionReason::OwnerChanged.into());
             }
             authorized.value().validate(session, &reachable)?;
         }
