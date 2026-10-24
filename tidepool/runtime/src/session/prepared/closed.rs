@@ -26,7 +26,9 @@ pub(in crate::session) struct RetainedNativeRequirement {
     required_evaluated: bool,
 }
 impl RetainedNativeRequirement {
-    fn from_declaration(
+    /// Assemble an unauthorized slot request; the linked target and checked
+    /// execution must still authorize it before a value can be installed.
+    pub(in crate::session) fn from_declaration(
         declaration: &tidepool_repr::execution_schema::GlobalDecl,
         signatures: &[Signature],
         leaf: NativeRetainedRequirement,

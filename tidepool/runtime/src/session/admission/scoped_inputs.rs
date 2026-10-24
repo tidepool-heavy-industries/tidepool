@@ -659,3 +659,208 @@ impl PersistentSession {
         Ok(owner)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::resident::world_cell_test_support::{
+        bootstrap_world_for, execute_fixture_cell_for, plan_fixture_cell_for,
+        source_action_with_original, InputRecipe,
+    };
+    use crate::session::{ModuleEnv, OutputSink, ResidentSession, SessionId, SessionLib};
+    use tidepool_toolchain::linked_native::AcquiredNativeImport;
+
+    #[derive(Clone)]
+    struct EmptyOutput;
+    impl OutputSink for EmptyOutput {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn historical_native_authorization_requires_actual_stage_terminal_and_admitted_value() {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let recipe = InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            effects.include_paths().to_vec(),
+        );
+        let library = SessionLib::open(
+            SessionId(1016),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+        let mut resident =
+            ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(library));
+        let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+        bootstrap_world_for(&mut resident, &recipe, &source);
+        let original = source.original_source().clone();
+        let execution = Arc::new(
+            source_action_with_original(&mut resident, original.clone(), |resident, _| {
+                resident.begin_private_execution(source.scope())
+            })
+            .unwrap(),
+        );
+        execute_fixture_cell_for(
+            &mut resident,
+            &source,
+            &recipe,
+            &execution,
+            include_str!("../fixtures/checked-produced-native-capture.hs"),
+        );
+        let admission = plan_fixture_cell_for(
+            &mut resident,
+            &recipe,
+            "historicalResult <- pure privateOriginalCapture",
+            execution.clone(),
+        )
+        .unwrap();
+        let prepared = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, report| {
+                    crate::session::turn::prepare_cell_program_admitted(owner, admission, report)
+                },
+            )
+            .unwrap();
+        let (_, program) = crate::session::turn::finish_cell_program_admitted(prepared).unwrap();
+        let prefix = resident.begin_cell_program(program).unwrap().unwrap();
+        let issued = &prefix.cell_program().items()[0];
+        let native = issued.native().unwrap();
+        let target = issued
+            .native_products()
+            .unwrap()
+            .linked_native_target()
+            .unwrap();
+        let inputs = prefix.snapshot().scoped_inputs.clone();
+        let (owner, global_index, binding, leaf) = target
+            .acquired()
+            .find_map(|owner| {
+                owner
+                    .imports()
+                    .enumerate()
+                    .find_map(|(index, import)| match import {
+                        AcquiredNativeImport::Retained {
+                            requirement,
+                            binding,
+                        } if requirement.identity().occurrence == "capturedForNative" => Some((
+                            owner.clone(),
+                            u32::try_from(index).unwrap(),
+                            binding,
+                            requirement,
+                        )),
+                        _ => None,
+                    })
+            })
+            .expect("historical HOME body must retain its original checked value slot");
+        assert!(matches!(
+            target
+                .verify_retained_slot(&owner, global_index, binding, &leaf)
+                .unwrap(),
+            VerifiedRetainedSlotDemander::HistoricalInput(_),
+        ));
+        let definitions = owner.code().body().definitions();
+        let requirement = Arc::new(
+            RetainedNativeRequirement::from_declaration(
+                &definitions.globals()[global_index as usize],
+                definitions.signatures(),
+                leaf,
+                owner.clone(),
+                global_index,
+                binding,
+            )
+            .unwrap(),
+        );
+        let authorized = inputs
+            .resolve_native_requirement(&prefix, native, target, &requirement)
+            .unwrap();
+        assert!(authorized.matches_slot(
+            native.item(),
+            prefix.admission().digest(),
+            target,
+            &requirement
+        ));
+        assert!(matches!(
+            authorized.value().evidence,
+            ScopedValueEvidence::Admitted { .. }
+        ));
+        let stage = native
+            .item()
+            .world_selected_runtime_inputs()
+            .stage_first_ordinal();
+        assert!(inputs.stages[&stage].iter().any(|selected| {
+            selected.terminal.origin() == DependencyTerminalOrigin::NativeOriginal
+                && selected.terminal.demander()
+                    == match owner.occurrence() {
+                        tidepool_toolchain::linked_native::NativeOccurrenceId::Home(binding) => {
+                            binding
+                        }
+                        _ => panic!("historical retained slot must be HOME"),
+                    }
+                && selected.terminal.global_index() == global_index
+                && selected.terminal.binding() == binding
+                && selected.value.id == authorized.value().id
+                && selected.value.handle == authorized.value().handle
+        }));
+
+        let mut unselected = inputs.clone();
+        unselected.stages = Arc::new(BTreeMap::new());
+        assert!(
+            Arc::ptr_eq(
+                unselected
+                    .value(requirement.identity(), requirement.generation())
+                    .unwrap(),
+                authorized.value(),
+            ),
+            "the rejected value remains in the pooled runtime inputs"
+        );
+        assert!(matches!(
+            unselected.resolve_native_requirement(&prefix, native, target, &requirement),
+            Err(PreparedRuntimeError::CertifiedTargetOwners { .. }),
+        ));
+
+        let value = authorized.value();
+        let ScopedValueEvidence::Admitted { row, provenance } = &value.evidence else {
+            unreachable!()
+        };
+        let mut produced = inputs.clone();
+        produced.values.insert(
+            (value.identity.clone(), value.generation),
+            Arc::new(ScopedResolvedValue {
+                id: value.id,
+                defining_scope: value.defining_scope,
+                identity: value.identity.clone(),
+                generation: value.generation,
+                handle: value.handle,
+                name: value.name.clone(),
+                evidence: ScopedValueEvidence::Produced {
+                    row: row.clone(),
+                    provenance: provenance.clone(),
+                },
+                _bindings: value._bindings.clone(),
+            }),
+        );
+        assert!(
+            Arc::ptr_eq(&produced.stages, &inputs.stages),
+            "the exact historical terminal remains selected"
+        );
+        assert!(matches!(
+            produced.resolve_native_requirement(&prefix, native, target, &requirement),
+            Err(PreparedRuntimeError::CertifiedTargetOwners { .. }),
+        ));
+        assert!(inputs
+            .resolve_native_requirement(&prefix, native, target, &requirement)
+            .is_ok());
+    }
+}
