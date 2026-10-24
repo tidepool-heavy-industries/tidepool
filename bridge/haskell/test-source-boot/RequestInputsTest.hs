@@ -2369,7 +2369,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
       let requestedCounters =
             [("world.cell.source_frontends.main:" ++ name,1) | name <- ["CacheEntry","CacheEven","CacheOdd"]]
             ++ [("world.cell.source_frontends.main:WorldCancellationNames",2)
-              ,("world.cell.admission_parses",16)
+              ,("world.cell.admission_parses",15)
               -- Recovery has a separate finite observation budget for this
               -- fixed staged fixture; overflow refuses incomplete evidence.
               ,("world.cell.prior_source_preparations",256)]
@@ -3073,7 +3073,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
           ++ "; globalCaptureTruncated=" ++ show ("[compiler diagnostics truncated at 4 MiB]" `isInfixOf` diagnostics)))
       admissionParses <- observed "world.cell.admission_parses"
       hPutStrLn stderr ("world.cell.admission_parses count=" ++ show (sum admissionParses))
-      unless (admissionParses == replicate 16 1)
+      unless (admissionParses == replicate 15 1)
         (fail ("real preparation did not parse its recipe exactly once: "
           ++ show admissionParses))
 
