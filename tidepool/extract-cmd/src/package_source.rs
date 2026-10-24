@@ -495,6 +495,11 @@ impl ConfiguredSource {
                 let roots = state["roots"]
                     .as_array()
                     .ok_or_else(|| invalid("missing receipt roots"))?;
+                if roots.iter().any(|item| item["state"] != "registered") {
+                    return Err(invalid(
+                        "provider acquired receipt contains unregistered roots",
+                    ));
+                }
                 let exact=roots.iter().map(|item|serde_json::json!({"path":item["path"],"store_path":item["store_path"]})).collect::<Vec<_>>();
                 if serde_json::Value::Array(exact) != plan["roots"] {
                     return Err(invalid("provider receipt scope differs"));
