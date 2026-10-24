@@ -485,6 +485,7 @@ fn native_demand_prebound_plain_and_explicit_routes_refuse_reentry_without_poiso
     use tidepool_extract_cmd::{CompilerEndpoint, CompilerTransaction, ExtractRun, SpawnError};
     struct PreboundSession<'a> {
         plain: Option<CompilerEndpoint>,
+        begin: Vec<CompilerEndpoint>,
         plain_command: &'a ExtractCmd,
         transaction: &'a mut CompilerTransaction,
         transaction_command: &'a ExtractCmd,
@@ -507,7 +508,22 @@ fn native_demand_prebound_plain_and_explicit_routes_refuse_reentry_without_poiso
                 .transaction
                 .execute(self.transaction_command)
                 .unwrap_err();
-            for error in [plain, explicit] {
+            let mut errors = vec![plain, explicit];
+            for (index, endpoint) in self.begin.drain(..).enumerate() {
+                // Include default and explicit workload BEGIN, plus the same
+                // one-slot daemon currently serving this outer callback.
+                errors.push(
+                    if index == 1 {
+                        endpoint.transaction_for_workload(
+                            tidepool_extract_cmd::CompileWorkload::Preparation,
+                        )
+                    } else {
+                        endpoint.transaction()
+                    }
+                    .unwrap_err(),
+                );
+            }
+            for error in errors {
                 assert!(error.definitely_unsubmitted());
                 assert!(error.permits_rebind());
                 assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidInput);
@@ -538,8 +554,18 @@ fn native_demand_prebound_plain_and_explicit_routes_refuse_reentry_without_poiso
         .unwrap()
         .transaction()
         .unwrap();
+    let begin_roots = [
+        scratch.path().join("begin-default"),
+        scratch.path().join("begin-workload"),
+    ];
+    let mut begin = begin_roots
+        .iter()
+        .map(|root| setup(root, &fixture, 20).bind_direct().unwrap())
+        .collect::<Vec<_>>();
     let outer_root = scratch.path().join("outer");
     let outer_command = setup(&outer_root, &fixture, 20);
+    let mut daemon = daemon(&outer_root, 5);
+    begin.push(outer_command.bind().unwrap());
     let outcome = with_compiler_transaction(
         |_| {},
         || {
@@ -547,6 +573,7 @@ fn native_demand_prebound_plain_and_explicit_routes_refuse_reentry_without_poiso
                 &outer_command,
                 PreboundSession {
                     plain: Some(plain),
+                    begin,
                     plain_command: &plain_command,
                     transaction: &mut transaction,
                     transaction_command: &transaction_command,
@@ -566,6 +593,13 @@ fn native_demand_prebound_plain_and_explicit_routes_refuse_reentry_without_poiso
         "known-unsubmitted reentry must not poison the explicit transaction"
     );
     assert!(transaction.finish().is_clean());
+    for root in begin_roots {
+        assert!(
+            !root.join("worker-pids").exists(),
+            "refused BEGIN admitted a compiler worker"
+        );
+    }
+    stop(&outer_root, &mut daemon);
     assert_reaped(&transaction_root);
     assert_reaped(&outer_root);
 }
