@@ -6823,7 +6823,7 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
             body.owner().module == f_owner
                 && code.imports().any(|import| matches!(import,
                     tidepool_toolchain::linked_native::AcquiredNativeImport::Retained { requirement, .. }
-                    if requirement.requirement().identity() == &held_identity
+                    if requirement.identity() == &held_identity
                         && requirement.generation() == held_generation))
         }),
         "the original HOME body really captures the old exact value generation"

@@ -1,13 +1,15 @@
 //! The live values held by one checked prefix, including exact terminal uses.
 
+use super::super::prepared::{PreparedRuntimeError, RetainedNativeRequirement};
 use super::*;
 use tidepool_codegen::prepared_program::PreparedHandle;
 use tidepool_repr::SessionVarId;
 use tidepool_toolchain::checked_cell::{CheckedValueArtifact, ExactCheckedItem, ExactCompiledItem};
-use tidepool_toolchain::compiler_world::{DependencyTerminalOrigin, WorldCellRuntimeInputOrigin};
-use tidepool_toolchain::linked_native::{CellStageSlotWitness, HistoricalSlotWitness, LinkedNativeTarget, VerifiedRetainedSlotDemander};
-use super::super::prepared::{PreparedRuntimeError, RetainedNativeRequirement};
 use tidepool_toolchain::compiler_world::SelectedDependencyTerminal;
+use tidepool_toolchain::compiler_world::{DependencyTerminalOrigin, WorldCellRuntimeInputOrigin};
+use tidepool_toolchain::linked_native::{
+    CellStageSlotWitness, HistoricalSlotWitness, LinkedNativeTarget, VerifiedRetainedSlotDemander,
+};
 
 #[derive(Debug)]
 enum ScopedValueEvidence {
@@ -113,11 +115,21 @@ pub(in crate::session) struct AuthorizedRetainedValue {
 }
 
 impl AuthorizedRetainedValue {
-    pub(in crate::session) fn item(&self) -> &ExactCheckedItem { &self.item }
-    pub(in crate::session) fn admission_digest(&self) -> &[u8; 32] { &self.admission_digest }
-    pub(in crate::session) fn target(&self) -> &Arc<LinkedNativeTarget> { &self.target }
-    pub(in crate::session) fn requirement(&self) -> &Arc<RetainedNativeRequirement> { &self.requirement }
-    pub(in crate::session) fn value(&self) -> &Arc<ScopedResolvedValue> { &self.value }
+    pub(in crate::session) fn item(&self) -> &ExactCheckedItem {
+        &self.item
+    }
+    pub(in crate::session) fn admission_digest(&self) -> &[u8; 32] {
+        &self.admission_digest
+    }
+    pub(in crate::session) fn target(&self) -> &Arc<LinkedNativeTarget> {
+        &self.target
+    }
+    pub(in crate::session) fn requirement(&self) -> &Arc<RetainedNativeRequirement> {
+        &self.requirement
+    }
+    pub(in crate::session) fn value(&self) -> &Arc<ScopedResolvedValue> {
+        &self.value
+    }
     pub(in crate::session) fn matches_slot(
         &self,
         expected_item: &ExactCheckedItem,
@@ -268,7 +280,9 @@ impl ScopedResolvedInputs {
                 || *authorized.admission_digest() != expected_admission_digest
                 || !Arc::ptr_eq(authorized.target(), expected_target)
             {
-                return Err(SessionError::Engine(PreparedRuntimeError::certified_target_owners()));
+                return Err(SessionError::Engine(
+                    PreparedRuntimeError::certified_target_owners(),
+                ));
             }
             authorized.value().validate(session, &reachable)?;
         }
@@ -318,22 +332,34 @@ impl ScopedResolvedInputs {
         value: &Arc<ScopedResolvedValue>,
     ) -> Result<AuthorizedRetainedValue, PreparedRuntimeError> {
         let stage = item.world_selected_runtime_inputs().stage_first_ordinal();
-        let selected = item.world_selected_runtime_inputs().inputs().iter().find(|selected| {
-            selected.session_var() == value.id
-                && selected.defining_scope() == value.defining_scope.0
-                && selected.generation() == witness.leaf().generation()
-                && *selected.symbol() == *witness.leaf().identity()
-        }).ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+        let selected = item
+            .world_selected_runtime_inputs()
+            .inputs()
+            .iter()
+            .find(|selected| {
+                selected.session_var() == value.id
+                    && selected.defining_scope() == value.defining_scope.0
+                    && selected.generation() == witness.leaf().generation()
+                    && *selected.symbol() == *witness.leaf().identity()
+            })
+            .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
         let row = match (&value.evidence, selected.origin()) {
-            (ScopedValueEvidence::Admitted { row, .. },
-                WorldCellRuntimeInputOrigin::BaseWorld | WorldCellRuntimeInputOrigin::CellOperand) => {
-                let expected = selected.checked_row().ok_or_else(PreparedRuntimeError::certified_target_owners)?;
+            (
+                ScopedValueEvidence::Admitted { row, .. },
+                WorldCellRuntimeInputOrigin::BaseWorld | WorldCellRuntimeInputOrigin::CellOperand,
+            ) => {
+                let expected = selected
+                    .checked_row()
+                    .ok_or_else(PreparedRuntimeError::certified_target_owners)?;
                 if !Arc::ptr_eq(expected, row) {
                     return Err(PreparedRuntimeError::certified_target_owners());
                 }
                 row
             }
-            (ScopedValueEvidence::Produced { row, .. }, WorldCellRuntimeInputOrigin::PriorStage { producer, consumer }) => {
+            (
+                ScopedValueEvidence::Produced { row, .. },
+                WorldCellRuntimeInputOrigin::PriorStage { producer, consumer },
+            ) => {
                 if producer >= consumer || consumer > stage {
                     return Err(PreparedRuntimeError::certified_target_owners());
                 }
@@ -341,14 +367,19 @@ impl ScopedResolvedInputs {
             }
             _ => return Err(PreparedRuntimeError::certified_target_owners()),
         };
-        if !witness.owner().matches_retained_checked_value(witness.global_index(), witness.binding(), row)
+        if !witness
+            .owner()
+            .matches_retained_checked_value(witness.global_index(), witness.binding(), row)
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?
         {
             return Err(PreparedRuntimeError::certified_target_owners());
         }
         Ok(AuthorizedRetainedValue {
-            item: item.clone(), admission_digest, target: Arc::clone(target),
-            requirement: Arc::clone(requirement), value: Arc::clone(value),
+            item: item.clone(),
+            admission_digest,
+            target: Arc::clone(target),
+            requirement: Arc::clone(requirement),
+            value: Arc::clone(value),
         })
     }
 
@@ -362,26 +393,35 @@ impl ScopedResolvedInputs {
         value: &Arc<ScopedResolvedValue>,
     ) -> Result<AuthorizedRetainedValue, PreparedRuntimeError> {
         let stage = item.world_selected_runtime_inputs().stage_first_ordinal();
-        let matched = self.stages.get(&stage).is_some_and(|entries| entries.iter().any(|selected| {
-            selected.terminal.origin() == DependencyTerminalOrigin::NativeOriginal
-                && selected.terminal.demander() == witness.demander()
-                && selected.terminal.global_index() == witness.global_index()
-                && selected.terminal.binding() == witness.binding()
-                && selected.value.id == value.id
-                && selected.value.handle == value.handle
-        }));
-        if !matched { return Err(PreparedRuntimeError::certified_target_owners()); }
+        let matched = self.stages.get(&stage).is_some_and(|entries| {
+            entries.iter().any(|selected| {
+                selected.terminal.origin() == DependencyTerminalOrigin::NativeOriginal
+                    && selected.terminal.demander() == witness.demander()
+                    && selected.terminal.global_index() == witness.global_index()
+                    && selected.terminal.binding() == witness.binding()
+                    && selected.value.id == value.id
+                    && selected.value.handle == value.handle
+            })
+        });
+        if !matched {
+            return Err(PreparedRuntimeError::certified_target_owners());
+        }
         let ScopedValueEvidence::Admitted { row, .. } = &value.evidence else {
             return Err(PreparedRuntimeError::certified_target_owners());
         };
-        if !witness.owner().matches_retained_checked_value(witness.global_index(), witness.binding(), row)
+        if !witness
+            .owner()
+            .matches_retained_checked_value(witness.global_index(), witness.binding(), row)
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?
         {
             return Err(PreparedRuntimeError::certified_target_owners());
         }
         Ok(AuthorizedRetainedValue {
-            item: item.clone(), admission_digest, target: Arc::clone(target),
-            requirement: Arc::clone(requirement), value: Arc::clone(value),
+            item: item.clone(),
+            admission_digest,
+            target: Arc::clone(target),
+            requirement: Arc::clone(requirement),
+            value: Arc::clone(value),
         })
     }
 
@@ -400,24 +440,48 @@ impl ScopedResolvedInputs {
         {
             return Err(PreparedRuntimeError::certified_target_owners());
         }
-        execution.validate_runtime_admission(admission_digest)
+        execution
+            .validate_runtime_admission(admission_digest)
             .map_err(|_| PreparedRuntimeError::certified_target_owners())?;
-        let value = self.value(requirement.identity(), requirement.generation())
+        let value = self
+            .value(requirement.identity(), requirement.generation())
             .ok_or_else(|| PreparedRuntimeError::MissingRetainedCertifiedOwner {
-                identity: requirement.identity().clone(), generation: requirement.generation(),
+                identity: requirement.identity().clone(),
+                generation: requirement.generation(),
             })?;
-        value.provenance().map_err(|_| PreparedRuntimeError::MissingRetainedSource { id: value.id })?;
-        let slot = target.verify_retained_slot(requirement.owner(), requirement.global_index(), requirement.binding(), requirement.leaf())
+        value
+            .provenance()
+            .map_err(|_| PreparedRuntimeError::MissingRetainedSource { id: value.id })?;
+        let slot = target
+            .verify_retained_slot(
+                requirement.owner(),
+                requirement.global_index(),
+                requirement.binding(),
+                requirement.leaf(),
+            )
             .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?;
         match slot {
             VerifiedRetainedSlotDemander::CurrentStage(witness)
-            | VerifiedRetainedSlotDemander::PriorProgramStage(witness) =>
-                self.authorize_for_cell_stage(item, admission_digest, target, requirement, witness, value),
-            VerifiedRetainedSlotDemander::HistoricalInput(witness) =>
-                self.authorize_for_historical_home(item, admission_digest, target, requirement, witness, value),
+            | VerifiedRetainedSlotDemander::PriorProgramStage(witness) => self
+                .authorize_for_cell_stage(
+                    item,
+                    admission_digest,
+                    target,
+                    requirement,
+                    witness,
+                    value,
+                ),
+            VerifiedRetainedSlotDemander::HistoricalInput(witness) => self
+                .authorize_for_historical_home(
+                    item,
+                    admission_digest,
+                    target,
+                    requirement,
+                    witness,
+                    value,
+                ),
         }
     }
-
 }
 
 impl RuntimeCheckedPrefix {

@@ -11537,9 +11537,12 @@ mod authored_publication_tests {
                         AcquiredNativeImport::Retained {
                             requirement,
                             binding,
-                        } if requirement.identity().occurrence == "capturedForNative" => {
-                            Some((owner.clone(), u32::try_from(index).unwrap(), binding, requirement))
-                        }
+                        } if requirement.identity().occurrence == "capturedForNative" => Some((
+                            owner.clone(),
+                            u32::try_from(index).unwrap(),
+                            binding,
+                            requirement,
+                        )),
                         _ => None,
                     })
             })
@@ -11559,15 +11562,25 @@ mod authored_publication_tests {
             .matches_retained_checked_value(retained.1, foreign_binding, &produced)
             .unwrap());
         assert!(matches!(
-            target.verify_retained_slot(&retained.0, retained.1, retained.2, &retained.3).unwrap(),
+            target
+                .verify_retained_slot(&retained.0, retained.1, retained.2, &retained.3)
+                .unwrap(),
             tidepool_toolchain::linked_native::VerifiedRetainedSlotDemander::PriorProgramStage(_)
         ));
-        assert!(target.verify_retained_slot(&retained.0, u32::MAX, retained.2, &retained.3).is_err());
-        assert!(target.verify_retained_slot(&retained.0, retained.1, foreign_binding, &retained.3).is_err());
+        assert!(target
+            .verify_retained_slot(&retained.0, u32::MAX, retained.2, &retained.3)
+            .is_err());
+        assert!(target
+            .verify_retained_slot(&retained.0, retained.1, foreign_binding, &retained.3)
+            .is_err());
         let wrong_leaf = tidepool_repr::native_code::NativeRetainedRequirement::new(
-            retained.3.identity().clone(), retained.3.generation() + 1, retained.3.type_artifact().copied(),
+            retained.3.identity().clone(),
+            retained.3.generation() + 1,
+            retained.3.type_artifact().copied(),
         );
-        assert!(target.verify_retained_slot(&retained.0, retained.1, retained.2, &wrong_leaf).is_err());
+        assert!(target
+            .verify_retained_slot(&retained.0, retained.1, retained.2, &wrong_leaf)
+            .is_err());
         source_action(&mut resident, &original, |resident, report| {
             resident.run_bind_with_sites(
                 &bound[0].name,
@@ -11629,10 +11642,20 @@ mod authored_publication_tests {
         })
         .unwrap();
         let scope = execution.private_scope();
-        let producer_target = compiled.certification.as_ref().unwrap().linked_target.as_ref().unwrap().clone();
+        let producer_target = compiled
+            .certification
+            .as_ref()
+            .unwrap()
+            .linked_target
+            .as_ref()
+            .unwrap()
+            .clone();
         #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Probe { Resolve, RefuseSecond, SubstituteFirst }
-
+        enum Probe {
+            Resolve,
+            RefuseSecond,
+            SubstituteFirst,
+        }
 
         // This callback exercises traversal only. The neighboring acquired-slot
         // test checks actual row, ordinal and full-binding authentication.
@@ -11698,7 +11721,8 @@ mod authored_publication_tests {
                 .unwrap();
             let before = resident.state.residency().unwrap();
             let mut resolved = Vec::<NativeOccurrenceId>::new();
-            let mut first_authorization: Option<super::super::admission::AuthorizedRetainedValue> = None;
+            let mut first_authorization: Option<super::super::admission::AuthorizedRetainedValue> =
+                None;
             let anchors = selection
                 .roots()
                 .keys()
@@ -11706,36 +11730,64 @@ mod authored_publication_tests {
                 .count();
             // The session owns mutable permit bookkeeping and validates the
             // selected physical witnesses before traversing retained imports.
-            let result =
-                resident
-                    .state
-                    .instantiate_native_plan_in(scope, &plan, Some((execution.item(), prefix.admission().digest())), selection, |requirement| {
-                        let value =
-                            inputs.resolve_native_requirement(prefix, execution, linked, requirement)?;
-                        {
-                            let occurrence = requirement.owner().occurrence();
-                            assert!(retained_owners.contains(&occurrence));
-                            if !resolved.contains(&occurrence) {
-                                resolved.push(occurrence);
-                                if resolved.len() == 2 {
-                                    match mode {
-                                        Probe::RefuseSecond => return Err(PreparedRuntimeError::certified_target_owners()),
-                                        Probe::SubstituteFirst => return Ok(first_authorization.as_ref().unwrap().clone()),
-                                        Probe::Resolve => {}
+            let result = resident.state.instantiate_native_plan_in(
+                scope,
+                &plan,
+                Some((execution.item(), prefix.admission().digest())),
+                selection,
+                |requirement| {
+                    let value = inputs.resolve_native_requirement(
+                        prefix,
+                        execution,
+                        linked,
+                        requirement,
+                    )?;
+                    {
+                        let occurrence = requirement.owner().occurrence();
+                        assert!(retained_owners.contains(&occurrence));
+                        if !resolved.contains(&occurrence) {
+                            resolved.push(occurrence);
+                            if resolved.len() == 2 {
+                                match mode {
+                                    Probe::RefuseSecond => {
+                                        return Err(PreparedRuntimeError::certified_target_owners())
                                     }
+                                    Probe::SubstituteFirst => {
+                                        return Ok(first_authorization.as_ref().unwrap().clone())
+                                    }
+                                    Probe::Resolve => {}
                                 }
                             }
                         }
-                        let digest = prefix.admission().digest();
-                        assert!(value.matches_slot(execution.item(), digest, linked, requirement));
-                        assert!(!value.matches_slot(&checked.checked_item(0).unwrap(), digest, linked, requirement));
-                        let mut wrong_digest = digest;
-                        wrong_digest[0] ^= 0x80;
-                        assert!(!value.matches_slot(execution.item(), wrong_digest, linked, requirement));
-                        assert!(!value.matches_slot(execution.item(), digest, &producer_target, requirement));
-                        if first_authorization.is_none() { first_authorization = Some(value.clone()); }
-                        Ok(value)
-                    });
+                    }
+                    let digest = prefix.admission().digest();
+                    assert!(value.matches_slot(execution.item(), digest, linked, requirement));
+                    assert!(!value.matches_slot(
+                        &checked.checked_item(0).unwrap(),
+                        digest,
+                        linked,
+                        requirement
+                    ));
+                    let mut wrong_digest = digest;
+                    wrong_digest[0] ^= 0x80;
+                    assert!(!value.matches_slot(
+                        execution.item(),
+                        wrong_digest,
+                        linked,
+                        requirement
+                    ));
+                    assert!(!value.matches_slot(
+                        execution.item(),
+                        digest,
+                        &producer_target,
+                        requirement
+                    ));
+                    if first_authorization.is_none() {
+                        first_authorization = Some(value.clone());
+                    }
+                    Ok(value)
+                },
+            );
             assert_eq!(
                 resident.state.residency().unwrap(),
                 before,
@@ -11750,12 +11802,44 @@ mod authored_publication_tests {
             } else {
                 let instantiation = result.expect("unchanged acquired obligations must resolve");
                 let digest = prefix.admission().digest();
-                inputs.validate_native_values(&resident.state, execution.item(), digest, linked, instantiation.retained_values()).unwrap();
-                assert!(inputs.validate_native_values(&resident.state, &checked.checked_item(0).unwrap(), digest, linked, instantiation.retained_values()).is_err());
+                inputs
+                    .validate_native_values(
+                        &resident.state,
+                        execution.item(),
+                        digest,
+                        linked,
+                        instantiation.retained_values(),
+                    )
+                    .unwrap();
+                assert!(inputs
+                    .validate_native_values(
+                        &resident.state,
+                        &checked.checked_item(0).unwrap(),
+                        digest,
+                        linked,
+                        instantiation.retained_values()
+                    )
+                    .is_err());
                 let mut wrong_digest = digest;
                 wrong_digest[0] ^= 0x80;
-                assert!(inputs.validate_native_values(&resident.state, execution.item(), wrong_digest, linked, instantiation.retained_values()).is_err());
-                assert!(inputs.validate_native_values(&resident.state, execution.item(), digest, &producer_target, instantiation.retained_values()).is_err());
+                assert!(inputs
+                    .validate_native_values(
+                        &resident.state,
+                        execution.item(),
+                        wrong_digest,
+                        linked,
+                        instantiation.retained_values()
+                    )
+                    .is_err());
+                assert!(inputs
+                    .validate_native_values(
+                        &resident.state,
+                        execution.item(),
+                        digest,
+                        &producer_target,
+                        instantiation.retained_values()
+                    )
+                    .is_err());
                 assert_eq!(
                     resolved
                         .iter()
