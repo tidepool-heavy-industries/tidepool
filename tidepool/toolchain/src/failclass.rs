@@ -119,6 +119,10 @@ pub struct FailureEnvelope {
 pub enum CompileFailureCause {
     Io,
     CompilerEndpoint,
+    NativeDemandRefused {
+        semantic: Box<CompileFailureCause>,
+        execution: NativeDemandExecutionCause,
+    },
     CompilerPublication {
         failure: CompilerTransactionPublicationFailure,
     },
@@ -156,6 +160,26 @@ pub enum CompileFailureCause {
     ModulePackage {
         failure: ModulePackageFailure,
     },
+}
+
+/// Diagnostic projection only; the actual SpawnError retains settlement authority.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeDemandExecutionCause {
+    Received {
+        success: bool,
+    },
+    Failed {
+        submission: NativeDemandSubmissionCause,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeDemandSubmissionCause {
+    RebindPermitted,
+    UnsubmittedCapacity,
+    Indeterminate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -449,6 +473,7 @@ impl FailureEnvelope {
 #[must_use]
 pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
     let mut envelope = match err {
+        CompileError::NativeDemandRefused { refusal, .. } => classify_compile(refusal),
         CompileError::CompilerEvidence(error) => {
             let failure = CompilerEvidenceFailure::from(error.as_ref());
             let class = match failure {
@@ -561,7 +586,35 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
             FailureEnvelope::new(FailureClass::VersionSkew, Phase::Compile, err.to_string())
         }
     };
-    envelope.cause = Some(match err {
+    envelope.cause = Some(compile_failure_cause(err));
+    envelope
+}
+
+fn compile_failure_cause(err: &CompileError) -> CompileFailureCause {
+    match err {
+        CompileError::NativeDemandRefused { refusal, execution } => {
+            CompileFailureCause::NativeDemandRefused {
+                semantic: Box::new(compile_failure_cause(refusal)),
+                execution: match execution {
+                    crate::NativeDemandExecution::Received(run) => {
+                        NativeDemandExecutionCause::Received {
+                            success: run.success(),
+                        }
+                    }
+                    crate::NativeDemandExecution::Failed(error) => {
+                        NativeDemandExecutionCause::Failed {
+                            submission: if error.permits_rebind() {
+                                NativeDemandSubmissionCause::RebindPermitted
+                            } else if error.definitely_unsubmitted() {
+                                NativeDemandSubmissionCause::UnsubmittedCapacity
+                            } else {
+                                NativeDemandSubmissionCause::Indeterminate
+                            },
+                        }
+                    }
+                },
+            }
+        }
         CompileError::Io(_)
         | CompileError::EntryPreparationUnfinished { .. }
         | CompileError::EntryReservationReleaseUnconfirmed { .. }
@@ -620,8 +673,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         CompileError::Asks(_) => CompileFailureCause::TypedSites,
         CompileError::IOTypeDetected => CompileFailureCause::UnsupportedIo,
         CompileError::ConstructorIdentity(_) => CompileFailureCause::ConstructorIdentity,
-    });
-    envelope
+    }
 }
 
 /// A self-diagnosing version-skew report: names the wire version seen (when the
@@ -648,6 +700,78 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
+
+    #[test]
+    fn native_refusal_classification_preserves_semantic_and_independent_transport_causes() {
+        use tidepool_extract_cmd::{ExtractCmd, ExtractRun, ResolvedExtractBin};
+        let command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+            "/nonexistent/native-demand-transport-control",
+        ));
+        let failure = command.bind_direct().unwrap_err();
+        let expected_io = failure.source.kind();
+        let refused = CompileError::NativeDemandRefused {
+            refusal: Box::new(CompileError::InputRejected(vec![])),
+            execution: crate::NativeDemandExecution::Failed(failure),
+        };
+        let envelope = classify_compile(&refused);
+        assert_eq!(envelope.class, FailureClass::InputRejected);
+        let expected = CompileFailureCause::NativeDemandRefused {
+            semantic: Box::new(CompileFailureCause::InputRejected),
+            execution: NativeDemandExecutionCause::Failed {
+                submission: NativeDemandSubmissionCause::RebindPermitted,
+            },
+        };
+        assert_eq!(envelope.cause, Some(expected.clone()));
+        let encoded = serde_json::to_vec(&expected).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<CompileFailureCause>(&encoded).unwrap(),
+            expected
+        );
+        let CompileError::NativeDemandRefused {
+            refusal,
+            execution: crate::NativeDemandExecution::Failed(failure),
+        } = refused
+        else {
+            panic!("typed transport failure must survive classification")
+        };
+        assert!(matches!(*refusal, CompileError::InputRejected(_)));
+        assert!(failure.permits_rebind());
+        assert!(failure.definitely_unsubmitted());
+        assert_eq!(failure.source.kind(), expected_io);
+
+        let run = ExtractRun {
+            worker_location: None,
+            request_correlation: "native-demand-received-control".into(),
+            output: std::process::Output {
+                status: std::process::ExitStatus::from_raw(256),
+                stdout: b"retained failed report".to_vec(),
+                stderr: b"retained stderr".to_vec(),
+            },
+            elapsed: std::time::Duration::ZERO,
+        };
+        let refused = CompileError::NativeDemandRefused {
+            refusal: Box::new(CompileError::IOTypeDetected),
+            execution: crate::NativeDemandExecution::Received(run),
+        };
+        let envelope = classify_compile(&refused);
+        assert_eq!(envelope.class, FailureClass::UserHaskell);
+        assert_eq!(
+            envelope.cause,
+            Some(CompileFailureCause::NativeDemandRefused {
+                semantic: Box::new(CompileFailureCause::UnsupportedIo),
+                execution: NativeDemandExecutionCause::Received { success: false },
+            })
+        );
+        let CompileError::NativeDemandRefused {
+            execution: crate::NativeDemandExecution::Received(run),
+            ..
+        } = refused
+        else {
+            panic!("received output must survive classification")
+        };
+        assert_eq!(run.output.stdout, b"retained failed report");
+        assert_eq!(run.output.stderr, b"retained stderr");
+    }
 
     #[test]
     fn compiler_publication_refusals_preserve_typed_diagnostic_causes() {

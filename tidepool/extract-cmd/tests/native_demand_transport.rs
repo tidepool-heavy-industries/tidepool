@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use tidepool_extract_cmd::{
     compiler_host_checkpoint, preflight_compiler_daemon, with_compiler_transaction,
     with_compiler_transaction_cancellable, CompilerTransactionCancellation, ExtractCmd,
-    NativeDemand, NativeDemandControl, NativeDemandOwner, NativeDemandResolver, NativeReply,
-    ResolvedExtractBin,
+    NativeDemand, NativeDemandControl, NativeDemandOwner, NativeDemandResolver,
+    NativeDemandSession, NativeReply, ResolvedExtractBin,
 };
 
 const FRONTEND: &str = env!("CARGO_BIN_EXE_tidepool-extract");
@@ -199,6 +199,29 @@ impl NativeDemandResolver for Resolver {
     }
 }
 
+impl NativeDemandSession for Resolver {
+    type Outcome = (
+        Self,
+        Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+    );
+
+    fn owner(&self) -> NativeDemandOwner {
+        owner()
+    }
+
+    fn complete(
+        self,
+        execution: Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+    ) -> Self::Outcome {
+        // This borrows TRANSACTION_SCOPE mutably through the production custody
+        // owner. Completion must run after the request's RefMut is released.
+        assert!(tidepool_extract_cmd::retain_compiler_input_directory(
+            std::sync::Arc::new(tempfile::tempdir().unwrap()),
+        ));
+        (self, execution)
+    }
+}
+
 fn assert_reaped(root: &Path) {
     let pids = fs::read_to_string(root.join("worker-pids")).unwrap();
     assert!(!pids.is_empty());
@@ -222,7 +245,7 @@ fn native_demand_actual_direct_and_daemon_preserve_terminal_counts_and_refusal()
                 .join(format!("resident-{resident}-refuse-{refuse}"));
             let command = setup(&root, &fixture, 20);
             let mut daemon = resident.then(|| daemon(&root, 5));
-            let mut resolver = Resolver {
+            let resolver = Resolver {
                 seen: Vec::new(),
                 refuse,
                 cancel: None,
@@ -230,14 +253,14 @@ fn native_demand_actual_direct_and_daemon_preserve_terminal_counts_and_refusal()
             let outcome = with_compiler_transaction(
                 |_| {},
                 || {
-                    command.bind().unwrap().execute_with_native_demand(
-                        &command,
-                        owner(),
-                        &mut resolver,
-                    )
+                    command
+                        .bind()
+                        .unwrap()
+                        .execute_with_native_demand(&command, resolver)
                 },
             );
-            let run = outcome.action.unwrap();
+            let (resolver, execution) = outcome.action;
+            let run = execution.unwrap();
             assert_eq!(run.success(), !refuse);
             assert!(outcome.close.is_clean(), "{:?}", outcome.close);
             assert_eq!(
@@ -268,6 +291,381 @@ fn native_demand_actual_direct_and_daemon_preserve_terminal_counts_and_refusal()
 }
 
 #[test]
+fn native_demand_real_reentry_completion_keeps_scope_custody_rejection_and_unwind_owner() {
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+    use tidepool_extract_cmd::{
+        CompilerEndpoint, CompilerTransactionClose, CompilerTransactionCloseReason, ExtractRun,
+        SpawnError,
+    };
+
+    struct NestedSession<'a> {
+        inputs: Arc<tempfile::TempDir>,
+        calls: &'a Cell<usize>,
+    }
+    impl NativeDemandResolver for NestedSession<'_> {
+        fn resolve_native_demand(
+            &mut self,
+            _: &NativeDemand,
+            _: &NativeDemandControl,
+        ) -> std::io::Result<NativeReply> {
+            panic!("nested compiler request must be refused before IO");
+        }
+    }
+    impl NativeDemandSession for NestedSession<'_> {
+        type Outcome = Result<ExtractRun, SpawnError>;
+        fn owner(&self) -> NativeDemandOwner {
+            owner()
+        }
+        fn complete(self, execution: Self::Outcome) -> Self::Outcome {
+            assert_eq!(self.calls.replace(1), 0);
+            assert!(tidepool_extract_cmd::retain_compiler_input_directory(
+                self.inputs
+            ));
+            let rejection = tidepool_extract_cmd::reject_compiler_response(
+                tidepool_extract_cmd::CompilerResponseRejection::Malformed,
+            );
+            assert!(!rejection.permits_rebind());
+            let error = execution
+                .as_ref()
+                .err()
+                .expect("actual nested execution refused");
+            assert!(error.definitely_unsubmitted());
+            assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidInput);
+            execution
+        }
+    }
+    struct OuterSession<'a> {
+        nested: Option<CompilerEndpoint>,
+        command: &'a ExtractCmd,
+        inputs: Option<Arc<tempfile::TempDir>>,
+        nested_calls: &'a Cell<usize>,
+        complete_calls: &'a Cell<usize>,
+        unwind: bool,
+    }
+    impl NativeDemandResolver for OuterSession<'_> {
+        fn resolve_native_demand(
+            &mut self,
+            _: &NativeDemand,
+            _: &NativeDemandControl,
+        ) -> std::io::Result<NativeReply> {
+            let execution = self
+                .nested
+                .take()
+                .expect("one actual callback")
+                .execute_with_native_demand(
+                    self.command,
+                    NestedSession {
+                        inputs: self.inputs.take().unwrap(),
+                        calls: self.nested_calls,
+                    },
+                );
+            assert!(execution.is_err());
+            if self.unwind {
+                panic!("outer callback unwind control");
+            }
+            Ok(NativeReply::Refused(b"nested refusal control".to_vec()))
+        }
+    }
+    impl NativeDemandSession for OuterSession<'_> {
+        type Outcome = Result<ExtractRun, SpawnError>;
+        fn owner(&self) -> NativeDemandOwner {
+            owner()
+        }
+        fn complete(self, execution: Self::Outcome) -> Self::Outcome {
+            assert_eq!(self.complete_calls.replace(1), 0);
+            execution
+        }
+    }
+
+    let _environment = Environment::set();
+    let scratch = tempfile::tempdir().unwrap();
+    let fixture = fixture(scratch.path());
+    for unwind in [false, true] {
+        let root = scratch.path().join(format!("unwind-{unwind}"));
+        let command = setup(&root, &fixture, 20);
+        let mut daemon = daemon(&root, 5);
+        let inputs = Arc::new(tempfile::tempdir().unwrap());
+        let input = inputs.path().join("nested-input");
+        fs::write(&input, b"same scope custody").unwrap();
+        fs::write(root.join("input-at-end"), input.as_os_str().as_bytes()).unwrap();
+        let weak = Arc::downgrade(&inputs);
+        let nested_calls = Cell::new(0);
+        let complete_calls = Cell::new(0);
+        let sink_calls = Cell::new(0);
+        let observed_close = RefCell::new(None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_compiler_transaction(
+                |close| {
+                    sink_calls.set(sink_calls.get() + 1);
+                    *observed_close.borrow_mut() = Some(close);
+                },
+                || {
+                    let endpoint = command.bind().unwrap();
+                    let nested = command.bind().unwrap();
+                    let result = endpoint.execute_with_native_demand(
+                        &command,
+                        OuterSession {
+                            nested: Some(nested),
+                            command: &command,
+                            inputs: Some(inputs),
+                            nested_calls: &nested_calls,
+                            complete_calls: &complete_calls,
+                            unwind,
+                        },
+                    );
+                    let refused = command.bind().unwrap().execute(&command).unwrap_err();
+                    assert!(
+                        !refused.permits_rebind(),
+                        "pending rejection must survive lease restoration"
+                    );
+                    assert!(refused.source.to_string().contains("failed request"));
+                    result
+                },
+            )
+        }));
+        assert_eq!(
+            sink_calls.get(),
+            1,
+            "original affine close sink settles exactly once"
+        );
+        assert_eq!(nested_calls.get(), 1);
+        let close = observed_close
+            .into_inner()
+            .expect("original scope guard observed close");
+        if unwind {
+            let panic = result.err().expect("callback must unwind");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"outer callback unwind control")
+            );
+            assert_eq!(
+                complete_calls.get(),
+                0,
+                "semantic completion is not a panic handler"
+            );
+        } else {
+            let outcome = result
+                .ok()
+                .expect("normal reentry completion must not panic");
+            assert!(!outcome.action.unwrap().success());
+            assert_eq!(complete_calls.get(), 1);
+            assert!(close.resources_retired());
+            assert_eq!(
+                fs::read(root.join("observed-input")).unwrap(),
+                b"same scope custody"
+            );
+        }
+        let evidence = match &close {
+            CompilerTransactionClose::Retired(evidence)
+            | CompilerTransactionClose::Unconfirmed(evidence) => evidence,
+            other => panic!("rejected/abandoned request cannot close cleanly: {other:?}"),
+        };
+        assert_eq!(
+            evidence.reason,
+            if unwind {
+                CompilerTransactionCloseReason::Abandoned
+            } else {
+                CompilerTransactionCloseReason::FailedRequest
+            }
+        );
+        assert_eq!(weak.upgrade().is_some(), !close.resources_retired());
+        drop(close);
+        assert!(
+            weak.upgrade().is_none(),
+            "exact scope custody releases with close evidence"
+        );
+        stop(&root, &mut daemon);
+        assert_reaped(&root);
+    }
+}
+
+#[test]
+fn native_demand_prebound_plain_and_explicit_routes_refuse_reentry_without_poisoning() {
+    use tidepool_extract_cmd::{CompilerEndpoint, CompilerTransaction, ExtractRun, SpawnError};
+    struct PreboundSession<'a> {
+        plain: Option<CompilerEndpoint>,
+        plain_command: &'a ExtractCmd,
+        transaction: &'a mut CompilerTransaction,
+        transaction_command: &'a ExtractCmd,
+        calls: usize,
+    }
+    impl NativeDemandResolver for PreboundSession<'_> {
+        fn resolve_native_demand(
+            &mut self,
+            _: &NativeDemand,
+            _: &NativeDemandControl,
+        ) -> std::io::Result<NativeReply> {
+            self.calls += 1;
+            let plain = self
+                .plain
+                .take()
+                .unwrap()
+                .execute(self.plain_command)
+                .unwrap_err();
+            let explicit = self
+                .transaction
+                .execute(self.transaction_command)
+                .unwrap_err();
+            for error in [plain, explicit] {
+                assert!(error.definitely_unsubmitted());
+                assert!(error.permits_rebind());
+                assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidInput);
+            }
+            Ok(NativeReply::Refused(b"prebound reentry control".to_vec()))
+        }
+    }
+    impl NativeDemandSession for PreboundSession<'_> {
+        type Outcome = Result<ExtractRun, SpawnError>;
+        fn owner(&self) -> NativeDemandOwner {
+            owner()
+        }
+        fn complete(self, execution: Self::Outcome) -> Self::Outcome {
+            assert_eq!(self.calls, 1);
+            execution
+        }
+    }
+    let _environment = Environment::set();
+    let scratch = tempfile::tempdir().unwrap();
+    let fixture = fixture(scratch.path());
+    let plain_root = scratch.path().join("plain");
+    let plain_command = setup(&plain_root, &fixture, 20);
+    let plain = plain_command.bind_direct().unwrap();
+    let transaction_root = scratch.path().join("explicit");
+    let transaction_command = setup(&transaction_root, &fixture, 20);
+    let mut transaction = transaction_command
+        .bind_direct()
+        .unwrap()
+        .transaction()
+        .unwrap();
+    let outer_root = scratch.path().join("outer");
+    let outer_command = setup(&outer_root, &fixture, 20);
+    let outcome = with_compiler_transaction(
+        |_| {},
+        || {
+            outer_command.bind().unwrap().execute_with_native_demand(
+                &outer_command,
+                PreboundSession {
+                    plain: Some(plain),
+                    plain_command: &plain_command,
+                    transaction: &mut transaction,
+                    transaction_command: &transaction_command,
+                    calls: 0,
+                },
+            )
+        },
+    );
+    assert!(!outcome.action.unwrap().success());
+    assert!(outcome.close.is_clean());
+    assert!(
+        !plain_root.join("worker-pids").exists(),
+        "prebound endpoint emitted no compile request"
+    );
+    assert!(
+        transaction.execute(&transaction_command).unwrap().success(),
+        "known-unsubmitted reentry must not poison the explicit transaction"
+    );
+    assert!(transaction.finish().is_clean());
+    assert_reaped(&transaction_root);
+    assert_reaped(&outer_root);
+}
+
+#[test]
+fn native_demand_caught_resolver_panic_poisoning_prevents_same_scope_reuse() {
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+    use tidepool_extract_cmd::{ExtractRun, SpawnError};
+    struct PanicSession<'a> {
+        input: Arc<tempfile::TempDir>,
+        completed: &'a Cell<usize>,
+    }
+    impl NativeDemandResolver for PanicSession<'_> {
+        fn resolve_native_demand(
+            &mut self,
+            _: &NativeDemand,
+            _: &NativeDemandControl,
+        ) -> std::io::Result<NativeReply> {
+            assert!(tidepool_extract_cmd::retain_compiler_input_directory(
+                Arc::clone(&self.input)
+            ));
+            panic!("caught resolver panic control");
+        }
+    }
+    impl NativeDemandSession for PanicSession<'_> {
+        type Outcome = Result<ExtractRun, SpawnError>;
+        fn owner(&self) -> NativeDemandOwner {
+            owner()
+        }
+        fn complete(self, execution: Self::Outcome) -> Self::Outcome {
+            self.completed.set(self.completed.get() + 1);
+            execution
+        }
+    }
+    let _environment = Environment::set();
+    let scratch = tempfile::tempdir().unwrap();
+    let fixture = fixture(scratch.path());
+    for resident in [false, true] {
+        let root = scratch.path().join(format!("resident-{resident}"));
+        let command = setup(&root, &fixture, 20);
+        let mut daemon = resident.then(|| daemon(&root, 5));
+        let completed = Cell::new(0);
+        let sink_calls = Cell::new(0);
+        let observed = RefCell::new(None);
+        let input = Arc::new(tempfile::tempdir().unwrap());
+        let weak = Arc::downgrade(&input);
+        let outcome = with_compiler_transaction(
+            |close| {
+                sink_calls.set(sink_calls.get() + 1);
+                *observed.borrow_mut() = Some(close);
+            },
+            || {
+                let endpoint = command.bind().unwrap();
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    endpoint.execute_with_native_demand(
+                        &command,
+                        PanicSession {
+                            input,
+                            completed: &completed,
+                        },
+                    )
+                }))
+                .err()
+                .expect("actual resolver must panic");
+                assert_eq!(
+                    panic.downcast_ref::<&str>(),
+                    Some(&"caught resolver panic control")
+                );
+                let error = command.bind().unwrap().execute(&command).unwrap_err();
+                assert!(!error.permits_rebind());
+                assert!(
+                    error.source.to_string().contains("failed request"),
+                    "reuse must fail before IO: {error}"
+                );
+            },
+        );
+        assert_eq!(
+            completed.get(),
+            0,
+            "unwind does not run semantic completion"
+        );
+        assert_eq!(sink_calls.get(), 1);
+        assert!(!outcome.close.is_clean());
+        assert!(
+            !root.join("reply-1").exists(),
+            "panic sends no reply/retry bytes"
+        );
+        assert_eq!(weak.upgrade().is_some(), !outcome.close.resources_retired());
+        drop(outcome);
+        drop(observed.into_inner());
+        assert!(weak.upgrade().is_none());
+        if let Some(daemon) = &mut daemon {
+            stop(&root, daemon);
+        }
+        assert_reaped(&root);
+    }
+}
+
+#[test]
 fn native_demand_actual_transports_poison_malformed_frames_and_reap_workers() {
     let _environment = Environment::set();
     let scratch = tempfile::tempdir().unwrap();
@@ -279,7 +677,7 @@ fn native_demand_actual_transports_poison_malformed_frames_and_reap_workers() {
                 .join(format!("resident-{resident}-phase-{phase}"));
             let command = setup(&root, &fixture, phase);
             let mut daemon = resident.then(|| daemon(&root, 2));
-            let mut resolver = Resolver {
+            let resolver = Resolver {
                 seen: Vec::new(),
                 refuse: false,
                 cancel: None,
@@ -287,14 +685,14 @@ fn native_demand_actual_transports_poison_malformed_frames_and_reap_workers() {
             let outcome = with_compiler_transaction(
                 |_| {},
                 || {
-                    command.bind().unwrap().execute_with_native_demand(
-                        &command,
-                        owner(),
-                        &mut resolver,
-                    )
+                    command
+                        .bind()
+                        .unwrap()
+                        .execute_with_native_demand(&command, resolver)
                 },
             );
-            let error = outcome.action.unwrap_err();
+            let (_, execution) = outcome.action;
+            let error = execution.unwrap_err();
             assert!(!error.definitely_unsubmitted(), "phase {phase}: {error}");
             assert!(!error.permits_rebind());
             assert!(!outcome.close.is_clean());
@@ -316,7 +714,7 @@ fn native_demand_resolver_cancellation_observes_real_host_checkpoint_and_retirem
         let command = setup(&root, &fixture, 20);
         let mut daemon = resident.then(|| daemon(&root, 20));
         let cancellation = CompilerTransactionCancellation::new();
-        let mut resolver = Resolver {
+        let resolver = Resolver {
             seen: Vec::new(),
             refuse: false,
             cancel: Some(cancellation.clone()),
@@ -332,10 +730,11 @@ fn native_demand_resolver_cancellation_observes_real_host_checkpoint_and_retirem
                 command
                     .bind()
                     .unwrap()
-                    .execute_with_native_demand(&command, owner(), &mut resolver)
+                    .execute_with_native_demand(&command, resolver)
             },
         );
-        assert!(outcome.action.is_err());
+        let (resolver, execution) = outcome.action;
+        assert!(execution.is_err());
         assert!(!outcome.close.is_clean());
         assert_eq!(
             outcome.close.resources_retired(),

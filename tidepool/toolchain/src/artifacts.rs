@@ -7919,6 +7919,7 @@ mod module_product_tests {
                 }
             }
             if mixed && !cancel_after_end {
+                crate::compiler_world::native_demand::assert_refusal_latched_before_postresolution_checkpoint(&checked);
                 crate::declaration_context::assert_world_repeated_source_refusals(
                     &checked,
                     prepared.items[4]

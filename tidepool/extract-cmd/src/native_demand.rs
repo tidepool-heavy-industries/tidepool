@@ -52,6 +52,16 @@ pub trait NativeDemandResolver {
     ) -> io::Result<NativeReply>;
 }
 
+/// Owns semantic completion of one native-demand execution. The session is
+/// consumed after transport returns, including every normal admission failure.
+/// Transaction END, input custody and unwinding remain with their existing owner.
+pub trait NativeDemandSession: NativeDemandResolver + Sized {
+    type Outcome;
+
+    fn owner(&self) -> NativeDemandOwner;
+    fn complete(self, execution: Result<crate::ExtractRun, crate::SpawnError>) -> Self::Outcome;
+}
+
 /// The same absolute admitted deadline and cancellation edge throughout an
 /// exchange, including host-side semantic resolution.
 #[derive(Clone, Debug)]
@@ -417,21 +427,6 @@ impl Exchange {
             deadline: MonotonicDeadline(u64::from_le_bytes(deadline)),
         })
     }
-
-    pub(crate) fn accept(&mut self, observed: &Self, first: bool) -> io::Result<()> {
-        if self.nonce != observed.nonce
-            || self.owner != observed.owner
-            || (if first {
-                observed.deadline > self.deadline
-            } else {
-                observed.deadline != self.deadline
-            })
-        {
-            return Err(invalid("native demand belongs to another active request"));
-        }
-        self.deadline = observed.deadline;
-        self.control(None).checkpoint()
-    }
 }
 
 pub(crate) struct ExchangeBudget {
@@ -551,34 +546,133 @@ fn write_frame(writer: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     writer.write_all(payload)
 }
 
-pub(crate) fn resolve(
-    resolver: &mut dyn NativeDemandResolver,
-    exchange: &Exchange,
-    stage: u64,
-    sequence: u64,
-    payload: Vec<u8>,
-    budget: &mut ExchangeBudget,
-    cancellation: Option<CompilerTransactionCancellation>,
-) -> io::Result<NativeReply> {
-    let control = exchange.control(cancellation);
-    control.checkpoint()?;
-    let reply = crate::endpoint::with_native_demand_control(control.clone(), || {
-        resolver.resolve_native_demand(
-            &NativeDemand {
-                owner: exchange.owner.clone(),
-                stage,
-                sequence,
-                payload,
-            },
-            &control,
-        )
-    })?;
-    control.checkpoint()?;
-    let bytes = match &reply {
-        NativeReply::Resolved(bytes) | NativeReply::Refused(bytes) => bytes,
-    };
-    budget.charge(bytes.len())?;
-    Ok(reply)
+/// One framing policy shared by client transports and the supervised relay.
+/// Client permits only its first demand to tighten the deadline; Relay receives
+/// an already-clamped header and requires exact equality on every demand.
+pub(crate) struct Protocol {
+    exchange: Exchange,
+    pub(crate) budget: ExchangeBudget,
+    role: DeadlineRole,
+    phase: ProtocolPhase,
+}
+
+enum DeadlineRole {
+    Client { first: bool },
+    Relay,
+}
+
+#[derive(Clone, Copy)]
+enum ProtocolPhase {
+    Active,
+    Refused,
+    Terminal,
+}
+
+impl Protocol {
+    pub(crate) fn client(exchange: Exchange) -> Self {
+        Self::new(exchange, DeadlineRole::Client { first: true })
+    }
+
+    pub(crate) fn relay(exchange: Exchange) -> Self {
+        Self::new(exchange, DeadlineRole::Relay)
+    }
+
+    fn new(exchange: Exchange, role: DeadlineRole) -> Self {
+        Self {
+            exchange,
+            budget: ExchangeBudget::new(),
+            role,
+            phase: ProtocolPhase::Active,
+        }
+    }
+
+    pub(crate) fn exchange(&self) -> &Exchange {
+        &self.exchange
+    }
+
+    pub(crate) fn ensure_demand_allowed(&self) -> io::Result<()> {
+        match self.phase {
+            ProtocolPhase::Active => Ok(()),
+            ProtocolPhase::Refused => Err(invalid("native demand after semantic refusal")),
+            ProtocolPhase::Terminal => Err(invalid("native demand after terminal output")),
+        }
+    }
+
+    pub(crate) fn demand(
+        &mut self,
+        observed: &Exchange,
+        stage: u64,
+        sequence: u64,
+    ) -> io::Result<()> {
+        self.ensure_demand_allowed()?;
+        let first = matches!(self.role, DeadlineRole::Client { first: true });
+        if self.exchange.nonce != observed.nonce
+            || self.exchange.owner != observed.owner
+            || if first {
+                observed.deadline > self.exchange.deadline
+            } else {
+                observed.deadline != self.exchange.deadline
+            }
+        {
+            return Err(invalid("native demand belongs to another active request"));
+        }
+        self.exchange.deadline = observed.deadline;
+        if let DeadlineRole::Client { first } = &mut self.role {
+            *first = false;
+        }
+        self.exchange.control(None).checkpoint()?;
+        self.budget.demand(stage, sequence)?;
+        self.budget.charge(ROUND_FRAME_BYTES)
+    }
+
+    pub(crate) fn reply(&mut self, reply: &NativeReply) {
+        if matches!(self.phase, ProtocolPhase::Active) && matches!(reply, NativeReply::Refused(_)) {
+            self.phase = ProtocolPhase::Refused;
+        }
+    }
+
+    pub(crate) fn terminal(&mut self, success: bool) -> io::Result<()> {
+        match self.phase {
+            ProtocolPhase::Refused if success => {
+                return Err(invalid("native refusal followed by successful output"));
+            }
+            ProtocolPhase::Terminal => return Err(invalid("duplicate native terminal output")),
+            _ => {}
+        }
+        self.phase = ProtocolPhase::Terminal;
+        Ok(())
+    }
+
+    pub(crate) fn resolve(
+        &mut self,
+        resolver: &mut dyn NativeDemandResolver,
+        stage: u64,
+        sequence: u64,
+        payload: Vec<u8>,
+        cancellation: Option<CompilerTransactionCancellation>,
+    ) -> io::Result<NativeReply> {
+        let control = self.exchange.control(cancellation);
+        control.checkpoint()?;
+        let reply = crate::endpoint::with_native_demand_control(control.clone(), || {
+            resolver.resolve_native_demand(
+                &NativeDemand {
+                    owner: self.exchange.owner.clone(),
+                    stage,
+                    sequence,
+                    payload,
+                },
+                &control,
+            )
+        })?;
+        // Preserve the wire refusal before a later deadline or budget failure.
+        self.reply(&reply);
+        control.checkpoint()?;
+        let bytes = match &reply {
+            NativeReply::Resolved(bytes) | NativeReply::Refused(bytes) => bytes,
+        };
+        self.budget.charge(bytes.len())?;
+        Ok(reply)
+    }
 }
 
 #[cfg(test)]
@@ -665,17 +759,27 @@ mod tests {
 
     #[test]
     fn native_exchange_tiny_deadline_and_server_tightening_do_not_refresh() {
-        let mut original = Exchange::new(owner()).unwrap();
+        let original = Exchange::new(owner()).unwrap();
         let mut server = original.clone();
         server.limit_deadline(Duration::from_secs(1)).unwrap();
         assert!(server.deadline < original.deadline);
-        original.accept(&server, true).unwrap();
-        assert_eq!(original.deadline, server.deadline);
+        let mut client = Protocol::client(original.clone());
+        client.demand(&server, 0, 1).unwrap();
+        assert_eq!(client.exchange().deadline, server.deadline);
         let mut changed = server.clone();
         changed.deadline.0 -= 1;
-        assert!(original.accept(&changed, false).is_err());
+        assert!(client.demand(&changed, 0, 2).is_err());
         let other_request = Exchange::new(owner()).unwrap();
-        assert!(original.accept(&other_request, true).is_err());
+        assert!(Protocol::client(original.clone())
+            .demand(&other_request, 0, 1)
+            .is_err());
+        // A relay has already received the server's clamped header. Even its
+        // first worker demand cannot tighten or extend that deadline.
+        assert!(Protocol::relay(original).demand(&server, 0, 1).is_err());
+        let mut relay = Protocol::relay(server.clone());
+        relay.demand(&server, 0, 1).unwrap();
+        relay.demand(&server, 1, 2).unwrap();
+        assert!(relay.demand(&changed, 1, 3).is_err());
         server.deadline = MonotonicDeadline(monotonic_nanos().unwrap());
         assert_eq!(
             server.control(None).checkpoint().unwrap_err().kind(),
@@ -685,5 +789,79 @@ mod tests {
             server.limit_deadline(Duration::ZERO).unwrap_err().kind(),
             io::ErrorKind::TimedOut
         );
+    }
+    #[test]
+    fn native_protocol_refusal_survives_post_resolution_cancellation_and_budget_failure() {
+        struct Refuse(Option<CompilerTransactionCancellation>);
+        impl NativeDemandResolver for Refuse {
+            fn resolve_native_demand(
+                &mut self,
+                _: &NativeDemand,
+                _: &NativeDemandControl,
+            ) -> io::Result<NativeReply> {
+                if let Some(cancel) = &self.0 {
+                    cancel.cancel();
+                }
+                Ok(NativeReply::Refused(b"first refusal".to_vec()))
+            }
+        }
+        for cancelled in [false, true] {
+            let exchange = Exchange::new(owner()).unwrap();
+            let mut protocol = Protocol::client(exchange.clone());
+            protocol.demand(&exchange, 0, 1).unwrap();
+            let cancellation = cancelled.then(CompilerTransactionCancellation::new);
+            if !cancelled {
+                protocol.budget.remaining = 0;
+            }
+            assert!(protocol
+                .resolve(
+                    &mut Refuse(cancellation.clone()),
+                    0,
+                    1,
+                    vec![],
+                    cancellation
+                )
+                .is_err());
+            assert!(protocol.demand(&exchange, 0, 2).is_err());
+            assert!(protocol.terminal(true).is_err());
+            protocol.terminal(false).unwrap();
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn native_protocol_refusal_cannot_be_cleared_by_later_replies(
+            prefix in 0u64..8,
+            replies in proptest::collection::vec(proptest::bool::ANY, 0..20),
+        ) {
+            for relay in [false, true] {
+                let exchange = Exchange::new(owner()).unwrap();
+                let mut protocol = if relay {
+                    Protocol::relay(exchange.clone())
+                } else {
+                    Protocol::client(exchange.clone())
+                };
+                for sequence in 1..=prefix {
+                    protocol.demand(&exchange, sequence, sequence).unwrap();
+                    protocol.reply(&NativeReply::Resolved(vec![]));
+                }
+                protocol.demand(&exchange, prefix, prefix + 1).unwrap();
+                protocol.reply(&NativeReply::Refused(vec![]));
+                for refused in replies.iter().copied() {
+                    let reply = if refused { NativeReply::Refused(vec![]) } else { NativeReply::Resolved(vec![]) };
+                    protocol.reply(&reply);
+                    let remaining = protocol.budget.remaining;
+                    proptest::prop_assert!(protocol.demand(&exchange, prefix, prefix + 2).is_err());
+                    proptest::prop_assert_eq!(protocol.budget.remaining, remaining);
+                    proptest::prop_assert!(protocol.terminal(true).is_err());
+                }
+                proptest::prop_assert!(protocol.terminal(true).is_err());
+                proptest::prop_assert!(protocol.terminal(false).is_ok());
+                proptest::prop_assert!(protocol.terminal(false).is_err());
+                proptest::prop_assert!(protocol.demand(&exchange, prefix, prefix + 2).is_err());
+                // A new request receives fresh framing state.
+                proptest::prop_assert!(Protocol::client(Exchange::new(owner()).unwrap()).terminal(true).is_ok());
+            }
+        }
     }
 }

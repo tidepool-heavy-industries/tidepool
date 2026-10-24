@@ -1820,6 +1820,7 @@ impl CompilerEndpoint {
     /// Adopt an already bound endpoint only when this scope has no compiler
     /// selection. Borrowed endpoints continue through their original owner.
     fn join_transaction_scope(self, cmd: &ExtractCmd) -> Result<Self, SpawnError> {
+        refuse_native_demand_reentry(&cmd.program)?;
         if matches!(self.transport, Transport::Scoped) {
             return Ok(self);
         }
@@ -1862,39 +1863,39 @@ impl CompilerEndpoint {
 
     /// Execute World preparation with the exact held input owner's narrow
     /// dependency resolver. The outer scope retains input/END custody.
-    pub fn execute_with_native_demand(
+    pub fn execute_with_native_demand<S: crate::NativeDemandSession>(
         self,
         cmd: &ExtractCmd,
-        owner: crate::NativeDemandOwner,
-        resolver: &mut dyn crate::NativeDemandResolver,
-    ) -> Result<ExtractRun, SpawnError> {
-        if !matches!(self.transport, Transport::Scoped) {
-            return Err(SpawnError::not_submitted(
-                &cmd.program,
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "native demand requires an explicit compiler transaction scope",
-                ),
-            ));
-        }
-        refuse_native_demand_reentry(&cmd.program)?;
-        ensure_scoped_transaction(cmd, &self.identity)?;
-        TRANSACTION_SCOPE.with(|scope| {
-            let mut scope = scope.borrow_mut();
-            let Some(ScopedCompiler::Active { transaction, .. }) =
-                scope.as_mut().map(|state| &mut state.compiler)
-            else {
-                return Err(SpawnError::indeterminate(
-                    "compiler transaction",
-                    io::Error::other("compiler scope ended before native demand execution"),
+        mut session: S,
+    ) -> S::Outcome {
+        let result = (|| {
+            let owner = session.owner();
+            if !matches!(self.transport, Transport::Scoped) {
+                return Err(SpawnError::not_submitted(
+                    &cmd.program,
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "native demand requires an explicit compiler transaction scope",
+                    ),
                 ));
-            };
-            transaction.execute_with_native_demand(cmd, owner, resolver)
-        })
+            }
+            refuse_native_demand_reentry(&cmd.program)?;
+            ensure_scoped_transaction(cmd, &self.identity)?;
+            let mut lease = NativeTransactionLease::take(cmd)?;
+            lease
+                .transaction
+                .as_mut()
+                .expect("leased transaction")
+                .execute_native_borrowed(cmd, owner, &mut session)
+        })();
+        // The lease restores the transaction before semantic completion. Neither
+        // resolution nor completion holds the enclosing scope's RefMut.
+        session.complete(result)
     }
 
     /// Execute `cmd` through the producer captured by this endpoint.
     pub fn execute(mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
+        refuse_native_demand_reentry(&cmd.program)?;
         if cmd.request.requires_native_demand() {
             return Err(SpawnError::not_submitted(
                 &cmd.program,
@@ -1991,7 +1992,6 @@ impl CompilerEndpoint {
                 }
             }
             Transport::Scoped => {
-                refuse_native_demand_reentry(&cmd.program)?;
                 ensure_scoped_transaction(cmd, &self.identity)?;
                 TRANSACTION_SCOPE.with(|scope| {
                     let mut scope = scope.borrow_mut();
@@ -2037,6 +2037,14 @@ enum ScopedCompiler {
         transaction: CompilerTransaction,
         program: OsString,
     },
+    /// The exact active transaction is temporarily held by NativeTransactionLease.
+    /// Scope identity and input custody stay available to resolver completion.
+    Executing {
+        identity: CompilerIdentity,
+        program: OsString,
+        daemon: bool,
+        rejected: bool,
+    },
     /// An uncertain BEGIN cannot be retried by a later borrowed endpoint.
     AdmissionFailed(BoundDaemonEndpoint),
 }
@@ -2052,6 +2060,9 @@ impl ScopedCompiler {
                 transaction,
                 program,
             } => Some((&transaction.identity, program)),
+            Self::Executing {
+                identity, program, ..
+            } => Some((identity, program)),
         }
     }
 }
@@ -2064,6 +2075,88 @@ struct TransactionScope {
     admission_close: Vec<CompilerTransactionCloseEvidence>,
     reported_close: Vec<CompilerTransactionClose>,
     input_custody: CompilerInputCustody,
+}
+
+/// Temporarily borrows the active compiler without borrowing its enclosing
+/// scope across resolver callbacks. Drop restores it before the original scope
+/// guard can settle END or input custody, including during unwinding.
+struct NativeTransactionLease {
+    transaction: Option<CompilerTransaction>,
+    program: OsString,
+}
+
+impl NativeTransactionLease {
+    fn take(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
+        TRANSACTION_SCOPE.with(|scope| {
+            let mut scope = scope.borrow_mut();
+            let Some(scope) = scope.as_mut() else {
+                return Err(SpawnError::indeterminate(
+                    &cmd.program,
+                    io::Error::other("compiler scope ended before native demand execution"),
+                ));
+            };
+            let ScopedCompiler::Active {
+                transaction,
+                program,
+            } = &scope.compiler
+            else {
+                return Err(SpawnError::indeterminate(
+                    &cmd.program,
+                    io::Error::other("compiler scope has no available native transaction"),
+                ));
+            };
+            let executing = ScopedCompiler::Executing {
+                identity: transaction.identity.clone(),
+                program: program.clone(),
+                daemon: matches!(
+                    &transaction.transport,
+                    Some(TransactionTransport::Daemon { .. })
+                ),
+                rejected: false,
+            };
+            let ScopedCompiler::Active {
+                transaction,
+                program,
+            } = std::mem::replace(&mut scope.compiler, executing)
+            else {
+                unreachable!("active transaction checked before leasing")
+            };
+            Ok(Self {
+                transaction: Some(transaction),
+                program,
+            })
+        })
+    }
+}
+
+impl Drop for NativeTransactionLease {
+    fn drop(&mut self) {
+        let Some(mut transaction) = self.transaction.take() else {
+            return;
+        };
+        TRANSACTION_SCOPE.with(|scope| {
+            let mut scope = scope.borrow_mut();
+            let scope = scope
+                .as_mut()
+                .expect("native lease retains its enclosing compiler scope");
+            let ScopedCompiler::Executing {
+                identity,
+                program,
+                rejected,
+                ..
+            } = &scope.compiler
+            else {
+                unreachable!("native lease restores only its exact executing transaction");
+            };
+            assert_eq!(identity, &transaction.identity);
+            assert_eq!(program, &self.program);
+            transaction.failed |= *rejected;
+            scope.compiler = ScopedCompiler::Active {
+                transaction,
+                program: std::mem::take(&mut self.program),
+            };
+        });
+    }
 }
 
 thread_local! {
@@ -2094,12 +2187,14 @@ impl std::error::Error for CompilerResponseRejection {}
 /// rejected bytes. Its next request is poisoned; END retains all input custody.
 pub fn reject_compiler_response(reason: CompilerResponseRejection) -> SpawnError {
     TRANSACTION_SCOPE.with(|scope| {
-        if let Some(TransactionScope {
-            compiler: ScopedCompiler::Active { transaction, .. },
-            ..
-        }) = scope.borrow_mut().as_mut()
-        {
-            transaction.failed = true;
+        if let Some(scope) = scope.borrow_mut().as_mut() {
+            match &mut scope.compiler {
+                ScopedCompiler::Active { transaction, .. } => transaction.failed = true,
+                ScopedCompiler::Executing { rejected, .. } => *rejected = true,
+                ScopedCompiler::Unbound
+                | ScopedCompiler::DaemonBound(_)
+                | ScopedCompiler::AdmissionFailed(_) => {}
+            }
         }
     });
     SpawnError::indeterminate(
@@ -2233,6 +2328,7 @@ fn bind_scoped_endpoint(
                     &transaction.transport,
                     Some(TransactionTransport::Daemon { .. })
                 ),
+                ScopedCompiler::Executing { daemon, .. } => *daemon,
                 ScopedCompiler::Unbound => false,
             },
         ))
@@ -2353,6 +2449,13 @@ fn ensure_scoped_transaction(
                 state.cancellation.clone(),
             )),
             ScopedCompiler::Active { .. } => Ok((None, state.workload, state.cancellation.clone())),
+            ScopedCompiler::Executing { .. } => Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "compiler transaction is executing native resolution",
+                ),
+            )),
             ScopedCompiler::AdmissionFailed(_) => Err(SpawnError::indeterminate(
                 &cmd.program,
                 io::Error::other("compiler transaction cannot continue after uncertain admission"),
@@ -2429,6 +2532,9 @@ fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
             mut transaction, ..
         } if abandoned => transaction.abandon(),
         ScopedCompiler::Active { transaction, .. } => transaction.finish(),
+        ScopedCompiler::Executing { .. } => {
+            unreachable!("native transaction lease restores before scope close")
+        }
         ScopedCompiler::Unbound
         | ScopedCompiler::DaemonBound(_)
         | ScopedCompiler::AdmissionFailed(_) => {
@@ -2611,6 +2717,7 @@ impl CompilerTransaction {
     }
 
     pub fn execute(&mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
+        refuse_native_demand_reentry(&cmd.program)?;
         if self.failed {
             return Err(SpawnError::indeterminate(
                 "compiler transaction",
@@ -2634,7 +2741,20 @@ impl CompilerTransaction {
         result
     }
 
-    pub fn execute_with_native_demand(
+    pub fn execute_with_native_demand<S: crate::NativeDemandSession>(
+        &mut self,
+        cmd: &ExtractCmd,
+        mut session: S,
+    ) -> S::Outcome {
+        let result = (|| {
+            let owner = session.owner();
+            refuse_native_demand_reentry(&cmd.program)?;
+            self.execute_native_borrowed(cmd, owner, &mut session)
+        })();
+        session.complete(result)
+    }
+
+    fn execute_native_borrowed(
         &mut self,
         cmd: &ExtractCmd,
         owner: crate::NativeDemandOwner,
@@ -2648,9 +2768,12 @@ impl CompilerTransaction {
         }
         let mut exchange = crate::native_demand::Exchange::new(owner)
             .map_err(|source| SpawnError::indeterminate(&cmd.program, source))?;
+        // A resolver may unwind and its caller may catch that panic inside the
+        // scope. Until normal completion, the worker still awaits this reply.
+        self.failed = true;
         let result = self.execute_inner_with_native(cmd, Some((&mut exchange, resolver)));
-        if result.is_err() {
-            self.failed = true;
+        if result.is_ok() {
+            self.failed = false;
         }
         result
     }
@@ -3524,6 +3647,154 @@ mod tests {
     #[test]
     fn direct_begin_handshake_deadline_terminates_and_reaps_the_child() {
         timeout_stalled_direct_handshake(4);
+    }
+
+    #[test]
+    fn native_session_completes_once_on_normal_admission_failures_outside_scope_borrow() {
+        struct CompletionProbe<'a>(&'a std::cell::Cell<usize>);
+        impl crate::NativeDemandResolver for CompletionProbe<'_> {
+            fn resolve_native_demand(
+                &mut self,
+                _: &crate::NativeDemand,
+                _: &crate::NativeDemandControl,
+            ) -> io::Result<crate::NativeReply> {
+                panic!("admission failure cannot invoke resolution");
+            }
+        }
+        impl crate::NativeDemandSession for CompletionProbe<'_> {
+            type Outcome = Result<ExtractRun, SpawnError>;
+            fn owner(&self) -> crate::NativeDemandOwner {
+                crate::NativeDemandOwner {
+                    admission: [1; 32],
+                    world: [2; 32],
+                    inputs: [3; 32],
+                }
+            }
+            fn complete(self, execution: Result<ExtractRun, SpawnError>) -> Self::Outcome {
+                TRANSACTION_SCOPE.with(|scope| assert!(scope.try_borrow_mut().is_ok()));
+                assert_eq!(self.0.replace(1), 0, "complete must run exactly once");
+                execution
+            }
+        }
+        let command = ExtractCmd {
+            program: "native-session-control".into(),
+            bin_source: BinSource::Explicit,
+            request: ExtractRequest::default(),
+            worker_affinity_hint: None,
+        };
+        // No transport or subprocess is needed for these production refusals.
+        for scoped in [false, true] {
+            let calls = std::cell::Cell::new(0);
+            let endpoint = CompilerEndpoint {
+                identity: CompilerIdentity::direct([1; 32], [2; 32]),
+                transport: if scoped {
+                    Transport::Scoped
+                } else {
+                    Transport::Daemon {
+                        socket: "/unused".into(),
+                        epoch: [3; 32],
+                    }
+                },
+            };
+            let error = endpoint
+                .execute_with_native_demand(&command, CompletionProbe(&calls))
+                .unwrap_err();
+            assert_eq!(calls.get(), 1);
+            assert_eq!(error.definitely_unsubmitted(), !scoped);
+        }
+
+        let calls = std::cell::Cell::new(0);
+        let mut transaction = CompilerTransaction {
+            workload: CompileWorkload::Foreground,
+            identity: CompilerIdentity::direct([1; 32], [2; 32]),
+            transport: None,
+            failed: true,
+            cancellation: None,
+        };
+        let error = transaction
+            .execute_with_native_demand(&command, CompletionProbe(&calls))
+            .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert!(!error.permits_rebind());
+
+        let calls = std::cell::Cell::new(0);
+        transaction.failed = false;
+        let error = transaction
+            .execute_with_native_demand(&command, CompletionProbe(&calls))
+            .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert!(transaction.failed);
+        assert!(!error.permits_rebind());
+
+        let calls = std::cell::Cell::new(0);
+        transaction.failed = false;
+        let exchange = crate::native_demand::Exchange::new(crate::NativeDemandOwner {
+            admission: [1; 32],
+            world: [2; 32],
+            inputs: [3; 32],
+        })
+        .unwrap();
+        let error = with_native_demand_control(exchange.control(None), || {
+            transaction.execute_with_native_demand(&command, CompletionProbe(&calls))
+        })
+        .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert!(error.definitely_unsubmitted());
+        assert_eq!(error.source.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            !transaction.failed,
+            "reentry refusal must precede transaction use"
+        );
+    }
+
+    #[test]
+    fn explicit_native_transaction_stays_failed_when_resolver_panic_is_caught() {
+        struct PanicSession;
+        impl crate::NativeDemandResolver for PanicSession {
+            fn resolve_native_demand(
+                &mut self,
+                _: &crate::NativeDemand,
+                _: &crate::NativeDemandControl,
+            ) -> io::Result<crate::NativeReply> {
+                panic!("explicit native panic control");
+            }
+        }
+        impl crate::NativeDemandSession for PanicSession {
+            type Outcome = Result<ExtractRun, SpawnError>;
+            fn owner(&self) -> crate::NativeDemandOwner {
+                crate::NativeDemandOwner {
+                    admission: [1; 32],
+                    world: [2; 32],
+                    inputs: [3; 32],
+                }
+            }
+            fn complete(self, _: Self::Outcome) -> Self::Outcome {
+                panic!("semantic completion cannot handle panic");
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), 26);
+        let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
+        let mut transaction = endpoint.transaction().unwrap();
+        let command = ExtractCmd {
+            program: "fixture".into(),
+            bin_source: BinSource::Explicit,
+            request: ExtractRequest::default(),
+            worker_affinity_hint: None,
+        };
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transaction.execute_with_native_demand(&command, PanicSession)
+        }))
+        .err()
+        .expect("resolver must unwind");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"explicit native panic control")
+        );
+        assert!(transaction.failed);
+        let error = transaction.execute(&command).unwrap_err();
+        assert!(error.source.to_string().contains("failed request"));
+        assert!(!transaction.finish().is_clean());
     }
 
     #[test]

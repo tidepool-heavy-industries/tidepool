@@ -20,6 +20,24 @@ pub(super) struct WorldDependencyObservations {
     stages: BTreeMap<u64, StageDependencyState>,
 }
 
+/// Issued only by the consuming session join: output and the observations from
+/// that exact request cannot be independently accepted by the World consumer.
+pub(super) struct CompletedWorldNativeRequest {
+    run: tidepool_extract_cmd::ExtractRun,
+    observations: WorldDependencyObservations,
+}
+
+impl CompletedWorldNativeRequest {
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        tidepool_extract_cmd::ExtractRun,
+        WorldDependencyObservations,
+    ) {
+        (self.run, self.observations)
+    }
+}
+
 pub(crate) struct WorldNativeDemandCompletion {
     pub(super) reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     pub(super) operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
@@ -646,8 +664,7 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
     );
     let foreign = WorldNativeDemandResolver::new(program.reservation(), &mut validation)
         .expect("same reservation has a distinct initial request acquisition")
-        .finish()
-        .expect("foreign request observations finish without a query refusal");
+        .completion;
     let refusal = foreign
         .bind_emitted_stages(program.stages())
         .err()
@@ -746,17 +763,13 @@ impl<'a> WorldNativeDemandResolver<'a> {
         })
     }
 
-    pub(super) fn owner(&self) -> tidepool_extract_cmd::NativeDemandOwner {
-        self.owner.clone()
-    }
-
-    pub(super) fn finish(self) -> Result<WorldDependencyObservations, CompileError> {
-        match self.refusal {
-            Some(refusal) => Err(refusal),
-            None => Ok(self.completion),
-        }
-    }
-
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "compiler.native_demand.resolve",
+        level = "debug",
+        skip_all,
+        fields(stage = demand.stage, sequence = demand.sequence, inclusive = true)
+    )]
     fn resolve(
         &mut self,
         demand: &tidepool_extract_cmd::NativeDemand,
@@ -1107,11 +1120,209 @@ impl tidepool_extract_cmd::NativeDemandResolver for WorldNativeDemandResolver<'_
                         "native input resolution interrupted",
                     ));
                 }
+                let reason = refusal_reason(&error);
+                // Preserve the semantic cause even when a checkpoint, reply
+                // allocation or transport budget fails after resolution.
+                let refusal = self.refusal.insert(error);
+                tracing::warn!(
+                    error = %refusal,
+                    cause = ?crate::failclass::classify_compile(refusal).cause,
+                    owner = ?demand.owner,
+                    stage = demand.stage,
+                    sequence = demand.sequence,
+                    "native input resolution refused",
+                );
                 control.checkpoint()?;
-                let reply = self.refusals[refusal_reason(&error) as usize].clone();
-                self.refusal = Some(error);
+                let reply = self.refusals[reason as usize].clone();
                 Ok(tidepool_extract_cmd::NativeReply::Refused(reply))
             }
         }
     }
+}
+
+impl tidepool_extract_cmd::NativeDemandSession for WorldNativeDemandResolver<'_> {
+    type Outcome = Result<CompletedWorldNativeRequest, CompileError>;
+
+    fn owner(&self) -> tidepool_extract_cmd::NativeDemandOwner {
+        self.owner.clone()
+    }
+
+    fn complete(
+        self,
+        execution: Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+    ) -> Self::Outcome {
+        match self.refusal {
+            Some(refusal) => Err(CompileError::NativeDemandRefused {
+                refusal: Box::new(refusal),
+                execution: execution.into(),
+            }),
+            None => execution
+                .map(|run| CompletedWorldNativeRequest {
+                    run,
+                    observations: self.completion,
+                })
+                .map_err(CompileError::CompilerEndpoint),
+        }
+    }
+}
+
+/// Cancel at the actual semantic resolver's return edge, before its caller can
+/// checkpoint. This checks the World owner, not a hand-built refusal variant.
+#[cfg(test)]
+pub(crate) fn assert_refusal_latched_before_postresolution_checkpoint(
+    program: &CheckedWorldCellProgram,
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tidepool_extract_cmd::{
+        CompilerTransactionCancellation, NativeDemandControl, NativeDemandOwner,
+        NativeDemandResolver, NativeDemandSession,
+    };
+
+    struct ResolutionTrace {
+        cancellation: CompilerTransactionCancellation,
+        resolution: AtomicU64,
+        next: AtomicU64,
+        errors: Arc<Mutex<Vec<String>>>,
+    }
+    impl tracing::Subscriber for ResolutionTrace {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.name() == "compiler.native_demand.resolve"
+                || metadata.target() == module_path!()
+        }
+        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+            Some(tracing::metadata::LevelFilter::DEBUG)
+        }
+        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            let id = self.next.fetch_add(1, Ordering::Relaxed);
+            if attributes.metadata().name() == "compiler.native_demand.resolve" {
+                self.resolution.store(id, Ordering::Relaxed);
+            }
+            tracing::span::Id::from_u64(id)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, span: &tracing::span::Id) {
+            if self.resolution.load(Ordering::Relaxed) == span.into_u64() {
+                self.cancellation.cancel();
+            }
+        }
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct ErrorField(Option<String>);
+            impl tracing::field::Visit for ErrorField {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "error" {
+                        self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut field = ErrorField(None);
+            event.record(&mut field);
+            if let Some(error) = field.0 {
+                self.errors.lock().unwrap().push(error);
+            }
+        }
+    }
+
+    struct InvalidStageSession<'a> {
+        resolver: WorldNativeDemandResolver<'a>,
+        calls: &'a std::cell::Cell<usize>,
+    }
+    impl NativeDemandResolver for InvalidStageSession<'_> {
+        fn resolve_native_demand(
+            &mut self,
+            demand: &tidepool_extract_cmd::NativeDemand,
+            control: &NativeDemandControl,
+        ) -> std::io::Result<tidepool_extract_cmd::NativeReply> {
+            self.calls.set(self.calls.get() + 1);
+            // Corrupt only this control's incoming demand. The reservation and
+            // held inputs remain issued by the real completed compiler program.
+            self.resolver.resolve_native_demand(
+                &tidepool_extract_cmd::NativeDemand {
+                    owner: demand.owner.clone(),
+                    stage: u64::MAX,
+                    sequence: demand.sequence,
+                    payload: Vec::new(),
+                },
+                control,
+            )
+        }
+    }
+    impl NativeDemandSession for InvalidStageSession<'_> {
+        type Outcome = Result<CompletedWorldNativeRequest, CompileError>;
+        fn owner(&self) -> NativeDemandOwner {
+            self.resolver.owner()
+        }
+        fn complete(
+            self,
+            execution: Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+        ) -> Self::Outcome {
+            self.resolver.complete(execution)
+        }
+    }
+
+    let cancellation = CompilerTransactionCancellation::new();
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let dispatcher = tracing::Dispatch::new(ResolutionTrace {
+        cancellation: cancellation.clone(),
+        resolution: AtomicU64::new(0),
+        next: AtomicU64::new(1),
+        errors: Arc::clone(&errors),
+    });
+    let _trace = tracing::dispatcher::set_default(&dispatcher);
+    let calls = std::cell::Cell::new(0);
+    let outcome = tidepool_extract_cmd::with_compiler_transaction_cancellable(
+        cancellation,
+        |_| {},
+        || {
+            let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
+                .expect("declared compiler deployment");
+            let (endpoint, _, _) = crate::toolchain::bind_admitted_extract_endpoint(&configured)
+                .expect("actual configured compiler endpoint");
+            let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
+                .expect("actual admitted compiler endpoint");
+            let request = world_native_request(&endpoint, program.reservation())?;
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let resolver = WorldNativeDemandResolver::new(program.reservation(), &mut validation)?;
+            request.bound.execute_with_native_demand(
+                &request.command,
+                InvalidStageSession {
+                    resolver,
+                    calls: &calls,
+                },
+            )
+        },
+    );
+    assert_eq!(
+        calls.get(),
+        1,
+        "actual World request must enter the real resolver"
+    );
+    let error = outcome
+        .action
+        .err()
+        .expect("cancelled semantic refusal cannot succeed");
+    let CompileError::NativeDemandRefused {
+        refusal,
+        execution: crate::NativeDemandExecution::Failed(transport),
+    } = error
+    else {
+        panic!("post-resolution cancellation discarded the original World refusal: {error:?}");
+    };
+    let expected = "native demand belongs to another preparation stage";
+    assert!(matches!(*refusal, CompileError::ExtractFailed(ref message) if message == expected));
+    assert!(!transport.permits_rebind());
+    assert!(!transport.definitely_unsubmitted());
+    assert!(
+        !outcome.close.is_clean(),
+        "accepted cancellation retains separate close evidence"
+    );
+    assert_eq!(
+        errors.lock().unwrap().as_slice(),
+        &[format!("extractor contract failure: {expected}")]
+    );
 }

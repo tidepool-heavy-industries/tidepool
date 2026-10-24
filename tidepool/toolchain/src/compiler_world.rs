@@ -5795,6 +5795,90 @@ pub fn admit_world_cell_program(
     }
 }
 
+/// Request construction retains the exact source owners before transport.
+struct WorldNativeRequest {
+    directory: Arc<tempfile::TempDir>,
+    output: PathBuf,
+    command: tidepool_extract_cmd::ExtractCmd,
+    bound: tidepool_extract_cmd::CompilerEndpoint,
+}
+
+fn world_native_request(
+    endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    reservation: &Arc<crate::cell_plan::CompilerWorldCellReservation>,
+) -> Result<WorldNativeRequest, CompileError> {
+    let plan = reservation.plan();
+    if *plan.producer_sha256()
+        != CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256()
+    {
+        return Err(source_failure(
+            "world cell plan belongs to another compiler producer",
+        ));
+    }
+    let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
+    let output = directory.path().join("cell-prepared.cbor");
+    let world_id = world_hex(plan.world().logical_id());
+    tidepool_extract_cmd::WorldCellPrepareRequest::validate_borrowed(
+        &world_id,
+        None,
+        plan.recipe(),
+        plan.operand().map(|operand| operand.request()),
+        plan.receipt(),
+        reservation
+            .items()
+            .iter()
+            .enumerate()
+            .map(|(ordinal, item)| (ordinal as u64, item.request_slot())),
+        directory.path(),
+        &output,
+    )
+    .map_err(|error| source_failure(error.to_string()))?;
+    if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&directory)) {
+        return Err(source_failure(
+            "world cell preparation requires its compiler scope",
+        ));
+    }
+    let request = tidepool_extract_cmd::WorldCellPrepareRequest {
+        world: world_id,
+        realization: ensure_world(plan.world(), endpoint.identity())?,
+        recipe: plan.recipe_owned(),
+        operand: plan.operand().map(|operand| operand.request().clone()),
+        plan: plan.receipt_owned(),
+        admission: *reservation.admission_digest(),
+        defining_scope: reservation.defining_scope(),
+        slots: world_cell_slots(reservation),
+        directory: directory.path().to_path_buf(),
+        output: output.clone(),
+    };
+    // Borrowed payload preflight preceded acquisition. Validate the complete
+    // request against those same limits before transport encoding.
+    request
+        .validate_transport()
+        .map_err(|error| source_failure(error.to_string()))?;
+    let (mut command, bound) = world_command(endpoint.identity(), None)?;
+    command
+        .world_cell_prepare(request)
+        .map_err(|error| source_failure(error.to_string()))?;
+    let files = plan
+        .operand()
+        .map(|operand| operand.retain_for_request())
+        .transpose()?
+        .unwrap_or_default();
+    for file in files {
+        if !tidepool_extract_cmd::retain_compiler_input_file(file) {
+            return Err(source_failure(
+                "native preparation lost its compiler input scope",
+            ));
+        }
+    }
+    Ok(WorldNativeRequest {
+        directory,
+        output,
+        command,
+        bound,
+    })
+}
+
 /// Obtain the actual held-world completion. This is kept private to the
 /// artifact front door: parsing a completion cannot issue checked execution.
 fn prepare_world_cell_outputs(
@@ -5804,81 +5888,34 @@ fn prepare_world_cell_outputs(
     scoped_world_action(|| {
         let origin = tidepool_extract_cmd::CompilerTransactionOrigin::current()
             .ok_or_else(|| source_failure("world cell preparation requires its compiler scope"))?;
-        let plan = reservation.plan();
-        if *plan.producer_sha256()
-            != CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256()
-        {
-            return Err(source_failure(
-                "world cell plan belongs to another compiler producer",
-            ));
-        }
-        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
-        let output = directory.path().join("cell-prepared.cbor");
-        let world_id = world_hex(plan.world().logical_id());
-        tidepool_extract_cmd::WorldCellPrepareRequest::validate_borrowed(
-            &world_id,
-            None,
-            plan.recipe(),
-            plan.operand().map(|operand| operand.request()),
-            plan.receipt(),
-            reservation
-                .items()
-                .iter()
-                .enumerate()
-                .map(|(ordinal, item)| (ordinal as u64, item.request_slot())),
-            directory.path(),
-            &output,
-        )
-        .map_err(|error| source_failure(error.to_string()))?;
-        if !tidepool_extract_cmd::retain_compiler_input_directory(Arc::clone(&directory)) {
-            return Err(source_failure(
-                "world cell preparation requires its compiler scope",
-            ));
-        }
-        let request = tidepool_extract_cmd::WorldCellPrepareRequest {
-            world: world_id,
-            realization: ensure_world(plan.world(), endpoint.identity())?,
-            recipe: plan.recipe_owned(),
-            operand: plan.operand().map(|operand| operand.request().clone()),
-            plan: plan.receipt_owned(),
-            admission: *reservation.admission_digest(),
-            defining_scope: reservation.defining_scope(),
-            slots: world_cell_slots(&reservation),
-            directory: directory.path().to_path_buf(),
-            output: output.clone(),
-        };
-        // Borrowed payload preflight preceded acquisition. Validate the complete
-        // request against those same limits before transport encoding.
-        request
-            .validate_transport()
-            .map_err(|error| source_failure(error.to_string()))?;
-        let (mut command, bound) = world_command(endpoint.identity(), None)?;
-        command
-            .world_cell_prepare(request)
-            .map_err(|error| source_failure(error.to_string()))?;
+        let WorldNativeRequest {
+            directory,
+            output,
+            command,
+            bound,
+        } = world_native_request(endpoint, &reservation)?;
         let diagnostics =
             crate::artifacts::CompilerDiagnosticCapture::start(directory.path(), &command);
-        let files = plan
-            .operand()
-            .map(|operand| operand.retain_for_request())
-            .transpose()?
-            .unwrap_or_default();
-        for file in files {
-            if !tidepool_extract_cmd::retain_compiler_input_file(file) {
-                return Err(source_failure(
-                    "native preparation lost its compiler input scope",
-                ));
-            }
-        }
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        let mut resolver =
+        let resolver =
             native_demand::WorldNativeDemandResolver::new(&reservation, &mut validation)?;
-        let owner = resolver.owner();
-        let run = bound
-            .execute_with_native_demand(&command, owner, &mut resolver)
-            .map_err(CompileError::CompilerEndpoint);
-        let native_demands = resolver.finish();
-        let run = run?;
+        let completed = bound
+            .execute_with_native_demand(&command, resolver)
+            .inspect_err(|error| {
+                if let CompileError::NativeDemandRefused {
+                    execution: crate::NativeDemandExecution::Received(run),
+                    ..
+                } = error
+                {
+                    diagnostics.completed(
+                        directory.path(),
+                        &command,
+                        run.success(),
+                        &run.output.stderr,
+                    );
+                }
+            })?;
+        let (run, native_demands) = completed.into_parts();
 
         diagnostics.completed(
             directory.path(),
@@ -5886,7 +5923,6 @@ fn prepare_world_cell_outputs(
             run.success(),
             &run.output.stderr,
         );
-        let native_demands = native_demands?;
         let report = crate::diag::decode_extract_result(
             run.success(),
             &run.output.stdout,

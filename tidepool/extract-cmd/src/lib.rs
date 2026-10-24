@@ -36,7 +36,8 @@ pub mod exec_check;
 pub mod frontend;
 mod native_demand;
 pub use native_demand::{
-    NativeDemand, NativeDemandControl, NativeDemandOwner, NativeDemandResolver, NativeReply,
+    NativeDemand, NativeDemandControl, NativeDemandOwner, NativeDemandResolver,
+    NativeDemandSession, NativeReply,
 };
 mod package_source;
 mod service;
