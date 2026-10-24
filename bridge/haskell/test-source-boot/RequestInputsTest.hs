@@ -139,7 +139,8 @@ import Tidepool.PlannedDeclaration (plannedModule)
 import Tidepool.ImportSyntax
   ( CapturedImportSyntax, captureImportSyntax, capturedImportOccurrences
   , matchDriverImports, driverImportOccurrences, importOccurrenceId, importOccurrenceDescriptor
-  , describeImport, beginImportRefinement, refinedParsedModule, refinedImportOccurrences, ImportLineage(..), importOccurrenceLineage )
+  , describeImport, beginImportRefinement, refinedParsedModule, refinedImportOccurrences
+  , ImportLineage(..), importOccurrenceLineage, ImportSyntaxError(..) )
 import Tidepool.CheckedCell (encodeCheckedTypeWitness, nativeImportSyntax, nativeParsedModule, unannotatedModule, mapNativeModule)
 import Tidepool.CheckedPrefixImports (refineParsedDeclarationImports)
 import Tidepool.ImportSyntax.Internal (ImportRefinement(..), mapRefinedImportsM)
@@ -354,15 +355,15 @@ bufferedImportRefinementLineage = withTiming $ withScratch $ \work ->
       (fail "repeated local narrowing changed the original selection, occurrence IDs or clone count")
     -- At the lineage owner's own boundary, shrink both existing descendants
     -- again. Their original-selection clones must remain unchanged.
-    let shrink occurrence located = pure $
+    let narrowAgain occurrence located = pure $
           if ideclQualified (unLoc located) == NotQualified
             && case importOccurrenceLineage occurrence of NarrowedImport _ -> True; _ -> False
           then NarrowUnqualified [] else KeepImport
-    smaller <- mapRefinedImportsM shrink (nativeImportSyntax repeated)
+    smaller <- mapRefinedImportsM narrowAgain (nativeImportSyntax repeated)
     let before = refinedImportOccurrences (nativeImportSyntax repeated)
         after = refinedImportOccurrences smaller
-        clones occurrences = [(importOccurrenceId occurrence,importOccurrenceDescriptor occurrence)
-          | occurrence <- occurrences
+        clones entries = [(importOccurrenceId occurrence,importOccurrenceDescriptor occurrence)
+          | occurrence <- entries
           , case importOccurrenceLineage occurrence of QualifiedImport _ -> True; _ -> False]
     unless (map importOccurrenceId before == map importOccurrenceId after
         && clones before == clones after
@@ -371,7 +372,10 @@ bufferedImportRefinementLineage = withTiming $ withScratch $ \work ->
             Just (Exactly,entries) -> null (unLoc entries)
             _ -> False) (hsmodImports (unLoc (pm_parsed_source (refinedParsedModule smaller)))))
       (fail "later narrowing duplicated a clone, changed its selection or widened an unqualified descendant")
-    requireUserError "qualified narrowing" "RefinementRequiresUnqualified" $
+    qualifiedIdentity <- case clones after of
+      (identity,_) : _ -> pure identity
+      [] -> fail "qualified narrowing control has no actual original-selection clone"
+    requireUserError "qualified narrowing" (show (RefinementRequiresUnqualified qualifiedIdentity)) $
       mapRefinedImportsM (\_ _ -> pure (NarrowUnqualified [])) smaller
     requireUserError "unregistered import reorder" "RefinementChangedImports" $
       mapNativeModule (\(L location syntax) ->

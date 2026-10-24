@@ -43,6 +43,7 @@ import Tidepool.CheckedCell
   (CheckedSignature(..), CheckedSignatureName(..), NativeParsedModule, unannotatedModule, typecheckNativeModule)
 import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
 import Tidepool.DeclarationJoin (InstanceInventory(..), DeclarationExport(..), ExportIdentity(..))
+import Tidepool.DiagJson (Diag(..), diagsFromSourceError)
 import Tidepool.GhcPipeline
   (CompilePurpose(..), PipelineSelection(..), pprPipelineResult, prHscEnv, prTargetRdrEnv, CheckedEnvironmentResult(..), runPipelineSessionSelected, cellCheckedBinderSignatures, cellGeneratedInstanceRecipe)
 import Tidepool.CheckedPrefixImports
@@ -161,6 +162,17 @@ scenario = withScratch $ \work -> do
     writeFile checkFile (replaceForeignImport replacement importedCheck)
     _ <- checkImports checkFile importedEnv importedInventory Nothing
     pure ()
+  ambiguous <- analyzeCell importedCheckWrapper (imported ++ "\ncommon value\n") >>= either (fail . show) pure
+  ambiguousOriginal <- either (fail . show) pure (preparePlannedDeclaration originalName importedDeclWrapper ambiguous)
+  ambiguousSource <- either fail pure (renderCellCheckSource importedCheckWrapper (plannedCheckPlan ambiguousOriginal))
+  writeFile checkFile ambiguousSource
+  ambiguousField <- try (checkImports checkFile importedEnv importedInventory Nothing)
+    :: IO (Either SourceError [CheckedSignature])
+  unless (case ambiguousField of
+      Left failure -> any (\diagnostic -> all (`isInfixOf` dMessage diagnostic)
+        ["Ambiguous occurrence", "common", "Box", "ForeignRecord"]) (diagsFromSourceError failure)
+      Right _ -> False) $
+    fail "bare field selector erased another record parent's GHC ambiguity"
   forbidden <- analyzeCell importedCheckWrapper (imported ++ "\nForeign.hidden\n") >>= either (fail . show) pure
   forbiddenOriginal <- either (fail . show) pure (preparePlannedDeclaration originalName importedDeclWrapper forbidden)
   forbiddenSource <- either fail pure (renderCellCheckSource importedCheckWrapper (plannedCheckPlan forbiddenOriginal))

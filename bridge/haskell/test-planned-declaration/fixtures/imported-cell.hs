@@ -13,4 +13,5 @@ let implicitQualifiedValue = Foreign.Box 19
 let remaining = Keep
 let originalConstructor = Taken 23
 let foreignRecord = ForeignRecord 5 7
-common value + untouched foreignRecord + (8 <+> 3) + (8 Foreign.<+> 3) + id 2
+let localCommon = case value of Box { common = number } -> number
+localCommon + untouched foreignRecord + (8 <+> 3) + (8 Foreign.<+> 3) + id 2

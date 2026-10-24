@@ -692,17 +692,19 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         narrowed <- liftIO (refineParsedDeclarationImports environment
           (unannotatedModule (beginImportRefinement driver)))
         composed <- liftIO (refineProgramDeclarationImports inventories environment narrowed)
-        repeated <- liftIO (refineProgramDeclarationImports inventories environment composed)
+        locallyRepeated <- liftIO (refineParsedDeclarationImports environment composed)
+        repeated <- liftIO (refineProgramDeclarationImports inventories environment locallyRepeated)
         let observations native = [(importOccurrenceId occurrence,importOccurrenceDescriptor occurrence)
               | occurrence <- refinedImportOccurrences (nativeImportSyntax native)]
-        unless (observations composed == observations repeated)
+        unless (observations composed == observations locallyRepeated
+            && observations composed == observations repeated)
           (fail "repeated declaration composition changed occurrence identities, clone count or selections")
         let parseImports imports = do
-              let source = unlines ("module ProgramOriginalConsumer where" : imports ++ ["__result = ()"])
-              parsed <- parseModule summary {ms_hspp_buf=Just (stringToStringBuffer source)}
-              captured <- either (liftIO . fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
-              driver <- either (liftIO . fail . show) pure (matchDriverImports captured parsed)
-              pure (unannotatedModule (beginImportRefinement driver))
+              let importSource = unlines ("module ProgramOriginalConsumer where" : imports ++ ["__result = ()"])
+              rawParsed <- parseModule summary {ms_hspp_buf=Just (stringToStringBuffer importSource)}
+              rawCapture <- either (liftIO . fail . show) pure (captureImportSyntax (pm_parsed_source rawParsed))
+              rawDriver <- either (liftIO . fail . show) pure (matchDriverImports rawCapture rawParsed)
+              pure (unannotatedModule (beginImportRefinement rawDriver))
             baseline = ["import Tidepool.Session.Lib.G0", "import Tidepool.Session.Lib.G3"]
             refuse label expected selected imports = do
               native <- parseImports imports
@@ -744,9 +746,9 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         -- Consume the actual refined AST, including the local narrowing and
         -- facade reexports, rather than compiling the unchanged source parent.
         typed <- typecheckNativeModule repeated
-        let (checked,_) = tm_internals_ typed
+        let (checkedImports,_) = tm_internals_ typed
             owners parent = [moduleNameString (moduleName owner)
-              | entry <- globalRdrEnvElts (tcg_rdr_env checked)
+              | entry <- globalRdrEnvElts (tcg_rdr_env checkedImports)
               , mkRdrUnqual (mkRecFieldOcc (mkFastString parent) "field") `elem` greRdrNames entry
               , Just owner <- [nameModule_maybe (greName entry)]]
         unless (owners "RecordA" == ["Tidepool.Session.Lib.G3"]
