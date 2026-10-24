@@ -1321,5 +1321,8 @@ pub(crate) fn assert_refusal_latched_before_postresolution_checkpoint(
         !outcome.close.is_clean(),
         "accepted cancellation retains separate close evidence"
     );
-    assert_eq!(errors.lock().unwrap().as_slice(), &[expected.to_owned()]);
+    assert_eq!(
+        errors.lock().unwrap().as_slice(),
+        &[format!("extractor contract failure: {expected}")]
+    );
 }

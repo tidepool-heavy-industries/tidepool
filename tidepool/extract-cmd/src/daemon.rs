@@ -1394,14 +1394,32 @@ pub(crate) fn execute_native_transaction_request(
     exchange: &mut Exchange,
     resolver: &mut dyn crate::NativeDemandResolver,
 ) -> Result<Output, DaemonError> {
-    let result =
-        execute_transaction_request_inner(transaction, cwd, request, Some((exchange, resolver)));
-    if result.is_err() {
-        // A complete consumed demand retains response framing while its resolver
-        // fails. Retire the waiting worker, then drain its actual close evidence.
-        transaction.request_abandoned = true;
-        transaction.stream.shutdown(Shutdown::Write).ok();
+    struct NativeRequestGuard<'a> {
+        transaction: &'a mut DaemonTransaction,
+        completed: bool,
     }
+    impl Drop for NativeRequestGuard<'_> {
+        fn drop(&mut self) {
+            if !self.completed {
+                // A consumed demand leaves the worker awaiting its reply on
+                // normal failure or unwind. The existing close owner drains
+                // retirement; END must not be mistaken for a native reply.
+                self.transaction.request_abandoned = true;
+                self.transaction.stream.shutdown(Shutdown::Write).ok();
+            }
+        }
+    }
+    let mut request_guard = NativeRequestGuard {
+        transaction,
+        completed: false,
+    };
+    let result = execute_transaction_request_inner(
+        &mut *request_guard.transaction,
+        cwd,
+        request,
+        Some((exchange, resolver)),
+    );
+    request_guard.completed = result.is_ok();
     result.map_err(|error| match error {
         accepted @ DaemonError::AfterAcceptance(_) => accepted,
         error => DaemonError::AfterAcceptance(Box::new(error)),

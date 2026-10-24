@@ -1820,6 +1820,7 @@ impl CompilerEndpoint {
     /// Adopt an already bound endpoint only when this scope has no compiler
     /// selection. Borrowed endpoints continue through their original owner.
     fn join_transaction_scope(self, cmd: &ExtractCmd) -> Result<Self, SpawnError> {
+        refuse_native_demand_reentry(&cmd.program)?;
         if matches!(self.transport, Transport::Scoped) {
             return Ok(self);
         }
@@ -1894,6 +1895,7 @@ impl CompilerEndpoint {
 
     /// Execute `cmd` through the producer captured by this endpoint.
     pub fn execute(mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
+        refuse_native_demand_reentry(&cmd.program)?;
         if cmd.request.requires_native_demand() {
             return Err(SpawnError::not_submitted(
                 &cmd.program,
@@ -1990,7 +1992,6 @@ impl CompilerEndpoint {
                 }
             }
             Transport::Scoped => {
-                refuse_native_demand_reentry(&cmd.program)?;
                 ensure_scoped_transaction(cmd, &self.identity)?;
                 TRANSACTION_SCOPE.with(|scope| {
                     let mut scope = scope.borrow_mut();
@@ -2716,6 +2717,7 @@ impl CompilerTransaction {
     }
 
     pub fn execute(&mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
+        refuse_native_demand_reentry(&cmd.program)?;
         if self.failed {
             return Err(SpawnError::indeterminate(
                 "compiler transaction",
@@ -2766,9 +2768,12 @@ impl CompilerTransaction {
         }
         let mut exchange = crate::native_demand::Exchange::new(owner)
             .map_err(|source| SpawnError::indeterminate(&cmd.program, source))?;
+        // A resolver may unwind and its caller may catch that panic inside the
+        // scope. Until normal completion, the worker still awaits this reply.
+        self.failed = true;
         let result = self.execute_inner_with_native(cmd, Some((&mut exchange, resolver)));
-        if result.is_err() {
-            self.failed = true;
+        if result.is_ok() {
+            self.failed = false;
         }
         result
     }
@@ -3740,6 +3745,56 @@ mod tests {
             !transaction.failed,
             "reentry refusal must precede transaction use"
         );
+    }
+
+    #[test]
+    fn explicit_native_transaction_stays_failed_when_resolver_panic_is_caught() {
+        struct PanicSession;
+        impl crate::NativeDemandResolver for PanicSession {
+            fn resolve_native_demand(
+                &mut self,
+                _: &crate::NativeDemand,
+                _: &crate::NativeDemandControl,
+            ) -> io::Result<crate::NativeReply> {
+                panic!("explicit native panic control");
+            }
+        }
+        impl crate::NativeDemandSession for PanicSession {
+            type Outcome = Result<ExtractRun, SpawnError>;
+            fn owner(&self) -> crate::NativeDemandOwner {
+                crate::NativeDemandOwner {
+                    admission: [1; 32],
+                    world: [2; 32],
+                    inputs: [3; 32],
+                }
+            }
+            fn complete(self, _: Self::Outcome) -> Self::Outcome {
+                panic!("semantic completion cannot handle panic");
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), 26);
+        let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
+        let mut transaction = endpoint.transaction().unwrap();
+        let command = ExtractCmd {
+            program: "fixture".into(),
+            bin_source: BinSource::Explicit,
+            request: ExtractRequest::default(),
+            worker_affinity_hint: None,
+        };
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transaction.execute_with_native_demand(&command, PanicSession)
+        }))
+        .err()
+        .expect("resolver must unwind");
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"explicit native panic control")
+        );
+        assert!(transaction.failed);
+        let error = transaction.execute(&command).unwrap_err();
+        assert!(error.source.to_string().contains("failed request"));
+        assert!(!transaction.finish().is_clean());
     }
 
     #[test]
