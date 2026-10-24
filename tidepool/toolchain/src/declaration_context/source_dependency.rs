@@ -118,7 +118,8 @@ impl SourceDependencyBasis {
                     .reserve::<(NativeGroupBinding, [usize; 4])>(1)
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
                 visited.insert(demander);
-                operation.charge(1)
+                operation
+                    .charge(1)
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
                 let entry = scope.group_payload(demander)?;
                 let ArtifactPayload::Original(product) = &entry.payload else {
@@ -453,20 +454,61 @@ mod tests {
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        let operation = InventoryOperation::new(Default::default());
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let primary = context
+            .capture_world_primary_inputs(context.toolchain_identity_sha256())
+            .unwrap();
+        let selected = context
+            .compiler_source_support()
+            .compiler_primary_input(&fixture.root.descriptor.owner)
+            .unwrap()
+            .unwrap();
+        let ArtifactPayload::Original(product) = &fixture.root.payload else {
+            unreachable!()
+        };
         let issue = |ordinals: &[u32]| {
-            inventory
-                .admit_recovery_selection(
-                    &base,
-                    vec![],
-                    &ordinals
-                        .iter()
-                        .map(|original_ordinal| NativeGroupKey {
-                            artifact: fixture.root.descriptor.id,
-                            original_ordinal: *original_ordinal,
-                        })
-                        .collect(),
+            let mut complete = BTreeSet::new();
+            for ordinal in ordinals {
+                let binder = original_native_group_definitions(product, *ordinal)
+                    .unwrap()
+                    .export_contracts()
+                    .map(Result::unwrap)
+                    .find(|contract| {
+                        contract.identity.module == fixture.root.descriptor.owner.module
+                    })
+                    .unwrap()
+                    .identity
+                    .clone();
+                let reference = ReceiptImportOwner::OriginalBinding {
+                    unit: fixture.root.descriptor.owner.unit.clone(),
+                    module: fixture.root.descriptor.owner.module.clone(),
+                    interface: selected.interface(),
+                    original: selected.original().unwrap(),
+                    binder,
+                };
+                let membership = AuthenticatedOriginalBindings::issue(
+                    primary.inputs().shared_compiler_source_support(),
+                    operation.clone(),
+                    [&reference],
                 )
+                .unwrap();
+                let chosen = membership
+                    .available_group(&reference, &operation)
+                    .unwrap()
+                    .unwrap();
+                let issued = SelectedOriginalGroupScope::contribution(chosen.contribution());
+                let mut pending = vec![chosen.binding()];
+                while let Some(group) = pending.pop() {
+                    if complete.insert(NativeGroupKey {
+                        artifact: group.binding.artifact(),
+                        original_ordinal: group.original_ordinal,
+                    }) {
+                        pending.extend(issued.children(group, &operation).unwrap());
+                    }
+                }
+            }
+            inventory
+                .admit_recovery_selection(&base, vec![], &complete)
                 .unwrap()
         };
         let left = issue(&fixture.root_ordinals[..1]);
@@ -489,8 +531,13 @@ mod tests {
             "control holds independent group issuers"
         );
         let explicit = BTreeSet::from([left_group]);
+        let missing = SelectedOriginalGroupScope::acquired(&base, &explicit, &operation)
+            .err()
+            .unwrap();
         assert!(
-            SelectedOriginalGroupScope::acquired(&base, &explicit, &operation).is_err(),
+            matches!(missing, CompileError::ArtifactInventory(error) if matches!(error.failure,
+            crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal }
+                if artifact == left_group.binding.artifact() && original_ordinal == left_group.original_ordinal)),
             "payload custody alone cannot authenticate a group"
         );
         let both = left.retain_custody(&right).unwrap();
@@ -500,6 +547,34 @@ mod tests {
         assert!(scope.children(left_group, &operation).is_ok());
         assert!(scope.group_payload(right_group).is_err());
         assert!(scope.children(right_group, &operation).is_err());
+        assert!(
+            SelectedOriginalGroupScope::selected(&both)
+                .group_payload(right_group)
+                .is_err(),
+            "a selected query cannot use a custody-only group"
+        );
+        let right_scope = SelectedOriginalGroupScope::selected(&right);
+        let parent = right_scope
+            .bindings(&operation)
+            .unwrap()
+            .into_iter()
+            .find(|group| {
+                group.binding.artifact() == fixture.root.descriptor.id
+                    && group.original_ordinal == fixture.root_ordinals[1]
+            })
+            .unwrap();
+        assert!(
+            !right_scope.children(parent, &operation).unwrap().is_empty(),
+            "the incomplete-set refusal has a real exact child"
+        );
+        let incomplete = BTreeSet::from([parent]);
+        assert!(
+            SelectedOriginalGroupScope::acquired(&both, &incomplete, &operation)
+                .unwrap()
+                .children(parent, &operation)
+                .is_err(),
+            "acquired traversal requires complete explicit children"
+        );
         assert_eq!(scope.bindings(&operation).unwrap(), vec![left_group]);
         assert_eq!(both.capture_graph_selection(), before);
     }
