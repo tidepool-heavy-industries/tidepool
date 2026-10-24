@@ -36,7 +36,7 @@ import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var (varName, isLocalId, isId)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
-import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls, mi_exports)
+import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls, mi_exports, set_mi_extra_decls)
 import System.Directory
   ( createDirectoryIfMissing
   , getTemporaryDirectory
@@ -72,7 +72,7 @@ import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceA
   selectVerifiedExactInterfaceProducts, verifiedExactInterface, capturedInterfaceInputs,
   hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactInterfaces, hydratedExactEnvironment, restoreHydratedInterfaceEnvironment,
   readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface,
-  newOriginalInterfaceArtifactsWithSessionCaptures,
+  newOriginalInterfaceArtifactsWithSessionCaptures, serializeOriginalInterface,
   InterfaceInputFailure(..))
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), Generation(..), sessionModuleString, sessionHiPath
@@ -237,6 +237,14 @@ verifyCompletedInterfaceMerges libdir work environment = do
     (lookupHpt (hsc_HPT (hydratedExactEnvironment decodedOwner)) (mkModuleName (sessionModuleString selected)))
   decodedIdentity <- evaluate decodedHome >>= makeStableName
   assert (decodedIdentity /= actualIdentity) "raw decoded input silently claimed a completed HMI owner"
+  completedOverDecoded <- retainInstalledInterfaceInputs (hydratedExactEnvironment decodedOwner) completed
+  case hydratedExactInterfaces completedOverDecoded of
+    [(selectedArtifact,retainedHome)] -> do
+      assert (selectedArtifact == artifact) "completed retention changed its selected descriptor"
+      retainedIdentity <- evaluate retainedHome >>= makeStableName
+      assert (retainedIdentity == actualIdentity && retainedIdentity /= decodedIdentity)
+        "equal interface bytes replaced the completed HMI with another allocation"
+    _ -> fail "completed retention over a decoded HMI changed its selected owners"
   foreignEnvironment <- runGhc (Just libdir) getSession
   foreignRetain <- try (retainInstalledInterfaceInputs foreignEnvironment completed >> pure ())
     :: IO (Either InterfaceInputFailure ())
@@ -516,11 +524,20 @@ verifyRetainedHome (InlineOriginalFixture fixture identifier) = do
   environment <- freshFixtureEnvironment fixture
   genuine <- declaringId environment identifier
   let path = fixtureDirectory fixture </> "MissingFixture.hi"
-  body <- captureArtifactBytes <$> BS.readFile path
   original <- fixtureInterface environment "MissingFixture"
+  -- Admit the production TYPE projection, not the defining Core retained by
+  -- this fixture's physical fat interface.
+  body <- captureArtifactBytes <$> serializeOriginalInterface environment
+    (fixtureDirectory fixture) (set_mi_extra_decls Nothing original)
   let artifact = ExactIfaceArtifact (unitString (moduleUnit (mi_module original)))
         "MissingFixture" path (artifactSha256 body) []
-  captured <- readVerifiedExactIfaceClosure environment [artifact] >>= either fail pure
+  decoder <- newRequestIfaceDecoder
+  captured <- readCapturedExactIfaceClosureWithCheckedValues decoder
+    (\requested -> if requested == artifact then pure body else fail "unexpected retained TYPE input")
+    environment [artifact] [] >>= either fail pure
+  assert (all (maybe True (const False) . mi_extra_decls . snd . verifiedExactInterface)
+      (verifiedInterfaceProducts captured))
+    "retained TYPE projection still contains defining Core"
   actualHome <- maybe (fail "producer lost MissingFixture HMI") pure
     (lookupHpt (hsc_HPT environment) (mkModuleName "MissingFixture"))
   actualIdentity <- evaluate actualHome >>= makeStableName
