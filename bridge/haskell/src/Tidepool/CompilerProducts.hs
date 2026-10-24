@@ -781,8 +781,10 @@ admitCurrentOriginalProducts originalInterfaces outDir prepared productContext =
             | product <- products
             , let (unit,name,_,groups) = moduleProductInput (originalProductEncoding product)
             , group <- groups]
-      sealedMetadata <- fmap Map.fromList $ forM (Map.toAscList
-          (Map.restrictKeys groupMetadata admittedGroups)) $ \((unit,name,ordinal),(constructors,sites)) -> do
+      sealedMetadata <- fmap Map.fromList $ forM (Set.toAscList admittedGroups) $ \coordinate@(unit,name,ordinal) -> do
+        (constructors,sites) <- maybe
+          (fail ("admitted original group lacks its compiler metadata: " ++ show coordinate)) pure
+          (Map.lookup coordinate groupMetadata)
         sealedSites <- forM sites $ \site -> do
           witnesses <- forM (Effect.ysInputTypeWitnesses site) $ \witness ->
             maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
