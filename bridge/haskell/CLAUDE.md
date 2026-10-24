@@ -63,6 +63,14 @@ canonical recovery additions through the same pending dependency owner. Source
 captures retain the original local finalization and canonical proof without
 claiming native readiness. Each operation keeps its own source-resolution evidence.
 
+World demand renaming and final checking share declaration-import refinement.
+Source qualification still consumes immutable captured imports. The demand view
+borrows only refined imports from its matched driver, preserving its captured
+source, parsing policy, original declarations and no-execution proof. Completed
+value aliases depend on demand; final segment lowering and alias insertion must
+not be used to prepare the demand probe. Final import admission retains its own
+selected-owner checks after interface restoration.
+
 Selected Original references carry actual compiler Names and their exact selected
 interface/original association. Only reached uses enter the active handler's native
 demand exchange. A reply associates complete package obligations with each exact
