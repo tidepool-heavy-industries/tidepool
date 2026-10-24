@@ -105,11 +105,6 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
     .expect("operand from the actual checked execution owner");
 
     for used in [false, true] {
-        // The admission mutations live in toolchain's cfg(test), so their
-        // nonzero coverage belongs to this owning libtest, independently of
-        // runtime tests that link the production toolchain library. Preparation
-        // and its admission callbacks execute synchronously on this thread.
-        let controls_before = crate::declaration_context::borrowed_type_admission_control_count();
         let (prepared, admission) = settle(|| {
             let values = &[(51, "currentSelection"), (52, "laterSelection")];
             let checked = if used {
@@ -149,13 +144,6 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
         let program = prepared
             .seal(&admission)
             .expect("actual selected native END");
-        if used {
-            assert!(
-                crate::declaration_context::borrowed_type_admission_control_count()
-                    > controls_before,
-                "the actual prior-request operand must execute exact, omitted, and changed TYPE admission controls"
-            );
-        }
         let first = program.items()[0]
             .native_products()
             .expect("first target owner");
@@ -221,6 +209,97 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
         });
         assert_eq!(requires_operand, used);
     }
+
+    // An explicit operand already places its TYPE in the request primary.
+    // Visible host rows instead borrow TYPE only in the demanding stage. This
+    // owning libtest must exercise its cfg(test) admission mutations directly;
+    // runtime tests link the production toolchain library. The preparation and
+    // admission callbacks below execute synchronously on this thread.
+    let controls_before = crate::declaration_context::borrowed_type_admission_control_count();
+    let (prepared, admission) = settle(|| {
+        let visible = world.with_visible_host_bindings(
+            0,
+            [
+                crate::compiler_world::CompilerWorldHostBinding::from_checked_execution(
+                    "supplied",
+                    operand.symbol(),
+                    operand.session_var(),
+                    1,
+                    Arc::clone(&execution),
+                ),
+            ],
+        )?;
+        let plan = crate::compiler_world::plan_cell(
+            &endpoint,
+            visible.world(),
+            Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+                source: "borrowedCapture :: Int\nborrowedCapture = supplied\n".into(),
+                template: include_str!("../../tests/fixtures/world-native/CellTemplate.hs").into(),
+                turn_templates: Vec::new(),
+            }),
+            None,
+        )?;
+        assert_eq!(plan.items().len(), 1, "one authored native capture");
+        assert!(
+            plan.operand().is_none(),
+            "the visible value is not an explicit operand"
+        );
+        let origin = CompilerTransactionOrigin::current().expect("actual compiler transaction");
+        let subject = WorldCellAdmissionSubject::for_source_transaction(
+            &origin,
+            [17; 16],
+            0,
+            1,
+            1,
+            [b"visible prior-request TYPE admission control".to_vec()],
+        )?;
+        let reservation = plan.reserve(plan.issue_admission_token(
+            subject,
+            vec![crate::cell_plan::WorldCellReservationRequest::Declaration { declaration: 61 }],
+        )?)?;
+        let checked = crate::compiler_world::admit_world_cell_program(
+            &endpoint,
+            reservation,
+            source.clone(),
+            source.clone(),
+            &origin,
+        )?
+        .map_err(|refusal| {
+            CompileError::ExtractFailed(format!(
+                "actual visible-value declaration refused: {refusal:?}"
+            ))
+        })?;
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: operand.symbol().unit.clone(),
+            module: operand.symbol().module.clone(),
+        };
+        assert!(
+            checked
+                .primary_context()
+                .compiler_source_support()
+                .implementation_entry(&owner)
+                .is_none(),
+            "the visible value must remain outside the request primary TYPE selection"
+        );
+        assert_eq!(
+            checked.runtime_binding_demand().existing(),
+            &[operand.session_var()],
+            "the actual authored declaration demands the sealed visible value"
+        );
+        prepare_world_cell_program(checked)
+    });
+    let program = prepared
+        .seal(&admission)
+        .expect("actual visible-value declaration END");
+    assert_eq!(program.items().len(), 1);
+    assert!(program.items()[0]
+        .checked_item()
+        .planned_declaration()
+        .is_some());
+    assert!(
+        crate::declaration_context::borrowed_type_admission_control_count() > controls_before,
+        "the visible prior-request declaration must execute exact, omitted, and changed TYPE admission controls"
+    );
 }
 
 #[test]
