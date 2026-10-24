@@ -159,4 +159,18 @@ force/recovery/performance matrices and restore deduplication remain separate.
 
 ## Live state
 
-- Plan recorded; implementation lanes being dispatched. No new checks executed.
+- Plan committed at 8b2c21b1f4; all five implementation lanes dispatched in
+  isolated checkouts from that revision. No new component checks have executed.
+- Rust: fix/g2-source-offer-20261024; Haskell: fix/g2-load-failure-20261024;
+  Q9: refactor/g3-query-honesty-20261024;
+  Q10: test/g3-operation-oracle-20261024;
+  Q6: refactor/g3-compiler-access-20261024.
+- Current evidence root: /srv/swarm/evidence/inanna/g2-source-owner-20261024/.
+- Existing warm validator is clean at 98d1d08198; its prior seven codegen
+  ownership controls completed with exit 0. The old qualification-state active
+  marker is historical, not an active test lease.
+- Resource inspection found 107 GiB available RAM, 203 GiB free scratch,
+  2.30 GiB allocated swap, zero interval swap traffic and zero PSI averages.
+  No service was stopped. Installed swarm-build lacks staged storage switches;
+  use its supported launcher and actual resource observations.
+- Nix closure realization is coordinated serially; source work is parallel.
