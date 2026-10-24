@@ -438,10 +438,15 @@ fn configured_startup_failures_retain_acquisition_and_settle_exact_owner() {
                 .contains("injected refusal after fixture root registrations"));
         } else {
             assert_eq!(report["acquisition"]["status"], "acquired");
-            assert!(!report["service_terminal"]["failures"]
-                .as_array()
-                .unwrap()
-                .is_empty());
+            assert!(
+                report["service_terminal"]["failures"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|failure| failure.as_str()
+                        == Some("unsupported immutable service profile version")),
+                "{mode} must reach the intended profile decoder refusal: {report}"
+            );
             assert!(owner.join("package-source/receipt.json").is_file());
         }
         if mode == "release-refusal" {
