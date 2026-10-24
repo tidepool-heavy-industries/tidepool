@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs, TypeFamilies, FlexibleInstances #-}
+{-# LANGUAGE GADTs, TypeFamilies, FlexibleInstances, DisambiguateRecordFields #-}
 import qualified Foreign as Named (Box(..))
 data Box where
   Box :: { common :: Int } -> Box

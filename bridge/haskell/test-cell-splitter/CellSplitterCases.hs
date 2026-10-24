@@ -652,6 +652,8 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
   writeFile facade (unlines
     [ "module Tidepool.Session.Lib.G0 (module Tidepool.Session.Lib.G1,module Tidepool.Session.Lib.G2) where"
     , "import Tidepool.Session.Lib.G1", "import Tidepool.Session.Lib.G2" ])
+  writeFile (root </> "ExternalFields.hs") (unlines
+    [ "module ExternalFields (RecordC(..)) where", "data RecordC = RecordC {field :: Int}" ])
   let source body = unlines
         [ "{-# LANGUAGE PackageImports, DuplicateRecordFields #-}"
         , "module ProgramOriginalConsumer where"
@@ -660,6 +662,7 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         , "import Tidepool.Session.Lib.G2 as Restricted (b)"
         , "import Tidepool.Session.Lib.G3"
         , "import Tidepool.Session.Lib.G0"
+        , "import ExternalFields"
         , "c :: Int"
         , "c = 30"
         , "__result :: (Bool,Int)"
@@ -699,6 +702,19 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         unless (observations composed == observations locallyRepeated
             && observations composed == observations repeated)
           (fail "repeated declaration composition changed occurrence identities, clone count or selections")
+        facadeHome <- maybe (fail "facade field control has no exact installed owner") pure
+          (lookupHpt (hsc_HPT environment) (mkModuleName "Tidepool.Session.Lib.G0"))
+        facadeImport <- case [declaration
+            | L _ declaration <- hsmodImports (unLoc (pm_parsed_source (nativeParsedModule composed)))
+            , unLoc (ideclName declaration) == mkModuleName "Tidepool.Session.Lib.G0"
+            , ideclQualified declaration == NotQualified] of
+          [declaration] -> pure declaration
+          _ -> fail "facade field control lost its unique unqualified descendant"
+        facadeSelection <- either fail pure (selectedImportNames (mi_exports (hm_iface facadeHome))
+          (ideclImportList facadeImport))
+        unless ([unpackFS parent | name <- facadeSelection, Just parent <- [fieldOcc_maybe (nameOccName name)]]
+            == ["RecordB"])
+          (fail "generated parent-bearing field selection reacquired another record parent's field")
         let parseImports imports = do
               let importSource = unlines ("module ProgramOriginalConsumer where" : imports ++ ["__result = ()"])
               rawParsed <- parseModule summary {ms_hspp_buf=Just (stringToStringBuffer importSource)}
@@ -752,7 +768,8 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
               , mkRdrUnqual (mkRecFieldOcc (mkFastString parent) "field") `elem` greRdrNames entry
               , Just owner <- [nameModule_maybe (greName entry)]]
         unless (owners "RecordA" == ["Tidepool.Session.Lib.G3"]
-            && owners "RecordB" == ["Tidepool.Session.Lib.G1"])
+            && owners "RecordB" == ["Tidepool.Session.Lib.G1"]
+            && owners "RecordC" == ["ExternalFields"])
           (fail "composed field selections lost their exact record-parent winners or facade reexports")
         pure repeated
       let transformedSource = pm_parsed_source (nativeParsedModule transformed)
