@@ -5,7 +5,7 @@ pending. Regional closeout, G2 and G3 remain unqualified.**
 
 Integration: /srv/swarm/checkouts/tidepool-domain-runtime-join-20261023,
 branch integration/g2-domain-runtime-20261023. Code candidate:
-06ecb784efe8fce44d1bf5c60419059c95f3cd48; baseline: 9cbdbf44d8.
+20f61b99db; baseline: 9cbdbf44d8.
 [REQUEST-SERVICE-LIFECYCLE.md](REQUEST-SERVICE-LIFECYCLE.md) is the current
 implementation contract, worker partition and gate sequence.
 
@@ -26,16 +26,31 @@ Evidence: /srv/swarm/evidence/inanna/c-ownership-20261022/validation/9e2a-w1-che
 
 The first d387e2f488 joined compile exposed a deleted configuration helper still
 used by two property tests. The bounded repair is integrated at 0bbc6ebbf5.
-Its 18-target owner/downstream compile passed; 18 focused native cases have
-passed so far, with the remaining component checks running at that fixed pin.
-The actual Rust-writer-to-Python-reader check failed for all five emitted reports:
-the reader requires a 192-character endpoint, but the production issuer emits 64.
-This is product contract drift, not an invalid Rust fixture. Logs and exact build
-evidence are under /srv/swarm/evidence/inanna/c-ownership-20261022/validation/.
+Its 18-target owner/downstream compile passed. Fifty native tests executed:
+47 passed and three failed. Two failures were transport-fixture premises;
+one configured-provider fixture omitted required receipt fields and never reached
+the intended profile-decoder refusal. The separate actual Rust-writer-to-Python-reader
+check rejected all five reports because the reader required a 192-character
+endpoint while the production issuer emits 64. That was product contract drift.
+All four mechanisms have reviewed repairs in the current candidate. Their native
+reruns remain pending. Three packaging CLI probes passed separately; they are
+not executed test cases. Exact evidence is under
+/srv/swarm/evidence/inanna/c-ownership-20261022/validation/.
 
 The newest source additionally includes typed source admission and failed-recovery
-custody repairs. Those require compilation and execution after the validator
-releases 0bbc6ebbf5. Do not run G2 on the older pin or relabel its passing evidence.
+custody repairs. The next compile at 9a35539e9c caught one missed caller passing
+the captured-source owner to a byte comparator. The compiler rejected this
+migration before execution. Root repaired that caller at 20f61b99db, reading
+path and bytes from the same captured owner; joined compilation is being repeated.
+Two stronger test-only refusal oracles are also included. Do not run G2 on an
+older source candidate or relabel earlier passing evidence.
+
+Root's lightweight checks at 9a35539e9c passed: 11 contention cases, 35 report/package
+cases, and 141 isolated-runner cases. The parcel's reported 12-case contention
+check was 11 contention cases plus one separately selected runner case.
+Logs: /srv/swarm/evidence/inanna/c-ownership-20261023/w5/joined-9a-*.log.
+The first direct-file runner invocation failed import before execution; its
+correct module invocation is recorded in joined-9a-runner-module.log.
 
 ## Open follow-ups
 
@@ -48,10 +63,13 @@ releases 0bbc6ebbf5. Do not run G2 on the older pin or relabel its passing evide
   owned-resident controls are integrated through 67cf9ddb20. The old native raw
   digest accessor is deleted; canonical identity remains distinct from admission.
   Rust compilation, paired compile contracts and execution remain pending.
-- Joined report boundary: W4 is correcting endpoint length and valid live Pending
-  report parsing, with a maintained actual Rust writer/Python reader control.
-  W5 is migrating compiler-warm-contention.py from the retired lifecycle format.
-  The service reviewer must recheck their combined result.
+- Joined report boundary: endpoint identity and live Pending parsing are repaired;
+  the maintained Rust writer/Python reader control covers eight actual reports.
+  Its Pending refusal changes only retirement state from a valid complete report,
+  with an accepted incomplete counterpart. Contention uses the shared reader and
+  distinguishes incomplete, unknown, workload failure and retirement failure.
+  Independent source review accepted the joined consumers and final oracle fixes.
+  Native execution of the new report control remains pending.
 - Provider child lifetime: a controlled actual-process reproduction confirmed a
   Nix client can survive Python-provider death. W3 is implementing a bounded
   parent-death contract for those exact subprocess edges, with explicit limits:
@@ -107,7 +125,7 @@ It has not been rerun on the current candidate. See
 ## Build ownership
 
 Warm checkout tidepool-latent-original-stage-join-20261020 is held by
-validation_resume for compilation and focused execution at 0bbc6ebbf5;
+validation_resume for compilation and focused execution at the current candidate;
 other workers must not mutate it. Scratch cleanup reclaimed 110.33 GiB, leaving
 about 214 GiB free at the last observation. Preserve 100 GiB plus expected growth
 and recheck actual headroom before admission. Sources, WIP and evidence survived.
