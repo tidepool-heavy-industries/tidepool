@@ -245,9 +245,11 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
         genuine.roots
     );
     assert!(
-        foreign_groups
-            .iter()
-            .all(|group| held.artifact_view().contains_acquired_native_group(*group)),
+        foreign_groups.iter().all(|group| held
+            .artifact_view()
+            .capture_graph_selection()
+            .native_groups
+            .contains(&*group)),
         "foreign proofs are held as DATA custody, not absent from acquisition"
     );
     let assert_target_selection = |context: &ExactDeclarationContext| {
@@ -298,7 +300,9 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
         .unwrap();
     assert!(foreign_groups.iter().all(|group| prebirth
         .artifact_view()
-        .contains_acquired_native_group(*group)));
+        .capture_graph_selection()
+        .native_groups
+        .contains(group)));
     let CompilerInputRole::PublishedSourceOriginal {
         original_input_identity,
         ..
@@ -325,9 +329,11 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
         .compiler_source_support()
         .publication_birth_support(&root.descriptor.owner)
         .unwrap();
-    assert!(foreign_groups
-        .iter()
-        .all(|group| birth.artifacts().contains_acquired_native_group(*group)));
+    assert!(foreign_groups.iter().all(|group| birth
+        .artifacts()
+        .capture_graph_selection()
+        .native_groups
+        .contains(&*group)));
     assert!(
         birth.native_availability().same_recorded_facts(
             source
@@ -360,7 +366,9 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     );
     assert!(foreign_groups.iter().all(|group| recovered
         .artifact_view()
-        .contains_acquired_native_group(*group)));
+        .capture_graph_selection()
+        .native_groups
+        .contains(group)));
     assert_target_selection(&recovered);
 
     let published_role =
@@ -1024,9 +1032,11 @@ fn authored_certifier_preserves_published_policy_with_complete_demand() {
         "the completed output also holds the private executable wrapper"
     );
     assert!(
-        private_groups
-            .iter()
-            .all(|group| support.artifacts().contains_acquired_native_group(*group)),
+        private_groups.iter().all(|group| support
+            .artifacts()
+            .capture_graph_selection()
+            .native_groups
+            .contains(&*group)),
         "unselected completed bodies retain their exact issued custody"
     );
     assert!(originals

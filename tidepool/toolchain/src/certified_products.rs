@@ -2,6 +2,7 @@
 //! Worker receipts describe GHC's selected owners; stored product bytes and
 //! dependency witnesses remain independent inputs to this check.
 
+use crate::artifact_inventory::SelectedOriginalGroupScope;
 use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -7986,6 +7987,68 @@ impl AuthenticatedOriginalBindings {
         }))
     }
 
+    /// Availability uses this acquisition's offers independently of stage demand.
+    pub(crate) fn available_group(
+        &self,
+        reference: &ReceiptImportOwner,
+        operation: &InventoryOperation,
+    ) -> Result<Option<crate::declaration_context::ChosenNativeGroupSupport>, crate::CompileError>
+    {
+        use crate::artifact_inventory::NativeGroupKey;
+        let evidence = |error| crate::CompileError::CompilerEvidence(Box::new(error));
+        if !std::ptr::eq(self.operation.as_ref(), operation) {
+            return Err(evidence(CertificationError::Mismatch(
+                "Original metadata belongs to another inventory operation",
+            )));
+        }
+        let (owner, ordinal) = self.get(reference).ok_or_else(|| {
+            evidence(CertificationError::Mismatch(
+                "Original availability lacks authenticated membership",
+            ))
+        })?;
+        let ReceiptImportOwner::OriginalBinding {
+            interface,
+            original,
+            ..
+        } = reference
+        else {
+            return Err(evidence(CertificationError::Mismatch(
+                "Original availability reference kind",
+            )));
+        };
+        let key = NativeGroupKey {
+            artifact: original.artifact,
+            original_ordinal: *ordinal,
+        };
+        let source = self.acquisition();
+        let Some(row) = source.native_availability().issued_row(original.artifact) else {
+            // An absent grant still cannot erase a recorded exact choice.
+            select_input_native_group_candidates(
+                source,
+                key,
+                interface.artifact,
+                owner,
+                &crate::declaration_join::ExactModuleIdentity {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                },
+                BTreeSet::new(),
+            )
+            .map_err(evidence)?;
+            return Ok(None);
+        };
+        row.choose_group(
+            source,
+            key,
+            crate::declaration_context::NativeGroupChoiceIdentity::OriginalPair {
+                interface: *interface,
+                original: *original,
+            },
+            owner,
+            operation,
+        )
+    }
+
     pub(crate) fn merge(&self, other: &Self) -> CertResult<Arc<Self>> {
         if !other.belongs_to(&self.basis, &self.operation) {
             return Err(CertificationError::Mismatch(
@@ -8293,64 +8356,14 @@ impl OriginalBindingSelection {
         self.authenticated.acquisition()
     }
 
-    /// Availability uses this acquisition's offers independently of stage demand.
+    /// Availability uses the authenticated acquisition independently of stage demand.
     pub(crate) fn available_group(
         &self,
         reference: &ReceiptImportOwner,
         operation: &InventoryOperation,
     ) -> Result<Option<crate::declaration_context::ChosenNativeGroupSupport>, crate::CompileError>
     {
-        use crate::artifact_inventory::NativeGroupKey;
-        let evidence = |error| crate::CompileError::CompilerEvidence(Box::new(error));
-        self.metadata_references(operation)
-            .map(|_| ())
-            .map_err(evidence)?;
-        let (owner, ordinal) = self.metadata(reference).ok_or_else(|| {
-            evidence(CertificationError::Mismatch(
-                "Original availability lacks authenticated membership",
-            ))
-        })?;
-        let ReceiptImportOwner::OriginalBinding {
-            interface,
-            original,
-            ..
-        } = reference
-        else {
-            return Err(evidence(CertificationError::Mismatch(
-                "Original availability reference kind",
-            )));
-        };
-        let key = NativeGroupKey {
-            artifact: original.artifact,
-            original_ordinal: *ordinal,
-        };
-        let source = self.acquisition();
-        let Some(row) = source.native_availability().issued_row(original.artifact) else {
-            // An absent grant still cannot erase a recorded exact choice.
-            select_input_native_group_candidates(
-                source,
-                key,
-                interface.artifact,
-                owner,
-                &crate::declaration_join::ExactModuleIdentity {
-                    unit: owner.unit.clone(),
-                    module: owner.module.clone(),
-                },
-                BTreeSet::new(),
-            )
-            .map_err(evidence)?;
-            return Ok(None);
-        };
-        row.choose_group(
-            source,
-            key,
-            crate::declaration_context::NativeGroupChoiceIdentity::OriginalPair {
-                interface: *interface,
-                original: *original,
-            },
-            owner,
-            operation,
-        )
+        self.authenticated.available_group(reference, operation)
     }
 
     pub(crate) fn executable(
@@ -11892,101 +11905,6 @@ type OriginalGroupFacts<'a> = BTreeMap<
     (&'a AuthenticatedOriginalGroup, &'a OriginalNativeWitness),
 >;
 
-/// Borrow one immutable inventory for this validation call. Authentication of
-/// group facts is separate from each root's allowed dependency membership.
-#[derive(Clone, Copy)]
-pub(crate) enum SelectedOriginalGroupScope<'a> {
-    View(&'a crate::artifact_inventory::ArtifactView),
-    Contribution(&'a crate::artifact_inventory::NativeOfferContribution),
-    Acquired {
-        view: &'a crate::artifact_inventory::ArtifactView,
-        bindings: &'a BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
-    },
-}
-
-impl SelectedOriginalGroupScope<'_> {
-    fn carrier_pair(
-        &self,
-        binding: crate::artifact_inventory::NativeGroupBinding,
-        canonical: crate::artifact_inventory::ArtifactId,
-    ) -> Result<
-        (
-            crate::artifact_inventory::ArtifactBinding,
-            crate::artifact_inventory::ArtifactBinding,
-        ),
-        crate::CompileError,
-    > {
-        match self {
-            Self::View(view) | Self::Acquired { view, .. } => {
-                view.acquired_original_group_carrier_pair(binding, canonical)
-            }
-            Self::Contribution(proof) => proof.group_carrier_pair(binding, canonical),
-        }
-    }
-
-    fn bindings(
-        &self,
-        operation: &InventoryOperation,
-    ) -> Result<Vec<crate::artifact_inventory::NativeGroupBinding>, crate::CompileError> {
-        match self {
-            Self::View(view) => view.original_group_bindings(operation),
-            Self::Contribution(proof) => proof.original_group_bindings(operation),
-            Self::Acquired { view, bindings } => {
-                view.validate_acquired_original_group_bindings(bindings, operation)?;
-                Ok(bindings.iter().copied().collect())
-            }
-        }
-    }
-    fn children(
-        &self,
-        binding: crate::artifact_inventory::NativeGroupBinding,
-        operation: &InventoryOperation,
-    ) -> Result<Vec<crate::artifact_inventory::NativeGroupBinding>, crate::CompileError> {
-        match self {
-            Self::View(view) => view.original_group_children(binding, operation),
-            Self::Contribution(proof) => proof.original_group_children(binding, operation),
-            Self::Acquired { view, bindings } => {
-                let children = view.acquired_original_group_children(binding, operation)?;
-                if children.iter().any(|child| !bindings.contains(child)) {
-                    return Err(crate::CompileError::ExtractFailed(
-                        "acquired native completion omits an exact child binding".into(),
-                    ));
-                }
-                Ok(children)
-            }
-        }
-    }
-    fn retained_binding(
-        &self,
-        binding: crate::artifact_inventory::NativeGroupBinding,
-        identity: &SymbolIdentity,
-        generation: u64,
-        operation: &InventoryOperation,
-    ) -> Result<crate::artifact_inventory::ArtifactBinding, crate::CompileError> {
-        match self {
-            Self::View(view) => {
-                view.original_group_retained_binding(binding, identity, generation, operation)
-            }
-            Self::Contribution(proof) => {
-                proof.original_group_retained_binding(binding, identity, generation, operation)
-            }
-            Self::Acquired { view, .. } => view
-                .acquired_original_group_retained_binding(binding, identity, generation, operation),
-        }
-    }
-    fn has_home_owner(&self, unit: &str, module: &str) -> bool {
-        let owner = crate::declaration_join::ExactModuleIdentity {
-            unit: unit.to_owned(),
-            module: module.to_owned(),
-        };
-        match self {
-            Self::View(view) => view.has_home_owner(&owner),
-            Self::Contribution(proof) => proof.has_home_original_owner(&owner),
-            Self::Acquired { view, .. } => view.has_home_owner(&owner),
-        }
-    }
-}
-
 /// Restore only explicitly recorded acquired rows. The same certifier checks
 /// their complete exact children; no compiler role or execution root is added.
 pub(crate) fn certify_acquired_original_group_rows(
@@ -11994,15 +11912,10 @@ pub(crate) fn certify_acquired_original_group_rows(
     bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<SelectedScopeCertification, crate::CompileError> {
+    let scope = SelectedOriginalGroupScope::acquired(view, bindings, &validation.inventory)?;
     let mut available = BTreeMap::new();
     for binding in bindings {
-        let entry = view
-            .observed_payload(&binding.binding.artifact())
-            .ok_or_else(|| {
-                crate::CompileError::ExtractFailed(
-                    "completion HOME payload is outside acquired custody".into(),
-                )
-            })?;
+        let entry = scope.group_payload(*binding)?;
         let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
             return Err(crate::CompileError::ExtractFailed(
                 "completion row is not HOME code".into(),
@@ -12013,12 +11926,7 @@ pub(crate) fn certify_acquired_original_group_rows(
     let mut validator = OriginalValidationInventory::selected(&available, &validation.inventory)
         .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?;
     validator
-        .certify_selected_scope(
-            SelectedOriginalGroupScope::Acquired { view, bindings },
-            &BTreeMap::new(),
-            validation,
-            None,
-        )
+        .certify_selected_scope(scope, &BTreeMap::new(), validation, None)
         .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))
 }
 
@@ -18492,7 +18400,7 @@ pub(crate) mod tests {
             OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
         let rows = checked
             .certify_selected_scope(
-                SelectedOriginalGroupScope::View(&broad),
+                SelectedOriginalGroupScope::selected(&broad),
                 &BTreeMap::new(),
                 &mut validation,
                 None,
@@ -18507,7 +18415,7 @@ pub(crate) mod tests {
         let current = BTreeMap::from([(*binding, row)]);
         let repeated = checked
             .certify_selected_scope(
-                SelectedOriginalGroupScope::View(&broad),
+                SelectedOriginalGroupScope::selected(&broad),
                 &current,
                 &mut validation,
                 None,
@@ -18523,7 +18431,7 @@ pub(crate) mod tests {
         }
         assert!(matches!(
             checked.certify_selected_scope(
-                SelectedOriginalGroupScope::View(&foreign),
+                SelectedOriginalGroupScope::selected(&foreign),
                 &current,
                 &mut validation,
                 None
@@ -18536,7 +18444,7 @@ pub(crate) mod tests {
         wrong_owner.owner.unit = "foreign".into();
         assert!(matches!(
             checked.certify_selected_scope(
-                SelectedOriginalGroupScope::View(&broad),
+                SelectedOriginalGroupScope::selected(&broad),
                 &BTreeMap::from([(*binding, &wrong_owner)]),
                 &mut validation,
                 None
@@ -18551,7 +18459,7 @@ pub(crate) mod tests {
         .into();
         assert!(matches!(
             checked.certify_selected_scope(
-                SelectedOriginalGroupScope::View(&broad),
+                SelectedOriginalGroupScope::selected(&broad),
                 &BTreeMap::from([(*binding, &changed)]),
                 &mut validation,
                 None
@@ -18624,7 +18532,7 @@ pub(crate) mod tests {
             OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
         let rows = checker
             .certify_selected_scope(
-                SelectedOriginalGroupScope::View(&broad),
+                SelectedOriginalGroupScope::selected(&broad),
                 &BTreeMap::new(),
                 &mut validation,
                 None,
@@ -18643,8 +18551,8 @@ pub(crate) mod tests {
             .unwrap()
             .0;
         assert_eq!(
-            broad
-                .original_group_children(root_binding, &validation.inventory)
+            SelectedOriginalGroupScope::selected(&broad)
+                .children(root_binding, &validation.inventory)
                 .unwrap(),
             vec![child_binding]
         );
@@ -18657,7 +18565,7 @@ pub(crate) mod tests {
             .collect();
         let repeated = checker
             .certify_selected_scope(
-                SelectedOriginalGroupScope::View(&broad),
+                SelectedOriginalGroupScope::selected(&broad),
                 &baseline,
                 &mut validation,
                 None,
@@ -18671,15 +18579,15 @@ pub(crate) mod tests {
         for (binding, repeated_row) in &repeated {
             assert!(repeated_row.product().same_issuance(baseline[binding]));
         }
-        let wrong = other
-            .original_group_bindings(&validation.inventory)
+        let wrong = SelectedOriginalGroupScope::selected(&other)
+            .bindings(&validation.inventory)
             .unwrap()[0];
         let mut substituted = baseline;
         let child_row = substituted.remove(&child_binding).unwrap();
         substituted.insert(wrong, child_row);
         assert!(matches!(
             checker.certify_selected_scope(
-                SelectedOriginalGroupScope::View(&broad),
+                SelectedOriginalGroupScope::selected(&broad),
                 &substituted,
                 &mut validation,
                 None
@@ -19207,9 +19115,8 @@ pub(crate) mod tests {
             .unwrap();
         // Availability may issue a fresh sibling whose exact child proof is
         // held, while preserving the other sibling as nominal metadata only.
-        let held_groups = source
-            .artifacts()
-            .original_group_bindings(&operation)
+        let held_groups = SelectedOriginalGroupScope::selected(source.artifacts())
+            .bindings(&operation)
             .unwrap();
         assert_eq!(held_groups.len(), 1);
         assert_eq!(held_groups[0].binding.artifact(), original.artifact);
@@ -30249,8 +30156,8 @@ pub(crate) mod tests {
         let view = inventory
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
-        let expected_bindings = view
-            .original_group_bindings(&InventoryOperation::new(Default::default()))
+        let expected_bindings = SelectedOriginalGroupScope::selected(&view)
+            .bindings(&InventoryOperation::new(Default::default()))
             .unwrap();
         assert_eq!(expected_bindings.len(), 1);
         let metadata = view.metadata_snapshot();
@@ -30334,7 +30241,7 @@ pub(crate) mod tests {
                 OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
             let selected = checked
                 .certify_selected_scope(
-                    SelectedOriginalGroupScope::View(&view),
+                    SelectedOriginalGroupScope::selected(&view),
                     &BTreeMap::new(),
                     &mut validation,
                     None,
@@ -30523,7 +30430,7 @@ pub(crate) mod tests {
             OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
         let rows = checked
             .certify_selected_scope(
-                SelectedOriginalGroupScope::View(&consumer_view),
+                SelectedOriginalGroupScope::selected(&consumer_view),
                 &BTreeMap::new(),
                 &mut validation,
                 None,
@@ -30553,7 +30460,7 @@ pub(crate) mod tests {
             OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
         assert!(matches!(
             checked.certify_selected_scope(
-                SelectedOriginalGroupScope::View(&with_home),
+                SelectedOriginalGroupScope::selected(&with_home),
                 &BTreeMap::new(),
                 &mut validation,
                 None
@@ -37256,14 +37163,14 @@ None,
             .unwrap()
             .0;
         assert_eq!(
-            executable
-                .original_group_children(parent_binding, &operation)
+            SelectedOriginalGroupScope::selected(executable)
+                .children(parent_binding, &operation)
                 .unwrap(),
             vec![child_binding]
         );
         assert_eq!(
-            executable
-                .acquired_original_group_carrier_pair(child_binding, interface.artifact)
+            SelectedOriginalGroupScope::selected(executable)
+                .carrier_pair(child_binding, interface.artifact)
                 .unwrap(),
             (original, interface),
             "native issuance must retain the exact input pair, not reissue the child's scope"

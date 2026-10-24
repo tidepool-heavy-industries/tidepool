@@ -1,4 +1,4 @@
-//! Read-only SOURCE metadata from an admitted primary and its exact acquired graph.
+//! Read-only SOURCE metadata from an admitted primary and its exact issued contribution.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -13,7 +13,9 @@ use crate::certified_products::{
 use crate::declaration_join::ExactModuleIdentity;
 use crate::CompileError;
 
-use super::{NativeRetainedOccurrence, RetainedValueEvidence, WorldPrimaryInputs};
+use super::{
+    ChosenNativeGroupSupport, NativeRetainedOccurrence, RetainedValueEvidence, WorldPrimaryInputs,
+};
 
 /// An observation keeps the same admitted SOURCE context, exact input selection
 /// and accounting owner alive. It cannot authorize native acquisition or values.
@@ -25,6 +27,7 @@ pub(crate) struct SourceDependencyBasis {
 
 pub(crate) struct SourceDependencyRow {
     reference: ReceiptImportOwner,
+    support: ChosenNativeGroupSupport,
     retained: Vec<OwnedRetainedOccurrence>,
 }
 
@@ -77,19 +80,29 @@ impl SourceDependencyBasis {
         operation
             .reserve::<SourceDependencyRow>(references.len())
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        let view = membership.acquisition().artifacts();
         let mut rows = Vec::with_capacity(references.len());
         for reference in references {
             crate::host_work::checkpoint()?;
-            let ReceiptImportOwner::OriginalBinding { original, .. } = &reference else {
-                return Err(refuse(
-                    "authenticated SOURCE dependency reference changed kind",
-                ));
-            };
-            let (_, ordinal) = membership
-                .get(&reference)
-                .ok_or_else(|| refuse("SOURCE dependency lacks authenticated pair membership"))?;
-            let root = view.acquired_original_group_for_carrier(*original, *ordinal, operation)?;
+            let support = membership
+                .available_group(&reference, operation)?
+                .ok_or_else(|| {
+                    let ReceiptImportOwner::OriginalBinding { original, .. } = &reference else {
+                        return refuse("authenticated SOURCE dependency reference changed kind");
+                    };
+                    let Some((_, ordinal)) = membership.get(&reference) else {
+                        return refuse("SOURCE dependency lacks authenticated pair membership");
+                    };
+                    crate::artifact_inventory::admission_failure(
+                    crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: original.artifact,
+                        original_ordinal: *ordinal,
+                    },
+                )
+                })?;
+            let scope = crate::artifact_inventory::SelectedOriginalGroupScope::contribution(
+                support.contribution(),
+            );
+            let root = support.binding();
             operation
                 .reserve::<NativeGroupBinding>(1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
@@ -105,13 +118,9 @@ impl SourceDependencyBasis {
                     .reserve::<(NativeGroupBinding, [usize; 4])>(1)
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
                 visited.insert(demander);
-                view.validate_acquired_original_group_bindings(
-                    &BTreeSet::from([demander]),
-                    operation,
-                )?;
-                let entry = view
-                    .observed_payload(&demander.binding.artifact())
-                    .ok_or_else(|| refuse("SOURCE dependency group lacks its acquired payload"))?;
+                operation.charge(1)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                let entry = scope.group_payload(demander)?;
                 let ArtifactPayload::Original(product) = &entry.payload else {
                     return Err(refuse("SOURCE dependency group payload is not an Original"));
                 };
@@ -160,12 +169,8 @@ impl SourceDependencyBasis {
                             )
                         })
                         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-                    let binding = view.acquired_original_group_retained_binding(
-                        demander,
-                        identity,
-                        *generation,
-                        operation,
-                    )?;
+                    let binding =
+                        scope.retained_binding(demander, identity, *generation, operation)?;
                     retained.push(OwnedRetainedOccurrence {
                         demander,
                         global_index,
@@ -174,13 +179,14 @@ impl SourceDependencyBasis {
                         generation: *generation,
                     });
                 }
-                let children = view.acquired_original_group_children(demander, operation)?;
+                let children = scope.children(demander, operation)?;
                 // The stack visits children in their issued edge order.
                 pending.extend(children.into_iter().rev());
             }
             retained.sort();
             rows.push(SourceDependencyRow {
                 reference,
+                support,
                 retained,
             });
         }
@@ -223,12 +229,10 @@ impl SourceDependencyBasis {
                 if found.is_err() {
                     return Err(refuse("SOURCE terminal exceeds its issued exact use"));
                 }
-                let entry = self
-                    ._membership
-                    .acquisition()
-                    .artifacts()
-                    .observed_payload(&occurrence.binding.artifact)
-                    .ok_or_else(|| refuse("observed SOURCE terminal lost its acquired payload"))?;
+                let entry = crate::artifact_inventory::SelectedOriginalGroupScope::contribution(
+                    observed.support.contribution(),
+                )
+                .retained_payload(occurrence.demander, *occurrence.binding)?;
                 Ok(RetainedValueEvidence {
                     entry: Arc::clone(entry),
                 })
@@ -266,35 +270,45 @@ mod tests {
         references: Vec<ReceiptImportOwner>,
         operation: &InventoryOperation,
     ) -> crate::certified_products::native_demand::SourceDependencyQuery {
-        use crate::certified_products::native_demand::{
-            self, DependencyQuery, SourceDependencyReply,
-        };
+        use crate::certified_products::native_demand::DependencyQuery;
         use ciborium::value::Value;
-        let rows = references
+        let binding = |binding: &ArtifactBinding| {
+            Value::Array(vec![
+                Value::Bytes(binding.artifact.0.to_vec()),
+                Value::Bytes(binding.selection.0.to_vec()),
+            ])
+        };
+        let uses = references
             .iter()
-            .map(|original| SourceDependencyReply {
-                original,
-                retained: &[],
-            })
-            .collect::<Vec<_>>();
-        let reply = native_demand::encode_source_reply(&rows, operation).unwrap();
-        let Value::Array(mut fields) =
-            ciborium::de::from_reader::<Value, _>(reply.as_slice()).unwrap()
-        else {
-            unreachable!()
-        };
-        let Value::Array(rows) = fields.pop().unwrap() else {
-            unreachable!()
-        };
-        let uses = rows
-            .into_iter()
-            .map(|row| {
-                let Value::Array(mut row) = row else {
-                    unreachable!()
+            .map(|reference| {
+                let ReceiptImportOwner::OriginalBinding {
+                    unit,
+                    module,
+                    interface,
+                    original,
+                    binder,
+                } = reference
+                else {
+                    panic!("SOURCE fixture requests an exact Original use");
                 };
-                row.remove(0)
+                Value::Array(vec![
+                    Value::Text(unit.clone()),
+                    Value::Text(module.clone()),
+                    binding(interface),
+                    binding(original),
+                    Value::Array(vec![
+                        Value::Text(binder.unit.clone()),
+                        Value::Text(binder.module.clone()),
+                        Value::Text(binder.namespace.clone()),
+                        Value::Text(binder.occurrence.clone()),
+                        binder
+                            .record_parent
+                            .as_ref()
+                            .map_or(Value::Null, |parent| Value::Text(parent.clone())),
+                    ]),
+                ])
             })
-            .collect::<Vec<_>>();
+            .collect();
         let query = Value::Array(vec![
             Value::Text("TPDEPENDENCYQUERY1".into()),
             Value::Integer(0u64.into()),
@@ -418,9 +432,9 @@ mod tests {
     }
     #[test]
     #[ignore = "requires the declared rooted compiler service"]
-    fn source_group_metadata_refuses_missing_and_ambiguous_exact_issuers() {
+    fn acquired_group_scope_checks_explicit_membership_without_union_ambiguity() {
         use crate::artifact_inventory::{
-            ArtifactInventory, ArtifactInventoryFailure, NativeArtifactDemand, NativeGroupKey,
+            ArtifactInventory, NativeArtifactDemand, NativeGroupKey, SelectedOriginalGroupScope,
         };
         let fixture =
             crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
@@ -439,21 +453,7 @@ mod tests {
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        let carrier = *base
-            .capture_graph_selection()
-            .namespace
-            .iter()
-            .find(|binding| binding.artifact == fixture.root.descriptor.id)
-            .unwrap();
         let operation = InventoryOperation::new(Default::default());
-        let missing = base
-            .acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
-            .unwrap_err();
-        assert!(
-            matches!(missing, CompileError::ArtifactInventory(error) if matches!(error.failure,
-            ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal }
-                if artifact == carrier.artifact && original_ordinal == fixture.root_ordinals[0]))
-        );
         let issue = |ordinals: &[u32]| {
             inventory
                 .admit_recovery_selection(
@@ -462,7 +462,7 @@ mod tests {
                     &ordinals
                         .iter()
                         .map(|original_ordinal| NativeGroupKey {
-                            artifact: carrier.artifact,
+                            artifact: fixture.root.descriptor.id,
                             original_ordinal: *original_ordinal,
                         })
                         .collect(),
@@ -471,35 +471,37 @@ mod tests {
         };
         let left = issue(&fixture.root_ordinals[..1]);
         let right = issue(&fixture.root_ordinals);
-        let left_group = left
-            .acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
-            .unwrap();
-        let right_group = right
-            .acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
-            .unwrap();
+        let group = |view: &crate::artifact_inventory::ArtifactView| {
+            *SelectedOriginalGroupScope::selected(view)
+                .bindings(&operation)
+                .unwrap()
+                .iter()
+                .find(|group| {
+                    group.binding.artifact() == fixture.root.descriptor.id
+                        && group.original_ordinal == fixture.root_ordinals[0]
+                })
+                .unwrap()
+        };
+        let left_group = group(&left);
+        let right_group = group(&right);
         assert_ne!(
             left_group, right_group,
-            "the control holds separate group issuances for the same exact carrier and ordinal"
+            "control holds independent group issuers"
+        );
+        let explicit = BTreeSet::from([left_group]);
+        assert!(
+            SelectedOriginalGroupScope::acquired(&base, &explicit, &operation).is_err(),
+            "payload custody alone cannot authenticate a group"
         );
         let both = left.retain_custody(&right).unwrap();
         let before = both.capture_graph_selection();
-        let ambiguous = both
-            .acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
-            .unwrap_err();
-        assert!(
-            matches!(ambiguous, CompileError::ArtifactInventory(error) if matches!(error.failure,
-            ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == carrier.artifact))
-        );
-        assert_eq!(
-            both.capture_graph_selection(),
-            before,
-            "refusal does not choose or withdraw a held issuer"
-        );
-        assert_eq!(
-            left.acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
-                .unwrap(),
-            left_group
-        );
+        let scope = SelectedOriginalGroupScope::acquired(&both, &explicit, &operation).unwrap();
+        assert!(scope.group_payload(left_group).is_ok());
+        assert!(scope.children(left_group, &operation).is_ok());
+        assert!(scope.group_payload(right_group).is_err());
+        assert!(scope.children(right_group, &operation).is_err());
+        assert_eq!(scope.bindings(&operation).unwrap(), vec![left_group]);
+        assert_eq!(both.capture_graph_selection(), before);
     }
     #[test]
     #[ignore = "requires the declared rooted compiler service"]

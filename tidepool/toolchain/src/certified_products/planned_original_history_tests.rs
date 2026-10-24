@@ -645,7 +645,10 @@ fn raw_original_rebinding_refuses_each_exact_unearned_group() {
             expected_canonical,
             &raw
         ));
-        assert!(!raw.contains_acquired_native_group(candidate));
+        assert!(!raw
+            .capture_graph_selection()
+            .native_groups
+            .contains(&candidate));
         let projection = selection.compiler_projection(&raw).unwrap();
         assert_eq!(
             projection
@@ -759,7 +762,10 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
             };
             assert!(offer.group_bindings(key).any(|issued| issued == *binding));
             assert!(
-                !rebound.contains_acquired_native_group(*binding),
+                !rebound
+                    .capture_graph_selection()
+                    .native_groups
+                    .contains(&*binding),
                 "equal payloads do not recreate an issued Group binding"
             );
         }

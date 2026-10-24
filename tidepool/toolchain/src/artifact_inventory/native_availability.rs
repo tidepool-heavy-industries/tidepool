@@ -1334,13 +1334,12 @@ pub(super) fn issued_carrier_pair(
     support.carrier_pair(group, canonical)
 }
 
-pub(super) fn acquired_carrier_pair(
+pub(super) fn scoped_carrier_pair(
     parent: &ArtifactView,
+    owned: &imbl::OrdSet<InventoryNodeKey>,
     group: NativeGroupBinding,
     canonical: ArtifactId,
 ) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
-    let state = parent.lease.inventory.0.lock().expect("inventory lock");
-    let owned = &parent.read_projection(&state).nodes;
     if !owned.contains(&InventoryNodeKey::Group(group)) {
         return Err(failure("native carrier query lacks exact acquired group"));
     }
@@ -2206,6 +2205,11 @@ impl NativeOfferContribution {
         )
     }
 
+    pub(super) fn contains_artifact_binding(&self, binding: ArtifactBinding) -> bool {
+        self.reachable
+            .contains(&ArtifactBindingNode::Artifact(binding))
+    }
+
     pub(crate) fn contains_group(&self, group: NativeGroupBinding) -> bool {
         self.reachable.contains(&ArtifactBindingNode::Group(group))
     }
@@ -2336,7 +2340,7 @@ impl CheckedNativeAvailability {
         for contribution in &contributions {
             inventory
                 .validate_selected_scope(
-                    crate::certified_products::SelectedOriginalGroupScope::Contribution(
+                    crate::artifact_inventory::SelectedOriginalGroupScope::contribution(
                         contribution,
                     ),
                     validation,

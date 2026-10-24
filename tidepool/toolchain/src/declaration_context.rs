@@ -4033,7 +4033,7 @@ impl DemandNativeInputs {
                 .collect();
             let certification = group_validation
                 .certify_selected_scope(
-                    crate::certified_products::SelectedOriginalGroupScope::Contribution(
+                    crate::artifact_inventory::SelectedOriginalGroupScope::contribution(
                         contribution,
                     ),
                     &previous,
@@ -17724,7 +17724,7 @@ pub(crate) fn validate_artifact_view_groups_with_validation(
     .map_err(compiler_evidence_failure)?;
     inventory
         .validate_selected_scope(
-            crate::certified_products::SelectedOriginalGroupScope::View(view),
+            crate::artifact_inventory::SelectedOriginalGroupScope::selected(view),
             validation,
         )
         .map_err(compiler_evidence_failure)
@@ -18149,7 +18149,7 @@ fn certify_artifact_view_groups(
     .map_err(compiler_evidence_failure)?;
     let certification = group_validation
         .certify_selected_scope(
-            crate::certified_products::SelectedOriginalGroupScope::View(view),
+            crate::artifact_inventory::SelectedOriginalGroupScope::selected(view),
             &keyed_current,
             validation,
             Some(&shared_rows),

@@ -5736,6 +5736,263 @@ fn native_requirements_for_exact_groups_in_custody(
     ))
 }
 
+/// One authenticated graph boundary. Custody may be broader than the explicit
+/// acquired completion; selected views and contributions retain their own scope.
+#[derive(Clone, Copy)]
+pub(crate) struct SelectedOriginalGroupScope<'a>(OriginalGroupScope<'a>);
+
+#[derive(Clone, Copy)]
+enum OriginalGroupScope<'a> {
+    Selected(&'a ArtifactView),
+    Contribution(&'a NativeOfferContribution),
+    Acquired {
+        view: &'a ArtifactView,
+        bindings: &'a BTreeSet<NativeGroupBinding>,
+    },
+}
+
+impl<'a> SelectedOriginalGroupScope<'a> {
+    pub(crate) fn selected(view: &'a ArtifactView) -> Self {
+        Self(OriginalGroupScope::Selected(view))
+    }
+
+    pub(crate) fn contribution(contribution: &'a NativeOfferContribution) -> Self {
+        Self(OriginalGroupScope::Contribution(contribution))
+    }
+
+    pub(crate) fn acquired(
+        view: &'a ArtifactView,
+        bindings: &'a BTreeSet<NativeGroupBinding>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Self, CompileError> {
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &view.read_projection(&state).nodes;
+        for binding in bindings {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            if !owned.contains(&InventoryNodeKey::Group(*binding)) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::NativeGroupUnavailable {
+                        artifact: binding.binding.artifact(),
+                        original_ordinal: binding.original_ordinal,
+                    },
+                ));
+            }
+        }
+        Ok(Self(OriginalGroupScope::Acquired { view, bindings }))
+    }
+
+    fn require_group(&self, group: NativeGroupBinding) -> Result<(), CompileError> {
+        let contains = match self.0 {
+            OriginalGroupScope::Selected(view) => {
+                let state = view.lease.inventory.0.lock().expect("inventory lock");
+                view.selected_nodes(&state)
+                    .contains(&InventoryNodeKey::Group(group))
+            }
+            OriginalGroupScope::Contribution(proof) => proof.contains_group(group),
+            OriginalGroupScope::Acquired { bindings, .. } => bindings.contains(&group),
+        };
+        if !contains {
+            return Err(failure(
+                "original group is outside its explicit observation scope",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn carrier_pair(
+        &self,
+        group: NativeGroupBinding,
+        canonical: ArtifactId,
+    ) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
+        self.require_group(group)?;
+        match self.0 {
+            OriginalGroupScope::Contribution(proof) => proof.group_carrier_pair(group, canonical),
+            OriginalGroupScope::Selected(view) => {
+                let state = view.lease.inventory.0.lock().expect("inventory lock");
+                native_availability::scoped_carrier_pair(
+                    view,
+                    view.selected_nodes(&state),
+                    group,
+                    canonical,
+                )
+            }
+            OriginalGroupScope::Acquired { view, .. } => {
+                let state = view.lease.inventory.0.lock().expect("inventory lock");
+                native_availability::scoped_carrier_pair(
+                    view,
+                    &view.read_projection(&state).nodes,
+                    group,
+                    canonical,
+                )
+            }
+        }
+    }
+
+    pub(crate) fn bindings(
+        &self,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Vec<NativeGroupBinding>, CompileError> {
+        match self.0 {
+            OriginalGroupScope::Selected(view) => view.original_group_bindings(operation),
+            OriginalGroupScope::Contribution(proof) => proof.original_group_bindings(operation),
+            OriginalGroupScope::Acquired { bindings, .. } => {
+                operation
+                    .reserve::<NativeGroupBinding>(bindings.len())
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                Ok(bindings.iter().copied().collect())
+            }
+        }
+    }
+
+    pub(crate) fn children(
+        &self,
+        group: NativeGroupBinding,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Vec<NativeGroupBinding>, CompileError> {
+        self.require_group(group)?;
+        match self.0 {
+            OriginalGroupScope::Selected(view) => view.original_group_children(group, operation),
+            OriginalGroupScope::Contribution(proof) => {
+                proof.original_group_children(group, operation)
+            }
+            OriginalGroupScope::Acquired { view, bindings } => {
+                let state = view.lease.inventory.0.lock().expect("inventory lock");
+                let children = original_group_children_in_scope(
+                    &state,
+                    &view.read_projection(&state).nodes,
+                    group,
+                    operation,
+                )?;
+                if children.iter().any(|child| !bindings.contains(child)) {
+                    return Err(failure(
+                        "acquired native completion omits an exact child binding",
+                    ));
+                }
+                Ok(children)
+            }
+        }
+    }
+
+    pub(crate) fn retained_binding(
+        &self,
+        group: NativeGroupBinding,
+        identity: &tidepool_repr::execution_schema::SymbolIdentity,
+        generation: u64,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<ArtifactBinding, CompileError> {
+        self.require_group(group)?;
+        match self.0 {
+            OriginalGroupScope::Selected(view) => {
+                view.original_group_retained_binding(group, identity, generation, operation)
+            }
+            OriginalGroupScope::Contribution(proof) => {
+                proof.original_group_retained_binding(group, identity, generation, operation)
+            }
+            OriginalGroupScope::Acquired { view, .. } => {
+                let state = view.lease.inventory.0.lock().expect("inventory lock");
+                original_group_retained_binding_in_scope(
+                    &state,
+                    &view.lease.payloads,
+                    &view.read_projection(&state).nodes,
+                    group,
+                    identity,
+                    generation,
+                    operation,
+                )
+            }
+        }
+    }
+
+    fn payload(&self, binding: ArtifactBinding) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
+        let (member, payloads) = match self.0 {
+            OriginalGroupScope::Contribution(proof) => (
+                proof.contains_artifact_binding(binding),
+                &proof.offer().custody_lease().payloads,
+            ),
+            OriginalGroupScope::Selected(view) => {
+                let state = view.lease.inventory.0.lock().expect("inventory lock");
+                (
+                    view.selected_nodes(&state)
+                        .contains(&InventoryNodeKey::Artifact(binding)),
+                    &view.lease.payloads,
+                )
+            }
+            OriginalGroupScope::Acquired { view, .. } => {
+                let state = view.lease.inventory.0.lock().expect("inventory lock");
+                (
+                    view.read_projection(&state)
+                        .nodes
+                        .contains(&InventoryNodeKey::Artifact(binding)),
+                    &view.lease.payloads,
+                )
+            }
+        };
+        if !member {
+            return Err(failure(
+                "artifact payload is outside its exact observation scope",
+            ));
+        }
+        payloads
+            .get(&binding.artifact)
+            .ok_or_else(|| failure("observed artifact lacks payload custody"))
+    }
+
+    pub(crate) fn retained_payload(
+        &self,
+        group: NativeGroupBinding,
+        binding: ArtifactBinding,
+    ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
+        self.require_group(group)?;
+        self.payload(binding)
+    }
+
+    pub(crate) fn group_payload(
+        &self,
+        group: NativeGroupBinding,
+    ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
+        self.require_group(group)?;
+        let lease = match self.0 {
+            OriginalGroupScope::Contribution(proof) => proof.offer().custody_lease(),
+            OriginalGroupScope::Selected(view) | OriginalGroupScope::Acquired { view, .. } => {
+                &view.lease
+            }
+        };
+        let state = lease.inventory.0.lock().expect("inventory lock");
+        let mut carrier = None;
+        for (target, edge) in state.outgoing(InventoryNodeKey::Group(group)) {
+            if let (InventoryNodeKey::Artifact(binding), ArtifactDependency::Interface) =
+                (target, edge)
+            {
+                if binding.artifact != group.binding.artifact()
+                    || carrier.replace(binding).is_some()
+                {
+                    return Err(failure("original group has competing carrier bindings"));
+                }
+            }
+        }
+        let binding =
+            carrier.ok_or_else(|| failure("original group lacks its exact carrier binding"))?;
+        drop(state);
+        self.payload(binding)
+    }
+
+    pub(crate) fn has_home_owner(&self, unit: &str, module: &str) -> bool {
+        let owner = ExactModuleIdentity {
+            unit: unit.to_owned(),
+            module: module.to_owned(),
+        };
+        match self.0 {
+            OriginalGroupScope::Selected(view) | OriginalGroupScope::Acquired { view, .. } => {
+                view.has_home_owner(&owner)
+            }
+            OriginalGroupScope::Contribution(proof) => proof.has_home_original_owner(&owner),
+        }
+    }
+}
+
 fn original_group_children_in_scope(
     state: &InventoryState,
     owned: &imbl::OrdSet<InventoryNodeKey>,
@@ -5834,6 +6091,11 @@ fn original_group_retained_binding_in_scope(
         let InventoryNodeKey::Artifact(binding) = target else {
             return Err(failure("retained import edge lacks artifact binding"));
         };
+        if !owned.contains(&target) {
+            return Err(failure(
+                "retained import edge is outside its exact selection",
+            ));
+        }
         let entry = payloads
             .get(&binding.artifact)
             .ok_or_else(|| failure("retained import lacks payload custody"))?;
@@ -5841,11 +6103,6 @@ fn original_group_retained_binding_in_scope(
             || entry.descriptor.owner.module != identity.module
         {
             continue;
-        }
-        if !owned.contains(&target) {
-            return Err(failure(
-                "retained import edge is outside its exact selection",
-            ));
         }
         if selected.is_some_and(|previous| previous != binding) {
             return Err(admission_failure(
@@ -7796,7 +8053,7 @@ impl ArtifactView {
         (NativeGroupViewStamp(Arc::downgrade(&self.lease)), bindings)
     }
 
-    pub(crate) fn original_group_bindings(
+    fn original_group_bindings(
         &self,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Vec<NativeGroupBinding>, CompileError> {
@@ -7814,7 +8071,7 @@ impl ArtifactView {
             .collect())
     }
 
-    pub(crate) fn original_group_children(
+    fn original_group_children(
         &self,
         group: NativeGroupBinding,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
@@ -7823,7 +8080,7 @@ impl ArtifactView {
         original_group_children_in_scope(&state, self.selected_nodes(&state), group, operation)
     }
 
-    pub(crate) fn original_group_retained_binding(
+    fn original_group_retained_binding(
         &self,
         group: NativeGroupBinding,
         identity: &tidepool_repr::execution_schema::SymbolIdentity,
@@ -7840,105 +8097,6 @@ impl ArtifactView {
             generation,
             operation,
         )
-    }
-
-    /// Resolve immutable group metadata for one exact acquired Original carrier.
-    /// This observes custody without selecting roots or issuing native permission.
-    pub(crate) fn acquired_original_group_for_carrier(
-        &self,
-        carrier: ArtifactBinding,
-        ordinal: u32,
-        operation: &tidepool_repr::execution_schema::InventoryOperation,
-    ) -> Result<NativeGroupBinding, CompileError> {
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let owned = &self.read_projection(&state).nodes;
-        if !owned.contains(&InventoryNodeKey::Artifact(carrier)) {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::NativeRootOutsideView {
-                    artifact: carrier.artifact,
-                },
-            ));
-        }
-        operation
-            .charge(owned.len())
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        resolve_group_binding(&state, owned, carrier, ordinal)
-    }
-
-    /// Validate a recorded completion's exact rows against acquired custody.
-    /// This does not select executable roots or qualify another Original.
-    pub(crate) fn validate_acquired_original_group_bindings(
-        &self,
-        bindings: &BTreeSet<NativeGroupBinding>,
-        operation: &tidepool_repr::execution_schema::InventoryOperation,
-    ) -> Result<(), CompileError> {
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let owned = &self.read_projection(&state).nodes;
-        for binding in bindings {
-            crate::host_work::checkpoint()?;
-            operation
-                .charge(1)
-                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-            if !owned.contains(&InventoryNodeKey::Group(*binding)) {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeGroupUnavailable {
-                        artifact: binding.binding.artifact(),
-                        original_ordinal: binding.original_ordinal,
-                    },
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn acquired_original_group_children(
-        &self,
-        group: NativeGroupBinding,
-        operation: &tidepool_repr::execution_schema::InventoryOperation,
-    ) -> Result<Vec<NativeGroupBinding>, CompileError> {
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        original_group_children_in_scope(
-            &state,
-            &self.read_projection(&state).nodes,
-            group,
-            operation,
-        )
-    }
-
-    pub(crate) fn acquired_original_group_carrier_pair(
-        &self,
-        group: NativeGroupBinding,
-        canonical: ArtifactId,
-    ) -> Result<(ArtifactBinding, ArtifactBinding), CompileError> {
-        native_availability::acquired_carrier_pair(self, group, canonical)
-    }
-
-    pub(crate) fn acquired_original_group_retained_binding(
-        &self,
-        group: NativeGroupBinding,
-        identity: &tidepool_repr::execution_schema::SymbolIdentity,
-        generation: u64,
-        operation: &tidepool_repr::execution_schema::InventoryOperation,
-    ) -> Result<ArtifactBinding, CompileError> {
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        original_group_retained_binding_in_scope(
-            &state,
-            &self.lease.payloads,
-            &self.read_projection(&state).nodes,
-            group,
-            identity,
-            generation,
-            operation,
-        )
-    }
-
-    /// Observe exact DATA custody, independently of issued native permission.
-    #[cfg(test)]
-    pub(crate) fn contains_acquired_native_group(&self, group: NativeGroupBinding) -> bool {
-        let state = self.lease.inventory.0.lock().expect("inventory lock");
-        self.read_projection(&state)
-            .nodes
-            .contains(&InventoryNodeKey::Group(group))
     }
 
     /// Retain matching owned payloads without choosing a compiler role or group.
@@ -18766,17 +18924,26 @@ mod tests {
                 .iter()
                 .find(|group| group.binding.artifact() == helper.descriptor.id)
                 .unwrap();
-            assert!(issuer.contains_acquired_native_group(helper_group));
-            assert!(!issuers[1 - index].contains_acquired_native_group(helper_group));
+            assert!(issuer
+                .capture_graph_selection()
+                .native_groups
+                .contains(&helper_group));
+            assert!(!issuers[1 - index]
+                .capture_graph_selection()
+                .native_groups
+                .contains(&helper_group));
             let narrowed = issuer
                 .select_publication_roots(
                     originals[index].descriptor.id,
                     vec![originals[index].descriptor.id],
                 )
                 .unwrap();
-            assert!(narrowed.contains_acquired_native_group(helper_group));
-            assert!(!narrowed.contains_acquired_native_group(
-                *helper_groups
+            assert!(narrowed
+                .capture_graph_selection()
+                .native_groups
+                .contains(&helper_group));
+            assert!(!narrowed.capture_graph_selection().native_groups.contains(
+                helper_groups
                     .iter()
                     .find(|other| **other != helper_group)
                     .unwrap()
@@ -18826,9 +18993,10 @@ mod tests {
                 .check(&retained)
                 .expect("retention preserves issuing groups");
             assert_eq!(retained.roots(), joined.roots());
-            assert!(helper_groups
-                .iter()
-                .all(|group| retained.contains_acquired_native_group(*group)));
+            assert!(helper_groups.iter().all(|group| retained
+                .capture_graph_selection()
+                .native_groups
+                .contains(&*group)));
             let generated = Arc::new(entry("RecaptureScaffold", &[]));
             let scaffold = inventory
                 .admit_shared(&inventory.empty_view(), vec![generated.clone()])
