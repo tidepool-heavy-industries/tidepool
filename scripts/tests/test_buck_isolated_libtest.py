@@ -30,7 +30,7 @@ def owned_service_report(owner, *, complete=True, code=0):
                 'signal': None, 'failure': None}
     return {'schema': 2, 'kind': 'owned-compiler-service', 'owner_directory': str(owner),
             'operation': '01' * 32, 'daemon_epoch': '02' * 32, 'daemon_pid': 73,
-            'producer': '03' * 32, 'endpoint': '04' * 96, 'socket_path': str(owner / 'socket'),
+            'producer': '03' * 32, 'endpoint': '04' * 32, 'socket_path': str(owner / 'socket'),
             'action': observation('exited', code), 'acquisition': {'status': 'not_configured'},
             'daemon_reap': observation('reaped', 0), 'service_terminal': {
                 'epoch': [2] * 32, 'workers_retired': complete, 'socket_retired': True, 'failures': []},

@@ -9,7 +9,9 @@ Execute only after central semantic eligibility and resource admission.
 
 import argparse
 from datetime import datetime
+from enum import Enum
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,11 +19,58 @@ import signal
 import subprocess
 import sys
 import time
+from typing import NamedTuple
 
 SELECTOR = "session::turn::scaling_tests::resident_warm_capture_cells_50"
 RESERVE = 20 * 1024**3
 MESSAGES = {"compiler request started", "compiler request finished",
             "compiler job dequeued", "compiler request waiting for capacity"}
+SERVICE_REPORT_CODEC = Path(__file__).resolve().parents[1] / "build/package/owned_service_report.py"
+
+
+class ServiceReportState(Enum):
+    COMPLETE = "complete"
+    INCOMPLETE = "incomplete"
+    UNKNOWN = "unknown"
+
+
+class ServiceReportObservation(NamedTuple):
+    state: ServiceReportState
+    report: dict | None
+    error: dict | None
+
+    def summary(self):
+        return {"status": self.state.value, "report": self.report, "error": self.error}
+
+
+def observe_compiler_service(output):
+    """Observe the exact owner's report without issuing cleanup authority."""
+    try:
+        spec = importlib.util.spec_from_file_location("contention_service_report", SERVICE_REPORT_CODEC)
+        codec = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(codec)
+        report = codec.read_owned_service_report(output / "compiler")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return ServiceReportObservation(ServiceReportState.UNKNOWN, None,
+                                        {"type": type(error).__name__, "message": str(error)})
+    return ServiceReportObservation(
+        ServiceReportState.COMPLETE if report["complete"] else ServiceReportState.INCOMPLETE,
+        report, None)
+
+
+def compiler_service_succeeded(observation, code):
+    if observation.state is not ServiceReportState.COMPLETE or code != 0:
+        return False
+    report = observation.report
+    action, reap = report["action"], report["daemon_reap"]
+    return (action["status"] == "exited" and action["exit_code"] == code
+            and action["success"] is True and action["signal"] is None
+            and reap["status"] == "reaped" and reap["exit_code"] == 0
+            and reap["success"] is True and reap["signal"] is None
+            and all(report[key]["failure"] is None for key in
+                    ("action", "daemon_reap", "source_settlement", "artifact_retention"))
+            and report["artifact_retention"]["status"] != "failed"
+            and not report["service_terminal"]["failures"])
 
 
 def save(path, value):
@@ -71,21 +120,25 @@ def settle_compiler_owner(owner, output, environment, grace=90):
     except subprocess.TimeoutExpired:
         pass
     # Ask the existing private daemon owner to STOP before killing its frontend.
-    # Its lifecycle receipt was written by that exact selected frontend; never
+    # Its service report was written by that exact selected frontend; never
     # discover or address another session's socket.
     control = {"status": "unavailable"}
     try:
-        receipt = json.loads((output / "compiler/lifecycle.json").read_text())
-        if not isinstance(receipt, dict):
-            raise ValueError("private lifecycle receipt is not an object")
+        observation = observe_compiler_service(output)
+        control["compiler_service"] = observation.summary()
+        if observation.state is ServiceReportState.UNKNOWN:
+            raise ValueError("private compiler service report is unknown")
+        receipt = observation.report
         socket = receipt["socket_path"]
         if not isinstance(socket, str) or not Path(socket).is_absolute():
-            raise ValueError("private lifecycle socket is not absolute")
+            raise ValueError("private compiler service socket is not absolute")
         argv = [environment["TIDEPOOL_EXTRACT"], "--stop-daemon", "--socket", socket]
         result = subprocess.run(argv, env=environment, timeout=30, capture_output=True)
-        control = {"argv": argv, "exit_code": result.returncode,
-                   "stdout": result.stdout.decode(errors="replace"),
-                   "stderr": result.stderr.decode(errors="replace")}
+        control.update(argv=argv, exit_code=result.returncode,
+                       stdout=result.stdout.decode(errors="replace"),
+                       stderr=result.stderr.decode(errors="replace"))
+        if result.returncode != 0:
+            raise ValueError("selected compiler STOP refused")
         code = owner.wait(timeout=30)
         return {"exit_code": code, "forced_kill": False, "stop_control": control}
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
@@ -93,7 +146,7 @@ def settle_compiler_owner(owner, output, environment, grace=90):
     row = settle(owner, grace=5, stop=True)
     # Both frontend children already use the crate's parent-death constructor.
     # This fallback settles the process chain but cannot claim acknowledged
-    # compiler cleanup; the actual lifecycle receipt remains authoritative.
+    # compiler cleanup; the actual service report remains authoritative.
     row.update(owner_forced_termination=True, stop_control=control)
     return row
 
@@ -343,7 +396,8 @@ def main():
             "compiler_role_manifest_sha256": sha(frozen / "compiler-roles/freeze-record.json"),
             "eligibility_evidence": {"path": str(args.eligibility_evidence.resolve()),
                                      "sha256": sha(args.eligibility_evidence)},
-            "runner_sha256": sha(Path(__file__)), "host_reserve_bytes": RESERVE,
+            "runner_sha256": sha(Path(__file__)),
+            "service_report_codec_sha256": sha(SERVICE_REPORT_CODEC), "host_reserve_bytes": RESERVE,
             "parent_cgroup": Path("/proc/self/cgroup").read_text(),
             "external_workload_context": args.workload_context,
             "observation_inputs": {name: sha(support / name) for name in
@@ -413,32 +467,30 @@ def main():
             signal.signal(signal.SIGINT, old_int)
             signal.signal(signal.SIGTERM, old_term)
             save(output / "process-settlement.json", settlement)
-    if failure or any(row and (row.get("forced_kill") or row.get("owner_forced_termination")
-                              or row.get("error") or row.get("exit_code", 0) != 0)
-                      for row in settlement.values()):
-        receipt = None
-        try:
-            receipt = json.loads((output / "compiler/lifecycle.json").read_text())
-        except (OSError, ValueError):
-            pass
+    return summarize_campaign(output, code, settlement, failure)
+
+
+def summarize_campaign(output, code, settlement, failure):
+    observation = observe_compiler_service(output)
+    if (failure or not compiler_service_succeeded(observation, code)
+            or any(row and (row.get("forced_kill") or row.get("owner_forced_termination")
+                            or row.get("error") or row.get("exit_code", 0) != 0)
+                   for row in settlement.values())):
         save(output / "summary.json", {"status": "failed", "exception": failure,
-                                       "process_settlement": settlement,
-                                       "actual_frontend_lifecycle": receipt,
-                                       "cleanup_confirmed": receipt.get("cleanup_confirmed")
-                                       if isinstance(receipt, dict) else None})
+                                       "exit_code": code, "process_settlement": settlement,
+                                       "compiler_service": observation.summary()})
         return 1
-    lifecycle = json.loads((output / "compiler/lifecycle.json").read_text())
     trace = Trace(output / "compiler/compiler.jsonl")
     trace.poll(final=True)
-    report = analyze(trace.rows) if code == 0 else {"status": "failed", "request_envelopes": trace.rows}
-    report.update(exit_code=code, cleanup_confirmed=lifecycle["cleanup_confirmed"],
+    report = analyze(trace.rows)
+    report.update(exit_code=code, compiler_service=observation.summary(),
                   trace_sha256=sha(trace.path), preparation_execution=json.loads(
                       (output / "preparation-execution.json").read_text())
                   if (output / "preparation-execution.json").exists() else [])
     capture = json.loads((output / "authored-sources/capture.json").read_text())
     report["actual_distinct_measured_sources"] = capture["observed_distinct_measured_source_sha256"]
     save(output / "summary.json", report)
-    if code or not report["cleanup_confirmed"] or report["actual_distinct_measured_sources"] != 50:
+    if report["actual_distinct_measured_sources"] != 50:
         return 1
     return 0 if report["status"] == "observed_overlap" else 2
 
