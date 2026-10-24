@@ -265,6 +265,11 @@ impl ConfiguredSource {
         {
             return Err(invalid("acquisition record association differs"));
         }
+        if Path::new(text("provider_guard_store_path")?) != self.python_object {
+            return Err(invalid(
+                "declared provider guard differs from authenticated Python",
+            ));
+        }
         let objects = record["acquisition_roots"]
             .as_array()
             .ok_or_else(|| invalid("missing declared exact acquisition scope"))?;
@@ -472,6 +477,11 @@ impl ConfiguredSource {
                     || state["source_id"] != crate::endpoint::hex(&self.source)
                     || state["profile_id"] != crate::endpoint::hex(&self.profile)
                     || state["attempt_sha256"] != crate::endpoint::hex(&attempt.sha256)
+                    || state["source_record_sha256"] != crate::endpoint::hex(&self.record_sha)
+                    || state["provider_guard_store_path"]
+                        != self.python_object.to_string_lossy().as_ref()
+                    || state["acquire_count"] != 1
+                    || state["release_count"] != 0
                     || profile.path
                         != PathBuf::from(
                             plan["profile_store_path"]
@@ -1289,13 +1299,14 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&attempt.path).unwrap()).unwrap();
         let receipt_path = owner.path().join("package-source/receipt.json");
         std::fs::create_dir(receipt_path.parent().unwrap()).unwrap();
-        let receipt_bytes = serde_json::to_vec(
-            &serde_json::json!({"schema":2,"kind":"compiler-service-package-acquisition","status":"acquired","service_epoch":crate::endpoint::hex(&[5;32]),
-            "schema":2,"kind":"compiler-service-package-source",
+        let roots=plan["roots"].as_array().unwrap().iter().map(|item|serde_json::json!({"path":item["path"],"store_path":item["store_path"],"state":"registered"})).collect::<Vec<_>>();
+        let receipt_bytes = serde_json::to_vec(&serde_json::json!({
+            "schema":2,"kind":"compiler-service-package-acquisition","status":"acquired",
+            "service_epoch":crate::endpoint::hex(&[5;32]),
             "source_id":crate::endpoint::hex(&[2;32]),"profile_id":crate::endpoint::hex(&[3;32]),
-            "attempt_sha256":crate::endpoint::hex(&attempt.sha256),"roots":plan["roots"]}),
-        )
-        .unwrap();
+            "attempt_sha256":crate::endpoint::hex(&attempt.sha256),"source_record_sha256":crate::endpoint::hex(&config.record_sha),
+            "provider_guard_store_path":config.python_object,"acquire_count":1,"release_count":0,"roots":roots
+        })).unwrap();
         std::fs::write(&receipt_path, &receipt_bytes).unwrap();
         let acquired = AcquisitionObservation::Acquired {
             attempt: attempt.clone(),
@@ -1328,6 +1339,19 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         assert!(config
             .validate_outcome(&acquired, &attempt, [5; 32], other.path())
+            .is_err());
+        let mut changed: serde_json::Value = serde_json::from_slice(&receipt_bytes).unwrap();
+        changed["roots"][0]["state"] = "planned".into();
+        let changed_bytes = serde_json::to_vec(&changed).unwrap();
+        if let AcquisitionObservation::Acquired { receipt, .. } = &acquired {
+            std::fs::write(&receipt.path, &changed_bytes).unwrap();
+        }
+        let mut forged = acquired.clone();
+        if let AcquisitionObservation::Acquired { receipt, .. } = &mut forged {
+            receipt.sha256 = digest(&changed_bytes);
+        }
+        assert!(config
+            .validate_outcome(&forged, &attempt, [5; 32], owner.path())
             .is_err());
     }
 
