@@ -237,7 +237,7 @@ verifyHydratedOriginalOwners = do
           _ -> fail "finalization changed its selected owner set"
         _ <- either fail pure (selectVerifiedExactInterfaceProducts (hydratedClosureAsCapturedInputs completed) [alias])
         pure (closure,artifactSha256 body)
-      writeSource (42 :: Int)
+      writeFile path (unlines ["module HydratedOwnerFixture where", "__result :: Bool", "__result = False"])
       runScope (pure ()) $ \scope -> do
         changed <- scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing path [work] Nothing
         original <- maybe (fail "changed compiler omitted finalization") pure (Map.lookup name (pprFinalizedModules changed))

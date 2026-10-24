@@ -443,8 +443,8 @@ sessionNominalOwners env identifiers = sort . nub $
   , Just owner <- [nameModule_maybe (tyConName constructor)]
   , moduleUnit owner == homeUnitAsUnit (hsc_home_unit env)]
 
--- Both path and captured input consumers decode through this one owner. The
--- installed interface and returned capture consume the same immutable bytes.
+-- The file-backed session input path decodes once before installing and
+-- capturing its compiler product. World inputs use the shared hydration knot.
 injectSessionBody :: SessionModule -> HscEnv -> ArtifactBytes -> IO (HscEnv,[Id],Module)
 injectSessionBody sm hsc0 body = do
   let modNm = renderSessionModule sm

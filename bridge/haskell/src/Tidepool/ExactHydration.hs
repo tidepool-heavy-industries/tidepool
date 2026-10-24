@@ -253,6 +253,12 @@ preferCompilerProduct key left@(VerifiedExactInterface _ leftProduct _ leftIssue
     (CompletedHomeInterface first,CompletedHomeInterface second)
       | sameCompletedInterfaceOwner first second -> Right left
       | otherwise -> Left (InterfaceCompletedOwnerConflict key)
+    (CompletedHomeInterface (SessionHomeInterface capture),DecodedCheckedValueInterface _ _ packages) -> do
+      _ <- checkCapturedSessionInterface (fst (verifiedExactInterface right)) (verifiedExactInterfaceBody right) packages capture
+      Right left
+    (DecodedCheckedValueInterface _ _ packages,CompletedHomeInterface (SessionHomeInterface capture)) -> do
+      _ <- checkCapturedSessionInterface (fst (verifiedExactInterface left)) (verifiedExactInterfaceBody left) packages capture
+      Right right
     (CompletedHomeInterface _,_) -> Right left
     (_,CompletedHomeInterface _) -> Right right
     (DecodedCheckedValueInterface first _ firstPackages,DecodedCheckedValueInterface second _ secondPackages)
@@ -305,7 +311,7 @@ captureCompletedInterfaceInputs environment previous captures finalized = do
     (capturedInterfaceInputs (map fst (Map.elems replaced) ++ sessions ++ produced))
   let aliased = CapturedInterfaceInputs (Map.mapWithKey
         (\key (verified,aliases) -> (verified,nub (aliases ++ maybe [] snd (Map.lookup key replaced)))) combined)
-  hydrateOwnedClosure environment aliased
+  completedInputsAsHydratedClosure environment aliased
   where
     expectedCache = (nsUniqChar (hsc_NC environment),nsNames (hsc_NC environment))
 
@@ -482,10 +488,11 @@ admitCheckedValueInterface packages (VerifiedExactInterface artifact product' bo
       _ <- checkCapturedSessionInterface artifact body packages capture
       pure (VerifiedExactInterface artifact product' body issuer)
     CompletedHomeInterface _ -> Left "checked value interface has another completed owner"
-    _ -> pure (VerifiedExactInterface artifact
-      (DecodedCheckedValueInterface selected (case product' of
-        DecodedTypeInterface iface -> iface
-        DecodedCheckedValueInterface _ iface _ -> iface) packages) body issuer)
+    DecodedTypeInterface iface -> pure (VerifiedExactInterface artifact
+      (DecodedCheckedValueInterface selected iface packages) body issuer)
+    DecodedCheckedValueInterface _ iface existingPackages -> do
+      unless (existingPackages == packages) (Left "checked value interface has conflicting package evidence")
+      pure (VerifiedExactInterface artifact (DecodedCheckedValueInterface selected iface packages) body issuer)
 
 data VerifiedExactInterface = VerifiedExactInterface !ExactIfaceArtifact CapturedCompilerInterface !ArtifactBytes
   !(Char,MVar OrigNameCache)
@@ -1705,8 +1712,8 @@ hydrateInterfaceInputs env inputs@(CapturedInterfaceInputs rows) = do
   pure (HydratedExactInterfaces completed closure homes)
 
 -- Completion assembly is retain-only: no decoded product may enter this route.
-hydrateOwnedClosure :: HscEnv -> CapturedInterfaceInputs -> IO HydratedInterfaceClosure
-hydrateOwnedClosure environment (CapturedInterfaceInputs rows) = do
+completedInputsAsHydratedClosure :: HscEnv -> CapturedInterfaceInputs -> IO HydratedInterfaceClosure
+completedInputsAsHydratedClosure environment (CapturedInterfaceInputs rows) = do
   owned <- Map.traverseWithKey (\key (VerifiedExactInterface artifact compiler body issuer,aliases) -> do
     unless (issuer == (nsUniqChar (hsc_NC environment),nsNames (hsc_NC environment)))
       (throwIO InterfaceNameCacheMismatch)
