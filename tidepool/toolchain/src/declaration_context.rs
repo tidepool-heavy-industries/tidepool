@@ -27840,10 +27840,22 @@ mod tests {
 
     #[test]
     fn nonempty_native_imports_keep_issued_rows_through_custody_and_request() {
-        let cold = demanded_native_fixture(
+        let package = tempfile::NamedTempFile::new().unwrap();
+        let package_bytes = b"ordered materialization package interface";
+        std::fs::write(package.path(), package_bytes).unwrap();
+        let package_digest = Sha256::digest(package_bytes).into();
+        let packages = BTreeMap::from([(
+            ("package".into(), "Package".into()),
+            crate::certified_products::PackageInterfaceWitness {
+                selected_path: package.path().to_path_buf(),
+                sha256: package_digest,
+            },
+        )]);
+        let cold = demanded_native_fixture_with_packages(
             0,
             crate::artifact_inventory::NativeArtifactDemand::AllGroups,
             false,
+            &packages,
         );
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
@@ -27900,10 +27912,23 @@ mod tests {
                     .then_some(value)
             })
             .unwrap();
-        let expected = vec![crate::certified_products::SelectedNativeImport::Source {
-            binding: child,
-            value,
-        }];
+        // The fixture authors its HOME dependency first and package slot second.
+        let expected = vec![
+            crate::certified_products::SelectedNativeImport::Source {
+                binding: child,
+                value,
+            },
+            crate::certified_products::SelectedNativeImport::Package {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "package".into(),
+                    module: "Package".into(),
+                    namespace: "value".into(),
+                    occurrence: "DemandParent_7".into(),
+                    record_parent: None,
+                },
+                interface_digest: package_digest,
+            },
+        ];
         assert_eq!(parent_row.imports(), expected);
         let artifacts = prepared
             .metadata
