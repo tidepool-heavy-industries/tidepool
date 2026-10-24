@@ -93,7 +93,7 @@ import Tidepool.GhcPipeline
   ( withResidentCompilerScopes, scopedCompile, PipelineSelection(..), CompilePurpose(..)
   , pprFinalizedModules, pprCompletedModuleInterface, pprPipelineResult, prHscEnv )
 import Tidepool.FinalizedModule
-  ( finalizedHomeModInfo, captureFinalizedInterface, homeInterfaceUsageOwners )
+  ( finalizedHomeModInfo, captureFinalizedInterface, homeInterfaceUsageOwners, completedModuleInterfaceHome )
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -229,7 +229,7 @@ verifyHydratedOriginalOwners = do
         finalized <- pprCompletedModuleInterface prepared name >>= maybe (fail "actual compiler omitted completed interface owner") pure
         completed <- captureCompletedInterfaceInputs environment closure [] [finalized,finalized]
         completionOwner <- retainInstalledInterfaceInputs fresh completed
-        expectedIdentity <- evaluate actualHome >>= makeStableName
+        expectedIdentity <- evaluate (completedModuleInterfaceHome finalized) >>= makeStableName
         case hydratedExactInterfaces completionOwner of
           [(_,home)] -> do
             identity <- evaluate home >>= makeStableName
