@@ -1,79 +1,14 @@
--- | Withholds GHC unfoldings for retained-generation symbols before the
--- simplifier ever sees them, so a symbol carried over from an earlier
--- session generation cannot be inlined into a module compiled alongside it.
---
--- WHY THIS EXISTS
---
--- 'Tidepool.ExecutionProjection' already refuses to recover a
--- retained-generation symbol's own body and instead emits a 'GlobalDecl'
--- reference for it ('ExecutionProjection.dropRetainedTops' /
--- 'ExecutionProjection.internGlobal'). That check runs on the wire
--- projection, AFTER every home module has finished compiling. By then it can
--- already be too late: 'Tidepool.GhcPipeline.canonicalizeDFlags' turns on
--- @Opt_ExposeAllUnfoldings@ (needed so ordinary cross-module Core --
--- library calls, dictionaries, and the like -- resolves without a runtime
--- import), and GHC's own batch driver (@load'@, called once for the whole
--- module graph before 'Tidepool.GhcPipeline''s own per-module
--- typecheck/desugar/@core2core@ redo loop even starts) already runs the
--- real simplifier and may inline a retained id's unfolding into every home
--- module that references it. The projection stage then sees only the
--- aftermath: a consumer whose Core already carries a recovered copy
--- (floated sub-bindings such as @producerValue1@..@producerValue5@, a
--- specialised worker such as @$wproducerFn@), with no trace of the original
--- occurrence left to match against the retained map.
---
--- Replacing a home interface after its dependencies have compiled cannot
--- undo inlining performed by load's own compiler pipeline. Withholding must
--- therefore apply before either pipeline simplifies the defining module.
---
--- The one seam that reaches BOTH @load'@'s internal simplification and this
--- pipeline's own later @core2core@ redo is the seam GHC itself exposes for
--- exactly this purpose: a Core plugin registered on the session's
--- 'HscEnv' (@hsc_plugins@). 'Plugin's @installCoreToDos@ lets a plugin
--- prepend a pass to the @CoreToDo@ list that @core2core@ -- and @load'@'s
--- internal use of the very same machinery -- runs for every home module, in
--- every compile that consults this 'HscEnv'. That covers both compile paths
--- uniformly, without this pipeline needing to know which one produced a
--- given module's guts. This module's pass runs FIRST, before
--- @CoreDoSimplify@, on the freshly desugared Core: it rewrites every
--- retained-generation 'Id' (matched by 'SymbolIdentity', external-name-only,
--- exactly as 'ExecutionProjection.idSymbol' matches it) to the same 'Id'
--- with 'noUnfolding' and 'neverInlinePragma'. That is exactly what a source
--- @{-# NOINLINE #-}@ pragma already produces at desugaring time (see the
--- former stand-in comment this pass replaces in
--- @test-prepared-stg/ImportProducer.hs@) -- this pass only derives the same
--- effect from the retained-generation map instead of requiring the pragma
--- text, so a notebook user never has to write it.
---
--- VALIDITY
---
--- The pass rewrites only the module's OWN top-level binders (and their
--- occurrences). A module's output is therefore a function of its source,
--- the interfaces it imports, and @retained ∩ definedBy(module)@; a retained
--- identity defined elsewhere reaches it only through that defining module's
--- interface, which GHC's usage fingerprints and the memo's dependency check
--- already track. Both validity checks use exactly that intersection
--- ('retainedDefinedBy'): the pipeline's memo, and the plugin's
--- recompilation fingerprint.
---
--- GHC 9.12 calls @pluginRecompile@ with the plugin's arguments only, with no
--- module in scope, both when checking an old interface ('checkPlugins' in
--- @hscRecompStatus@) and when stamping a new one ('fingerprintPlugins' in
--- 'mkFullIface'). The make driver's 'compileOne'' however runs
--- 'initializePlugins' on the module-local 'HscEnv' (the summary's
--- @ms_hspp_opts@) immediately before both, and that runs each uninitialised
--- static plugin's @driverPlugin@. 'scopeRetainedModuleGraph' records each
--- summary's module identity as a plugin option in those flags; the driver
--- action copies it into the plugin's own arguments and leaves the plugin
--- uninitialised so the next module re-scopes it. The custom compiler path
--- explicitly scopes its saved environment before building an interface.
--- An unscoped environment must never fingerprint the entire retained set.
+-- | Module-local compiler boundaries, installed before either compilation
+-- route simplifies Core. Retained values keep their existing withholding
+-- policy. An issued native declaration additionally keeps ordinary calls
+-- opaque, while constructor and dictionary representation remains available.
+-- The same complete module policy owns compiler and memo validity.
 module Tidepool.RetainedUnfoldings
-  ( RetainedContext, retainedContext, emptyRetainedContext
+  ( RetainedContext, retainedContext, emptyRetainedContext, extendRetainedContext
+  , ModuleUnfoldingPolicy, moduleUnfoldingPolicyFor, withNativeDeclarationBoundary
   , installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph
-  , scopeRetainedSummaryHscEnv, retainedDefinedBy
-  , withholdRetainedUnfoldings
+  , scopeRetainedSummaryHscEnv
   ) where
 
 import Data.Map.Strict (Map)
@@ -83,8 +18,10 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC.Core
-  ( Alt(..), Bind(..), CoreBind, CoreProgram, Expr(..), noUnfolding )
-import GHC.Core.Opt.Pipeline.Types (CoreToDo(..), bindsOnlyPass)
+  ( Alt(..), Bind(..), CoreBind, CoreProgram, Expr(..), noUnfolding, isBuiltinRule )
+import GHC.Core.FVs (exprFreeVars, mkRuleInfo)
+import GHC.Core.Subst qualified as Subst
+import GHC.Core.Opt.Pipeline.Types (CoreToDo(..))
 import GHC.Data.FastString (unpackFS)
 import GHC.Driver.Session (DynFlags(..))
 import GHC.Driver.Env (hscSetFlags)
@@ -95,10 +32,17 @@ import GHC.Driver.Plugins
 import GHC.Utils.Fingerprint (fingerprintString)
 import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Types.Basic (neverInlinePragma)
-import GHC.Types.Id (Id, idName, setIdUnfolding, setInlinePragma)
+import GHC.Parser.PostProcess (mkOpaquePragma)
+import GHC.Types.SourceText (SourceText(NoSourceText))
+import GHC.Types.Id
+  ( Id, idName, setIdUnfolding, setInlinePragma, isDataConId, isDFunId
+  , isClassOpId, idSpecialisation, realIdUnfolding, setIdSpecialisation )
+import GHC.Types.Id.Info (emptyRuleInfo, ruleInfoRules)
 import GHC.Types.Name (isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
-import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
+import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv, isEmptyVarEnv, mkInScopeSet, mkVarEnv)
+import GHC.Types.Var.Set (mkVarSet, unionVarSets)
+import GHC.Unit.Module.ModGuts (ModGuts(..))
 import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.Graph (ModuleGraph, mapMG)
 import GHC.Unit.Module.ModSummary (ModSummary(..))
@@ -106,28 +50,58 @@ import Text.Read (readMaybe)
 import GHC.Unit.Types (unitString)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 
--- Each attempt installs one pass with immutable inputs. Lazy computations
--- captured by an earlier HscEnv keep their original policy. An empty retained
--- set leaves the compiled bytes unchanged.
+data DefinitionBoundary = OrdinaryDefinitions | NativeDeclarationDefinitions
+  deriving (Eq, Ord, Show)
+
+data ModuleUnfoldingPolicy = ModuleUnfoldingPolicy
+  !(Set SymbolIdentity) !DefinitionBoundary
+  deriving (Eq, Ord, Show)
+
+-- Each attempt captures immutable policies. An old environment retains its
+-- original policy even when a later attempt extends its retained inputs.
 data RetainedContext = RetainedContext
-  { contextAll :: !(Set SymbolIdentity)
-  , contextByModule :: !(Map (Text.Text, Text.Text) (Set SymbolIdentity, Fingerprint))
+  { contextByModule :: !(Map (Text.Text, Text.Text) (ModuleUnfoldingPolicy, Fingerprint))
   , contextEmptyFingerprint :: !Fingerprint
   }
 
 retainedContext :: Set SymbolIdentity -> RetainedContext
-retainedContext identities = RetainedContext identities scopes (scopeFingerprint Set.empty)
-  where
-    groups = Map.fromListWith Set.union
-      [ ((symbolUnit i, symbolModule i), Set.singleton i) | i <- Set.toList identities ]
-    scopes = Map.map (\group -> (group, scopeFingerprint group)) groups
+retainedContext identities = extendRetainedContext identities emptyRetainedContext
 
 emptyRetainedContext :: RetainedContext
-emptyRetainedContext = retainedContext Set.empty
+emptyRetainedContext = RetainedContext Map.empty (scopeFingerprint emptyModulePolicy)
 
-scopeFingerprint :: Set SymbolIdentity -> Fingerprint
-scopeFingerprint identities = fingerprintString
-  ("tidepool-retained-unfoldings-v3:" ++ show (Set.toAscList identities))
+emptyModulePolicy :: ModuleUnfoldingPolicy
+emptyModulePolicy = ModuleUnfoldingPolicy Set.empty OrdinaryDefinitions
+
+moduleUnfoldingPolicyFor :: Module -> RetainedContext -> ModuleUnfoldingPolicy
+moduleUnfoldingPolicyFor owner context = policyForKey (moduleKey owner) context
+
+policyForKey :: (Text.Text, Text.Text) -> RetainedContext -> ModuleUnfoldingPolicy
+policyForKey key context = maybe emptyModulePolicy fst (Map.lookup key (contextByModule context))
+
+updatePolicy :: (Text.Text, Text.Text) -> (ModuleUnfoldingPolicy -> ModuleUnfoldingPolicy)
+  -> RetainedContext -> RetainedContext
+updatePolicy key update context = context {contextByModule = Map.insert key
+  (policy, scopeFingerprint policy) (contextByModule context)}
+  where policy = update (policyForKey key context)
+
+withNativeDeclarationBoundary :: Module -> RetainedContext -> RetainedContext
+withNativeDeclarationBoundary owner = updatePolicy (moduleKey owner)
+  (\(ModuleUnfoldingPolicy retained _) -> ModuleUnfoldingPolicy retained NativeDeclarationDefinitions)
+
+extendRetainedContext :: Set SymbolIdentity -> RetainedContext -> RetainedContext
+extendRetainedContext identities initial = Map.foldlWithKey' extend initial groups
+  where
+    groups = Map.fromListWith Set.union
+      [((symbolUnit identity, symbolModule identity), Set.singleton identity)
+      | identity <- Set.toList identities]
+    extend context key more = updatePolicy key
+      (\(ModuleUnfoldingPolicy retained boundary) ->
+        ModuleUnfoldingPolicy (Set.union retained more) boundary) context
+
+scopeFingerprint :: ModuleUnfoldingPolicy -> Fingerprint
+scopeFingerprint policy = fingerprintString
+  ("tidepool-retained-unfoldings-v4:" ++ show policy)
 
 installRetainedUnfoldingsPlugin :: RetainedContext -> HscEnv -> HscEnv
 installRetainedUnfoldingsPlugin context hscEnv =
@@ -174,12 +148,6 @@ scopeRetainedSummaryHscEnv :: ModSummary -> HscEnv -> HscEnv
 scopeRetainedSummaryHscEnv summary =
   scopeRetainedHscEnv (ms_mod summary) . hscSetFlags (ms_hspp_opts summary)
 
--- | The retained identities a module defines: the only part of the retained
--- set that can change the module's own compilation (see VALIDITY above).
-retainedDefinedBy :: Module -> RetainedContext -> Set SymbolIdentity
-retainedDefinedBy m context = maybe Set.empty fst
-  (Map.lookup (moduleKey m) (contextByModule context))
-
 moduleKey :: Module -> (Text.Text, Text.Text)
 moduleKey m =
   (Text.pack (unitString (moduleUnit m)), Text.pack (moduleNameString (moduleName m)))
@@ -219,8 +187,44 @@ withholdingPlugin context = defaultPlugin
         _ -> ForceRecompile
   }
   where
-    pass = bindsOnlyPass $ \binds -> do
-      pure (withholdRetainedUnfoldings (contextAll context) binds)
+    pass guts = pure $ case moduleUnfoldingPolicyFor (mg_module guts) context of
+      ModuleUnfoldingPolicy retained OrdinaryDefinitions ->
+        guts {mg_binds = withholdRetainedUnfoldings retained (mg_binds guts)}
+      ModuleUnfoldingPolicy _ NativeDeclarationDefinitions ->
+        -- At this phase mg_rules contains this module's authored rules for
+        -- imported heads. Imported HPT/EPS rules remain with their own owners.
+        guts {mg_binds = opaqueNativeBindings (mg_binds guts), mg_rules = []}
+
+-- Ordinary executable tops are LocalIds before tidy, including exported
+-- external Names. Representation Ids may be GlobalIds; they are not replaced
+-- by the substitution. Rebind Core and preserved metadata together so a DFun's
+-- unfolding cannot retain an ordinary method's older, unprotected IdInfo.
+opaqueNativeBindings :: CoreProgram -> CoreProgram
+opaqueNativeBindings binds = map rewrite binds
+  where
+    identifiers = concatMap topBinders binds
+    scope = Subst.mkEmptySubst (mkInScopeSet (unionVarSets
+      (mkVarSet identifiers : [exprFreeVars rhs | binding <- binds, rhs <- rightSides binding])))
+    substitution = Subst.extendIdSubstList scope [(old, Var (rebind old)) | old <- identifiers]
+    rewritten = mkVarEnv [(identifier, rewriteId identifier) | identifier <- identifiers]
+    rebind identifier = fromMaybe identifier (lookupVarEnv rewritten identifier)
+    ordinary identifier = not (isDataConId identifier || isDFunId identifier || isClassOpId identifier)
+    rewriteId identifier
+      | ordinary identifier = setIdSpecialisation
+          (setIdUnfolding (setInlinePragma identifier (mkOpaquePragma NoSourceText)) noUnfolding)
+          emptyRuleInfo
+      | otherwise = setIdSpecialisation
+          (setIdUnfolding identifier (Subst.substUnfolding substitution (realIdUnfolding identifier)))
+          (Subst.substRuleInfo substitution identifier (mkRuleInfo
+            (filter isBuiltinRule (ruleInfoRules (idSpecialisation identifier)))))
+    rewrite (NonRec identifier rhs) = NonRec (rebind identifier) (Subst.substExpr substitution rhs)
+    rewrite (Rec pairs) = Rec [(rebind identifier, Subst.substExpr substitution rhs) | (identifier,rhs) <- pairs]
+    rightSides (NonRec _ rhs) = [rhs]
+    rightSides (Rec pairs) = map snd pairs
+
+topBinders :: CoreBind -> [Id]
+topBinders (NonRec binder _) = [binder]
+topBinders (Rec pairs) = map fst pairs
 
 -- | The pure Core-to-Core rewrite: every top-level binder whose
 -- 'SymbolIdentity' is a member of the retained set, and every occurrence of
@@ -232,6 +236,7 @@ withholdingPlugin context = defaultPlugin
 withholdRetainedUnfoldings :: Set SymbolIdentity -> CoreProgram -> CoreProgram
 withholdRetainedUnfoldings retained binds
   | Set.null retained = binds
+  | isEmptyVarEnv fixes = binds
   | otherwise = map substTop binds
   where
     fixes :: VarEnv Id
@@ -239,8 +244,6 @@ withholdRetainedUnfoldings retained binds
     addFix v env = case idIdentity v of
       Just identity | identity `Set.member` retained -> extendVarEnv env v (withhold v)
       _ -> env
-    topBinders (NonRec b _) = [b]
-    topBinders (Rec ps) = map fst ps
     withhold v = setIdUnfolding (setInlinePragma v neverInlinePragma) noUnfolding
     sub v = fromMaybe v (lookupVarEnv fixes v)
     substTop :: CoreBind -> CoreBind
