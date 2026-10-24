@@ -287,10 +287,19 @@ fn frame_path(bytes: &mut Vec<u8>, path: &Path) {
     reason = "real owned frontend/provider refusal and post-acquisition settlement controls"
 )]
 fn configured_startup_failures_retain_acquisition_and_settle_exact_owner() {
-    let directory = tempfile::tempdir().unwrap();
-    let worker_source = directory.path().join("worker.rs");
+    let temporary = tempfile::tempdir().unwrap();
+    let retained_directory = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").map(|root| {
+        std::path::PathBuf::from(root).join("owned-compiler-control-configured-source")
+    });
+    if let Some(directory) = &retained_directory {
+        fs::create_dir(directory).unwrap();
+    }
+    let directory = retained_directory
+        .as_deref()
+        .unwrap_or_else(|| temporary.path());
+    let worker_source = directory.join("worker.rs");
     fs::write(&worker_source, worker_fixture_source()).unwrap();
-    let worker = directory.path().join("worker");
+    let worker = directory.join("worker");
     assert!(Command::new("rustc")
         .args(["--edition=2021"])
         .arg(&worker_source)
@@ -313,13 +322,13 @@ fn configured_startup_failures_retain_acquisition_and_settle_exact_owner() {
             .unwrap(),
     );
     let python_sha = sha256(&fs::read(&python).unwrap());
-    let provider = directory.path().join("provider.py");
+    let provider = directory.join("provider.py");
     let provider_bytes = include_bytes!("fixtures/service_provider.py");
     fs::write(&provider, provider_bytes).unwrap();
     let frontend = env!("CARGO_BIN_EXE_tidepool-extract");
     for mode in ["preboot-refusal", "profile-failure", "release-refusal"] {
-        let owner = directory.path().join(mode);
-        let record = directory.path().join(format!("{mode}-source.json"));
+        let owner = directory.join(mode);
+        let record = directory.join(format!("{mode}-source.json"));
         // The executable deliberately is not a TPSPF001 package profile. Its
         // valid immutable digest lets acquisition succeed before profile decode.
         let record_bytes=serde_json::to_vec(&serde_json::json!({"schema":2,"kind":"compiler-service-package-source","source_id":hex(&[2;32]),"profile_id":hex(&[3;32]),"provider_guard_store_path":python_object,"profile_store_path":python,"profile_sha256":hex(&python_sha),"acquisition_roots":[python_object],"fixture_mode":mode})).unwrap();
@@ -334,7 +343,7 @@ fn configured_startup_failures_retain_acquisition_and_settle_exact_owner() {
         config.extend_from_slice(&sha256(&record_bytes));
         config.extend_from_slice(&[2; 32]);
         config.extend_from_slice(&[3; 32]);
-        let config_path = directory.path().join(format!("{mode}-launch.bin"));
+        let config_path = directory.join(format!("{mode}-launch.bin"));
         fs::write(&config_path, &config).unwrap();
         let marker = owner.join("workload-ran");
         let mut command = Command::new(frontend);
@@ -370,6 +379,16 @@ fn configured_startup_failures_retain_acquisition_and_settle_exact_owner() {
             .arg(&marker)
             .output()
             .unwrap();
+        fs::write(
+            directory.join(format!("{mode}.frontend.stdout")),
+            &output.stdout,
+        )
+        .unwrap();
+        fs::write(
+            directory.join(format!("{mode}.frontend.stderr")),
+            &output.stderr,
+        )
+        .unwrap();
         assert!(
             !output.status.success(),
             "{mode} must retain startup failure"
@@ -390,7 +409,12 @@ fn configured_startup_failures_retain_acquisition_and_settle_exact_owner() {
             report["endpoint"].is_null(),
             "terminal before Ready remains valid"
         );
-        assert_eq!(report["complete"], mode != "release-refusal");
+        assert_eq!(
+            report["complete"],
+            mode != "release-refusal",
+            "mode={mode}; report={report}; frontend stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(
             report["source_settlement"]["status"],
             if mode == "release-refusal" {
