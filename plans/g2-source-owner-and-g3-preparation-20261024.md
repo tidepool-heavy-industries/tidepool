@@ -159,18 +159,47 @@ force/recovery/performance matrices and restore deduplication remain separate.
 
 ## Live state
 
-- Plan committed at 8b2c21b1f4; all five implementation lanes dispatched in
-  isolated checkouts from that revision. No new component checks have executed.
-- Rust: fix/g2-source-offer-20261024; Haskell: fix/g2-load-failure-20261024;
-  Q9: refactor/g3-query-honesty-20261024;
-  Q10: test/g3-operation-oracle-20261024;
-  Q6: refactor/g3-compiler-access-20261024.
-- Current evidence root: /srv/swarm/evidence/inanna/g2-source-owner-20261024/.
-- Existing warm validator is clean at 98d1d08198; its prior seven codegen
-  ownership controls completed with exit 0. The old qualification-state active
-  marker is historical, not an active test lease.
-- Resource inspection found 107 GiB available RAM, 203 GiB free scratch,
-  2.30 GiB allocated swap, zero interval swap traffic and zero PSI averages.
-  No service was stopped. Installed swarm-build lacks staged storage switches;
-  use its supported launcher and actual resource observations.
-- Nix closure realization is coordinated serially; source work is parallel.
+Evidence root: `/srv/swarm/evidence/inanna/g2-source-owner-20261024/`.
+
+- Joined candidate `36c0873bbcbe981f433ec84d57ced935bb814920` contains G2
+  Rust core, G2 Haskell and Q9. The warm validator
+  `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020` is running
+  the five actor notebook cases at that exact revision. Source was advanced
+  under its exclusive output lease. See `joined/actor-36c0873-plan.json` and
+  `joined/actor-36c0873.log`; execution and qualification are pending.
+- Q9 candidate `633e6c1e72` is integrated as `35fa315631`: production and test
+  targets compile, seven focused cases pass (`q9/result.json`).
+- G2 Haskell candidate `082f4925d1` is fully integrated through `eae5c40fab`:
+  seven distinct focused cases pass. Removing only the new native-failure catch
+  makes the actual load test fail with the expected `DependencySourceFailure`
+  instead of its exact native cause; restoring the committed bytes passes again.
+  Mutation and restoration evidence is retained under `haskell/`.
+- G2 Rust candidate `3d790d701d` is integrated as `36c0873bbc`. Production and
+  test targets compile; SOURCE scope and historical-body controls pass. The
+  acquired-scope fixture repair is committed separately at `4ecec03bd5`; its
+  pre-tightening run passes, with exact-final-source execution pending. A real
+  Full-offer observation followed by nonempty retained-terminal consumption
+  remains unproven. Two attempted value-import fixtures failed before SOURCE
+  observation because source qualification precedes checked-value hydration.
+  One bounded route through actual declaration publication is in progress;
+  do not modify hydration or manufacture SOURCE authority to make a test pass.
+- Q10 candidate `a5a5e86814` is source-reviewed; final focused compilation and
+  nine controls are running. The actual ordinary-demand history remains pending.
+  See `q10/run-plan-final.json`. It is not integrated yet.
+- Q6 remains in `refactor/g3-compiler-access-20261024`, with production and
+  affected tests compiled. Nine of ten focused cases pass after correcting
+  migrated fixture construction. Its remaining original-projection failure
+  reproduces independently at G2-only `082f4925d1`: authored source imports are
+  attempted through a lexical scope without current SOURCE admission
+  (`ExecutionSourceUnavailable main:ProjectionIndependent`). This inherited
+  boundary is unqualified; the refactor must preserve the refusal. A final
+  native-only session-writer preflight and no-write control remain in progress.
+- All five isolated toolchains are configured. Measured memory and scratch
+  headroom permit the current independent lanes. Swap inspection found allocated
+  pages but no active swapping or pressure; no service or system setting changed.
+  Installed `swarm-build` lacks the staged storage switches; use its supported
+  launcher and actual observations.
+- Integration-status ran with consistent Harness pins; its strict result is
+  `local_main_missing` in this named campaign checkout. Do not claim main or
+  frozen-release qualification from this integration branch. Argon receives
+  the joined candidate after the remaining focused controls and actor results.
