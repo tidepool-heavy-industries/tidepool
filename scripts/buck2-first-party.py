@@ -56,6 +56,8 @@ GENERATED_BIN_NAMES = {
     "tidepool-effects-gen": "tidepool_effects_gen",
 }
 TOOLCHAIN_COMPILER_FREE_TESTS = [
+    "declaration_context::tests::retained_group_materialization_keeps_scope_aliases_on_cold_and_cache_hits",
+    "declaration_context::tests::nonempty_native_imports_keep_issued_rows_through_custody_and_request",
     "source_bundle::tests::materialization_repairs_a_stale_or_partial_completion_marker",
     "source_bundle::tests::completion_marker_does_not_hide_changed_or_missing_library_sources",
     "source_bundle::tests::selected_source_verification_rejects_changed_missing_and_extra_modules",
