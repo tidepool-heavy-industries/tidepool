@@ -1022,11 +1022,15 @@ impl<'a> PhysicalCohortInputs<'a> {
 
     pub(crate) fn certify_target_groups(
         &self,
-        view: &ArtifactView,
+        target: &crate::artifact_inventory::TargetNativeInputs,
         candidates: &crate::certified_products::IssuedGroupCandidates,
         baseline: Option<CertifiedNativeGroupBaseline<'_>>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
+        if !target.belongs_to_cohort(*self) {
+            return Err(failure("native target belongs to another physical cohort"));
+        }
+        let view = target.artifacts();
         if !Arc::ptr_eq(&self.stage.operation, &validation.inventory) {
             return Err(failure("physical cohort has another accounting owner"));
         }

@@ -3121,7 +3121,6 @@ fn admit_native_target_products(
             )?
         }
     };
-    let artifact_view = selected_target.artifacts();
     let baseline = segment_cursor
         .as_ref()
         .map(|cursor| cursor.groups)
@@ -3129,7 +3128,7 @@ fn admit_native_target_products(
             inherited_groups.map(crate::declaration_context::CertifiedNativeGroupBaseline::Target)
         });
     let selected_groups = Arc::new(physical.certify_target_groups(
-        &artifact_view,
+        &selected_target,
         &certified.data().groups,
         baseline,
         validation,
@@ -4967,7 +4966,7 @@ fn compile_invocation_inner(
                 )?;
                 let selected_groups =
                     Arc::new(physical_inputs.physical_cohort().certify_target_groups(
-                        selected_target.artifacts(),
+                        &selected_target,
                         &certified.data().groups,
                         exact_request.as_ref().map(|request| {
                             crate::declaration_context::CertifiedNativeGroupBaseline::Target(

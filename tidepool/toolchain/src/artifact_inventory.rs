@@ -499,6 +499,13 @@ pub(crate) struct TargetNativeInputs {
 }
 
 impl TargetNativeInputs {
+    pub(crate) fn belongs_to_cohort(
+        &self,
+        cohort: crate::declaration_context::PhysicalCohortInputs<'_>,
+    ) -> bool {
+        Arc::ptr_eq(&self.physical_inputs, cohort.compiler_inputs())
+    }
+
     pub(crate) fn with_certified_groups(
         self,
         groups: Arc<crate::declaration_context::CertifiedArtifactGroupBindings>,
