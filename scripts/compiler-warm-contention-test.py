@@ -7,6 +7,7 @@ import unittest
 import json
 import subprocess
 import sys
+from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location("contention", Path(__file__).with_name("compiler-warm-contention.py"))
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -31,7 +32,144 @@ def workload():
     return rows
 
 
+def service_report(owner, *, complete=True):
+    def observation(status, code=None):
+        return {"status": status, "exit_code": code,
+                "success": code == 0 if code is not None else None,
+                "signal": None, "failure": None}
+    return {"schema": 2, "kind": "owned-compiler-service", "owner_directory": str(owner),
+            "operation": "01" * 32, "daemon_epoch": "02" * 32, "daemon_pid": 73,
+            "producer": "03" * 32, "endpoint": "04" * 32, "socket_path": str(owner / "socket"),
+            "action": observation("exited", 0), "acquisition": {"status": "not_configured"},
+            "daemon_reap": observation("reaped", 0), "service_terminal": {
+                "epoch": [2] * 32, "workers_retired": True, "socket_retired": True, "failures": []},
+            "source_settlement": observation("not_configured"),
+            "artifact_retention": observation("retained"),
+            "settlement_failures": [], "publication_failures": [], "complete": complete}
+
+
+def write_report(output, report):
+    owner = output / "compiler"
+    owner.mkdir(mode=0o700, exist_ok=True)
+    path = owner / "owned-service.json"
+    path.write_text(json.dumps(report))
+    path.chmod(0o600)
+
+
+def successful_measurement(output):
+    owner = output / "compiler"
+    write_report(output, service_report(owner))
+    rows = workload() + envelope(200, "preparation", "2026-10-06T00:00:02.150Z",
+                                  "2026-10-06T00:00:02.250Z")
+    (owner / "compiler.jsonl").write_text("".join(json.dumps({
+        "timestamp": row["observed_timestamp"], "fields": row}) + "\n" for row in rows))
+    capture = output / "authored-sources"
+    capture.mkdir()
+    (capture / "capture.json").write_text(json.dumps({"observed_distinct_measured_source_sha256": 50}))
+
+
 class EvidenceControls(unittest.TestCase):
+    def test_campaign_consumes_complete_report_and_preserves_failed_obligations(self):
+        for kind in ("complete", "incomplete", "missing", "malformed", "legacy", "crossed_owner",
+                     "wrong_endpoint", "failed_action", "startup_failed", "action_failure",
+                     "reap_failure", "terminal_failure"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary)
+                successful_measurement(output)
+                owner = output / "compiler"
+                report = service_report(owner)
+                if kind in ("missing", "legacy"):
+                    (owner / "owned-service.json").unlink()
+                    if kind == "legacy":
+                        (owner / "lifecycle.json").write_text(json.dumps({"cleanup_confirmed": True}))
+                elif kind == "malformed":
+                    (owner / "owned-service.json").write_text("{partial")
+                else:
+                    if kind == "incomplete":
+                        report["complete"] = False
+                    elif kind == "crossed_owner":
+                        report["owner_directory"] = str(output / "other-owner")
+                    elif kind == "wrong_endpoint":
+                        report["endpoint"] = "04" * 96
+                    elif kind == "failed_action":
+                        report["action"].update(exit_code=17, success=False)
+                    elif kind == "startup_failed":
+                        report["action"].update(status="failed", exit_code=None, success=None,
+                                                failure="startup refused")
+                        report["daemon_reap"].update(exit_code=1, success=False)
+                        report["service_terminal"]["failures"] = ["startup refused"]
+                    elif kind == "action_failure":
+                        report["action"]["failure"] = "workload observation failed"
+                    elif kind == "reap_failure":
+                        report["daemon_reap"].update(exit_code=1, success=False)
+                    elif kind == "terminal_failure":
+                        report["service_terminal"]["failures"] = ["worker startup refused"]
+                    write_report(output, report)
+                result = MODULE.summarize_campaign(output, 0, {"owner": {"exit_code": 0}}, None)
+                self.assertEqual(result, 0 if kind == "complete" else 1)
+                summary = json.loads((output / "summary.json").read_text())
+                observed = summary["compiler_service"]
+                if kind in ("missing", "malformed", "legacy", "crossed_owner", "wrong_endpoint"):
+                    self.assertEqual(observed["status"], "unknown")
+                    self.assertIsNone(observed["report"])
+                    self.assertTrue(observed["error"]["type"])
+                else:
+                    self.assertEqual(observed["status"], "incomplete" if kind == "incomplete" else "complete")
+                    self.assertEqual(observed["report"], report)
+                if kind != "complete":
+                    self.assertEqual(summary["status"], "failed")
+
+    def test_primary_failure_preserves_independent_service_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            report = service_report(output / "compiler", complete=False)
+            write_report(output, report)
+            result = MODULE.summarize_campaign(output, 17, {"owner": {"exit_code": 17}}, "primary failure")
+            self.assertEqual(result, 1)
+            summary = json.loads((output / "summary.json").read_text())
+            self.assertEqual(summary["exception"], "primary failure")
+            self.assertEqual(summary["compiler_service"]["status"], "incomplete")
+            self.assertEqual(summary["compiler_service"]["report"], report)
+
+    def test_stop_uses_valid_live_owner_without_claiming_retirement(self):
+        for stop_code in (0, 1):
+            with self.subTest(stop_code=stop_code), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary)
+                report = service_report(output / "compiler", complete=False)
+                report["action"].update(status="running", exit_code=None, success=None)
+                report["daemon_reap"].update(status="pending", exit_code=None, success=None)
+                report["service_terminal"] = None
+                write_report(output, report)
+                owner = Mock()
+                owner.poll.return_value = None
+                owner.wait.side_effect = [subprocess.TimeoutExpired("owner", 1), 0]
+                with patch.object(MODULE.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], stop_code, b"stop observation", b"")) as stop:
+                    settlement = MODULE.settle_compiler_owner(owner, output, {"TIDEPOOL_EXTRACT": "/frontend"}, 1)
+                self.assertEqual(stop.call_args.args[0], ["/frontend", "--stop-daemon", "--socket", report["socket_path"]])
+                self.assertFalse(settlement["forced_kill"])
+                self.assertEqual(settlement["stop_control"]["status"], "exited")
+                self.assertEqual(settlement["stop_control"]["compiler_service"]["status"], "incomplete")
+                self.assertEqual(settlement.get("owner_forced_termination", False), stop_code != 0)
+                if stop_code:
+                    owner.terminate.assert_called_once()
+                    self.assertEqual(settlement["stop_control"]["exit_code"], stop_code)
+                self.assertIsNone(report["service_terminal"])
+
+    def test_missing_owner_report_cannot_address_an_ambient_socket(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            owner = Mock()
+            owner.wait.side_effect = [subprocess.TimeoutExpired("owner", 1), 0]
+            owner.poll.return_value = None
+            with patch.object(MODULE.subprocess, "run") as stop:
+                settlement = MODULE.settle_compiler_owner(owner, output, {"TIDEPOOL_EXTRACT": "/frontend"}, 1)
+            stop.assert_not_called()
+            owner.terminate.assert_called_once()
+            self.assertTrue(settlement["owner_forced_termination"])
+            self.assertEqual(settlement["stop_control"]["status"], "unavailable")
+            self.assertEqual(settlement["stop_control"]["compiler_service"]["status"], "unknown")
+
     def test_actual_intersection_and_reserved_slot(self):
         rows = workload() + envelope(200, "preparation", "2026-10-06T00:00:02.150Z",
                                       "2026-10-06T00:00:02.250Z")
