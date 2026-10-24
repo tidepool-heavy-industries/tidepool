@@ -75,8 +75,8 @@ refusals while repairing their inputs:
 | Consuming target selection | The general snapshot join inherits executable roots from earlier targets. A later barrier acquired an unused earlier scaffold and demanded its package interface. | Restrict only the consuming target's execution roots; retain removed exact nodes as custody. Reuse only selected baseline rows at target admission. General joins and complete-prefix validation stay strict. Exercise exact selection, historical custody, changed selected links, and the multi-stage runtime history. |
 | Repeated native-demand batches | Later sibling references reacquired a group already issued by an earlier batch; certification had no access to the earlier row. | The request supplies its actual prior acquisitions. Both split-order controls and the real sibling history pass at `794d3efd01`; foreign-operation and changed-dependency refusals remain. No content coalescing or weaker merge equality. |
 | Product source membership | Product facts flattened demanded groups into pending payloads. The membership overlay then attempted to reconstruct an exact Original import from a context-free witness. | ProductInputGroups carries the actual Exact or World selected-row owner. Real class-default and transitive histories pass at `85507b78e6`. The direct positive must acquire a real child edge through the request's inventory; nominal metadata alone deliberately grants no execution. |
-| Same-stage item values | Item 3 of stage 1 demands `Val.G2.historyRead0`, produced by an earlier item in that same stage. Its stage incoming-input list is correctly empty. | `CellStageRetainedInput` distinguishes stage-selected inputs from sealed earlier-item evidence. Retain producer item and checked row during existing prefix sealing, then consume them only with exact native demand and actual Produced runtime evidence. The diagnostic at `eeb3835adc` establishes the counterexample; joined repair execution is pending. |
-| Diagnostic evidence | The metadata history emitted both frontend counters but the displayed prefix omitted the second. Several nearby tests also inferred absence from that prefix. | Selected counters are read completely under explicit observation bounds before independently truncating display. Reader and metadata history pass at `9cd06f6c0a`; four adjacent counter consumers are migrated and awaiting execution. Remaining raw phase-marker/frontend-text checks are recorded in the evidence audit. |
+| Same-stage item values | Item 3 of stage 1 demands `Val.G2.historyRead0`, produced by an earlier item in that same stage. Its stage incoming-input list is correctly empty. | `CellStageRetainedInput` distinguishes stage-selected inputs from sealed earlier-item evidence. Retain producer item and checked row during existing prefix sealing, then consume them only with exact native demand and actual Produced runtime evidence. At `0b4c0cf5d2`, the deterministic cold history completes; its repeat fails later during declaration-import refinement. Direct same-stage and historical controls pass at `35066c2115`. |
+| Diagnostic evidence | The metadata history emitted both frontend counters but the displayed prefix omitted the second. Several nearby tests also inferred absence from that prefix. | Selected counters are read completely under explicit observation bounds before independently truncating display. Reader and metadata history pass at `9cd06f6c0a`; four adjacent counter consumers pass at `0b4c0cf5d2`. Remaining raw phase-marker/frontend-text checks are recorded in the evidence audit. |
 
 These are integration findings, not proof that earlier commits introduced
 regressions. Source traces and retained failing histories establish the current
@@ -84,7 +84,12 @@ mechanisms; unchanged component counts do not qualify these repairs.
 
 The warm validator records each exact candidate under
 `/srv/swarm/evidence/inanna/g2-argon-implementation-20261024/`.
-Current qualification work is the joined same-stage repair, the issued-graph
-overlay positive, and the four adjacent complete-counter controls. Component
-success does not erase earlier failures or establish G2. Preserve startup
-refusals that execute zero tests separately from actual test outcomes.
+The issued-graph overlay positive passes at `a59ac11a36`. Runtime cfg and both
+direct runtime ownership controls pass at `35066c2115` (two executed, zero
+failed). Two preceding cfg compilations caught test-caller API mistakes and
+executed zero tests. Overall diagnostic capture remains incomplete in the final
+case reports despite passing assertions and confirmed compiler/process cleanup.
+The next review decision is the warm declaration-import boundary, documented in
+`g2-argon-mid-effort-review-20261024.md`. Component success does not erase earlier
+failures or establish G2. Preserve startup refusals that execute zero tests
+separately from actual test outcomes.

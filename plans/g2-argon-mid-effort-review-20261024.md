@@ -2,15 +2,16 @@
 
 Integration checkout: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`.
 Branch: `integration/g2-domain-runtime-20261023`.
-Code candidate: `987e55258e2b3bfcf6698e52b7791f3de9c20896`.
+Code candidate: `35066c2115040ce9cf462d8ade764cb2ef84a4fc`.
 Accepted packet: SHA256 `a774cd044a2f907f62a10ed72fee32e624c66d313cb0142d99b62261d44678e2`.
 Review base: `a3edd881fbc3fa73eb70c03df3423e678313b6e4` (code `dc34094d5e`).
 Evidence directory: `/srv/swarm/evidence/inanna/g2-argon-implementation-20261024/`.
 
 The user selected Argon for this review. G2/G3 remain unqualified. No bundle,
-main merge or Persona acceptance is claimed. The final same-stage refusal test
-is consolidated; its bounded validation is pending. The checkpoints below
-distinguish executed code from pending test work. Review the pinned commits
+main merge or Persona acceptance is claimed. The final runtime test target
+compiles at `35066c2115`; both bounded ownership controls pass (2 executed,
+0 failed). The checkpoints below
+distinguish executed checks from remaining qualification work. Review the pinned commits
 rather than assuming current HEAD has already executed every check.
 
 ## What changed and why
@@ -53,6 +54,10 @@ lease, liveness, representation, evaluation and signature checks remain.
 
 ## Primary review requests
 
+Start with request 2 if the immediate goal is unblocking the remaining history;
+review request 1 independently before accepting the new ownership extension.
+The numbered order is not a dependency between those investigations.
+
 ### 1. Challenge the same-stage proof extension
 
 Read `checked_cell.rs` (`CheckedSettledValues`, `select_settled_values`,
@@ -84,6 +89,14 @@ user error (planned declaration requires one direct original wildcard import)
 
 This is a compile failure in the warm request, not a retained-slot refusal.
 The required warm/rejection/recovery sequence has not completed.
+
+Here "warm" means the same `SemanticSession` after the first successful cell's
+publication. The second cell repeats the same source, including declaration and
+binding names. This changes both compiler reuse conditions and the notebook's
+visible predecessor history; the current experiment does **not** isolate a
+compiler-cache defect from import/shadowing composition. Review
+`tidepool/runtime/src/session/typed_segment_tests.rs::exercise_capture_history`
+and the source generator, rather than inferring causality from the test label.
 
 Exact failing transaction:
 
@@ -121,6 +134,46 @@ shadowing and qualified historical access must remain intact. Seek a minimized
 two-cell positive with the same shadowing, paired with genuinely restricted,
 aliased or foreign imports that must not gain access.
 
+### Root-cause discriminators and requested output
+
+Verify which exact owner and occurrence reaches the refusal before choosing a
+repair. The source trace above does not establish whether local-name refinement,
+the admitted-original pass, or a preceding planned-original pass first narrowed
+that occurrence. Also inspect whether owner lists overlap and whether any
+wrapper replaces the captured syntax/lineage with a transformed AST.
+
+Useful starting points at the code candidate:
+
+- `bridge/haskell/src/Tidepool/CheckedPrefixImports.hs:174` and `:280`:
+  original/program refinement and the exact refusal branch.
+- `bridge/haskell/src/Tidepool/GhcPipeline.hs:3130` and `:4337`:
+  composition of parsed, admitted-original and planned-original transforms.
+- `bridge/haskell/src/Tidepool/ImportSyntax/Internal.hs`:
+  captured occurrence identity, `ImportLineage`, `mapRefinedImportsM`, and
+  `RefinedImportSyntax`'s retained source association.
+- `bridge/haskell/src/Tidepool/PlannedDeclaration.hs:285`:
+  `transformProgramDeclarationImports` projects exact owner/interface/export
+  inventories into `refineProgramDeclarationImports`.
+
+Please return:
+
+1. A verified cause with the first stage that violates the contract, or a short
+   competing-hypothesis table with the cheapest distinguishing observation.
+2. The proposed owning abstraction and invariants. Prefer one exact import
+   occurrence with composable narrowing to reconstructing source intent from
+   the current AST or carrying an unchecked "already processed" flag.
+3. A bounded implementation plan, old entry points to delete or restrict, and
+   affected consumers. Identify any semantic change separately from a repair.
+4. A discriminating positive/refusal matrix: repeated-cell shadowing, genuine
+   restricted/aliased/package-qualified imports, qualified historical access,
+   and the joined cold → repeat → rejection → recovery history. Distinguish
+   source-reviewed guarantees from actually executed cases.
+
+Use normal opt-in diagnostics if extra observations are required. Do not make
+the test pass by deleting the wildcard guard, authorizing by module name alone,
+or broadening a restricted import. A smaller refactor that consumes original
+evidence is preferable to a new parallel import framework.
+
 ### 3. Adversarial completeness and test-construction review
 
 Check actual production consumers and refusal controls, not only counts. In
@@ -156,7 +209,15 @@ counts, worker/binary hashes, cleanup and source OIDs are in each checkpoint.
 | `0b4c0cf5d2` | Three targets compile. Four Haskell counter controls pass. Deterministic test advances through cold execution then fails during warm declaration compilation; direct overlay fixture still fails before its intended boundary. |
 | `a59ac11a36` | Toolchain cfg compiles; corrected issued-graph overlay positive and its exact-owner guards pass. |
 | `9ff6594267` | New tests and fixture registration; cfg compilation caught a fixture-wrapper method used on the real ResidentSession. Zero tests executed. Generator checks pass 61/61. |
-| `987e55258e` | Test uses the actual private scope and existing scoped custody API. Runtime cfg compilation and two exact cases are pending. |
+| `987e55258e` | Runtime cfg compilation refused private `ResidentSession.state` access in the new test. Zero tests executed. |
+| `35066c2115` | Runtime cfg compiles (36.3 s). Both exact ownership controls pass: same-stage producer/refusal coverage and historical-terminal/admitted-value coverage. Two executed, zero failed; process and compiler cleanup confirmed. |
+
+Final batch: `integrated-3506-native-authorization-two-summary.json` under the
+evidence directory. It records immutable source, complete command, native and
+worker hashes, and one actual execution per case. Both reports still mark overall
+diagnostic evidence incomplete; successful assertions and confirmed cleanup do
+not establish full diagnostic capture. No joined warm rerun was performed after
+the test-only caller corrections.
 
 Selected counter evidence is now read from the complete diagnostic file before
 bounded display. This fixed a real false failure and nearby false-pass hazards.
@@ -167,10 +228,11 @@ migrated. Test observation bounds are not production compiler limits.
 
 ## Delivery and review limits
 
-Do not revise the warm validator's source while a pin is held. Its checkout is
-`/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020` and its owner
-is `validation_resume`. Final source/pin state will be recorded in
-`handoff.tmp.md` after the pending same-stage refusal control settles.
+The validator checkout is
+`/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`, owned by
+`validation_resume`. Both final cases have settled; the checkout is clean and
+idle, and its pin is released. `integrated-3506-checkpoint.json` records the
+terminal state. Implementation workers are stood down for Argon review.
 
 Existing public/main and bundled acceptance have not been rerun. No timing claim
 follows from these checks. The next decision belongs to review of this integrated
