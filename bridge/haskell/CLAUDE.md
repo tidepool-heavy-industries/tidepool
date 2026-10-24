@@ -26,8 +26,12 @@ projection inputs without reissuing compiler results.
 
 Captured interfaces retain authenticated byte tokens and their actual NameCache
 owner. Completed products also retain the actual successful HMI; decoded TYPE
-metadata cannot replace that allocation. `ExactHydration` selects and hydrates
-this owner without Finder paths. `GhcPipeline` alone combines it with observed
+metadata cannot replace that allocation. Source-less declaration Joins carry
+implementation closure in their authenticated descriptors, not ordinary GHC
+usage entries. Select that closure before retaining its existing compiler homes;
+a retain-only operation must refuse missing installations rather than hydrate
+them. `ExactHydration` owns the separate retention and hydration operations,
+without Finder paths. `GhcPipeline` alone combines their owner with observed
 SOURCE/lexical evidence and the current cycle's physical views. Qualification
 must remove its temporary Finder entries before publishing its retained HPT.
 HOME body reads consume HPT/captured owners; defining-file reads are explicit

@@ -1,9 +1,17 @@
 # Native-authored declaration reuse: remaining compiler boundary
 
-Status: phase tracing at `923cf48862` establishes loss of the consumer's exact
-Original use during simplification. Joined production candidate `47739467ae`
-implements the typed producer boundary described below; compilation and real
-history qualification are in progress. G2 remains unqualified.
+Status: `47739467ae` repairs the original captured-value continuation. The
+joined `14c9b59df9` also repairs descriptor-driven prefix retention and preserves
+stage-local TYPE context. Compilation/execution of those changes is pending;
+see [STATE.md](STATE.md) for the exact validation matrix. G2 remains unqualified.
+
+The prefix failure exposed a distinct ownership error: a source-less declaration
+Join's descriptor carries implementation dependencies which its GHC `mi_usages`
+does not contain. `retainInstalledInterfaceInputs` retains the selected captured
+closure's actual compiler objects without rehydration. The stage TYPE repair
+carries the updated WorldPrimaryInputs pair rather than borrowing its input
+projection and later consulting an older context. Neither repair changes
+SOURCE/native authority or permits execution from interface custody.
 
 ## Confirmed current boundary
 
