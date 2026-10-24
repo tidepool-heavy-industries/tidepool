@@ -9888,13 +9888,6 @@ pub(crate) enum ProductInputGroups<'a> {
 }
 
 impl<'a> ProductInputGroups<'a> {
-    pub(crate) fn data_only_payloads(self) -> &'a [PendingCertifiedGroup] {
-        match self {
-            Self::Exact(groups) => groups.groups(),
-            Self::World(groups) => groups.groups(),
-        }
-    }
-
     pub(crate) fn issued_rows(
         self,
     ) -> impl Iterator<Item = Result<
@@ -9914,15 +9907,7 @@ impl<'a> ProductInputGroups<'a> {
         })))
     }
 
-    #[cfg(test)]
-    pub(crate) fn mutate_exact_payloads(
-        groups: &mut CertifiedArtifactGroupBindings,
-        mutate: impl FnOnce(&mut Vec<PendingCertifiedGroup>),
-    ) {
-        let mut changed = groups.groups.to_vec();
-        mutate(&mut changed);
-        groups.groups = changed.into();
-    }
+
 }
 
 struct ProductInputFacts<'a> {
