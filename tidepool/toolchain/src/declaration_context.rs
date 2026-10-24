@@ -3557,6 +3557,21 @@ impl DemandCertifiedGroups {
                     || prior.dependencies != row.dependencies
                     || prior.imports() != row.imports()
                 {
+                    tracing::warn!(target: "tidepool_toolchain::artifacts",
+                        phase = "native_demand_merge_conflict",
+                        ?binding,
+                        same_issuance = prior.product().same_issuance(row.product()),
+                        product_equal = prior.product() == row.product(),
+                        group_allocation_equal = std::ptr::eq(prior.product().group(), row.product().group()),
+                        pending_imports_allocation_equal = std::ptr::eq(prior.product().imports(), row.product().imports()),
+                        pending_imports_equal = prior.product().imports() == row.product().imports(),
+                        dependencies_equal = prior.dependencies == row.dependencies,
+                        selected_imports_equal = prior.imports() == row.imports(),
+                        prior_dependencies = prior.dependencies.len(),
+                        incoming_dependencies = row.dependencies.len(),
+                        prior_imports = prior.imports().len(),
+                        incoming_imports = row.imports().len(),
+                        "native demand attempted to merge different issued occurrences");
                     return Err(failure("native demand changed an issued occurrence"));
                 }
             } else {
