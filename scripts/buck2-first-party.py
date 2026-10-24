@@ -907,8 +907,8 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     return env, sorted(set(resources)), worker
 
 
-def compiler_service_test_inputs(package_name, target_name, *, mixed=False):
-    env, resources, worker = test_runtime_inputs(package_name, target_name, unit=True)
+def compiler_service_test_inputs(package_name, target_name, *, mixed=False, unit=True):
+    env, resources, worker = test_runtime_inputs(package_name, target_name, unit=unit)
     # The Rooted service owns its Nix library closure. Generic finite test
     # loader paths must not enter that service's environment.
     env.pop("LD_LIBRARY_PATH", None)
@@ -2651,6 +2651,20 @@ tidepool_buildscript_run(
             )
         )
         NATIVE_TARGETS[package_name]["integration"][target["name"]] = {"test_build": "//" + CURRENT_DIR + ":" + target["name"] + "_binary", "test": "//" + CURRENT_DIR + ":" + target["name"]}
+        if package_name == "tidepool-extract-cmd" and target["name"] == "daemon_integration":
+            service_env, service_resources, service_worker = compiler_service_test_inputs(
+                package_name, target["name"], unit=False
+            )
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "owned_compiler_lifecycle_test",',
+                '    binary = ":daemon_integration_binary",',
+                '    exact_tests = ["owned_compiler_case_preserves_isolation_and_confirms_cleanup"],',
+                "    expected_count = 1,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 900,", "    test_rule_timeout_ms = 960000,",
+                runtime_arguments(service_env, service_resources, service_worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
         if package_name == "tidepool-extract-cmd" and target["name"] == "retained_fingerprint":
             NATIVE_TARGETS[package_name]["integration"][target["name"]]["execution_disposition"] = "manual_measurement"
         if package_name == "exomonad-actor" and target["name"] == "actor":

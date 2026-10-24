@@ -340,6 +340,35 @@ tidepool_rust_isolated_test(
     visibility = ["PUBLIC"],
 )
 
+tidepool_rust_test_cases(
+    name = "owned_compiler_lifecycle_test",
+    binary = ":daemon_integration_binary",
+    exact_tests = ["owned_compiler_case_preserves_isolation_and_confirms_cleanup"],
+    expected_count = 1,
+    ignored = True,
+    jobs = 1,
+    timeout = 900,
+    test_rule_timeout_ms = 960000,
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/haskell:retained_import_test_sources",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_RETAINED_IMPORT_FIXTURE_DIR": "$(location //bridge/haskell:retained_import_test_sources)",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
 rust_filegroup(
     name = "native_demand_transport_sources",
     mapped_srcs = {

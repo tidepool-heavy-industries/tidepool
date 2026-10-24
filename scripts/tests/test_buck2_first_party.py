@@ -406,6 +406,28 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                          "tidepool/extract-cmd/tests/fixtures/service_provider.py")
         self.assertNotIn("compile_env", self.rule("tidepool/extract-cmd", "tidepool_extract_cmd", "tidepool_rust_library"))
 
+    def test_owned_compiler_lifecycle_declares_rooted_resources_only_for_its_case(self):
+        metadata = json.loads(self.metadata.read_text())
+        package = next(p for p in metadata["packages"] if p["name"] == "tidepool-extract-cmd")
+        self.write("tidepool/extract-cmd/tests/daemon_integration.rs",
+                   '#[test] #[ignore] fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {}')
+        package["targets"].extend(self.package("unused", "tidepool/extract-cmd", [
+            ("daemon_integration", "test", "tests/daemon_integration.rs"),
+        ])["targets"])
+        self.metadata.write_text(json.dumps(metadata))
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        case = self.rule("tidepool/extract-cmd", "owned_compiler_lifecycle_test", "tidepool_rust_test_cases")
+        self.assertEqual(case["exact_tests"], ["owned_compiler_case_preserves_isolation_and_confirms_cleanup"])
+        self.assertEqual(case["expected_count"], 1)
+        self.assertTrue(case["ignored"])
+        self.assertTrue(case["haskell_worker"])
+        self.assertIn("//build/package:compiler_service_deployment", case["resources"])
+        self.assertIn("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", case["resource_env"])
+        self.assertNotIn("LD_LIBRARY_PATH", case["resource_env"])
+        self.assertNotIn("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", self.rule(
+            "tidepool/extract-cmd", "daemon_integration")["resource_env"])
+
     def test_integration_executable_input_without_a_binary_owner_refuses_publication(self):
         metadata = json.loads(self.metadata.read_text())
         package = next(p for p in metadata["packages"] if p["name"] == "tidepool-extract-cmd")

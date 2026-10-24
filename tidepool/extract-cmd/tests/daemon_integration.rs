@@ -1317,6 +1317,7 @@ fn producer_identity_survives_independent_daemon_boots() {
 }
 
 #[test]
+#[ignore = "requires the declared rooted owned_compiler_lifecycle_test resources"]
 #[allow(
     clippy::disallowed_methods,
     reason = "isolated process lifecycle acceptance control"
@@ -1369,6 +1370,48 @@ fn owned_compiler_case_preserves_isolation_and_confirms_cleanup() {
     assert!(!poison.exists(), "inherited cache override was consumed");
     assert_eq!(report["schema"], 2);
     assert_eq!(report["action"]["exit_code"], 0);
+    assert_eq!(report["acquisition"]["status"], "acquired");
+    assert_eq!(report["source_settlement"]["status"], "settled");
+    let fresh_compiler = root.join("fresh-compiler");
+    let fresh = Command::new(&bin)
+        .arg("--owned-daemon-run")
+        .arg(&fresh_compiler)
+        .arg("--")
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "owned_compiler_case_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("TIDEPOOL_OWNED_COMPILER_CONTROL_ROOT", &root)
+        .env("TIDEPOOL_OWNED_COMPILER_CONTROL_FRESH", "1")
+        .env_remove(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+        .env_remove(tidepool_extract_cmd::REQUIRED_DAEMON_ENDPOINT_ENV)
+        .env_remove("TIDEPOOL_EXTRACT_NO_DAEMON")
+        .output()
+        .unwrap();
+    assert!(
+        fresh.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let fresh_report: serde_json::Value =
+        serde_json::from_slice(&fs::read(fresh_compiler.join("owned-service.json")).unwrap())
+            .unwrap();
+    assert_eq!(fresh_report["complete"], true);
+    assert_eq!(fresh_report["acquisition"]["status"], "acquired");
+    assert_eq!(fresh_report["source_settlement"]["status"], "settled");
+    assert_ne!(fresh_report["daemon_epoch"], report["daemon_epoch"]);
+    assert!(!fresh_compiler.join("cache").exists());
+    for index in [0, 2] {
+        assert_eq!(
+            fs::read(root.join(format!("request-{index}/result.prepared.cbor"))).unwrap(),
+            fs::read(root.join(format!("fresh-request-{index}/result.prepared.cbor"))).unwrap(),
+            "independently owned rooted services differ at request {index}"
+        );
+    }
     let failed_compiler = root.join("failed-compiler");
     let failed = Command::new(&bin)
         .arg("--owned-daemon-run")
@@ -1440,7 +1483,12 @@ fn owned_compiler_case_child() {
     }
     let bin = compiler_inputs::require_compiler_executables();
     let lib = stdlib_lib_dir();
-    let cache = root.join("compiler/cache");
+    let fresh = std::env::var_os("TIDEPOOL_OWNED_COMPILER_CONTROL_FRESH").is_some();
+    let cache = root.join(if fresh {
+        "fresh-compiler/cache"
+    } else {
+        "compiler/cache"
+    });
     for (name, leaf) in [
         ("TIDEPOOL_CACHE_DIR", "tidepool"),
         ("TIDEPOOL_COMPILE_CACHE_DIR", "artifacts"),
@@ -1465,9 +1513,17 @@ fn owned_compiler_case_child() {
     let first = "module OwnedControl where\nimport Tidepool.Prelude\ndata InstanceProbe = InstanceProbe\nresult :: Int\nresult = 41\n";
     let second = "module OwnedControl where\nimport Tidepool.Prelude\ndata InstanceProbe = InstanceProbe deriving Show\ndata PrivateB = PrivateB deriving Show\nresult :: Int\nresult = 42\n";
     let mut original = None;
-    for (index, text) in [first, first, second, first].into_iter().enumerate() {
+    let history = if fresh {
+        vec![(0, first), (2, second)]
+    } else {
+        vec![(0, first), (1, first), (2, second), (3, first)]
+    };
+    for (index, text) in history {
         fs::write(&source, text).unwrap();
-        let out = root.join(format!("request-{index}"));
+        let out = root.join(format!(
+            "{}request-{index}",
+            if fresh { "fresh-" } else { "" }
+        ));
         let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&bin));
         command
             .input(&source)
@@ -1483,24 +1539,6 @@ fn owned_compiler_case_child() {
             String::from_utf8_lossy(&result.output.stderr)
         );
         let program = fs::read(out.join("result.prepared.cbor")).unwrap();
-        let direct_out = root.join(format!("direct-control-{index}"));
-        let mut direct = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&bin));
-        direct
-            .input(&source)
-            .output_dir(&direct_out)
-            .target("result")
-            .include(&lib);
-        let direct_result = direct.bind_direct().unwrap().execute(&direct).unwrap();
-        assert!(
-            direct_result.success(),
-            "{}",
-            String::from_utf8_lossy(&direct_result.output.stderr)
-        );
-        assert_eq!(
-            program,
-            fs::read(direct_out.join("result.prepared.cbor")).unwrap(),
-            "resident and explicitly direct control differ at request {index}"
-        );
         if index == 0 {
             original = Some(program);
         } else if index == 2 {
