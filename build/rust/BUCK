@@ -45,12 +45,16 @@ sh_test(
 python_bootstrap_binary(
     name = "isolated_libtest",
     main = "isolated-libtest.py",
+    deps = ["//build/package:owned_service_report"],
+    copy_deps = True,
     visibility = ["PUBLIC"],
 )
 
-export_file(
+python_bootstrap_binary(
     name = "isolated_libtest_source",
-    src = "isolated-libtest.py",
+    main = "isolated-libtest.py",
+    deps = ["//build/package:owned_service_report"],
+    copy_deps = True,
     visibility = ["PUBLIC"],
 )
 

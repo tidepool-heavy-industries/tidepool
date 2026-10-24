@@ -1,9 +1,21 @@
-load("@prelude//:rules.bzl", "export_file", "filegroup", "genrule")
+load("@prelude//:rules.bzl", "export_file", "filegroup", "genrule", "python_bootstrap_binary", "python_bootstrap_library")
 load(":runtime_shared_libraries.bzl", "tidepool_runtime_shared_libraries")
 load(":native_catalog.bzl", "native_catalog", "native_catalog_sources", "native_prepared_products", "native_runtime_bundle")
 load("//bridge/haskell:components.bzl", "NATIVE_CATALOG_COHORT")
 
-export_file(name = "qualification_script", src = "qualification.py", visibility = ["PUBLIC"])
+python_bootstrap_library(
+    name = "owned_service_report",
+    srcs = ["owned_service_report.py"],
+    visibility = ["PUBLIC"],
+)
+
+python_bootstrap_binary(
+    name = "qualification_script",
+    main = "qualification.py",
+    deps = [":owned_service_report"],
+    copy_deps = True,
+    visibility = ["PUBLIC"],
+)
 export_file(name = "native_entrypoint", src = "native-entrypoint.sh", visibility = ["PUBLIC"])
 
 native_catalog_sources(
@@ -86,7 +98,7 @@ genrule(
     bash = """set -euo pipefail
 TOOLS=""" + read_root_config("nix", "exomonad_runtime_tools") + """
 OUTPUT=`"$TOOLS/bin/python3" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$PWD/$OUT"`
-"$TOOLS/bin/python3" "$(location :qualification_script)" declare-compiler-service-source \\
+$(exe :qualification_script) declare-compiler-service-source \\
   --frontend "$(exe //tidepool/extract-cmd:tidepool-extract)" \\
   --worker "$(exe //bridge/haskell:tidepool_extract_bin)" \\
   --ghc-libdir """ + read_root_config("nix", "ghc_libdir") + """ \\
