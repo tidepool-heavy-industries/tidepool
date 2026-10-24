@@ -70,6 +70,10 @@ anchors retain their original ProgramFacts. Explicit prepared-source startup own
 its separate fresh-domain semantics.
 
 Compiled turns retain immutable provenance selections and context identities.
+Compiler stages can contain several runtime items. Stage input selection owns
+incoming values; the sealed item prefix owns earlier values produced within
+that stage. Retained-slot authorization must consume the relevant owner and
+actual completed runtime value, never infer selection from pooled custody.
 Initial notebook facade imports are selected once from issued declaration
 projections before World birth or durable publication. The scope retains their
 exact interface bindings and derives imports from those selections. Recovery

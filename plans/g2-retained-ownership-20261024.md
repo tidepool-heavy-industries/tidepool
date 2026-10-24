@@ -31,6 +31,14 @@ joined cases in `typed_segment_tests.rs` and their fixtures/registration.
 - Retained authorization binds the actual item, admission, target and exact
   slot. Keep lexical lease, reachability, live value, representation, signature
   and evaluation checks. The closed path rejects every retained import.
+- A stage's incoming inputs do not describe values produced by earlier items
+  inside that stage. The receiving compiled item selects those from its sealed
+  prefix, retaining the actual producer item, checked row and binder identity.
+  Same-stage selection requires earlier item order, the same cell and stage,
+  and exact native demand. It grants neither runtime completion nor a lease.
+  Cross-stage inputs still require explicit stage selection; historical HOME
+  inputs still require their exact terminal. Pooled value availability is never
+  a substitute for any of these proofs.
 - Accumulated hydrated ownership grants no implicit query selection or lexical
   visibility. Share the same compiler allocation, select exact inputs, and
   preserve failed qualification's environment restoration. Keep mutation local
@@ -65,8 +73,10 @@ refusals while repairing their inputs:
 | Boundary | Diagnosis | Bounded repair and evidence |
 |---|---|---|
 | Consuming target selection | The general snapshot join inherits executable roots from earlier targets. A later barrier acquired an unused earlier scaffold and demanded its package interface. | Restrict only the consuming target's execution roots; retain removed exact nodes as custody. Reuse only selected baseline rows at target admission. General joins and complete-prefix validation stay strict. Exercise exact selection, historical custody, changed selected links, and the multi-stage runtime history. |
-| Repeated native-demand batches | Later sibling references can reacquire a group already issued by an earlier batch. Source tracing indicates the earlier row is omitted from the new certification inputs. | First confirm which merge comparison fails. Pass the request's actual prior acquisitions through certification, retaining their row identities and ordered links. Do not coalesce equal products or weaken merge identity checks. Cover split and reversed requests plus foreign-owner refusal. |
-| Product source membership | Product facts flatten demanded groups into pending payloads. The membership overlay then attempts to reconstruct an exact Original import from a context-free witness. | Preserve the actual selected-row owner in product facts and overlay. Exact carrier-pair and slot checks remain mandatory. No nominal lookup or custody-only permission may replace the missing owner. Review the concrete type before implementation. |
+| Repeated native-demand batches | Later sibling references reacquired a group already issued by an earlier batch; certification had no access to the earlier row. | The request supplies its actual prior acquisitions. Both split-order controls and the real sibling history pass at `794d3efd01`; foreign-operation and changed-dependency refusals remain. No content coalescing or weaker merge equality. |
+| Product source membership | Product facts flattened demanded groups into pending payloads. The membership overlay then attempted to reconstruct an exact Original import from a context-free witness. | ProductInputGroups carries the actual Exact or World selected-row owner. Real class-default and transitive histories pass at `85507b78e6`. The direct positive must acquire a real child edge through the request's inventory; nominal metadata alone deliberately grants no execution. |
+| Same-stage item values | Item 3 of stage 1 demands `Val.G2.historyRead0`, produced by an earlier item in that same stage. Its stage incoming-input list is correctly empty. | `CellStageRetainedInput` distinguishes stage-selected inputs from sealed earlier-item evidence. Retain producer item and checked row during existing prefix sealing, then consume them only with exact native demand and actual Produced runtime evidence. The diagnostic at `eeb3835adc` establishes the counterexample; joined repair execution is pending. |
+| Diagnostic evidence | The metadata history emitted both frontend counters but the displayed prefix omitted the second. Several nearby tests also inferred absence from that prefix. | Selected counters are read completely under explicit observation bounds before independently truncating display. Reader and metadata history pass at `9cd06f6c0a`; four adjacent counter consumers are migrated and awaiting execution. Remaining raw phase-marker/frontend-text checks are recorded in the evidence audit. |
 
 These are integration findings, not proof that earlier commits introduced
 regressions. Source traces and retained failing histories establish the current
@@ -74,8 +84,7 @@ mechanisms; unchanged component counts do not qualify these repairs.
 
 The warm validator records each exact candidate under
 `/srv/swarm/evidence/inanna/g2-argon-implementation-20261024/`.
-Its `integrated-025a-checkpoint.json` records 13 distinct executed cases:
-eight passes and five failures. One separate compiler-service startup refusal
-executed zero tests; its clean settlement and subsequent successful test retry
-are retained independently. The current follow-up batch checks repaired test
-construction and the bounded target-selection repair before further integration.
+Current qualification work is the joined same-stage repair, the issued-graph
+overlay positive, and the four adjacent complete-counter controls. Component
+success does not erase earlier failures or establish G2. Preserve startup
+refusals that execute zero tests separately from actual test outcomes.
