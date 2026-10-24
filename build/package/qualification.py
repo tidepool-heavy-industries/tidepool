@@ -1065,7 +1065,7 @@ def declare_compiler_service_source(args) -> Path:
     provider = output / "qualification.py"
     shutil.copyfile(Path(__file__).resolve(), provider)
     record = {
-        "schema": 1, "kind": "compiler-service-package-source", "build_profile": args.profile,
+        "schema": 2, "kind": "compiler-service-package-source", "build_profile": args.profile,
         "frontend_path": str(frontend), "frontend_sha256": sha256(frontend),
         "worker_path": str(worker), "worker_sha256": sha256(worker),
         "producer_identity": authority["producer_identity"],
@@ -1078,7 +1078,8 @@ def declare_compiler_service_source(args) -> Path:
         "profile_store_path": profile_store,
         "profile_id": hashlib.sha256(PACKAGE_PROFILE_DOMAIN + body).hexdigest(),
         "capture_bytes": len(body), "profile_bytes": len(wrapper), "profile_bound_bytes": PACKAGE_PROFILE_LIMIT,
-        "nix_closure": closure, "nar_serialized_bytes": _package_nar_bytes(tools, closure["closure"]),
+        "nix_closure": closure, "acquisition_roots": sorted({*roots, provider_guard, profile_store}),
+        "nar_serialized_bytes": _package_nar_bytes(tools, closure["closure"]),
     }
     frozen_descriptor = getattr(args, "frozen_descriptor", None)
     record["declaration"] = ({"kind": "frozen-native-bundle", "descriptor": str(frozen_descriptor),
@@ -1132,7 +1133,7 @@ def _verify_package_source_record(args) -> tuple[dict, Path]:
     if sha256(record_path) != _package_digest(args.record_sha256):
         raise ValueError("compiler package source record changed")
     record = json.loads(record_path.read_text())
-    if (record.get("schema") != 1 or record.get("kind") != "compiler-service-package-source"
+    if (record.get("schema") != 2 or record.get("kind") != "compiler-service-package-source"
             or record.get("source_id") != _package_digest(args.source_id)
             or record.get("profile_id") != _package_digest(args.profile_id)
             or _package_source_id(record) != args.source_id):
@@ -1175,37 +1176,159 @@ def _package_root_present(item: dict) -> bool:
     return True
 
 
-def _settle_preboot_package_roots(state: dict, plan: Path) -> None:
-    """Only this fresh, unpublished acquisition owns these exact root names."""
+def _settle_preboot_package_roots(state: dict, plan: Path) -> tuple[str, list[str], list[str]]:
+    """Settle only the exact immutable attempt scope before a receipt is issued."""
+    cleanup, publication = [], []
     try:
-        # Observe all before removal; one ambiguous root keeps the owner intact.
+        directory = plan.parent / "gc-roots"
+        try:
+            _private_package_directory(directory)
+        except FileNotFoundError:
+            # Every planned root is observed independently below; this is only
+            # the optional directory-sync obligation before first registration.
+            directory = None
         present = [item for item in state["roots"] if _package_root_present(item)]
         for item in present:
             Path(item["path"]).unlink()
-        if (plan.parent / "gc-roots").exists():
-            _sync_directory(plan.parent / "gc-roots")
+        if directory is not None:
+            _sync_directory(directory)
         for item in state["roots"]:
             item["state"] = "preboot-released"
         state["status"] = "preboot-released"
-    except BaseException as cleanup_error:
-        state.update(status="retained-unknown", cleanup_failure=type(cleanup_error).__name__ + ": " + str(cleanup_error))
-    write_private_json(plan, state)
+    except BaseException as error:
+        cleanup.append(_package_failure(error))
+        state.update(status="retained-unknown", cleanup_failure=cleanup[-1])
+    try:
+        write_private_json(plan, state)
+    except BaseException as error:
+        publication.append(_package_failure(error))
+    return state["status"].replace("-", "_"), cleanup, publication
+
+
+def _package_failure(error: BaseException) -> str:
+    """Bounded diagnostics retain the exact command and status of subprocess failures."""
+    message = type(error).__name__ + ": " + str(error)
+    if isinstance(error, subprocess.CalledProcessError):
+        # Keep stderr independently budgeted even for closure-sized argv lists.
+        message = type(error).__name__ + "; status=" + str(error.returncode)
+        message += "; argv=" + repr(error.cmd)[:8192]
+        stderr = error.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        message += "; stderr=" + stderr[:4096]
+    return message[:16384]
+
+
+def _retain_package_failure(args, error: BaseException) -> tuple[str, list[str]]:
+    primary = _package_failure(error)
+    path = args.owner_directory / "package-provider.failure.json"
+    evidence = {"schema": 1, "kind": "compiler-service-provider-failure",
+                "exception": type(error).__name__, "message": str(error)[:16384],
+                "stderr_log": str(args.owner_directory / "package-provider.stderr")}
+    if isinstance(error, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+        command = error.cmd
+        evidence["argv"] = [str(item) for item in command] if isinstance(command, (list, tuple)) else command
+        if isinstance(error, subprocess.CalledProcessError):
+            evidence["returncode"] = error.returncode
+        else:
+            evidence["timeout_seconds"] = error.timeout
+        stderr = error.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        evidence["stderr"] = stderr[:4096]
+    try:
+        write_private_json(path, evidence)
+        return primary + "; diagnostics=" + str(path) + "; sha256=" + sha256(path), []
+    except BaseException as publication_error:
+        return primary, [_package_failure(publication_error)]
+
+
+def _package_reference(path: Path) -> dict:
+    return {"path": str(path), "sha256": list(bytes.fromhex(sha256(path)))}
+
+
+def _package_attempt(args) -> tuple[dict, dict]:
+    owner = _private_package_directory(args.owner_directory)
+    path = args.attempt.absolute()
+    if path != owner / "compiler-service-source.attempt.json" or sha256(path) != _package_digest(args.attempt_sha256):
+        raise ValueError("compiler package acquisition attempt identity differs")
+    attempt = _private_package_record(path)
+    expected = {"schema": 1, "kind": "compiler-service-package-acquisition-attempt",
+                "owner_directory": str(owner), "service_epoch": _package_digest(args.service_epoch),
+                "source_id": _package_digest(args.source_id), "profile_id": _package_digest(args.profile_id),
+                "source_record_sha256": _package_digest(args.record_sha256),
+                "source_record": str(args.record)}
+    if any(attempt.get(key) != value for key, value in expected.items()):
+        raise ValueError("compiler package acquisition attempt association differs")
+    _package_digest(attempt["attempt_id"])
+    _package_digest(attempt["launch_configuration_sha256"])
+    roots = attempt.get("roots")
+    if not isinstance(roots, list) or not roots:
+        raise ValueError("compiler package attempt lacks its exact root scope")
+    for item in roots:
+        value = item["store_path"]
+        expected_path = owner / "package-source/gc-roots" / hashlib.sha256(value.encode()).hexdigest()
+        if item != {"path": str(expected_path), "store_path": value}:
+            raise ValueError("compiler package attempt has another root scope")
+    if len({item["store_path"] for item in roots}) != len(roots):
+        raise ValueError("compiler package attempt repeats a root")
+    return attempt, _package_reference(path)
 
 
 def acquire_compiler_service_source(args) -> bytes:
+    """One bounded provider frame; mutable progress never supplies authority."""
+    try:
+        attempt, reference = _package_attempt(args)
+    except BaseException as error:
+        payload = _canonical_json({"status": "unknown", "attempt": None, "failure": _package_failure(error)})
+        return b"TPSAO001" + struct.pack("<I", len(payload)) + payload
+    root = args.owner_directory / "package-source"
+    no_roots = False
+    phase = {"mutation_started": False}
+    try:
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            no_roots = True
+        else:
+            raise ValueError("compiler package acquisition owner is already populated")
+        receipt, publication = _acquire_compiler_service_source(args, attempt, phase)
+        observation = {"status": "acquired", "attempt": reference,
+                       "receipt": _package_reference(receipt),
+                       "profile": {"path": attempt["profile_store_path"],
+                                   "sha256": list(bytes.fromhex(attempt["profile_sha256"]))}, "publication": publication}
+    except BaseException as error:
+        settlement = getattr(error, "package_settlement", "no_roots_issued" if no_roots and not phase["mutation_started"] else "retained_unknown")
+        primary, diagnostic_publication = _retain_package_failure(args, error)
+        observation = {"status": "refused", "attempt": reference, "primary": primary,
+                       "settlement": settlement,
+                       "cleanup": getattr(error, "package_cleanup", []),
+                       "publication": [*getattr(error, "package_publication", []), *diagnostic_publication]}
+    payload = _canonical_json(observation)
+    if len(payload) > 65536:
+        raise ValueError("compiler package acquisition outcome exceeds 64 KiB")
+    return b"TPSAO001" + struct.pack("<I", len(payload)) + payload
+
+
+def _acquire_compiler_service_source(args, attempt: dict, phase: dict) -> tuple[Path, list[str]]:
     record, tools = _verify_package_source_record(args)
     epoch = _package_digest(args.service_epoch)
     owner = _private_package_directory(args.owner_directory)
     root = owner / "package-source"
+    profile_store = record["profile_store_path"]
+    roots = record["acquisition_roots"]
+    if (attempt["roots"] != [{"path": str(root / "gc-roots" / hashlib.sha256(value.encode()).hexdigest()),
+                              "store_path": value} for value in roots]
+            or attempt["profile_store_path"] != profile_store
+            or attempt["profile_sha256"] != record["profile_sha256"]):
+        raise ValueError("compiler package source differs from its immutable attempt scope")
+    phase["mutation_started"] = True
     root.mkdir(mode=0o700, exist_ok=False)
     _sync_directory(owner)
-    profile_store = record["profile_store_path"]
-    roots = sorted({*record["nix_closure"]["roots"], record["provider_guard_store_path"], profile_store})
-    planned = [{"path": str(root / "gc-roots" / hashlib.sha256(value.encode()).hexdigest()),
-                "store_path": value, "state": "planned"} for value in roots]
-    state = {"schema": 1, "kind": "compiler-service-package-acquisition", "status": "acquiring",
+    planned = [{**item, "state": "planned"} for item in attempt["roots"]]
+    state = {"schema": 2, "kind": "compiler-service-package-acquisition", "status": "acquiring",
              "service_epoch": epoch, "source_id": args.source_id, "profile_id": args.profile_id,
-             "source_record_sha256": args.record_sha256, "runtime_tools": str(tools),
+             "source_record_sha256": args.record_sha256, "attempt_sha256": args.attempt_sha256, "runtime_tools": str(tools),
              "provider_guard_store_path": record["provider_guard_store_path"],
              "roots": planned, "acquire_count": 1, "release_count": 0,
              "capture_bytes": record["capture_bytes"], "profile_declaration_write_bytes": record["profile_bytes"],
@@ -1216,6 +1339,7 @@ def acquire_compiler_service_source(args) -> bytes:
     # The durable plan precedes --add AND the first root registration. No failure
     # can turn a partially registered root set into an unowned ordinary miss.
     write_private_json(plan, state)
+    receipt_started = False
     try:
         state["nix_profile_import_attempts"] = 1
         write_private_json(plan, state)
@@ -1246,16 +1370,81 @@ def acquire_compiler_service_source(args) -> bytes:
                      immutable_profile_path=profile_store, immutable_profile_sha256=record["profile_sha256"])
         write_private_json(plan, state)
         receipt = root / "receipt.json"
-        write_private_json(receipt, state)
-        return (b"TPSRC001" + bytes.fromhex(epoch) + bytes.fromhex(args.source_id) + bytes.fromhex(args.profile_id)
-                + _package_frame(str(receipt)) + bytes.fromhex(sha256(receipt))
-                + _package_frame(profile_store) + bytes.fromhex(record["profile_sha256"]))
+        receipt_started = True
+        try:
+            write_private_json(receipt, state)
+        except BaseException as publication_error:
+            # Rename may have succeeded before directory fsync failed. A valid
+            # acquired receipt can never be reclassified as a preboot attempt.
+            try:
+                visible = _private_package_record(receipt)
+            except BaseException:
+                raise publication_error
+            if visible != state:
+                raise publication_error
+            return receipt, [_package_failure(publication_error)]
+        return receipt, []
     except BaseException as error:
-        state.update(status="retained-unknown", failure=type(error).__name__ + ": " + str(error))
-        # Keep planned and observed state distinct, including the root whose
-        # command failed. Inaccessible state is never evidence of no roots.
-        _settle_preboot_package_roots(state, plan)
+        state.update(status="retained-unknown", failure=_package_failure(error))
+        if receipt_started:
+            # A failed observation after receipt publication cannot establish
+            # that no worker could ever use that receipt. Retain exact roots.
+            settlement, cleanup, publication = "retained_unknown", [], [_package_failure(error)]
+            try:
+                write_private_json(plan, state)
+            except BaseException as publication_error:
+                publication.append(_package_failure(publication_error))
+        else:
+            settlement, cleanup, publication = _settle_preboot_package_roots(state, plan)
+        error.package_settlement = settlement
+        error.package_cleanup = cleanup
+        error.package_publication = publication
         raise
+
+
+def settle_compiler_service_attempt(args) -> Path:
+    """Resume only the frozen partial scope after matching native retirement."""
+    attempt, reference = _package_attempt(args)
+    owner = args.owner_directory
+    outcome_path = owner / "package-provider.stdout"
+    if args.provider_outcome != outcome_path or sha256(outcome_path) != _package_digest(args.provider_outcome_sha256):
+        raise ValueError("partial settlement provider outcome differs")
+    with outcome_path.open("rb") as source:
+        frame = source.read(65549)
+    if len(frame) > 65548 or len(frame) < 12 or frame[:8] != b"TPSAO001" or struct.unpack("<I", frame[8:12])[0] != len(frame) - 12:
+        raise ValueError("partial settlement requires a complete provider frame")
+    outcome = json.loads(frame[12:])
+    if (outcome.get("status") != "refused" or outcome.get("attempt") != reference
+            or outcome.get("settlement") != "retained_unknown"):
+        raise ValueError("partial settlement requires its exact retained provider refusal")
+    complete_path = owner / "compiler-service-complete-retirement.json"
+    if args.complete_retirement != complete_path:
+        raise ValueError("partial settlement requires native retirement at its exact owner")
+    complete = _private_package_record(complete_path)
+    expected = {"schema": 2, "kind": "compiler-service-attempt-retirement", "complete": True,
+                "attempt_sha256": args.attempt_sha256, "provider_outcome_sha256": args.provider_outcome_sha256,
+                **{key: attempt[key] for key in ("owner_directory", "service_epoch", "source_id", "profile_id")}}
+    if complete != expected:
+        raise ValueError("partial settlement lacks the matching native retirement")
+    receipt = owner / "package-source/receipt.json"
+    try:
+        receipt.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        # Receipt publication may have succeeded before its observer failed.
+        # That case retains acquired custody and cannot use preboot settlement.
+        raise ValueError("partial settlement refuses an issued or ambiguous acquired receipt")
+    state = {"schema": 2, "kind": "compiler-service-attempt-settlement",
+             "attempt_sha256": args.attempt_sha256, "complete_retirement_sha256": sha256(complete_path),
+             "status": "retained-unknown", "roots": [{**item, "state": "planned"} for item in attempt["roots"]]}
+    root = owner / "package-source"
+    _private_package_directory(root)
+    settlement = root / "attempt-settlement.json"
+    status, cleanup, publication = _settle_preboot_package_roots(state, settlement)
+    if status != "preboot_released" or cleanup or publication:
+        raise ValueError("partial settlement incomplete: " + repr({"cleanup": cleanup, "publication": publication}))
+    return settlement
 
 
 def release_compiler_service_source(args) -> Path:
@@ -1272,7 +1461,8 @@ def release_compiler_service_source(args) -> Path:
     expected = {"schema": 1, "kind": "compiler-service-complete-retirement", "complete": True,
                 "receipt_sha256": args.receipt_sha256,
                 **{key: state[key] for key in ("service_epoch", "source_id", "profile_id")}}
-    if complete != expected or state.get("status") != "acquired" or state.get("release_count") != 0:
+    if (complete != expected or state.get("schema") != 2 or state.get("kind") != "compiler-service-package-acquisition"
+            or state.get("status") != "acquired" or state.get("release_count") != 0):
         raise ValueError("compiler package release lacks the exact complete parent retirement")
     if receipt.name != "receipt.json" or receipt.parent.name != "package-source":
         raise ValueError("compiler package release receipt is outside its issued owner")
@@ -1324,7 +1514,10 @@ def release_compiler_service_source(args) -> Path:
         write_private_json(settlement, result)
     except BaseException as error:
         result.update(status="retained-unknown", failure=type(error).__name__ + ": " + str(error))
-        write_private_json(settlement, result)
+        try:
+            write_private_json(settlement, result)
+        except BaseException as publication_error:
+            error.add_note("release progress publication failed: " + _package_failure(publication_error))
         raise
     return settlement
 
@@ -1646,26 +1839,35 @@ def catalog_compiler_environment(args, tools: Path) -> dict:
     }
 
 
+def _owned_service_report_codec():
+    # The source runner and frozen runner package this exact companion module.
+    # Provider acquisition does not load report code from its memfd directory.
+    path = Path(__file__).with_name("owned_service_report.py")
+    spec = importlib.util.spec_from_file_location("tidepool_owned_service_report", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_owned_service_report(report: dict, owner: Path) -> dict:
+    return _owned_service_report_codec().validate_owned_service_report(report, owner)
+
+
+def read_owned_service_report(owner: Path) -> dict:
+    return _owned_service_report_codec().read_owned_service_report(owner)
+
+
 def catalog_compiler_settlement(compiler_root: Path, return_code: int | None) -> dict:
-    """Only the process owner's completed retirement can confirm settlement."""
-    records = {}
-    for filename, key in (("owned-compiler-outcome.json", "outcome"), ("lifecycle.json", "lifecycle")):
-        try:
-            records[key] = json.loads((compiler_root / filename).read_text())
-        except (OSError, ValueError) as error:
-            records[key + "_error"] = str(error)
-    outcome, lifecycle = records.get("outcome", {}), records.get("lifecycle", {})
-    producer_exit_code = lifecycle.get("exit_code") if isinstance(lifecycle, dict) and lifecycle.get("schema") == 1 else None
-    if type(producer_exit_code) is not int or not 0 <= producer_exit_code <= 255:
-        producer_exit_code = None
-    confirmed = (isinstance(outcome, dict) and outcome.get("schema") == 1
-                 and outcome.get("cleanup") == {"status": "confirmed"}
-                 and isinstance(lifecycle, dict) and lifecycle.get("schema") == 1
-                 and lifecycle.get("cleanup_confirmed") is True)
-    return {"status": "confirmed" if confirmed else "unconfirmed",
-            "producer_exit_code": producer_exit_code,
-            "invocation_result_consistent": (producer_exit_code == return_code
-                if producer_exit_code is not None and return_code is not None else None), **records}
+    """Only the process owner's schema-2 observation can confirm settlement."""
+    try:
+        report = read_owned_service_report(compiler_root)
+    except (OSError, ValueError, KeyError) as error:
+        return {"status": "unconfirmed", "producer_exit_code": None,
+                "invocation_result_consistent": None, "owned_service_error": str(error)}
+    code = report["action"]["exit_code"]
+    return {"status": "confirmed" if report["complete"] else "unconfirmed",
+            "producer_exit_code": code, "invocation_result_consistent": (code == return_code
+                if code is not None and return_code is not None else None), "owned_service": report}
 
 
 def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) -> Path:
@@ -3242,12 +3444,19 @@ def main(argv=None) -> int:
     package_acquire = commands.add_parser("acquire-compiler-service-source")
     package_acquire.add_argument("--record", required=True, type=Path)
     package_acquire.add_argument("--owner-directory", required=True, type=Path)
+    package_acquire.add_argument("--attempt", required=True, type=Path)
+    package_acquire.add_argument("--attempt-sha256", required=True)
     for key in ("record-sha256", "source-id", "profile-id", "service-epoch"):
         package_acquire.add_argument("--" + key, required=True)
     package_release = commands.add_parser("release-compiler-service-source")
     for key in ("receipt", "complete-retirement"):
         package_release.add_argument("--" + key, required=True, type=Path)
     package_release.add_argument("--receipt-sha256", required=True)
+    partial_settle = commands.add_parser("settle-compiler-service-attempt")
+    for key in ("record", "owner-directory", "attempt", "provider-outcome", "complete-retirement"):
+        partial_settle.add_argument("--" + key, required=True, type=Path)
+    for key in ("record-sha256", "source-id", "profile-id", "service-epoch", "attempt-sha256", "provider-outcome-sha256"):
+        partial_settle.add_argument("--" + key, required=True)
     snapshot = commands.add_parser("snapshot-sources")
     for key in ("sources", "effects", "jev-sources", "cohort", "root-entry-source", "workbench-entry-source", "async-workbench-entry-source", "output"):
         snapshot.add_argument("--" + key, required=True, type=Path)
@@ -3323,6 +3532,8 @@ def main(argv=None) -> int:
             print(declare_compiler_service_source(args))
         elif args.command == "acquire-compiler-service-source":
             sys.stdout.buffer.write(acquire_compiler_service_source(args))
+        elif args.command == "settle-compiler-service-attempt":
+            print(settle_compiler_service_attempt(args))
         elif args.command == "release-compiler-service-source":
             print(release_compiler_service_source(args))
         elif args.command == "snapshot-sources":
