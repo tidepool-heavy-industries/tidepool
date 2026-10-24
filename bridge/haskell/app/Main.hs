@@ -21,7 +21,6 @@ import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8, IOMode(ReadMode), withBinaryFile)
 
 import GHC.Driver.Session (DynFlags)
-import GHC.Core (Bind(..))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
@@ -36,20 +35,11 @@ import Tidepool.Binders
   )
 import Tidepool.CompilerRequest
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprPackageImports, CheckedEnvironmentResult(..)
-  , preparedFreshDependencies, preparedExactCompilation
-  , CompilePurpose(..), prBinds, prHscEnv
-  , prCapturedType, prWarnings, prWarningDiagnostics, prTargetTcGblEnv, CompilerScope
-  , withResidentCompilerScopes, captureSupportedPackageProfile
-  , scopedEnsureWorld, WorldCellRefusal(..)
-  , satisfiesCapturedConstraint, activationPreviewInputType )
-import Tidepool.CompilerProducts
-  ( CertifiedOriginalProducts, PreparedProductContext
-  , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals )
+  ( CompilePurpose(..), CompilerScope, withResidentCompilerScopes, captureSupportedPackageProfile
+  , scopedEnsureWorld, WorldCellRefusal(..) )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.CompileInput (writeCompileInputProof)
-import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, generatedActivationPreviewRecipe )
+import Tidepool.ExactHydration (generatedActivationPreviewRecipe)
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
   , HostBindingInterfaceInput(..), encodeHostBindingInterface, encodeBindingInterfacePurpose
@@ -81,15 +71,13 @@ import Tidepool.InspectionRunner
   ( runInspectionRequests )
 import Tidepool.ExactScope
   ( ExactScope, scopeRequestSha256, scopeSemanticSha256
-  , ActivationPreviewAdmission(..), scopeActivationPreview, revalidateExactScope )
-import Tidepool.CheckedCell (encodeCheckedSignature, captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
-  , validateOriginalInputTypeWitness)
+  , ActivationPreviewAdmission(..), scopeActivationPreview )
+import Tidepool.CheckedCell (encodeCheckedSignature)
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionHiPath, sessionModuleString)
 import Tidepool.SessionArtifacts
-  ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule
-  , emitHostBindingInterface
+  ( parseValModule, emitHostBindingInterface
   )
 import Tidepool.CborEncode (encodeTurnOut, encodeCellOut, encodeBoundBinder)
 import Tidepool.Timing (readTimingEnabled, timePhase)
@@ -98,8 +86,6 @@ import Tidepool.TurnSource
   , captureCompilerDefaultRecipe, literalImportRendering
   , importRenderingSource, replaceTemplateMarker
   , qualifyCompilerDefaultRendering, spliceImportRendering )
-import Tidepool.DependencyEvidence
-  ( validateDependencyEvidence, writeDependencyEvidence)
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 
 -- | Serve one typed request, or answer the role probe before compiler setup.
@@ -189,7 +175,7 @@ dispatch timing bound = case boundAdmittedOperation bound of
       Left _ -> pure []
       Right completed -> do
         mapM_ (commitPreparedWorldDependencies bound) completed
-        pure (concatMap (prWarningDiagnostics . pprPipelineResult . preparedCompilationResult) completed)
+        pure (concatMap preparedCompilationWarnings completed)
   AdmittedWorldCellPlan question -> do
     bytes <- runBoundWorldCellPlan bound
     BS.writeFile (worldCellPlanOutput question) bytes
@@ -241,36 +227,21 @@ runActivationPreviewMode bound request = do
             (previewOriginalTarget admission) protected named modulePath moduleName' >>= either fail pure
           pure (named, modulePath, GeneratedScaffoldCompile recipe basePurpose)
     (_, probePath, probePurpose) <- render opaque
-    probe <- compileBoundRequest bound CheckedEnvironment Set.empty probePurpose (Just (scopeFromWorkerRequest args))
+    probe <- compileCheckedRequest bound CheckedCompilationEnvironment Set.empty probePurpose (Just (scopeFromWorkerRequest args))
       probePath
-    input <- either fail pure (activationPreviewInputType (crTargetTcGblEnv probe))
-    rendered <- satisfiesCapturedConstraint (crHscEnv probe) (crTargetTcGblEnv probe)
-      "__tidepoolActivationConstraint" input
+    rendered <- satisfiesCheckedActivationConstraint probe
     (source, modulePath, purpose) <- render (if rendered
       then "TidepoolInspection.workbenchActivationDisplay " ++ show (previewBudget admission) ++ " __activationInput"
       else opaque)
-    completion <- compilePreparedRequest bound (PreparedProducts (optionModuleCandidates args)) Set.empty purpose
+    completion <- compilePreparedRequest bound (PreparedCompilationProducts (optionModuleCandidates args)) Set.empty purpose
       (Just (scopeFromWorkerRequest args)) modulePath
-    let prepared = preparedCompilationResult completion
-        compiled = pprPipelineResult prepared
-        environment = prHscEnv compiled
-        binds = prBinds compiled
-    verifiedInput <- either fail pure (activationPreviewInputType (prTargetTcGblEnv compiled))
-    originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
-    witness <- captureCheckedTypeWitness environment verifiedInput
-      >>= maybe (fail "activation preview input type has no complete canonical witness") pure
-    sealed <- sealCheckedTypeWitness originalInterfaces witness
-      >>= maybe (fail "activation preview input lacks an original interface seal") pure
-    either fail pure (validateOriginalInputTypeWitness (previewInputSignature admission)
-      (previewInputWitness admission) sealed)
-    encodedWitness <- maybe (fail "activation preview witness is unsealed") pure (encodeCheckedTypeWitness sealed)
-    let witnessBytes = toStrictByteString encodedWitness
+    originalInterfaces <- newPreparedCompilationInterfaceArtifacts completion outDir
+    witnessBytes <- sealPreparedActivationPreviewWitness originalInterfaces
     projection <- try (prepareArtifactsWithProjection requirePreviewProjection
-      originalInterfaces outDir completion [preparedScaffoldTargetName]
-      (standardAuxiliaryRoots binds) Map.empty [])
-      :: IO (Either PreviewOriginalDependenciesUnavailable ([PreparedArtifact], Maybe PreparedProductContext))
-    validateDependencyEvidence (preparedFreshDependencies prepared)
-    revalidateExactScope environment exact >>= either fail pure
+      originalInterfaces [preparedScaffoldTargetName]
+      (preparedCompilationAuxiliaryRoots completion) Map.empty [])
+      :: IO (Either PreviewOriginalDependenciesUnavailable ([PreparedArtifact], Maybe PreparedCompilationProductContext))
+    validatePreparedCompilationInputs completion
     templateBytes <- readTemplate
     unless (templateBytes == originalBytes) (fail "activation preview template changed during compilation")
     let text = encodeString . T.pack
@@ -282,10 +253,9 @@ runActivationPreviewMode bound request = do
           <> encodeBytes (previewInputWitness admission))
       Right (artifacts, productContext) -> do
         unless (all (null . paYieldSites) artifacts) (fail "pure activation preview emitted suspension sites")
-        void $ writePreparedSidecars InlineYieldSites outDir binds
-          (T.pack <$> prCapturedType compiled) (map T.pack (prWarnings compiled)) artifacts
+        void $ writePreparedCompilationSidecars InlineYieldSites originalInterfaces artifacts
         void $ writePreparedArtifacts outDir artifacts
-        void $ writeRequestProducts bound originalInterfaces outDir prepared productContext artifacts
+        void $ writePreparedRequestProducts originalInterfaces productContext artifacts
         let outFile = turnOutput request
         BS.writeFile outFile (encodeTurnOut (TExpr 0 (concatMap paYieldSites artifacts) (T.pack source)))
         BS.writeFile (outDir </> "activation-preview.cbor") $ toStrictByteString
@@ -303,9 +273,9 @@ runSourceCheckMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runSourceCheckMode bound path = do
   let args = boundWorkerRequest bound
   checked <- trySynchronous $ do
-    compiled <- compileBoundRequest bound (maybe CheckedEnvironment CheckedEnvironmentProducts (optionModuleCandidates args))
+    compiled <- compileCheckedRequest bound (maybe CheckedCompilationEnvironment CheckedCompilationEnvironmentProducts (optionModuleCandidates args))
       Set.empty GeneralCompile Nothing path
-    pure (crWarnings compiled)
+    pure (checkedCompilationWarnings compiled)
   either throwIO pure checked
 
 runDeclarationOperation :: BoundCompilerRequest -> FilePath -> FilePath -> IO [Diag]
@@ -349,9 +319,9 @@ runInspectionMode bound request = do
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
         compile purpose path = do
           inspectionCompilationWork work
-          compileBoundRequest bound CheckedEnvironment Set.empty purpose scope path
+          compileCheckedRequest bound CheckedCompilationEnvironment Set.empty purpose scope path
 
-        inspect = inspectBoundCheckedEnvironment bound work
+        inspect = inspectCheckedCompilation work
     bytes <- encodeInspectionResults <$> runInspectionRequests request compile inspect
     BS.writeFile out bytes
   either throwIO (const (pure [])) res
@@ -386,18 +356,8 @@ processFile bound timing request = do
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
     let purpose = if sourceOutputKind outputRequest == CertifyHomeOriginals
           then CertifyHomeProductsCompile else GeneralCompile
-    completion <- compilePreparedRequest bound (PreparedProducts (optionModuleCandidates args)) (Map.keysSet (optionRetainedGenerations args)) purpose scope path
-    let prepared = preparedCompilationResult completion
-        result = pprPipelineResult prepared
-    let binds = prBinds result
-        -- Inferred type of the eval's top expression (the @__user@ binding),
-        -- threaded into meta.cbor for the Rust side. Nothing for non-eval
-        -- extractions (no @__user@). See GhcPipeline.capturedUserType.
-        mCapturedTy = fmap T.pack (prCapturedType result)
-        -- Success-path GHC warnings for the target module (empty on a clean
-        -- compile). See GhcPipeline.prWarnings.
-        warnTexts = map T.pack (prWarnings result)
-    hPutStrLn stderr $ "  Top-level bindings: " ++ show (length binds)
+    completion <- compilePreparedRequest bound (PreparedCompilationProducts (optionModuleCandidates args)) (Map.keysSet (optionRetainedGenerations args)) purpose scope path
+    hPutStrLn stderr $ "  Top-level bindings: " ++ show (preparedCompilationBindingCount completion)
 
     let outDir = case mOutDir of
           Just dir -> dir
@@ -405,52 +365,24 @@ processFile bound timing request = do
     createDirectoryIfMissing True outDir
 
     let preparedTargets = NE.toList (sourceOutputTargets outputRequest)
-    originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
+    originalInterfaces <- newPreparedCompilationInterfaceArtifacts completion outDir
     output <- prepareArtifactsWithIntent
-      originalInterfaces outDir completion preparedTargets
-      (standardAuxiliaryRoots binds) (optionRetainedGenerations args) []
+      originalInterfaces preparedTargets
+      (preparedCompilationAuxiliaryRoots completion) (optionRetainedGenerations args) []
     let preparedArtifacts = case output of
           NativeOutputs artifacts _ -> artifacts
           PortableOutputs artifacts -> artifacts
     void $ if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
-      else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
+      else timePhase timing "prepared_sidecars" $ writePreparedCompilationSidecars SeparateYieldSites originalInterfaces preparedArtifacts
 
     void $ timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     case output of
       NativeOutputs _ productContext -> void $ timePhase timing "module_products" $
-        writeRequestProducts bound originalInterfaces outDir prepared (Just productContext) preparedArtifacts
-      PortableOutputs _ -> do
-        _ <- writeDependencyEvidence outDir (preparedFreshDependencies prepared)
-        writeRequestInputProof bound outDir prepared
-        BS.writeFile (outDir </> "portable-output.mode") "TPPORTABLEOUTPUT1\n"
+        writePreparedRequestProducts originalInterfaces (Just productContext) preparedArtifacts
+      PortableOutputs _ -> writePreparedPortableOutputs originalInterfaces
 
   either throwIO (const (pure [])) res
-
--- Every completed worker product carries its original input evidence. Exact
--- and session requests use their separate retained authority instead.
-writeRequestProducts
-  :: BoundCompilerRequest -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
-  -> [PreparedArtifact] -> IO CertifiedOriginalProducts
-writeRequestProducts bound originalInterfaces outDir prepared productContext preparedArtifacts = do
-  let args = boundWorkerRequest bound
-  products <- writeCertifiedProductsKeepingWithOriginals (optionIncludes args) originalInterfaces outDir prepared productContext
-    [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
-  writeRequestInputProof bound outDir prepared
-  pure products
-
-writeRequestInputProof :: BoundCompilerRequest -> FilePath -> PreparedPipelineResult -> IO ()
-writeRequestInputProof bound outDir prepared =
-  let args = boundWorkerRequest bound
-      sourceProofAllowed = case boundAdmittedOperation bound of
-        AdmittedActivationPreview _ -> False
-        _ -> True
-  in when (sourceProofAllowed
-      && null (optionInjectVals args) && not (isJust (optionSessionArtifacts args))
-      && Map.null (optionRetainedGenerations args)
-      && isNothing (preparedExactCompilation prepared)) $
-    writeCompileInputProof outDir (prHscEnv (pprPipelineResult prepared))
-      (preparedFreshDependencies prepared) (pprPackageImports prepared)
 
 -- | Turn mode (@--turn@): classify the raw
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the
@@ -597,7 +529,7 @@ compileClassifiedTurn parserFlags bound timing outDir turnSrc sb bindersStr last
         -- A prepared turn uses one compiler pass for the checked metadata
         -- and the prepared modules.
         compileTurn modulePath =
-          compilePreparedRequest bound (PreparedProducts (optionModuleCandidates args))
+          compilePreparedRequest bound (PreparedCompilationProducts (optionModuleCandidates args))
             (Map.keysSet (optionRetainedGenerations args)) GeneralCompile
             (Just scope) modulePath
         compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
@@ -611,35 +543,30 @@ compileClassifiedTurn parserFlags bound timing outDir turnSrc sb bindersStr last
               (Just _, _ : _) -> compileVariants (index + 1) rest
               _               -> throwIO err
     (variant, spliced, completion) <- compileVariants (0 :: Int) matching
-    let prepared = preparedCompilationResult completion
-        result = pprPipelineResult prepared
-        binds       = prBinds result
-        mCapturedTy = fmap T.pack (prCapturedType result)
-        warnTexts   = map T.pack (prWarnings result)
     -- Projection remains outside compileVariants. Its entry is the settled
     -- scaffold, and its constructors join the shared metadata before write.
     let boundNames = case selector of
           SBind -> sbBinders sb
           _ -> []
-    sessionBindings <- prepareSessionBindings boundNames result
-    originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
-    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir completion
-      [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
-      (optionRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
+    sessionBindings <- prepareCompilationSessionBindings completion boundNames
+    originalInterfaces <- newPreparedCompilationInterfaceArtifacts completion outDir
+    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces
+      [preparedScaffoldTargetName] (preparedCompilationAuxiliaryRoots completion)
+      (optionRetainedGenerations args) (compilationBindingRepresentations sessionBindings)
     let asksSites = concatMap paYieldSites preparedArtifacts
-    void $ timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
+    void $ timePhase timing "prepared_sidecars" $ writePreparedCompilationSidecars InlineYieldSites originalInterfaces preparedArtifacts
     void $ timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     void $ timePhase timing "module_products" $
-      writeRequestProducts bound originalInterfaces outDir prepared productContext preparedArtifacts
+      writePreparedRequestProducts originalInterfaces productContext preparedArtifacts
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
-    validateDependencyEvidence (preparedFreshDependencies prepared)
+    validatePreparedCompilationInputs completion
     let wrapped = T.pack spliced
     turn <- case selector of
       SBind -> do
         g    <- requireArg "--bind-gen"     (optionBindGen args)
         root <- requireArg "--session-root" (optionSessionRoot args)
-        bbs  <- writeSessionBindings g root sessionBindings
+        bbs  <- writeCompilationSessionBindings sessionBindings g root
         return (TBind (map T.pack (sbBinders sb)) variant bbs asksSites wrapped)
       SBindDiscard -> return (TBind [] variant [] asksSites wrapped)
       SExpr -> return (TExpr variant asksSites wrapped)

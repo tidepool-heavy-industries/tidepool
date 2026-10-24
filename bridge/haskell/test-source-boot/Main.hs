@@ -3,7 +3,7 @@ module Main (main, tests) where
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
 import Test.Tasty (withResource)
 import SourceBootCases
-import CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, compilerScopeCleanupFailure)
+import CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, completedRequestOwnerBoundaries, completedRequestScopeRelease, checkedRequestOwnerBoundaries, compilerScopeCleanupFailure)
 import CompilerRequestTest (checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries)
@@ -35,6 +35,9 @@ tests = testGroup "source-boot"
   , testCase "unissued world materialization preserves failure and cleanup" worldMaterializationBoundaries
   , testCase "completed compiler cancellation preserves facts and fences effects" completedRequestCancellation
   , testCase "closed executor refuses completed cached preparation" completedRequestRelease
+  , testCase "completed compilation owners refuse crossed contexts before writing" completedRequestOwnerBoundaries
+  , testCase "released compiler scope refuses every prepared operation" completedRequestScopeRelease
+  , testCase "checked compilation preserves its issuer through reuse and release" checkedRequestOwnerBoundaries
   , testCase "compiler recovery cleanup failure preserves causes and poisons later scopes" compilerScopeCleanupFailure
   , testCase "diagnostic counter capture separates complete evidence from bounded display" diagnosticCounterCapture
   , testCase "owned arena range reads" ownedArenaRangeReads

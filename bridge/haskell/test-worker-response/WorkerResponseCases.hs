@@ -22,14 +22,14 @@ import System.Timeout (timeout)
 import System.Posix.Files (setFileMode)
 import GHC.Conc (getNumCapabilities, ThreadStatus(..), BlockReason(..), threadStatus)
 import GHC.Clock (getMonotonicTimeNSec)
-import Tidepool.CompilerRequest (withBoundCompilerRequest, compileBoundRequest)
+import Tidepool.CompilerRequest (withBoundCompilerRequest, compileCheckedRequest, CheckedCompilationTarget(..))
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..))
 import Tidepool.ExtractRequest
   ( AdmittedWorkerRequest, admitWorkerRequest, WorkerRequest, workerRequestFromArgv, workerArgv, RequestField(..)
   , EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..)
   , WorldAcquisitionMiss(..), encodeEnsureExactInputsOutcomeWithin )
 import Tidepool.GhcPipeline
-  ( withResidentCompilerScopes, PipelineSelection(CheckedEnvironment), CompilePurpose(GeneralCompile) )
+  ( withResidentCompilerScopes, CompilePurpose(GeneralCompile) )
 import System.Posix.Resource
   ( Resource(..), ResourceLimit(..), ResourceLimits(..), getResourceLimit, setResourceLimit )
 import GHC.IO.Handle (hDuplicate)
@@ -799,7 +799,7 @@ compilerClusterChild scratch = do
         completed <- flattenCompletion <$> captureCompletion
           (withBoundCompilerRequest sink scope (admitFixtureRequest request) $ \bound -> do
             body <- captureCompletion $ do
-              _ <- compileBoundRequest bound CheckedEnvironment mempty GeneralCompile Nothing source
+              _ <- compileCheckedRequest bound CheckedCompilationEnvironment mempty GeneralCompile Nothing source
               if mode == "cancel" then throwIO ThreadKilled
                 else pure [Diag Nothing DiagWarning "original-cluster-warning"]
             case mode of

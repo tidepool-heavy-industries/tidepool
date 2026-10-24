@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, compilerScopeCleanupFailure, checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries) where
+module CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, completedRequestOwnerBoundaries, completedRequestScopeRelease, checkedRequestOwnerBoundaries, compilerScopeCleanupFailure, checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -8,7 +8,7 @@ import Tidepool.RequestCompletion
 import Control.Exception (AsyncException(ThreadKilled), Exception, SomeException, SomeAsyncException, IOException, fromException, throw, throwIO, try)
 import Control.Concurrent (forkFinally, killThread, newEmptyMVar, putMVar, readMVar)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, sort)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString.Char8 as BSC
 import System.Environment (getEnvironment, lookupEnv)
@@ -34,6 +34,8 @@ import GHC.Driver.Session (backend, gopt, GeneralFlag(Opt_ByteCode), parseDynami
 import GHC.Types.SrcLoc (noLoc)
 import GHC.Types.Name (getOccString)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
+import Tidepool.Binders (BoundBinder(..))
+import Tidepool.Introspection (withInspectionWork, InspectionResult(..))
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import SourceBootFixtureSupport (hasIntResultLiteral, withScratch, captureDiagnostics
@@ -42,13 +44,14 @@ import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFile
 import System.FilePath ((</>), takeFileName, takeDirectory)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
-  ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory
-  , writeCertifiedProductsKeepingWithOriginals, writeCertifiedSegmentProducts
-  , writeCertifiedSegmentItemProductsWithInputs, retainPreparedPackageTargets )
+  ( prepareCompilerProjectionContext, prepareOriginalProducts, newPreparedOriginalInterfaceArtifacts
+  , retainPreparedPackageTargets, writeCertifiedSegmentProducts
+  , writeCertifiedSegmentItemProductsWithInputs )
 import Tidepool.CompilerRequest
-import Tidepool.ExecutionProjection (preparedModuleProductOutcomes, projectOriginalHomeModuleProducts)
 import Tidepool.ExtractRequest
 import Tidepool.GhcPipeline
+import Tidepool.ExecutionProjection (packageTargetGroups, projectedPackageModule, projectedPackageInterfaceBody)
+import qualified Tidepool.ExecutionSchema as Wire
 import Tidepool.ExecutionSchema (WireProgram(..), SymbolIdentity(..), Group(..), TopBinding(..))
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
@@ -159,8 +162,8 @@ worldRequestBoundaries = do
       absent <- boundWorldCellPreparation request
       unless (either (== WorldCellUnavailable) (const False) absent)
         (fail "unheld prepare parsed source or allocated compiler generation state")
-      compiled <- try (compileBoundRequest request CheckedEnvironment Set.empty GeneralCompile Nothing "/unavailable/target.hs")
-        :: IO (Either InputRejection CheckedEnvironmentResult)
+      compiled <- try (compileCheckedRequest request CheckedCompilationEnvironment Set.empty GeneralCompile Nothing "/unavailable/target.hs")
+        :: IO (Either InputRejection CheckedCompilation)
       case compiled of
         Left CheckedPurposeMismatch -> pure ()
         Left failure -> throwIO failure
@@ -171,10 +174,10 @@ worldRequestBoundaries = do
         writeFile path source
         recipe <- generatedCheckingTemplateRecipe (scopedParserFlags scope)
           (CheckedTemplateImports [] []) source source path "PurposeConflict" >>= either fail pure
-        conflict <- try (compileBoundRequest request CheckedEnvironment Set.empty
+        conflict <- try (compileCheckedRequest request CheckedCompilationEnvironment Set.empty
           (GeneratedScaffoldCompile recipe (GeneratedScaffoldCompile recipe GeneralCompile))
           Nothing "/unavailable/target.hs")
-          :: IO (Either CompilePurposeConflict CheckedEnvironmentResult)
+          :: IO (Either CompilePurposeConflict CheckedCompilation)
         unless (either (== DuplicateCompilePurposeSetting "GeneratedScaffoldCompile") (const False) conflict)
           (fail "conflicting compile purpose was not refused before held-world work")
       pure (void (boundWorldCellPreparation request))
@@ -525,29 +528,40 @@ withRequestFixture action = withCompilerFixture $ \scope work -> do
   (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> action scope request work
 
 compileA :: BoundCompilerRequest -> FilePath -> IO PreparedCompilation
-compileA request work = compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing
+compileA request work = compilePreparedRequest request (PreparedCompilationProducts Nothing) Set.empty GeneralCompile Nothing
   (work </> "BoundPreparedA.hs")
 
--- The expected owner and Core literal are authored fixture facts, not values
--- recovered from the retained cache. Recompute original products without the
--- completion observer/worklist as a separate oracle for delayed consumption.
-projectA :: String -> PreparedCompilation -> IO ()
-projectA target completion = do
-  let prepared = preparedCompilationResult completion
-      result = pprPipelineResult prepared
-      env = prHscEnv result
-      owner = tcg_mod (prTargetTcGblEnv result)
-      interfaces = pprProductInterfaces prepared
-      modules = pprModules prepared
-  unless (moduleNameString (moduleName owner) == "BoundPreparedA"
-      && hasIntResultLiteral 41 (prBinds result)) $
-    fail "completed preparation lost its independently specified owner or Core value"
-  context <- prepareCompilerProjectionContext prepared Map.empty owner target [] Nothing
-  (_,actual) <- prepareCompilationOriginals completion Nothing context Set.empty
-  let reference = projectOriginalHomeModuleProducts env interfaces context Set.empty modules
-  unless (preparedModuleProductOutcomes (preparedProductInventory actual)
-      == preparedModuleProductOutcomes reference) $
-    fail "delayed completion products differ from uncached projection of its actual compiler inputs"
+-- Expected module/entry and integer bytes are authored fixture facts. This
+-- oracle inspects the emitted execution schema, never the retained Core/cache.
+projectA :: FilePath -> String -> PreparedCompilation -> IO ()
+projectA work target completion = projectFixture work "BoundPreparedA" target
+  (if target == "alternate" then 43 else 41) completion
+
+projectFixture :: FilePath -> Text.Text -> String -> Int -> PreparedCompilation -> IO ()
+projectFixture work owner target expected completion = do
+  interfaces <- newPreparedCompilationInterfaceArtifacts completion work
+  (artifacts,_) <- prepareArtifacts interfaces [target] [] Map.empty []
+  case artifacts of
+    [artifact] | wireResultLiteral owner (Text.pack target) expected (paProgram artifact) -> pure ()
+    _ -> fail "completed preparation lost its independently specified owner or integer value"
+
+wireResultLiteral :: Text.Text -> Text.Text -> Int -> WireProgram -> Bool
+wireResultLiteral owner target expected program = case matching of
+  [binding] | Wire.heapBindingId binding == programEntry program -> case Wire.heapBindingRhs binding of
+    Wire.Constructor constructor [value] -> intConstructor constructor && intAtom value
+    Wire.Thunk _ _ [] (Wire.Construct constructor [value]) -> intConstructor constructor && intAtom value
+    _ -> False
+  _ -> False
+  where
+    matching = [binding | group <- programBindings program
+      , TopBinding identity binding <- case group of NonRecursive value -> [value]; Recursive values -> values
+      , symbolModule identity == owner, symbolOccurrence identity == target]
+    intAtom (Wire.Scalar (Wire.IntLiteral 64 bytes)) = bytes == BS.pack (replicate 7 0 ++ [fromIntegral expected])
+    intAtom _ = False
+    intConstructor (Wire.ConstructorId ordinal) = case drop (fromIntegral ordinal) (programConstructors program) of
+      declaration:_ -> let identity = Wire.constructorSymbol (Wire.constructorIdentity declaration)
+        in symbolModule identity == "GHC.Types" && symbolOccurrence identity == "I#"
+      [] -> False
 
 completedRequestHistories :: IO ()
 completedRequestHistories = do
@@ -562,17 +576,16 @@ completedRequestHistories = do
 runHistory :: [Int] -> IO ()
 runHistory history = withRequestFixture $ \scope request work -> do
   first <- compileA request work
-  projectA "__result" first
+  projectA work "__result" first
   let step :: Int -> IO ()
       step choice = case choice of
         0 -> do
-          second <- compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing
+          second <- compilePreparedRequest request (PreparedCompilationProducts Nothing) Set.empty GeneralCompile Nothing
             (work </> "BoundPreparedB.hs")
-          unless (hasIntResultLiteral 97 (prBinds (pprPipelineResult (preparedCompilationResult second)))) $
-            fail "B did not exercise an independent successful compiler result"
+          projectFixture work "BoundPreparedB" "__result" 97 second
         1 -> do
-          refused <- try (compileBoundRequest request CheckedEnvironment Set.empty GeneralCompile Nothing
-            (work </> "BoundPreparedError.hs")) :: IO (Either SomeException CheckedEnvironmentResult)
+          refused <- try (compileCheckedRequest request CheckedCompilationEnvironment Set.empty GeneralCompile Nothing
+            (work </> "BoundPreparedError.hs")) :: IO (Either SomeException CheckedCompilation)
           case refused of
             Left failure | Just (_ :: SomeAsyncException) <- fromException failure -> throwIO failure
             Left failure | Just _ <- sourceFailureDiagnostics failure -> pure ()
@@ -583,20 +596,24 @@ runHistory history = withRequestFixture $ \scope request work -> do
           info <- getModuleInfo package
           unless (maybe False (any ((== "fromMaybe") . getOccString) . modInfoExports) info) $
             liftIO (fail "package-only helper did not demand the actual Data.Maybe interface")
-        3 -> projectA "__result" first
-        _ -> projectA "alternate" first
+        3 -> projectA work "__result" first
+        _ -> projectA work "alternate" first
   mapM_ step history
-  projectA "__result" first
+  projectA work "__result" first
 
 completedRequestCancellation :: IO ()
 completedRequestCancellation = withRequestFixture $ \scope request work -> do
   first <- compileA request work
-  originals <- newPreparedOriginalInterfaceArtifacts (preparedCompilationResult first) work
+  originals <- newPreparedCompilationInterfaceArtifacts first work
+  bindings <- prepareCompilationSessionBindings first ["retained"]
+  checked <- compileCheckedRequest request CheckedCompilationEnvironment Set.empty GeneralCompile Nothing (work </> "BoundPreparedA.hs")
   cancelled <- try (scopedRunGhc scope (liftIO (throwIO ThreadKilled))) :: IO (Either SomeException ())
   requireCancellation cancelled
-  unless (hasIntResultLiteral 41 (prBinds (pprPipelineResult (preparedCompilationResult first)))) $
-    fail "cancellation changed previously completed compiler facts"
-  requirePhase CompilerTransactionFailed (prepareArtifacts originals work first [] [] Map.empty [])
+  unless (preparedCompilationBindingCount first > 0 && null (preparedCompilationWarnings first)) $
+    fail "cancellation changed previously completed compiler observations"
+  noOutputChanges work $ forM_ (preparedHandleOperations first originals bindings) $ requirePhase CompilerTransactionFailed
+  withInspectionWork $ \inspection ->
+    requirePhase CompilerTransactionFailed (inspectCheckedCompilation inspection checked [])
   -- The existing scope guard, rather than a second request lifecycle, refuses
   -- all later compiler effects too.
   requirePhase CompilerTransactionFailed (scopedRunGhc scope (pure ()))
@@ -645,26 +662,176 @@ compilerScopeCleanupFailure = withResidentCompilerScopes [] $ \runScope -> do
     (runScope (pure ()) (\compiler -> scopedRunGhc compiler (pure ())))
 
 completedRequestRelease :: IO ()
-completedRequestRelease = withScratch $ \work -> do
-  copyFile "test-source-boot/fixtures/BoundPreparedA.hs" (work </> "BoundPreparedA.hs")
+completedRequestRelease = withCompilerFixture $ \scope work -> do
   args <- requestFor work
-  withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope -> do
-    completed <- (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
-      first <- compileA request work
-      projectA "__result" first
-      originals <- newPreparedOriginalInterfaceArtifacts (preparedCompilationResult first) work
-      pure (first,originals)
-    -- The original GHC scope is Ready, but this executor is closed. Check an
-    -- otherwise empty/cached operation, without relying on a task submission.
-    let (first,originals) = completed
-    refused <- try (void (prepareArtifacts originals work first [] [] Map.empty []))
-      :: IO (Either SomeException ())
+  (first,interfaces,bindings) <- (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
+    first <- compileA request work
+    projectA work "__result" first
+    interfaces <- newPreparedCompilationInterfaceArtifacts first work
+    bindings <- prepareCompilationSessionBindings first ["retained"]
+    pure (first,interfaces,bindings)
+  -- The compiler scope remains Ready; the issuing executor is already closed.
+  noOutputChanges work $ forM_ (preparedHandleOperations first interfaces bindings) $ \operation -> do
+    refused <- try operation
     requireCancellation refused
-    -- A later live allowance on this same GHC scope cannot substitute for the
-    -- completed result's closed issuing allowance, even before pending lookup.
-    (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \later -> do
-      stolen <- try (commitPreparedWorldDependencies later first) :: IO (Either SomeException ())
-      requireCancellation stolen
+  unless (preparedCompilationBindingCount first > 0 && null (preparedCompilationWarnings first))
+    (fail "closed preparation lost its immutable observations")
+  (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \later -> do
+    requireCancellation =<< try (commitPreparedWorldDependencies later first)
+    noOutputChanges work $ forM_ (preparedHandleOperations first interfaces bindings) $ \operation ->
+      requireCancellation =<< try operation
+
+preparedHandleOperations :: PreparedCompilation -> PreparedCompilationInterfaces -> PreparedCompilationBindings -> [IO ()]
+preparedHandleOperations completion interfaces bindings =
+  [ void (newPreparedCompilationInterfaceArtifacts completion "/unavailable/closed-preparation")
+  , void (prepareArtifacts interfaces [] [] Map.empty [])
+  , void (prepareArtifacts interfaces ["__result"] [] Map.empty [])
+  , void (sealPreparedActivationPreviewWitness interfaces)
+  , validatePreparedCompilationInputs completion
+  , void (writePreparedCompilationSidecars InlineYieldSites interfaces [])
+  , void (writePreparedRequestProducts interfaces Nothing [])
+  , writePreparedPortableOutputs interfaces
+  , void (prepareCompilationSessionBindings completion [])
+  , void (writeCompilationSessionBindings bindings 1 "/unavailable/closed-preparation")
+  ]
+
+completedRequestScopeRelease :: IO ()
+completedRequestScopeRelease = withScratch $ \output -> do
+  BS.writeFile (output </> "existing-product") "preserve closed-scope product"
+  (first,interfaces,bindings,checked) <- withRequestFixture $ \_ request work -> do
+    first <- compileA request work
+    interfaces <- newPreparedCompilationInterfaceArtifacts first output
+    bindings <- prepareCompilationSessionBindings first ["retained"]
+    checked <- compileCheckedRequest request CheckedCompilationEnvironment Set.empty GeneralCompile Nothing (work </> "BoundPreparedA.hs")
+    pure (first,interfaces,bindings,checked)
+  noOutputChanges output $ forM_ (preparedHandleOperations first interfaces bindings) $
+    requirePhase CompilerTransactionReleased
+  unless (preparedCompilationBindingCount first > 0 && null (preparedCompilationWarnings first))
+    (fail "released compiler scope lost immutable diagnostics")
+  withInspectionWork $ \inspection -> do
+    requirePhase CompilerTransactionReleased (inspectCheckedCompilation inspection checked [])
+    requirePhase CompilerTransactionReleased (satisfiesCheckedActivationConstraint checked)
+  unless (null (checkedCompilationWarnings checked)) (fail "released checked diagnostics changed")
+
+completedRequestOwnerBoundaries :: IO ()
+completedRequestOwnerBoundaries = withRequestFixture $ \scope request work -> do
+  let directoryA = work </> "output-a"
+      directoryB = work </> "output-b"
+  createDirectory directoryA
+  createDirectory directoryB
+  BS.writeFile (directoryA </> "existing-product") "A already exists"
+  BS.writeFile (directoryB </> "existing-product") "B already exists"
+  first <- compileA request work
+  interfacesA <- newPreparedCompilationInterfaceArtifacts first directoryA
+  bindingsA <- prepareCompilationSessionBindings first ["retained"]
+  (artifactsA,contextA) <- prepareArtifacts interfacesA ["__result"] [] Map.empty []
+  second <- compilePreparedRequest request (PreparedCompilationProducts Nothing) Set.empty GeneralCompile Nothing
+    (work </> "BoundPreparedB.hs")
+  interfacesB <- newPreparedCompilationInterfaceArtifacts second directoryB
+  (artifactsB,contextB) <- prepareArtifacts interfacesB ["__result"] [] Map.empty []
+  unless (case (artifactsA,artifactsB) of
+      ([a],[b]) -> wireResultLiteral "BoundPreparedA" "__result" 41 (paProgram a)
+        && wireResultLiteral "BoundPreparedB" "__result" 97 (paProgram b)
+      _ -> False) (fail "same-request owner controls did not compile distinct actual products")
+  unless (maybe False (const True) contextA && maybe False (const True) contextB)
+    (fail "owner mismatch controls lack genuine native contexts")
+  noOutputChanges directoryA $ requirePurpose (writePreparedRequestProducts interfacesA contextB artifactsA)
+  noOutputChanges directoryA $ requirePurpose (writePreparedRequestProducts interfacesA Nothing artifactsA)
+  noOutputChanges directoryB $ requirePurpose (writePreparedRequestProducts interfacesB contextA artifactsB)
+  noOutputChanges directoryA $ requirePurpose (writePreparedPortableOutputs interfacesA)
+  noOutputChanges directoryA $ requirePurpose (sealPreparedActivationPreviewWitness interfacesA)
+  -- A separate live request on the same compiler cannot supply A's context.
+  args <- requestFor work
+  foreignContext <- (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \other -> do
+    third <- compileA other work
+    interfaces <- newPreparedCompilationInterfaceArtifacts third directoryB
+    snd <$> prepareArtifacts interfaces ["__result"] [] Map.empty []
+  noOutputChanges directoryA $ requirePurpose (writePreparedRequestProducts interfacesA foreignContext artifactsA)
+  noOutputChanges directoryA $ forM_ (preparedHandleOperations first interfacesA bindingsA) $ \operation -> do
+    result <- newEmptyMVar
+    _ <- forkFinally operation (putMVar result)
+    outcome <- readMVar result
+    requirePhase CompilerTransactionWrongThread (either throwIO pure outcome)
+  -- Repeating and changing a valid projection retains the same compilation.
+  (again,_) <- prepareArtifacts interfacesA ["__result"] [] Map.empty []
+  unless (map paBytes again == map paBytes artifactsA) (fail "repeated projection changed completed code")
+  projectA directoryA "alternate" first
+  _ <- writePreparedRequestProducts interfacesA contextA artifactsA
+  _ <- writePreparedCompilationSidecars InlineYieldSites interfacesA artifactsA
+  published <- doesFileExist (directoryA </> "certified-products.cbor")
+  unless published (fail "matching owner did not publish certified products")
+  binders <- writeCompilationSessionBindings bindingsA 1 (work </> "session-output")
+  case binders of
+    [BoundBinder "retained" _ _ _ "Int" _ _] -> pure ()
+    _ -> fail "session output lost the first compilation's prepared binding"
+
+checkedRequestOwnerBoundaries :: IO ()
+checkedRequestOwnerBoundaries = withCompilerFixture $ \scope work -> withInspectionWork $ \inspection -> do
+  let pathA = work </> "CheckedOwnerA.hs"
+      pathB = work </> "CheckedOwnerB.hs"
+      -- TypeOf consumes the real generated probe, rather than reevaluating the
+      -- diagnostic query string. Different probe types distinguish the owners.
+      question = InspectTypeOf "probe"
+      requireType expected completion = do
+        answers <- inspectCheckedCompilation inspection completion [question]
+        case answers of
+          [InspectionType "probe" actual _] | actual == expected -> pure ()
+          _ -> fail ("checked handle lost its issuing probe type: " ++ show answers)
+  writeFile pathA "module CheckedOwnerA where\n__tidepool_inspect_0 = (41 :: Int)\n"
+  writeFile pathB "module CheckedOwnerB where\n__tidepool_inspect_0 = False\n"
+  args <- case workerRequestFromArgv (workerArgv
+      [Input pathA,Include work,InspectType "probe",InspectOut (work </> "inspection.cbor")]) of
+    Right (Just request) -> pure request
+    other -> fail ("invalid checked owner fixture: " ++ show other)
+  first <- (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
+    first <- compileCheckedRequest request CheckedCompilationEnvironment Set.empty GeneralCompile Nothing pathA
+    second <- compileCheckedRequest request CheckedCompilationEnvironment Set.empty GeneralCompile Nothing pathB
+    requireType "Bool" second
+    requireType "Int" first
+    requirePurpose (satisfiesCheckedActivationConstraint first)
+    result <- newEmptyMVar
+    _ <- forkFinally (void (inspectCheckedCompilation inspection first [])) (putMVar result)
+    outcome <- readMVar result
+    requirePhase CompilerTransactionWrongThread (either throwIO pure outcome)
+    pure first
+  requireCancellation =<< try (void (inspectCheckedCompilation inspection first []))
+  requireCancellation =<< try (void (satisfiesCheckedActivationConstraint first))
+  unless (null (checkedCompilationWarnings first)) (fail "closed checked handle changed diagnostics")
+  (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \later -> do
+    live <- compileCheckedRequest later CheckedCompilationEnvironment Set.empty GeneralCompile Nothing pathB
+    requireType "Bool" live
+    requireCancellation =<< try (void (inspectCheckedCompilation inspection first []))
+
+requirePurpose :: IO a -> IO ()
+requirePurpose operation = do
+  outcome <- try (void operation) :: IO (Either InputRejection ())
+  case outcome of
+    Left CheckedPurposeMismatch -> pure ()
+    Left failure -> throwIO failure
+    Right () -> fail "operation accepted a foreign owner or wrong admitted intent"
+
+-- Observe entries as well as bytes: an empty/new file and an overwrite both fail.
+noOutputChanges :: FilePath -> IO a -> IO a
+noOutputChanges directory operation = do
+  before <- directorySnapshot directory
+  result <- operation
+  after <- directorySnapshot directory
+  unless (before == after) (fail "refused operation changed existing output entries or contents")
+  pure result
+
+directorySnapshot :: FilePath -> IO [(FilePath,Maybe BS.ByteString)]
+directorySnapshot root = walk ""
+  where
+    walk relative = do
+      names <- sort <$> listDirectory (root </> relative)
+      fmap concat $ forM names $ \name -> do
+        let child = relative </> name
+            path = root </> child
+        directory <- doesDirectoryExist path
+        if directory then ((child,Nothing):) <$> walk child
+          else do
+            bytes <- BS.readFile path
+            pure [(child,Just bytes)]
 
 requireCancellation :: Either SomeException () -> IO ()
 requireCancellation result = case result of
@@ -692,23 +859,31 @@ nativeOutputProvenanceChecks = withScratch $ \work -> do
     other -> fail ("invalid explicit portable fixture: " ++ show other)
   withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope -> do
     refused <- try ((withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest native) >=> finishCompletion) $ \request ->
-      compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing (work </> "missing.hs"))
+      compilePreparedRequest request PreparedCompilationStg Set.empty GeneralCompile Nothing (work </> "missing.hs"))
       :: IO (Either NativeProductConfigurationUnavailable PreparedCompilation)
     case refused of
       Left NativeProductConfigurationUnavailable -> pure ()
       Right _ -> fail "observation configuration issued a native compilation"
     (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest portable) >=> finishCompletion) $ \request -> do
-      completion <- compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing
+      completion <- compilePreparedRequest request PreparedCompilationStg Set.empty GeneralCompile Nothing
         (work </> "BoundPreparedA.hs")
-      let prepared = preparedCompilationResult completion
-      unless (hasIntResultLiteral 41 (prBinds (pprPipelineResult prepared)))
-        (fail "explicit portable compilation lost its actual source result")
-      interfaces <- newPreparedOriginalInterfaceArtifacts prepared work
-      output <- prepareArtifactsWithIntent interfaces work completion ["__result"] [] Map.empty []
+      interfaces <- newPreparedCompilationInterfaceArtifacts completion work
+      output <- prepareArtifactsWithIntent interfaces ["__result"] [] Map.empty []
       case output of
-        PortableOutputs [artifact] -> unless (not (BS.null (paBytes artifact)))
-          (fail "explicit portable compilation emitted no code")
+        PortableOutputs [artifact] -> unless (wireResultLiteral "BoundPreparedA" "__result" 41 (paProgram artifact))
+          (fail "explicit portable compilation emitted incorrect code")
         _ -> fail "explicit portable intent selected native products"
+      noOutputChanges work $ requirePurpose (writePreparedRequestProducts interfaces Nothing [])
+      bindings <- prepareCompilationSessionBindings completion ["portable"]
+      noOutputChanges work $ requirePurpose (writeCompilationSessionBindings bindings 3 work)
+      case output of
+        PortableOutputs artifacts -> void (writePreparedCompilationSidecars SeparateYieldSites interfaces artifacts)
+        _ -> fail "portable sidecar control changed output intent"
+      writePreparedPortableOutputs interfaces
+      sidecar <- doesFileExist (work </> "meta.cbor")
+      unless sidecar (fail "portable output omitted shared metadata")
+      marker <- BS.readFile (work </> "portable-output.mode")
+      unless (marker == "TPPORTABLEOUTPUT1\n") (fail "portable writer omitted its output contract")
 
 -- Finite installers and World stages consume this same native output owner.
 -- A real list operation requires a separately prepared package implementation.
@@ -722,19 +897,15 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
   withRootedCompilerEnvironment work $ withQuietStdout $
     withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope ->
       (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
-        completion <- compilePreparedRequest request (PreparedProducts Nothing) Set.empty GeneralCompile Nothing source
-        let prepared = preparedCompilationResult completion
-        interfaces <- newPreparedOriginalInterfaceArtifacts prepared work
-        output <- prepareArtifactsWithIntent interfaces work completion names [] Map.empty []
+        completion <- compilePreparedRequest request (PreparedCompilationProducts Nothing) Set.empty GeneralCompile Nothing source
+        interfaces <- newPreparedCompilationInterfaceArtifacts completion work
+        output <- prepareArtifactsWithIntent interfaces names [] Map.empty []
         case output of
           PortableOutputs _ -> fail "native package fixture selected portable output"
           NativeOutputs artifacts products -> do
             unless (length artifacts == length names) (fail "native package fixture lost its targets")
-            provenance <- scopedNativeProductProvenance scope
-            targets <- forM artifacts $ \artifact -> maybe
-              (fail "native package fixture lost its actual target projection") pure (paPackageTarget artifact)
-            duplicate <- try (void (retainPreparedPackageTargets provenance
-              (targets ++ take 1 targets) Map.empty products)) :: IO (Either SomeException ())
+            duplicate <- try (void (prepareArtifactsWithIntent interfaces
+              (names ++ take 1 names) [] Map.empty [])) :: IO (Either SomeException ())
             case duplicate of
               Left failure | "package projections repeat a target" `isInfixOf` show failure -> pure ()
               Left failure -> throwIO failure
@@ -745,8 +916,7 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
                   , TopBinding identity _ <- case group of NonRecursive top -> [top]; Recursive tops -> tops]))
               (fail "native target retained the package reverse implementation")
             void (writePreparedArtifacts work artifacts)
-            void (writeCertifiedProductsKeepingWithOriginals [work] interfaces work prepared (Just products)
-              [(paTarget artifact,paProgram artifact) | artifact <- artifacts])
+            void (writePreparedRequestProducts interfaces (Just products) artifacts)
             hasCode <- doesDirectoryExist (work </> "package-products")
             paths <- if hasCode then listDirectory (work </> "package-products") else pure []
             unless (not (null paths) == wantsCode)
@@ -789,7 +959,22 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
                 let segmentDirectory = work </> "segment"
                     itemDirectory = segmentDirectory </> "item-0"
                 createDirectory segmentDirectory
-                staged <- writeCertifiedSegmentProducts [work] interfaces segmentDirectory prepared products
+                -- Exercise the lower product stage with its independently owned
+                -- compiler result; request handles never expose their raw inputs.
+                prepared <- scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing source [work] Nothing
+                originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared segmentDirectory
+                let pipeline = pprPipelineResult prepared
+                    owner = tcg_mod (prTargetTcGblEnv pipeline)
+                projection <- prepareCompilerProjectionContext prepared Map.empty owner "__result" [] Nothing
+                (_,referenceProducts) <- prepareOriginalProducts (prHscEnv pipeline) Nothing
+                  (pprProductInterfaces prepared) projection Set.empty (pprModules prepared)
+                packageTargets <- forM artifacts $ \outputArtifact -> maybe
+                  (fail "native artifact lost its paired package projection") pure (paPackageTarget outputArtifact)
+                let captures = Map.fromList [(projectedPackageModule group,projectedPackageInterfaceBody group)
+                      | target <- packageTargets,group <- packageTargetGroups target]
+                provenance <- scopedNativeProductProvenance scope
+                stageProducts <- retainPreparedPackageTargets provenance packageTargets captures referenceProducts
+                staged <- writeCertifiedSegmentProducts [work] originalInterfaces segmentDirectory prepared stageProducts
                 packageTarget <- maybe (fail "native artifact lost its paired package projection") pure
                   (paPackageTarget artifact)
                 createDirectory itemDirectory

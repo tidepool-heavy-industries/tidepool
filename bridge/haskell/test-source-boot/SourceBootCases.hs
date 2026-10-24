@@ -3,8 +3,9 @@ module SourceBootCases where
 import Tidepool.RequestCompletion (finishCompletion)
 import Tidepool.CompilerRequest
   ( BoundCompilerRequest, withBoundCompilerRequest, boundRequestExactScope, withBoundExactInterfaceTransaction
-  , compilePreparedRequest, preparedCompilationResult, prepareArtifactsWithIntent
-  , PreparedArtifactOutput(..), paProgram )
+  , compilePreparedRequest, PreparedCompilationTarget(..), newPreparedCompilationInterfaceArtifacts
+  , prepareArtifactsWithIntent, writePreparedRequestProducts
+  , PreparedArtifactOutput(..), paProgram, paPackageTarget )
 import Tidepool.ExtractRequest ( AdmittedWorkerRequest, admitWorkerRequest, WorkerRequest,RequestField(..), workerArgv, workerRequestFromArgv)
 
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256, artifactBytes)
@@ -131,7 +132,7 @@ import System.Timeout (timeout)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
   , requireOriginalExecutableGlobals, certifiedExecutionSource, newPreparedOriginalInterfaceArtifacts
-  , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
+  , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts, retainPreparedPackageTargets
   , prepareOriginalProductsWithCache, newOriginalProjectionCollector
   , observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
@@ -152,6 +153,7 @@ import Tidepool.ExecutionProjection
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, settleOriginalHomeModuleProductsWithoutOwners, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
+import Tidepool.ExecutionProjection (packageTargetGroups, projectedPackageModule, projectedPackageInterfaceBody)
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts, preparedModuleProductEncodings, preparedModuleProductOmissions)
 import Tidepool.PreparedStg
   ( newPreparedBodyCache, PreparedBodyReuse(..), pmIdentityResolver, pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
@@ -218,7 +220,7 @@ import Tidepool.GhcPipeline
   , renderType, generatedScaffoldRecipe, activationPreviewInputType
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction, withResidentCompilerScopes
-  , scopedCompile, scopedRunGhc )
+  , CompilerScope, scopedCompile, scopedRunGhc, scopedNativeProductProvenance )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
@@ -3259,10 +3261,10 @@ originalProjectionProducts = withScratch $ \work ->
         Right (Just request) -> pure request
         other -> fail ("invalid original product projection request: " ++ show other)
       (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $
-        originalProjectionProductsWithRequest work
+        originalProjectionProductsWithRequest compiler work
 
-originalProjectionProductsWithRequest :: FilePath -> BoundCompilerRequest -> IO ()
-originalProjectionProductsWithRequest work request = do
+originalProjectionProductsWithRequest :: CompilerScope -> FilePath -> BoundCompilerRequest -> IO ()
+originalProjectionProductsWithRequest compiler work request = do
   originalGraphClosureProperties
   let identity :: String -> String -> String -> SymbolIdentity
       identity unit moduleName' occurrence =
@@ -3321,9 +3323,12 @@ originalProjectionProductsWithRequest work request = do
     , "module ProjectionConsumer (usesGood) where"
     , "import ProjectionOwner", "import ProjectionIndependent"
     , "usesGood :: Int -> Int", "usesGood x = good x + 1" ]
-  completion <- compilePreparedRequest request (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+  -- The low-level projection oracle owns a separate actual compiler result;
+  -- request handles never expose their environment to this test.
+  paired <- scopedCompile compiler (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "ProjectionConsumer.hs") [work] Nothing
+  completion <- compilePreparedRequest request (PreparedCompilationProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "ProjectionConsumer.hs")
-  let paired = preparedCompilationResult completion
   let findPrepared name = case [prepared | prepared <- pprModules paired
         , moduleNameString (moduleName (pmModule prepared)) == name] of
           [prepared] -> pure prepared
@@ -3412,10 +3417,25 @@ originalProjectionProductsWithRequest work request = do
     "usesGood" [] Nothing
   (_,rawContext) <- prepareOriginalProducts pairedEnv Nothing pairedInterfaces
     currentContext Set.empty (pprModules paired)
-  output <- prepareArtifactsWithIntent currentInterfaces captureDirectory completion ["usesGood"] [] Map.empty []
-  (currentProgram,issuedContext) <- case output of
-    NativeOutputs [artifact] products -> pure (paProgram artifact,products)
+  let requestDirectory = work </> "request-original-products"
+  createDirectory requestDirectory
+  requestInterfaces <- newPreparedCompilationInterfaceArtifacts completion requestDirectory
+  output <- prepareArtifactsWithIntent requestInterfaces ["usesGood"] [] Map.empty []
+  currentProgram <- case output of
+    NativeOutputs [artifact] _ -> pure (paProgram artifact)
     _ -> fail "original product projection did not issue its actual native target"
+  admittedContext <- admitCurrentOriginalProducts currentInterfaces captureDirectory paired rawContext
+  packageTargets <- case output of
+    NativeOutputs artifacts _ -> forM artifacts $ \artifact -> maybe
+      (fail "guarded projection lost its immutable package target") pure (paPackageTarget artifact)
+    _ -> fail "guarded projection changed native intent"
+  let packageCaptures = Map.fromList [(projectedPackageModule group,projectedPackageInterfaceBody group)
+        | target <- packageTargets,group <- packageTargetGroups target]
+  provenance <- scopedNativeProductProvenance compiler
+  issuedContext <- retainPreparedPackageTargets provenance packageTargets packageCaptures admittedContext
+  requestCertificate <- case output of
+    NativeOutputs artifacts products -> writePreparedRequestProducts requestInterfaces (Just products) artifacts
+    _ -> fail "request-owned original projection changed output intent"
   issued <- maybe (fail "genuine original issuer did not return its inventory") pure
     (preparedCurrentOriginalInventory issuedContext)
   let importedNames = currentOriginalBindingsExcept issued (Set.singleton entry)
@@ -3439,6 +3459,11 @@ originalProjectionProductsWithRequest work request = do
   let emittedBinders = Set.fromList [binder | product' <- certifiedOriginalProducts currentCertificate
         , let (_,_,_,groups) = moduleProductInput product'
         , group <- groups, binder <- projectedBinders group]
+  -- Compare complete emitted module/group content, not compiler allocation
+  -- identity, through the real guarded and independently owned publication paths.
+  unless (map moduleProductInput (certifiedOriginalProducts requestCertificate)
+      == map moduleProductInput (certifiedOriginalProducts currentCertificate))
+    (fail "request-owned publication differs from independently emitted originals")
   unless (emittedBinders == currentOriginalBinders issued) $
     fail "writer changed the compiler-issued original availability boundary"
   emittedInventory <- BS.readFile (captureDirectory </> "module-products.cbor")

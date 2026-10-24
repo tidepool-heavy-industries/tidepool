@@ -93,11 +93,11 @@ import Tidepool.TypedSegment.Types
 
 -- The captured GHC types and their authority are resolved once, before native
 -- projection, and retained unchanged for the later session interface write.
-data PreparedSessionBindings = PreparedSessionBindings PipelineResult
+data PreparedSessionBindings = PreparedSessionBindings [(OccName, Fixity)]
   [(String, Type, Type, Maybe HostBindingRepresentation)]
 
 prepareSessionBindings :: [String] -> PipelineResult -> IO PreparedSessionBindings
-prepareSessionBindings [] result = pure (PreparedSessionBindings result [])
+prepareSessionBindings [] _ = pure (PreparedSessionBindings [] [])
 prepareSessionBindings bindNames result = do
   resultType <- case prResultType result of
     Just ty -> pure ty
@@ -116,7 +116,8 @@ prepareSessionBindings bindNames result = do
     (prCanonicalInterfaceAdmissions result)
   forM_ (zip bindNames persistedTypes) $ \(name,ty) ->
     observeHostBindingDecision name authorities ty
-  pure (PreparedSessionBindings result
+  fixities <- boundBinderFixities bindNames (prTargetTcGblEnv result)
+  pure (PreparedSessionBindings fixities
     (zipWith3 (\name ty persisted -> (name, ty, persisted,
       hostBindingRepresentationForType authorities persisted))
       bindNames componentTypes persistedTypes))
@@ -129,12 +130,11 @@ sessionBindingRepresentations (PreparedSessionBindings _ bindings) =
 mkBoundBinders :: [String] -> Word64 -> FilePath -> PipelineResult -> IO [BoundBinder]
 mkBoundBinders names generation root result = do
   prepared <- prepareSessionBindings names result
-  writeSessionBindings generation root prepared
+  writeSessionBindings (prHscEnv result) generation root prepared
 
-writeSessionBindings :: Word64 -> FilePath -> PreparedSessionBindings -> IO [BoundBinder]
-writeSessionBindings generation root (PreparedSessionBindings result bindings) = do
-  fixities <- boundBinderFixities [name | (name, _, _, _) <- bindings] (prTargetTcGblEnv result)
-  writeNativeSessionBindings (prHscEnv result) generation root bindings fixities
+writeSessionBindings :: HscEnv -> Word64 -> FilePath -> PreparedSessionBindings -> IO [BoundBinder]
+writeSessionBindings environment generation root (PreparedSessionBindings fixities bindings) =
+  writeNativeSessionBindings environment generation root bindings fixities
 
 -- The compiler owns the captures; this product owns their thin transport and
 -- actual hydrated global identifiers. It grants no authority to a live value.

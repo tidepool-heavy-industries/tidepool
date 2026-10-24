@@ -7,13 +7,20 @@
 module Tidepool.CompilerRequest
   ( BoundCompilerRequest, withBoundCompilerRequest, withBoundCompilerRequestWithNativeDemand, boundWorkerRequest
   , boundAdmittedOperation, boundTurnTemplates, boundRequestExactScope, boundParserFlags
-  , compileBoundRequest, compilePreparedRequest
-  , inspectBoundCheckedEnvironment, extractBoundDeclarationBinders
+  , CheckedCompilation, CheckedCompilationTarget(..), compileCheckedRequest, checkedCompilationWarnings
+  , satisfiesCheckedActivationConstraint, compilePreparedRequest, PreparedCompilationTarget(..)
+  , inspectCheckedCompilation, extractBoundDeclarationBinders
   , withBoundExactInterfaceTransaction
   , runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation, commitPreparedWorldDependencies
   , prepareWorldCell
-  , standardAuxiliaryRoots, writePreparedArtifacts, YieldSiteDelivery(..), writePreparedSidecars
-  , PreparedCompilation, preparedCompilationResult, preparedCompilationWorldInputs, prepareCompilationOriginals
+  , writePreparedArtifacts, YieldSiteDelivery(..)
+  , PreparedCompilation, preparedCompilationWorldInputs, preparedCompilationWarnings
+  , preparedCompilationBindingCount, preparedCompilationAuxiliaryRoots
+  , PreparedCompilationInterfaces, newPreparedCompilationInterfaceArtifacts
+  , sealPreparedActivationPreviewWitness, validatePreparedCompilationInputs
+  , writePreparedCompilationSidecars, writePreparedRequestProducts, writePreparedPortableOutputs
+  , PreparedCompilationBindings, prepareCompilationSessionBindings, compilationBindingRepresentations, writeCompilationSessionBindings
+  , PreparedCompilationProductContext
   , PreparedArtifact(..), PreparedArtifactOutput(..), PreparedOutputIntent(..), preparedOutputIntent, prepareArtifacts, prepareArtifactsWithIntent
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
   ) where
@@ -25,6 +32,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Maybe ( isNothing, mapMaybe)
 import Data.Word (Word64)
+import Data.Unique (Unique, newUnique)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import GHC.Tc.Types (tcg_mod)
@@ -40,6 +48,7 @@ import Tidepool.CompilerExecution
   , withCompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen )
 import Tidepool.CompilerProducts
   ( writeCertifiedSegmentItemProductsWithInputs
+  , CertifiedOriginalProducts, writeCertifiedProductsKeepingWithOriginals, newPreparedOriginalInterfaceArtifacts
   , CompletedWorldProducts, stageWorldProducts, pendingWorldNative
   , completeWorldProducts
   , WorldStageInputs, exchangeWorldNativeDemand, bindWorldStageInputsWithNativeDemand, requireWorldStageInputs, withWorldStageBasis, worldStagePriorOriginals, withWorldStageBindings, withWorldStageCompilation, newPreparedWorldInterfaceArtifacts
@@ -53,7 +62,7 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, preparedProductInventory, currentOriginalBinders
   , currentOriginalBindingsExcept, currentReconciledOriginalProducts
   , currentOriginalGroupMetadata, lookupStageGroupMetadata )
-import Tidepool.DiagJson (InputRejection(..), SourceRejection(..))
+import Tidepool.DiagJson (Diag, InputRejection(..), SourceRejection(..))
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), ExactInterfaceOperations, OriginalInterfaceArtifacts)
 import Tidepool.ImportAdmission (compilationScope)
 import Tidepool.ExactScope
@@ -73,7 +82,8 @@ import Tidepool.ExecutionProjection
 import Tidepool.HostBindingAuthority (HostBindingRepresentation, hostBindingRepresentationJsonAuthority)
 import Tidepool.ConstructorIdentity (IssuedConstructor)
 import qualified Tidepool.EffectSchema
-import Tidepool.CheckedCell (sealCheckedTypeWitness, CheckedSignature, captureCheckedSignature, encodeCheckedSignature)
+import Tidepool.CheckedCell (sealCheckedTypeWitness, CheckedSignature, captureCheckedSignature, encodeCheckedSignature
+  , captureCheckedTypeWitness, encodeCheckedTypeWitness, validateOriginalInputTypeWitness)
 import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.WorkerServer (NativeDemandExchange)
@@ -133,14 +143,16 @@ import Tidepool.ExecutionEncode (encodeSymbol)
 import Tidepool.Metadata (metadataForConstructors, targetBindingHasIO)
 import Tidepool.TypePolicy (nominalHeadsOfType)
 import Tidepool.ExtractUtil (shaHex, trySynchronous)
-import Tidepool.DependencyEvidence (validateDependencyEvidence, renderDependencyQualifier)
+import Tidepool.DependencyEvidence (validateDependencyEvidence, renderDependencyQualifier, writeDependencyEvidence)
+import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.PlannedDeclaration
   ( plannedModule, plannedSource, plannedOriginalOwner, renderPlannedDeclarationInventory
   , PlannedDeclaration, PlannedDeclarationInventory, admitLocalNativeDeclaration )
 import Tidepool.FinalizedModuleArtifacts
   ( finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface )
 import Tidepool.SessionArtifacts
-  ( prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment, typedSegmentSessionGlobals
+  ( PreparedSessionBindings, prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings
+  , prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment, typedSegmentSessionGlobals
   , typedSegmentSessionInterfaces, typedSegmentSessionRetainedGlobals, typedSegmentSessionBindingRepresentations
   , ResolvedTypedItemBindings, resolveTypedSegmentBindings
   , resolvedTypedItemOrdinal, resolvedTypedItemBinders, resolvedTypedItemInterface )
@@ -263,10 +275,40 @@ compileBoundWorldCompleted (BoundCompilerRequest scope _ _ admitted _ executor _
       scopedCompileWorldCell scope admission selection Set.empty
     _ -> throwIO CheckedPurposeMismatch
 
-compileBoundRequest :: BoundCompilerRequest -> PipelineSelection result
-  -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO result
-compileBoundRequest request selection retained purpose session path =
-  completedCompilerResult <$> compileBoundCompleted request selection retained purpose session path
+-- Public request selections cannot install GHC callbacks or select a raw
+-- prepared result. The issuing request remains paired with every checked value.
+data CheckedCompilationTarget = CheckedCompilationEnvironment
+  | CheckedCompilationEnvironmentProducts FilePath
+
+data CheckedCompilation = CheckedCompilation BoundCompilerRequest Unique CheckedEnvironmentResult (IO ())
+
+compileCheckedRequest :: BoundCompilerRequest -> CheckedCompilationTarget
+  -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO CheckedCompilation
+compileCheckedRequest request target retained purpose session path = do
+  let selection = case target of
+        CheckedCompilationEnvironment -> CheckedEnvironment
+        CheckedCompilationEnvironmentProducts products -> CheckedEnvironmentProducts products
+  completed <- compileBoundCompleted request selection retained purpose session path
+  identity <- newUnique
+  pure (CheckedCompilation request identity (completedCompilerResult completed) (completedCompilerGuard completed))
+
+checkedCompilationWarnings :: CheckedCompilation -> [Diag]
+checkedCompilationWarnings (CheckedCompilation _ _ checked _) = crWarnings checked
+
+withCheckedCompilation :: CheckedCompilation -> (BoundCompilerRequest -> CheckedEnvironmentResult -> IO a) -> IO a
+withCheckedCompilation (CheckedCompilation request@(BoundCompilerRequest _ _ _ _ _ executor _) _ checked guard) use = do
+  guard
+  requireCompilerExecutorOpen executor
+  use request checked
+
+satisfiesCheckedActivationConstraint :: CheckedCompilation -> IO Bool
+satisfiesCheckedActivationConstraint completion = withCheckedCompilation completion $ \request checked -> do
+  case boundAdmittedOperation request of
+    AdmittedActivationPreview _ -> pure ()
+    _ -> throwIO CheckedPurposeMismatch
+  input <- either fail pure (activationPreviewInputType (crTargetTcGblEnv checked))
+  satisfiesCapturedConstraint (crHscEnv checked) (crTargetTcGblEnv checked)
+    "__tidepoolActivationConstraint" input
 
 -- The constructor stays private. Retention does not grant executor use after its
 -- bracket closes; projection checks operation entry, while submissions fence a
@@ -279,20 +321,47 @@ data PreparedCompletion
   = PreparedOrdinaryCompletion
   | PreparedWorldCompletion CompiledWorldStage (Maybe NativeDemandExchange)
 
-data PreparedCompilation = PreparedCompilation PreparedPipelineResult CompilerRecoveryCaches
-  CompilerExecutor (IO ()) (Maybe OriginalProductWorklist) PreparedCompletion !PreparedOutputAuthority
+data PreparedCompilation = PreparedCompilation
+  { compilationIssuer :: BoundCompilerRequest
+  , compilationIdentity :: Unique
+  , compilationResult :: PreparedPipelineResult
+  , compilationRecovery :: CompilerRecoveryCaches
+  , compilationGuard :: IO ()
+  , compilationWorklist :: Maybe OriginalProductWorklist
+  , compilationCompletion :: PreparedCompletion
+  , compilationOutputAuthority :: !PreparedOutputAuthority
+  }
+
+data PreparedCompilationTarget = PreparedCompilationStg
+  | PreparedCompilationProducts (Maybe FilePath)
+
+preparedRequestSelection :: PreparedCompilationTarget -> PipelineSelection PreparedPipelineResult
+preparedRequestSelection PreparedCompilationStg = PreparedStg
+preparedRequestSelection (PreparedCompilationProducts products) = PreparedProducts products
+
+compilationExecutor :: PreparedCompilation -> CompilerExecutor
+compilationExecutor completion = case compilationIssuer completion of
+  BoundCompilerRequest _ _ _ _ _ executor _ -> executor
+
+-- Opaque operation handles preserve the actual completion and output directory.
+-- No public projection returns their compiler-backed interface reader.
+data PreparedCompilationInterfaces = PreparedCompilationInterfaces PreparedCompilation FilePath OriginalInterfaceArtifacts
+
+data PreparedCompilationBindings = PreparedCompilationBindings PreparedCompilation PreparedSessionBindings
+
+data PreparedCompilationProductContext = PreparedCompilationProductContext Unique PreparedProductContext
 
 data PreparedOutputAuthority
   = NativeOriginalAuthority !NativeProductProvenance
   | PortableAuthority
 
 preparedCompilationOutputIntent :: PreparedCompilation -> PreparedOutputIntent
-preparedCompilationOutputIntent (PreparedCompilation _ _ _ _ _ _ authority) = case authority of
+preparedCompilationOutputIntent completion = case compilationOutputAuthority completion of
   NativeOriginalAuthority _ -> NativeOriginals
   PortableAuthority -> PortableExecutable
 
 preparedCompilationNativeProvenance :: PreparedCompilation -> IO NativeProductProvenance
-preparedCompilationNativeProvenance (PreparedCompilation _ _ _ _ _ _ authority) = case authority of
+preparedCompilationNativeProvenance completion = case compilationOutputAuthority completion of
   NativeOriginalAuthority provenance -> pure provenance
   PortableAuthority -> throwIO CheckedPurposeMismatch
 
@@ -303,43 +372,142 @@ acquirePreparedOutputAuthority request@(BoundCompilerRequest scope _ _ _ _ execu
     PortableExecutable -> pure PortableAuthority
     NativeOriginals -> NativeOriginalAuthority <$> scopedNativeProductProvenance scope
 
-preparedCompilationResult :: PreparedCompilation -> PreparedPipelineResult
-preparedCompilationResult (PreparedCompilation result _ _ _ _ _ _) = result
+preparedCompilationWarnings :: PreparedCompilation -> [Diag]
+preparedCompilationWarnings = prWarningDiagnostics . pprPipelineResult . compilationResult
+
+preparedCompilationBindingCount :: PreparedCompilation -> Int
+preparedCompilationBindingCount = length . prBinds . pprPipelineResult . compilationResult
+
+preparedCompilationAuxiliaryRoots :: PreparedCompilation -> [String]
+preparedCompilationAuxiliaryRoots = standardAuxiliaryRoots . prBinds . pprPipelineResult . compilationResult
 
 preparedCompilationWorldInputs :: PreparedCompilation -> Maybe WorldCellInputs
-preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ PreparedOrdinaryCompletion _) = Nothing
-preparedCompilationWorldInputs (PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion world _) _) =
-  Just (worldCompilerCompletionInputs (compiledWorldStageCompletion world))
+preparedCompilationWorldInputs completion = case compilationCompletion completion of
+  PreparedOrdinaryCompletion -> Nothing
+  PreparedWorldCompletion world _ -> Just (worldCompilerCompletionInputs (compiledWorldStageCompletion world))
 
 preparedCompilationPlannedDeclaration :: PreparedCompilation -> Maybe (PlannedDeclaration,PlannedDeclarationInventory)
-preparedCompilationPlannedDeclaration (PreparedCompilation _ _ _ _ _ PreparedOrdinaryCompletion _) = Nothing
-preparedCompilationPlannedDeclaration (PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion world _) _) =
-  worldCompilerCompletionPlannedDeclaration (compiledWorldStageCompletion world)
+preparedCompilationPlannedDeclaration completion = case compilationCompletion completion of
+  PreparedOrdinaryCompletion -> Nothing
+  PreparedWorldCompletion world _ -> worldCompilerCompletionPlannedDeclaration (compiledWorldStageCompletion world)
 
 withPreparedCompilation :: PreparedCompilation
   -> (PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor -> Maybe OriginalProductWorklist -> IO a)
   -> IO a
-withPreparedCompilation (PreparedCompilation result recovery executor guard worklist _ _) use = do
-  guard
+withPreparedCompilation completion use = do
+  compilationGuard completion
+  let executor = compilationExecutor completion
   requireCompilerExecutorOpen executor
-  use result recovery executor worklist
+  use (compilationResult completion) (compilationRecovery completion) executor (compilationWorklist completion)
+
+newPreparedCompilationInterfaceArtifacts :: PreparedCompilation -> FilePath -> IO PreparedCompilationInterfaces
+newPreparedCompilationInterfaceArtifacts completion directory = withPreparedCompilation completion $ \prepared _ _ _ -> do
+  interfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
+  pure (PreparedCompilationInterfaces completion directory interfaces)
+
+prepareCompilationSessionBindings :: PreparedCompilation -> [String] -> IO PreparedCompilationBindings
+prepareCompilationSessionBindings completion names = withPreparedCompilation completion $ \prepared _ _ _ ->
+  PreparedCompilationBindings completion <$> prepareSessionBindings names (pprPipelineResult prepared)
+
+compilationBindingRepresentations :: PreparedCompilationBindings -> [HostBindingRepresentation]
+compilationBindingRepresentations (PreparedCompilationBindings _ bindings) = sessionBindingRepresentations bindings
+
+writeCompilationSessionBindings :: PreparedCompilationBindings -> Word64 -> FilePath -> IO [BoundBinder]
+writeCompilationSessionBindings (PreparedCompilationBindings completion bindings) generation root =
+  withPreparedCompilation completion $ \prepared _ _ _ -> do
+    unless (preparedCompilationOutputIntent completion == NativeOriginals) (throwIO CheckedPurposeMismatch)
+    writeSessionBindings (prHscEnv (pprPipelineResult prepared)) generation root bindings
+
+sealPreparedActivationPreviewWitness :: PreparedCompilationInterfaces -> IO BS.ByteString
+sealPreparedActivationPreviewWitness (PreparedCompilationInterfaces completion _ interfaces) =
+  withPreparedCompilation completion $ \prepared _ _ _ -> do
+    let request = compilationIssuer completion
+        result = pprPipelineResult prepared
+    case boundAdmittedOperation request of
+      AdmittedActivationPreview _ -> pure ()
+      _ -> throwIO CheckedPurposeMismatch
+    exact <- maybe (throwIO CheckedPurposeMismatch) pure (boundRequestExactScope request)
+    admission <- maybe (throwIO CheckedPurposeMismatch) pure (scopeActivationPreview exact)
+    input <- either fail pure (activationPreviewInputType (prTargetTcGblEnv result))
+    witness <- captureCheckedTypeWitness (prHscEnv result) input
+      >>= maybe (fail "activation preview input type has no complete canonical witness") pure
+    sealed <- sealCheckedTypeWitness interfaces witness
+      >>= maybe (fail "activation preview input lacks an original interface seal") pure
+    either fail pure (validateOriginalInputTypeWitness (previewInputSignature admission) (previewInputWitness admission) sealed)
+    encoded <- maybe (fail "activation preview witness is unsealed") pure (encodeCheckedTypeWitness sealed)
+    pure (toStrictByteString encoded)
+
+validatePreparedCompilationInputs :: PreparedCompilation -> IO ()
+validatePreparedCompilationInputs completion = withPreparedCompilation completion $ \prepared _ _ _ -> do
+  validateDependencyEvidence (preparedFreshDependencies prepared)
+  -- Native writers validate exact inputs at publication. Preview also needs
+  -- this check when its projection returns an unavailable observation.
+  case boundAdmittedOperation (compilationIssuer completion) of
+    AdmittedActivationPreview _ -> forM_ (boundRequestExactScope (compilationIssuer completion)) $ \exact ->
+      revalidateExactScope (prHscEnv (pprPipelineResult prepared)) exact >>= either fail pure
+    _ -> pure ()
+
+-- Sidecars describe both native and portable artifacts. They select no native
+-- publication authority; the completion supplies only their checked metadata.
+writePreparedCompilationSidecars :: YieldSiteDelivery -> PreparedCompilationInterfaces -> [PreparedArtifact] -> IO [FilePath]
+writePreparedCompilationSidecars delivery (PreparedCompilationInterfaces completion directory _) artifacts =
+  withPreparedCompilation completion $ \prepared _ _ _ -> do
+    let result = pprPipelineResult prepared
+    writePreparedSidecars delivery directory (prBinds result)
+      (T.pack <$> prCapturedType result) (map T.pack (prWarnings result)) artifacts
+
+-- Identity and intent checks precede the existing writer, which may materialize
+-- package and finalization files before validating its terminal certificate.
+writePreparedRequestProducts :: PreparedCompilationInterfaces -> Maybe PreparedCompilationProductContext
+  -> [PreparedArtifact] -> IO CertifiedOriginalProducts
+writePreparedRequestProducts (PreparedCompilationInterfaces completion directory interfaces) context artifacts =
+  withPreparedCompilation completion $ \prepared _ _ _ -> do
+    unless (preparedCompilationOutputIntent completion == NativeOriginals) (throwIO CheckedPurposeMismatch)
+    when (not (null artifacts) && isNothing context) (throwIO CheckedPurposeMismatch)
+    rawContext <- forM context $ \(PreparedCompilationProductContext identity products) -> do
+      unless (identity == compilationIdentity completion) (throwIO CheckedPurposeMismatch)
+      pure products
+    let request = compilationIssuer completion
+    products <- writeCertifiedProductsKeepingWithOriginals (optionIncludes (boundWorkerRequest request))
+      interfaces directory prepared rawContext [(paTarget artifact, paProgram artifact) | artifact <- artifacts]
+    writePreparedInputProof request directory prepared
+    pure products
+
+writePreparedPortableOutputs :: PreparedCompilationInterfaces -> IO ()
+writePreparedPortableOutputs (PreparedCompilationInterfaces completion directory _) =
+  withPreparedCompilation completion $ \prepared _ _ _ -> do
+    unless (preparedCompilationOutputIntent completion == PortableExecutable) (throwIO CheckedPurposeMismatch)
+    _ <- writeDependencyEvidence directory (preparedFreshDependencies prepared)
+    writePreparedInputProof (compilationIssuer completion) directory prepared
+    BS.writeFile (directory </> "portable-output.mode") "TPPORTABLEOUTPUT1\n"
+
+writePreparedInputProof :: BoundCompilerRequest -> FilePath -> PreparedPipelineResult -> IO ()
+writePreparedInputProof request directory prepared =
+  let args = boundWorkerRequest request
+      sourceProofAllowed = case boundAdmittedOperation request of
+        AdmittedActivationPreview _ -> False
+        _ -> True
+  in when (sourceProofAllowed && null (optionInjectVals args) && isNothing (optionSessionArtifacts args)
+      && Map.null (optionRetainedGenerations args) && isNothing (preparedExactCompilation prepared)) $
+    writeCompileInputProof directory (prHscEnv (pprPipelineResult prepared))
+      (preparedFreshDependencies prepared) (pprPackageImports prepared)
 
 -- World effects borrow the bound stage's own result, caches and executor.
 -- The ordinary route has no predecessor or native exchange authority.
 withPreparationInputs :: PreparedCompilation -> Maybe WorldStageInputs
   -> (PreparedPipelineResult -> CompilerRecoveryCaches -> CompilerExecutor -> Maybe OriginalProductWorklist -> IO a) -> IO a
-withPreparationInputs completion (Just inputs) use = case completion of
-  PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion stage _) _ -> do
+withPreparationInputs completion (Just inputs) use = withPreparedCompilation completion $ \_ _ _ _ -> case compilationCompletion completion of
+  PreparedWorldCompletion stage _ -> do
     requireWorldStageInputs stage inputs
     withWorldStageCompilation inputs (\prepared recovery executor -> use prepared recovery executor Nothing)
   _ -> throwIO CheckedPurposeMismatch
-withPreparationInputs completion Nothing use = case completion of
-  PreparedCompilation _ _ _ _ _ PreparedOrdinaryCompletion _ -> withPreparedCompilation completion use
+withPreparationInputs completion Nothing use = case compilationCompletion completion of
+  PreparedOrdinaryCompletion -> withPreparedCompilation completion use
   _ -> throwIO CheckedPurposeMismatch
 
 bindPreparedWorldInputs :: PreparedCompilation -> Maybe CompletedWorldProducts -> IO WorldStageInputs
-bindPreparedWorldInputs completion prior = withPreparedCompilation completion $ \_ _ _ _ -> case completion of
-  PreparedCompilation _ _ _ _ _ (PreparedWorldCompletion stage native) _ -> do
+bindPreparedWorldInputs completion prior = withPreparedCompilation completion $ \_ _ _ _ -> case compilationCompletion completion of
+  PreparedWorldCompletion stage native -> do
     inputs <- bindWorldStageInputsWithNativeDemand stage prior native
     provenance <- preparedCompilationNativeProvenance completion
     withWorldStageBasis inputs $ \facts -> unless
@@ -390,9 +558,10 @@ compileWithWorklist request@(BoundCompilerRequest _ args _ _ _ executor _) selec
   worklist <- readIORef localWorklist
   pure (completed,worklist)
 
-compilePreparedRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipelineResult
+compilePreparedRequest :: BoundCompilerRequest -> PreparedCompilationTarget
   -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope -> FilePath -> IO PreparedCompilation
-compilePreparedRequest request@(BoundCompilerRequest _ _ _ admitted _ executor _) selection retained purpose session path = do
+compilePreparedRequest request@(BoundCompilerRequest _ _ _ admitted _ _ _) target retained purpose session path = do
+  let selection = preparedRequestSelection target
   authority <- acquirePreparedOutputAuthority request
   (completed,worklist) <- case (admitted,preparedOutputIntent request) of
     (AdmittedHeldCellPrepareOperation _,_) -> throwIO CheckedPurposeMismatch
@@ -401,31 +570,34 @@ compilePreparedRequest request@(BoundCompilerRequest _ _ _ admitted _ executor _
       completed <- compileBoundCompleted request selection retained purpose session path
       pure (completed,Nothing)
   route <- preparedCompletionFor Nothing completed
-  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed) executor (completedCompilerGuard completed) worklist route authority)
+  identity <- newUnique
+  pure (PreparedCompilation request identity (completedCompilerResult completed) (completedCompilerRecovery completed)
+    (completedCompilerGuard completed) worklist route authority)
 
 compilePreparedWorldRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipelineResult -> IO PreparedCompilation
-compilePreparedWorldRequest request@(BoundCompilerRequest _ _ _ _ _ executor native) selection = do
+compilePreparedWorldRequest request@(BoundCompilerRequest _ _ _ _ _ _ native) selection = do
   authority <- acquirePreparedOutputAuthority request
   completed <- compileBoundWorldCompleted request (maybe selection (\exchange -> WithCompilerDependencyExchange exchange selection) native)
   route <- preparedCompletionFor native completed
-  pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed)
-    executor (completedCompilerGuard completed) Nothing route authority)
+  identity <- newUnique
+  pure (PreparedCompilation request identity (completedCompilerResult completed) (completedCompilerRecovery completed)
+    (completedCompilerGuard completed) Nothing route authority)
 
 compilePreparedWorldSegmentRequest :: BoundCompilerRequest -> PipelineSelection PreparedSegmentProductsResult
   -> IO (PreparedCompilation,TypedSegment)
-compilePreparedWorldSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ executor native) selection = do
+compilePreparedWorldSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ _ native) selection = do
   authority <- acquirePreparedOutputAuthority request
   completed <- compileBoundWorldCompleted request (maybe selection (\exchange -> WithCompilerDependencyExchange exchange selection) native)
   let result = completedCompilerResult completed
   route <- preparedCompletionFor native completed
-  pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed)
-    executor (completedCompilerGuard completed) Nothing route authority,preparedSegmentCaptures result)
+  identity <- newUnique
+  pure (PreparedCompilation request identity (preparedSegmentProducts result) (completedCompilerRecovery completed)
+    (completedCompilerGuard completed) Nothing route authority,preparedSegmentCaptures result)
 
 -- Production helpers expose their actual checked input or parsed source.
 -- The generic Ghc runner stays private to this request owner.
-inspectBoundCheckedEnvironment :: BoundCompilerRequest -> InspectionWork
-  -> CheckedEnvironmentResult -> [InspectionRequest] -> IO [InspectionResult]
-inspectBoundCheckedEnvironment request work checked inspections = do
+inspectCheckedCompilation :: InspectionWork -> CheckedCompilation -> [InspectionRequest] -> IO [InspectionResult]
+inspectCheckedCompilation work completion inspections = withCheckedCompilation completion $ \request checked -> do
   case boundAdmittedOperation request of
     AdmittedInspection _ -> pure ()
     _ -> throwIO CheckedPurposeMismatch
@@ -457,8 +629,10 @@ boundWorldCellPreparation (BoundCompilerRequest _ _ _ admitted _ executor _) = d
 -- facts carry no source tree or usable compiler capability beyond scope END.
 commitPreparedWorldDependencies :: BoundCompilerRequest -> PreparedCompilation -> IO ()
 commitPreparedWorldDependencies (BoundCompilerRequest scope _ _ admitted _ executor _)
-    (PreparedCompilation _ _ issuing guard _ route _) = do
-  guard
+    completion = do
+  compilationGuard completion
+  let issuing = compilationExecutor completion
+      route = compilationCompletion completion
   requireCompilerExecutorOpen issuing
   requireCompilerExecutorOpen executor
   unless (sameCompilerExecutor issuing executor) (throwIO CheckedPurposeMismatch)
@@ -516,15 +690,15 @@ data FinalProjection
 
 -- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
-prepareArtifacts :: OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
+prepareArtifacts :: PreparedCompilationInterfaces
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
-  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifacts = prepareArtifactsWithProjectionIntent Nothing requireProjection
+  -> IO ([PreparedArtifact], Maybe PreparedCompilationProductContext)
+prepareArtifacts = prepareArtifactsWithProjection requireProjection
 
 data PreparedOutputIntent = NativeOriginals | PortableExecutable deriving (Eq)
 
 data PreparedArtifactOutput
-  = NativeOutputs [PreparedArtifact] PreparedProductContext
+  = NativeOutputs [PreparedArtifact] PreparedCompilationProductContext
   | PortableOutputs [PreparedArtifact]
 
 -- The request chooses its output contract before module completion observers
@@ -537,22 +711,23 @@ preparedOutputIntent request = case boundAdmittedOperation request of
     _ -> NativeOriginals
   _ -> NativeOriginals
 
-prepareArtifactsWithIntent :: OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
+prepareArtifactsWithIntent :: PreparedCompilationInterfaces
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO PreparedArtifactOutput
-prepareArtifactsWithIntent interfaces directory completion targets auxiliary retained hostBindings = do
-  (artifacts,products) <- prepareArtifactsWithProjectionIntent Nothing requireProjection
-    interfaces directory completion targets auxiliary retained hostBindings
+prepareArtifactsWithIntent interfaces@(PreparedCompilationInterfaces completion _ _) targets auxiliary retained hostBindings = do
+  (artifacts,products) <- prepareArtifacts interfaces targets auxiliary retained hostBindings
   case preparedCompilationOutputIntent completion of
     NativeOriginals -> NativeOutputs artifacts <$> maybe (fail "native output lacks its product owner") pure products
     PortableExecutable -> pure (PortableOutputs artifacts)
 
 prepareArtifactsWithProjection
   :: (forall a. Either ProjectionError a -> IO a)
-  -> OriginalInterfaceArtifacts -> FilePath -> PreparedCompilation
+  -> PreparedCompilationInterfaces
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
-  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjection = prepareArtifactsWithProjectionIntent Nothing
+  -> IO ([PreparedArtifact], Maybe PreparedCompilationProductContext)
+prepareArtifactsWithProjection project (PreparedCompilationInterfaces completion directory interfaces) targets auxiliary retained hostBindings = do
+  (artifacts,context) <- prepareArtifactsWithProjectionIntent Nothing project interfaces directory completion targets auxiliary retained hostBindings
+  pure (artifacts,PreparedCompilationProductContext (compilationIdentity completion) <$> context)
 
 prepareArtifactsWithProjectionIntent
   :: Maybe WorldStageInputs -> (forall a. Either ProjectionError a -> IO a)

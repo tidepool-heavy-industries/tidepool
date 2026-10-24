@@ -43,7 +43,13 @@ one compiler executor before mode dispatch. `CompilerScope` exposes ordinary
 operations, never public record-update labels. A `PreparedCompilation` retains
 its actual compiler result, selected recovery references and compilation-local
 original worklist; concrete projection consumes that completion rather than
-reading the most recent compilation's context. Entry checks use the issuing
+reading the most recent compilation's context. Checked and prepared request
+handles retain their issuing request and a distinct identity for each successful
+compilation. Public request selections cannot install raw GHC callbacks. Interface
+and session-binding operations derive their completion from opaque handles;
+publication checks product-context identity and output intent before any write.
+Interface readers retain live compiler state and are never immutable observations.
+Entry checks use the issuing
 thread/phase and executor's existing closed state, including empty projections.
 Retained facts may outlive that allowance; they do not authorize later effects.
 Package cells keep their existing GHC owner, and changed projection inputs still
