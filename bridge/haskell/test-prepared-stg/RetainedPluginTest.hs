@@ -288,6 +288,14 @@ verifyNativeBoundary dir = do
       result <- load' (Just cache) LoadAllTargets mkUnknownDiagnostic Nothing (scopeRetainedModuleGraph graph)
       unless (case result of Succeeded -> True; Failed -> False) $ liftIO $
         ioError (userError "native boundary fixture failed GHC load")
+      sourceEnvironment <- getSession
+      case lookupHpt (hsc_HPT sourceEnvironment) (mkModuleName source) of
+        Nothing -> liftIO (ioError (userError "source rule controls lost their actual HMI"))
+        Just home -> liftIO $ do
+          let controls = [identifier | identifier <- typeEnvIds (md_types (hm_details home))
+                , occurrence identifier `elem` ["sourceId","sourceRule"]]
+          require (length controls == 2 && all (isOpaquePragma . idInlinePragma) controls)
+            "source rule controls permit inlining or worker/wrapper, so call disappearance is ambiguous"
       observed <- liftIO (readIORef snapshots)
       let snapshot phase name = maybe (error ("missing native boundary phase " ++ phase ++ ":" ++ name)) id
             (Map.lookup (phase,name) observed)
