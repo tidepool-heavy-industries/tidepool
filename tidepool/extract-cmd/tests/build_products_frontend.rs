@@ -287,6 +287,20 @@ fn frame_path(bytes: &mut Vec<u8>, path: &Path) {
     reason = "real owned frontend/provider refusal and post-acquisition settlement controls"
 )]
 fn configured_startup_failures_retain_acquisition_and_settle_exact_owner() {
+    configured_startup_controls(&["preboot-refusal", "profile-failure"]);
+}
+
+#[test]
+#[ignore = "requires the maintained expected-runner-refusal control"]
+fn configured_source_release_refusal_is_retained() {
+    configured_startup_controls(&["release-refusal"]);
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "actual configured frontend/provider process controls"
+)]
+fn configured_startup_controls(modes: &[&str]) {
     let temporary = tempfile::tempdir().unwrap();
     let retained_directory = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").map(|root| {
         std::path::PathBuf::from(root).join("owned-compiler-control-configured-source")
@@ -326,7 +340,7 @@ fn configured_startup_failures_retain_acquisition_and_settle_exact_owner() {
     let provider_bytes = include_bytes!("fixtures/service_provider.py");
     fs::write(&provider, provider_bytes).unwrap();
     let frontend = env!("CARGO_BIN_EXE_tidepool-extract");
-    for mode in ["preboot-refusal", "profile-failure", "release-refusal"] {
+    for &mode in modes {
         let owner = directory.join(mode);
         let record = directory.join(format!("{mode}-source.json"));
         // The executable deliberately is not a TPSPF001 package profile. Its

@@ -43,6 +43,34 @@ sh_test(
 )
 
 python_bootstrap_binary(
+    name = "configured_service_refusal_control",
+    main = "configured-service-refusal.py",
+)
+
+sh_test(
+    name = "configured_service_refusal_tests",
+    test = ":configured_service_refusal_control",
+    args = [
+        "--binary", "$(location //tidepool/extract-cmd:build_products_frontend_binary)",
+        "--runner", "$(location :isolated_libtest_source)",
+    ],
+    env = {
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [
+        "//tidepool/extract-cmd:build_products_frontend_binary",
+        "//tidepool/extract-cmd:tidepool-extract",
+        ":isolated_libtest_source",
+        "toolchains//:bash",
+        "toolchains//:python",
+        "toolchains//:test_tools_closure",
+    ],
+    visibility = ["PUBLIC"],
+)
+
+python_bootstrap_binary(
     name = "isolated_libtest",
     main = "isolated-libtest.py",
     deps = ["//build/package:owned_service_report"],
