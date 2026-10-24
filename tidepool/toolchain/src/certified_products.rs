@@ -2491,6 +2491,23 @@ pub(crate) fn authenticates_original_native_entry(
             .is_some_and(|group| group.group.binders().contains(binder))
 }
 
+/// Compare physical code with the actual Original acquisition retained by its
+/// completed issuer. Contextual import selection has its own later row owner.
+pub(crate) fn authenticates_original_native_group(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    original_ordinal: u32,
+    pending: &PendingCertifiedGroup,
+) -> bool {
+    let witness = product.original_native();
+    witness.matches_original(product)
+        && witness.group(original_ordinal).is_some_and(|issued| {
+            issued.origin == pending.origin
+                && issued.owner == pending.owner
+                && pending.group.original_ordinal() == original_ordinal
+                && Arc::ptr_eq(&issued.group, &pending.group)
+        })
+}
+
 /// Read definitions from the immutable original at its authenticated group ordinal.
 pub(crate) fn original_native_group_definitions(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,

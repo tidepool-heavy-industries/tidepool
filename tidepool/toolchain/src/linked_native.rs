@@ -317,6 +317,8 @@ pub(crate) type NativeTargetSources = BTreeMap<NativeGroupBinding, TargetHomeSou
 /// A retained slot on code compiled in this cell, verified by its linked target.
 #[derive(Clone, Copy, Debug)]
 pub struct CellStageSlotWitness<'a> {
+    target: &'a LinkedNativeTarget,
+    origin: CellStageSlotOrigin,
     owner: &'a AcquiredNativeCode,
     demander: NativeGroupBinding,
     group: &'a Arc<PendingCertifiedGroup>,
@@ -324,7 +326,18 @@ pub struct CellStageSlotWitness<'a> {
     binding: ArtifactBinding,
     leaf: &'a NativeRetainedRequirement,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CellStageSlotOrigin {
+    Current,
+    PriorProgram,
+}
 impl<'a> CellStageSlotWitness<'a> {
+    pub(crate) fn target(&self) -> &'a LinkedNativeTarget {
+        self.target
+    }
+    pub(crate) fn origin(&self) -> CellStageSlotOrigin {
+        self.origin
+    }
     pub fn owner(&self) -> &'a AcquiredNativeCode {
         self.owner
     }
@@ -725,11 +738,13 @@ impl LinkedNativeTarget {
                 ))
             }
         }
-        let cell_stage = |group: &'a Arc<PendingCertifiedGroup>| {
+        let cell_stage = |group: &'a Arc<PendingCertifiedGroup>, origin| {
             if !group.same_issuance(product) {
                 return Err(refusal("native source receipt names another physical row"));
             }
             Ok(CellStageSlotWitness {
+                target: self,
+                origin,
                 owner,
                 demander,
                 group,
@@ -744,10 +759,12 @@ impl LinkedNativeTarget {
             .ok_or_else(|| refusal("selected HOME occurrence lacks target source classification"))?
         {
             TargetHomeSource::CurrentStage(group) => {
-                cell_stage(group).map(VerifiedRetainedSlotDemander::CurrentStage)
+                cell_stage(group, CellStageSlotOrigin::Current)
+                    .map(VerifiedRetainedSlotDemander::CurrentStage)
             }
             TargetHomeSource::PriorProgramStage(group) => {
-                cell_stage(group).map(VerifiedRetainedSlotDemander::PriorProgramStage)
+                cell_stage(group, CellStageSlotOrigin::PriorProgram)
+                    .map(VerifiedRetainedSlotDemander::PriorProgramStage)
             }
             TargetHomeSource::HistoricalInput => Ok(VerifiedRetainedSlotDemander::HistoricalInput(
                 HistoricalSlotWitness {

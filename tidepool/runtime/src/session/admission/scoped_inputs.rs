@@ -336,7 +336,8 @@ impl ScopedResolvedInputs {
         let item = execution.item();
         let stage = item.world_selected_runtime_inputs().stage_first_ordinal();
         let selected = execution
-            .cell_stage_retained_input(witness.leaf())
+            .select_cell_stage_retained_input(witness)
+            .map_err(|error| PreparedRuntimeError::NativeSourceEvidence(Box::new(error)))?
             .ok_or_else(|| {
                 tracing::warn!(
                     target: "tidepool::runtime::retained_authorization",
@@ -367,9 +368,7 @@ impl ScopedResolvedInputs {
                         WorldCellRuntimeInputOrigin::BaseWorld
                         | WorldCellRuntimeInputOrigin::CellOperand,
                     ) => {
-                        let expected = selected
-                            .checked_row()
-                            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
+                        let expected = selected.checked_row();
                         if !Arc::ptr_eq(expected, row) {
                             return Err(PreparedRuntimeError::certified_target_owners());
                         }
@@ -379,7 +378,10 @@ impl ScopedResolvedInputs {
                         ScopedValueEvidence::Produced { row, .. },
                         WorldCellRuntimeInputOrigin::PriorStage { producer, consumer },
                     ) => {
-                        if producer >= consumer || consumer > stage {
+                        if producer >= consumer
+                            || consumer > stage
+                            || !Arc::ptr_eq(selected.checked_row(), row)
+                        {
                             return Err(PreparedRuntimeError::certified_target_owners());
                         }
                         row
@@ -831,8 +833,19 @@ mod tests {
                         else {
                             continue;
                         };
+                        let slot = target
+                            .verify_retained_slot(
+                                &owner,
+                                u32::try_from(global_index).unwrap(),
+                                binding,
+                                &leaf,
+                            )
+                            .unwrap();
+                        let VerifiedRetainedSlotDemander::CurrentStage(witness) = slot else {
+                            continue;
+                        };
                         let Some(CellStageRetainedInput::EarlierItem(selected)) =
-                            native.cell_stage_retained_input(&leaf)
+                            native.select_cell_stage_retained_input(witness).unwrap()
                         else {
                             continue;
                         };
@@ -981,7 +994,21 @@ mod tests {
                         producer.generation(),
                         Some(row.certified_interface().artifact_id().0),
                     );
-                    assert!(native.cell_stage_retained_input(&leaf).is_none());
+                    for owner in target.acquired() {
+                        for (slot, import) in owner.imports().enumerate() {
+                            let AcquiredNativeImport::Retained { binding, .. } = import else {
+                                continue;
+                            };
+                            assert!(target
+                                .verify_retained_slot(
+                                    &owner,
+                                    u32::try_from(slot).unwrap(),
+                                    binding,
+                                    &leaf,
+                                )
+                                .is_err());
+                        }
+                    }
                     if producer.item().index() < index {
                         assert!(inputs.value(leaf.identity(), leaf.generation()).is_some());
                     }
@@ -1075,21 +1102,37 @@ mod tests {
             .unwrap()
             .linked_native_target()
             .unwrap();
-        let prior = earlier_target
+        let (owner, global_index, binding, prior) = earlier_target
             .acquired()
             .find_map(|owner| {
-                owner.imports().find_map(|import| match import {
-                    AcquiredNativeImport::Retained { requirement, .. }
-                        if requirement.identity().occurrence == "capturedForNative" =>
-                    {
-                        Some(requirement)
-                    }
-                    _ => None,
-                })
+                owner
+                    .imports()
+                    .enumerate()
+                    .find_map(|(index, import)| match import {
+                        AcquiredNativeImport::Retained {
+                            requirement,
+                            binding,
+                        } if requirement.identity().occurrence == "capturedForNative" => Some((
+                            owner.clone(),
+                            u32::try_from(index).unwrap(),
+                            binding,
+                            requirement,
+                        )),
+                        _ => None,
+                    })
             })
             .unwrap();
-        let Some(CellStageRetainedInput::StageSelected(selected)) =
-            earlier_native.cell_stage_retained_input(&prior)
+        let slot = earlier_target
+            .verify_retained_slot(&owner, global_index, binding, &prior)
+            .unwrap();
+        let (VerifiedRetainedSlotDemander::CurrentStage(witness)
+        | VerifiedRetainedSlotDemander::PriorProgramStage(witness)) = slot
+        else {
+            panic!("same-cell capture requires a cell-stage slot witness")
+        };
+        let Some(CellStageRetainedInput::StageSelected(selected)) = earlier_native
+            .select_cell_stage_retained_input(witness)
+            .unwrap()
         else {
             panic!("cross-stage produced value requires explicit stage selection")
         };
