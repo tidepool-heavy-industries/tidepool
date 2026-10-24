@@ -37084,6 +37084,7 @@ None,
         let request = ExactCompileContext::new(Arc::new(context))
             .prepare_compilation(directory.path(), PRODUCER)
             .unwrap();
+        let request_inventory = request.compiler_inputs().artifacts().inventory();
         let source = request.compiler_inputs().shared_compiler_source_support();
         let primary = source
             .compiler_primary_input(&child_entry.descriptor.owner)
@@ -37169,7 +37170,7 @@ None,
             )
             .unwrap();
         let mut validation = PackageInterfaceValidation::with_inventory(Arc::clone(&operation));
-        let physical = inventory
+        let physical = request_inventory
             .bind_segment(
                 request.compiler_inputs().artifacts(),
                 vec![Arc::clone(&parent_entry)],
@@ -37181,7 +37182,7 @@ None,
         let prepared = prepared_target_fixture(&observations);
         let observed =
             AuthenticatedTargetImports::issue(&prepared, &observations, &operation).unwrap();
-        let target = inventory
+        let target = request_inventory
             .select_native_target(
                 physical.captured_stage().physical_cohort(),
                 observed,
