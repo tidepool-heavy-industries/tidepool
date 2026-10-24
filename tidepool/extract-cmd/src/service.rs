@@ -578,6 +578,8 @@ mod tests {
         ] {
             let directory = root.join(name);
             std::fs::create_dir_all(&directory).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
             let directory = std::fs::canonicalize(directory).unwrap();
             let mut report = OwnedServiceReport::new(
                 directory,
