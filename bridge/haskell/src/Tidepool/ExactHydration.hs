@@ -1660,7 +1660,9 @@ selectHydratedInterfaceInputs roots closure@(HydratedInterfaceClosure rows) = do
   CapturedInterfaceInputs selected <- selectCapturedInterfaceInputs (closureSelectionInputs closure) roots
   let requested = Map.fromList [((exactUnit artifact,exactModule artifact),artifact) | artifact <- roots]
       receiving key (VerifiedHydratedInterface artifact compiler body issuer,aliases) =
-        (VerifiedHydratedInterface (Map.findWithDefault artifact key requested) compiler body issuer,aliases)
+        let alias = Map.findWithDefault artifact key requested
+            selectedArtifact = if sameExactInterfaceIdentity artifact alias then alias else artifact
+        in (VerifiedHydratedInterface selectedArtifact compiler body issuer,aliases)
   pure (HydratedInterfaceClosure (Map.mapWithKey receiving (Map.restrictKeys rows (Map.keysSet selected))))
 
 mergeHydratedInterfaceClosures :: [HydratedInterfaceClosure] -> Either InterfaceInputFailure HydratedInterfaceClosure
