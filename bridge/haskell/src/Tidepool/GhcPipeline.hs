@@ -1245,6 +1245,10 @@ data InterfaceInstallationFailure
   | InterfaceSourceObservationChanged
   | InterfacePhaseSourceChanged (String,String)
   | InterfaceCapturedSelectionFailure String
+  | InterfaceCapturedClosureMismatch
+      { homesWithoutCapturedInputs :: [(String,String)]
+      , capturedInputsWithoutHomes :: [(String,String)]
+      }
   deriving Show
 instance Exception InterfaceInstallationFailure
 
@@ -3507,11 +3511,16 @@ retainWorldCellOriginal prepared completion (PrefixHomeInterfaces homes previous
         , let (artifact,iface) = verifiedExactInterface product'
         , isJust (lookupHpt retained (moduleName (mi_module iface)))]
   captured <- either throwIO pure (selectCapturedInterfaceInputs allInputs roots)
-  unless (Set.fromList [(exactUnit artifact,exactModule artifact) | product' <- verifiedInterfaceProducts captured
+  let capturedOwners = Set.fromList
+        [(exactUnit artifact,exactModule artifact) | product' <- verifiedInterfaceProducts captured
           ,let (artifact,_) = verifiedExactInterface product']
-      == Set.fromList [(unitString (moduleUnit (mi_module (hm_iface home))),moduleNameString (moduleName (mi_module (hm_iface home))))
-          | home <- eltsHpt retained])
-    (throwIO (InterfaceCapturedSelectionFailure "completed prefix lacks its closed captured HMI set"))
+      retainedOwners = Set.fromList
+        [(unitString (moduleUnit (mi_module (hm_iface home))),moduleNameString (moduleName (mi_module (hm_iface home))))
+          | home <- eltsHpt retained]
+  unless (capturedOwners == retainedOwners)
+    (throwIO (InterfaceCapturedClosureMismatch
+      (Set.toAscList (retainedOwners `Set.difference` capturedOwners))
+      (Set.toAscList (capturedOwners `Set.difference` retainedOwners))))
   pure (PrefixHomeInterfaces retained captured,mkModuleGraph (mgModSummaries' graph ++ added))
   where
     environment = prHscEnv (pprPipelineResult prepared)
