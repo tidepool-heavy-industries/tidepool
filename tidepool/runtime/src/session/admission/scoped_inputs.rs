@@ -342,7 +342,26 @@ impl ScopedResolvedInputs {
                     && selected.generation() == witness.leaf().generation()
                     && *selected.symbol() == *witness.leaf().identity()
             })
-            .ok_or_else(|| PreparedRuntimeError::certified_target_owners())?;
+            .ok_or_else(|| {
+                tracing::warn!(
+                    target: "tidepool::runtime::retained_authorization",
+                    item = item.index(),
+                    stage,
+                    demander = ?witness.demander(),
+                    global_index = witness.global_index(),
+                    binding = ?witness.binding(),
+                    identity = ?witness.leaf().identity(),
+                    generation = witness.leaf().generation(),
+                    session_var = ?value.id,
+                    defining_scope = value.defining_scope.0,
+                    selected_count = item.world_selected_runtime_inputs().inputs().len(),
+                    selected = ?item.world_selected_runtime_inputs().inputs().iter().take(16).map(|input| (
+                        input.symbol(), input.generation(), input.session_var(), input.defining_scope(), input.origin(),
+                    )).collect::<Vec<_>>(),
+                    "retained native slot is absent from the stage's selected runtime inputs"
+                );
+                PreparedRuntimeError::certified_target_owners()
+            })?;
         let row = match (&value.evidence, selected.origin()) {
             (
                 ScopedValueEvidence::Admitted { row, .. },
