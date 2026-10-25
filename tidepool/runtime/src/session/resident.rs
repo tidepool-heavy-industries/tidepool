@@ -5668,7 +5668,7 @@ where
         self.state.set_effect_execution(effect_policy, live_payload);
     }
 
-    /// Atomically select one actor's authority/scopes and request policy.
+    /// Settle dropped custody, then select one actor's authority/scopes and request policy.
     /// Validation precedes both assignments, so a dead lexical scope
     /// cannot leave half of another actor's execution contract installed.
     pub fn set_actor_execution(
@@ -5677,6 +5677,7 @@ where
         effect_policy: EffectRunPolicy,
         live_payload: LivePayloadPolicy,
     ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
         if !self.state.scope_tree().is_live(context.lexical_scope) {
             return Err(SessionError::DeadScope(context.lexical_scope).into());
         }
@@ -10834,6 +10835,76 @@ mod custody_release_tests {
             PreparedOuter::Constructor { fields, .. } if matches!(fields.as_slice(),
                 [PreparedResult::Scalar(99)]))
         );
+    }
+
+    #[test]
+    fn actor_checkout_settles_dropped_custody_before_scope_validation() {
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let source = session.mint_isolated_scope_with_lease().unwrap();
+        let scope = source.scope();
+        let id = bind_fixture(&mut session, &source, scope, 45);
+        let context = SessionRunContext {
+            lexical_scope: scope,
+            resource_scope: RealmId::fresh(),
+            ..SessionRunContext::ROOT
+        };
+        session
+            .set_actor_execution(
+                context,
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .unwrap();
+        let custody = session
+            .retain_binding_custody_in(scope, "x", id)
+            .unwrap()
+            .unwrap();
+        let handle = custody.handle.unwrap();
+        drop(custody);
+        assert!(session
+            .state
+            .prepared()
+            .unwrap()
+            .handle_slot(handle)
+            .is_some());
+        session
+            .set_actor_execution(
+                context,
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .unwrap();
+        assert!(session
+            .state
+            .prepared()
+            .unwrap()
+            .handle_slot(handle)
+            .is_none());
+        assert_live_binding(&mut session, scope, id);
+
+        let abandoned = session.mint_isolated_scope_with_lease().unwrap();
+        let expired_scope = abandoned.scope();
+        drop(abandoned);
+        assert!(session.state.scope_tree().is_live(expired_scope));
+        assert!(matches!(
+            session.set_actor_execution(
+                SessionRunContext {
+                    lexical_scope: expired_scope,
+                    ..SessionRunContext::ROOT
+                },
+                EffectRunPolicy::SuspendAll,
+                LivePayloadPolicy::HASKELL_EFFECT_CLOSURE,
+            ),
+            Err(ResidentError::Session(SessionError::DeadScope(scope))) if scope == expired_scope
+        ));
+        assert!(!session.state.scope_tree().is_live(expired_scope));
+        assert_eq!(session.run_context(), context);
+        assert_eq!(session.effect_policy(), EffectRunPolicy::HandleOrSuspend);
+        assert_eq!(
+            session.live_payload_policy(),
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE
+        );
+        assert_live_binding(&mut session, scope, id);
     }
 
     #[test]
