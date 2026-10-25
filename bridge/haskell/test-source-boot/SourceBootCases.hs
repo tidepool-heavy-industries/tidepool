@@ -196,7 +196,7 @@ import Tidepool.ExactHydration
   , runExactInterfaceOperation, readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
-  , selectCapturedInterfaceInputs, hydrateInterfaceInputs
+  , selectCapturedInterfaceInputs, hydrateInterfaceInputs, hydratedClosureAsCapturedInputs, hydratedExactInputs, InterfaceInputFailure(..)
   , captureProtectedTemplateImports, renderProtectedTemplateImports
   , generatedScaffoldRecipeWithProtectedImports
   , generatedScaffoldRecipeWithImportRendering
@@ -246,9 +246,9 @@ import Tidepool.ImportAdmission
   , compilationExactImports, sourceImportsSnapshot, sourceImportsHomeRoles, writeCheckedExactCompilation )
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
-  , scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
+  , scopeLexical, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
   , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..)
-  , scopeValueInterfaces, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, validateExactScopeEnvironment
+  , scopeValueInterfaces, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, readScopedInterfaceClosure, validateExactScopeEnvironment
   , ExactScopeRequestFailure(..)
   , scopeModuleInterfaceProofs, scopeCanonicalInterfaces, admittedInterfaceSourceSha256, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
@@ -649,12 +649,40 @@ readScopeVariant original change = do
   hClose handle
   readExactScope path
 
+data InspectionScopeMode = RetainedInspection | CurrentSourceReload
+
 admitInspectionScope :: ExactScope -> [FilePath] -> [ExactIfaceArtifact] -> IO ExactScope
-admitInspectionScope original paths values = do
+admitInspectionScope = admitInspectionScopeWith RetainedInspection
+
+admitReloadInspectionScope :: ExactScope -> [FilePath] -> [ExactIfaceArtifact] -> IO ExactScope
+admitReloadInspectionScope = admitInspectionScopeWith CurrentSourceReload
+
+admitInspectionScopeWith :: InspectionScopeMode -> ExactScope -> [FilePath] -> [ExactIfaceArtifact] -> IO ExactScope
+admitInspectionScopeWith mode original paths values = do
   authorizationPath <- writeInspectionPurposeCodecFixture
     (takeDirectory (scopeManifestPath original)) paths values
   authorization <- readCodecTerm authorizationPath
-  readScopeVariant original (\fields -> take 8 fields ++ [authorization] ++ drop 9 fields) >>= either fail pure
+  purpose <- case (mode,authorization) of
+    (RetainedInspection,_) -> pure authorization
+    (CurrentSourceReload,TList (TString "inspection1":fields)) ->
+      pure (TList (TString "reload-inspection1":fields))
+    _ -> fail "inspection fixture has another purpose layout"
+  readScopeVariant original (\fields -> take 8 fields ++ [purpose] ++ drop 9 fields) >>= either fail pure
+
+-- These rows come from mkBoundBinders' real checked interface/package outputs.
+-- A purpose's interface inventory alone grants only TYPE selection.
+admitCheckedInspectionScope :: ExactScope -> [FilePath] -> [ExactIfaceArtifact] -> IO ExactScope
+admitCheckedInspectionScope original paths values = do
+  scope <- admitInspectionScope original paths values
+  rows <- forM values $ \artifact -> do
+    let packages = exactPath artifact ++ ".packages"
+    bytes <- BS.readFile packages
+    pure ((artifact,packages,digest bytes),CheckedValueEvidence)
+  admitted <- extendExactScopeGeneration scope rows [] [] >>= either fail pure
+  unless (all (\artifact -> Map.lookup (exactUnit artifact,exactModule artifact)
+      (scopeInterfaceEvidence admitted) == Just CheckedValueEvidence) values) $
+    fail "checked fixture lost its actual checked-value role"
+  pure admitted
 
 exactScopeBinders :: IO ()
 exactScopeBinders = withScratch $ \work -> do
@@ -760,12 +788,23 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   let aliasPath = work </> "captured-command-copy.hi"
       alias = value {exactPath=aliasPath}
   copyFile valuePath aliasPath
+  copyFile (valuePath ++ ".packages") (aliasPath ++ ".packages")
   aliasClosure <- readVerifiedExactIfaceClosureWithCheckedValues environment
     [iface | (iface,_,_) <- originals] [alias] >>= either fail pure
   selected <- either fail pure (selectVerifiedValueInterfaces aliasClosure [alias])
   aliasInputs <- either throwIO pure (selectCapturedInterfaceInputs aliasClosure
     ([iface | (iface,_,_) <- originals] ++ [alias]))
-  aliasOwner <- hydrateInterfaceInputs environment aliasInputs
+  rawOwner <- hydrateInterfaceInputs environment aliasInputs
+  unless (case hydratedClosureAsCapturedInputs (hydratedExactInputs rawOwner) of
+      Left InterfaceUnownedThinHome{} -> True; _ -> False) $
+    fail "raw thin TYPE selection acquired a completed checked owner"
+  checkedAlias <- admitCheckedInspectionScope base includes [alias]
+  ownedClosure <- readScopedInterfaceClosure environment checkedAlias
+    [iface | (iface,_,_) <- scopeInterfaces checkedAlias] (scopeValueInterfaces checkedAlias) >>= either fail pure
+  ownedInputs <- either throwIO pure (selectCapturedInterfaceInputs ownedClosure
+    ([iface | (iface,_,_) <- originals] ++ [alias]))
+  aliasOwner <- hydrateInterfaceInputs environment ownedInputs
+  _ <- either throwIO pure (hydratedClosureAsCapturedInputs (hydratedExactInputs aliasOwner))
   let symbol = SymbolIdentity "main" "Tidepool.Session.Val.G7" "value" "cmd" Nothing
       requestedAlias = ("renamedCmd",symbol,alias)
   liveAliases <- hydrateCompletedValueAliases [requestedAlias] aliasOwner >>= either fail pure
@@ -797,7 +836,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   let laterValue = value {exactModule="Tidepool.Session.Val.G8",exactPath=laterPath,exactSha256=digest laterBytes}
       interfaceIdentity artifact = (exactUnit artifact,exactModule artifact,exactPath artifact,exactSha256 artifact)
   forM_ [[],[value],[laterValue,value]] $ \values -> do
-    accepted <- admitInspectionScope base includes values
+    accepted <- admitCheckedInspectionScope base includes values
     unless (map interfaceIdentity (scopeValueInterfaces accepted) == map interfaceIdentity values)
       (fail "inspection fixture changed its ordered captured value inventory")
   duplicatePurpose <- writeInspectionPurposeCodecFixture work includes [value,value] >>= readCodecTerm
@@ -816,7 +855,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   withResidentPipelineSelected includes $ \compile ->
     forM_ [(True,consumerSource),(False,inferredSource)] $ \(explicitType,source) -> do
         writeFile consumerPath source
-        capture <- admitInspectionScope base includes [value]
+        capture <- admitCheckedInspectionScope base includes [value]
         before <- receipts
         checked <- compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile capture)
           (Just scope {ssExactScope=Just (scopeManifestPath capture)}) consumerPath includes Nothing
@@ -874,9 +913,12 @@ canonicalMixedSourceAdjacency = withScratch $ \work -> do
       scopePath <- if null retained then writeGenuineEmptyMetadataScope history
         else writeGenuineMetadataScope history retained fixture
       base <- readExactScope scopePath >>= either fail pure
-      lexicalBase <- extendExactScopeGeneration base [] []
-        [(("main",name),[]) | name <- retained] >>= either fail pure
-      admitted <- admitInspectionScope lexicalBase includes []
+      inspection <- admitInspectionScope base includes []
+      let lexicalRows = [(("main",name),[]) | name <- retained]
+      admitted <- extendExactScopeGeneration inspection [] [] lexicalRows >>= either fail pure
+      unless (Map.fromList (scopeLexical admitted) == Map.fromList lexicalRows
+          && Set.null (scopeSourceSelectedOwners admitted)) $
+        fail "mixed source fixture lost its retained lexical/source-selection partition"
       let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       prepared <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose admitted)
         (Just session) target includes Nothing
@@ -890,6 +932,9 @@ canonicalMixedSourceAdjacency = withScratch $ \work -> do
       certified <- writeCertifiedProductsKeeping includes originals captureDirectory prepared Nothing []
       let proofs = certifiedSourceOriginals certified
           admissions = finalizedLocalAdmissions (certifiedFinalizedArtifacts certified)
+          expectedFresh = Set.fromList (support : [("main",name) | name <- leaves, name `notElem` retained])
+      unless (Map.keysSet proofs == expectedFresh) $
+        fail ("mixed source capture differs from its actual fresh owners: " ++ show (Map.keys proofs,expectedFresh))
       rows <- forM (Map.toAscList proofs) $ \(key,proof) -> do
         capture <- maybe (fail "mixed source original lacks finalized interface custody") pure
           (Map.lookup key admissions)
@@ -900,11 +945,26 @@ canonicalMixedSourceAdjacency = withScratch $ \work -> do
       captured <- extendExactScopeGeneration inherited
         [(row,ModuleInterfaceEvidence proof) | (_,row,proof,_) <- rows]
         [] [(key,imports) | (key,_,_,imports) <- rows] >>= either fail pure
-      rechecked <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose captured)
+      reused <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose captured)
         (Just session) target includes Nothing
+      unless (isNothing (preparedExactCompilation reused >>= compilationSourceSelection)) $
+        fail "ordinary retained lexical imports unexpectedly demanded current source"
+      -- Reload inspection deliberately requalifies the current source graph.
+      -- Reapply real owner extensions after reading its distinct purpose.
+      reloadBase <- admitReloadInspectionScope base includes []
+      reloadLexical <- extendExactScopeGeneration reloadBase [] [] lexicalRows >>= either fail pure
+      reloadInherited <- either fail pure (extendSourceSelectedOriginals
+        (preparedExactCompilation prepared >>= compilationSourceSelection) reloadLexical)
+      reload <- extendExactScopeGeneration reloadInherited
+        [(row,ModuleInterfaceEvidence proof) | (_,row,proof,_) <- rows]
+        [] [(key,imports) | (key,_,_,imports) <- rows] >>= either fail pure
+      unless (Map.fromList (scopeLexical reload) == Map.fromList (scopeLexical captured)) $
+        fail "mixed source reload changed its captured lexical graph"
+      rechecked <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose reload)
+        (Just session {ssExactScope=Just (scopeManifestPath reload)}) target includes Nothing
       selected <- maybe (fail "mixed source history omitted its current original proof") pure
         (preparedExactCompilation rechecked >>= compilationSourceSelection)
-      either fail (const (pure ())) (extendSourceSelectedOriginals (Just selected) captured)
+      either fail (const (pure ())) (extendSourceSelectedOriginals (Just selected) reload)
       let evidence = selectedOriginalEvidence selected
           change key edit = selected {selectedOriginalEvidence=evidence
             {dependencyModules=[if (dependencyModuleUnit node,dependencyModuleName node) == key
@@ -916,9 +976,9 @@ canonicalMixedSourceAdjacency = withScratch $ \work -> do
           permuted = selected {selectedOriginalEvidence=evidence
             {dependencyModules=[node {dependencyModuleImports=reverse (dependencyModuleImports node)}
               | node <- reverse (dependencyModules evidence)]}}
-      either fail (const (pure ())) (extendSourceSelectedOriginals (Just permuted) captured)
+      either fail (const (pure ())) (extendSourceSelectedOriginals (Just permuted) reload)
       forM_ [missing,extra] $ \mutated ->
-        unless (either (const True) (const False) (extendSourceSelectedOriginals (Just mutated) captured)) $
+        unless (either (const True) (const False) (extendSourceSelectedOriginals (Just mutated) reload)) $
           fail "mixed source graph admitted a missing or extra inherited identity"
   putStrLn "mixed source adjacency: 16 fresh/retained partitions and import permutations, inherited rechecks and identity refusals"
 
@@ -2315,7 +2375,7 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G8" valuePath (digest bytes) []
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
-  admitted <- admitInspectionScope base [work] [value]
+  admitted <- admitCheckedInspectionScope base [work] [value]
   let scope = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted),ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
     positive <- compile CheckedEnvironment Set.empty GeneralCompile Nothing ordinaryTarget [work] Nothing
