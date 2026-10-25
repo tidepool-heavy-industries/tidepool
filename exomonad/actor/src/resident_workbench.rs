@@ -20897,19 +20897,23 @@ pub(crate) mod request_tests {
 
     impl RootedWorldInputTest {
         async fn new(client: crate::CompilerPreparationClient, known: i64) -> Self {
-            Self::with_source_files(client, known, &[]).await
+            Self::with_source_files(client, known, &[], &[]).await
         }
 
         async fn with_source_files(
             client: crate::CompilerPreparationClient,
             known: i64,
             additional: &[(&str, &str)],
+            template_imports: &[&str],
         ) -> Self {
-            let (session, mut public, source, root) = host_mount_fixture_with_effects(
+            let (session, mut public, mut source, root) = host_mount_fixture_with_effects(
                 |_| {},
                 &[tidepool_mcp::introspection_decl()],
                 "'[Introspection]",
             );
+            for import in template_imports {
+                source.workbench_imports.extend_text(import);
+            }
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(public.placement.session, Box::new(session));
             let body = format!("module WorldQuestion where\nknown :: Int\nknown = {known}\n");
@@ -21052,6 +21056,7 @@ pub(crate) mod request_tests {
                     ("RetainedNominal.hs", include_str!("fixtures/RetainedNominal.hs")),
                     ("RetainedNominalLeaf.hs", include_str!("fixtures/RetainedNominalLeaf.hs")),
                 ],
+                &["qualified RetainedNominal as Nominal"],
             ).await;
             fixture.workbench.access.with_machine(fixture.public.clone(), |session, context, _| {
                 let view = session.compile_view_in(context.placement.lexical_scope).unwrap();
@@ -21083,9 +21088,6 @@ pub(crate) mod request_tests {
                     "the ordinary-value control runs before any declaration can supply its nominal TYPE rows");
                 Ok(())
             }).await.unwrap();
-            producer.execute_cell_for_test(context.clone(),
-                include_str!("fixtures/world-nominal-captured-declaration.hs")).await
-                .expect("a later declaration captures the already validated ordinary nominal value");
             let private_binding = producer.access.with_machine(context.clone(), |session, context, _| {
                 Ok(session.current_binding_in(context.placement.lexical_scope, "nominal").unwrap().0)
             }).await.unwrap();
@@ -21102,7 +21104,30 @@ pub(crate) mod request_tests {
             consumer.execute_cell_for_test(context.clone(),
                 include_str!("fixtures/world-nominal-public-consumer.hs")).await
                 .expect("a fresh invocation consumes the promoted value after producer retirement");
+            consumer.access.with_machine(context.clone(), |session, context, _| {
+                let view = session.compile_view_in(context.placement.lexical_scope).unwrap();
+                assert!(view.exact_declaration_context().is_none_or(|context| context.compiler_roles().keys().all(|owner|
+                    owner.module != "RetainedNominal" && owner.module != "RetainedNominalLeaf")),
+                    "ordinary promotion and its fresh consumer must keep nominal TYPE support out of primary");
+                assert!(session.current_decl_heads_in(context.placement.lexical_scope).is_empty(),
+                    "no declaration may supply the promoted value's TYPE closure");
+                Ok(())
+            }).await.unwrap();
             consumer.publish_completed_cell_for_test(context).await.unwrap();
+            drop(consumer);
+
+            let (declaration, context) = fixture.private_with_input(None).await;
+            declaration.execute_cell_for_test(context.clone(),
+                include_str!("fixtures/world-nominal-captured-declaration.hs")).await
+                .expect("a subsequent declaration captures the independently qualified promoted nominal value");
+            declaration.publish_completed_cell_for_test(context).await.unwrap();
+            drop(declaration);
+
+            let (captured, context) = fixture.private_with_input(None).await;
+            captured.execute_cell_for_test(context.clone(),
+                include_str!("fixtures/world-nominal-captured-consumer.hs")).await
+                .expect("a fresh invocation consumes the thin declaration's captured nominal value");
+            captured.publish_completed_cell_for_test(context).await.unwrap();
         }).await;
     }
 
@@ -21128,7 +21153,7 @@ pub(crate) mod request_tests {
                         .compile_view_in(context.placement.lexical_scope)
                         .unwrap();
                     assert!(view.exact_declaration_context().is_none_or(|context| context.compiler_roles().keys()
-                    .all(|owner| owner.module != "Data.Aeson.Types.Internal")),
+                    .all(|owner| owner.module != "Tidepool.Aeson.Value")),
                     "this private World has no JSON observation scaffold or primary JSON TYPE row");
                     Ok(())
                 })
@@ -21161,7 +21186,7 @@ pub(crate) mod request_tests {
                 .inputs().iter().any(|input| matches!(input.origin(),
                     tidepool_toolchain::compiler_world::WorldCellRuntimeInputOrigin::CellOperand)
                     && input.checked_row().is_some_and(|row| row.certified_interface().requirements()
-                        .iter().any(|owner| owner.module == "Data.Aeson.Types.Internal")))),
+                        .iter().any(|owner| owner.module == "Tidepool.Aeson.Value")))),
                 "native preparation selects the actual operand with its issued nominal JSON TYPE requirement");
             let PreparedCell {
                 mut items,
