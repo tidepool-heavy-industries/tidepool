@@ -1322,18 +1322,19 @@ def actor_private_publication_test_cases(binary):
 def actor_notebook_contract_test_cases(binary):
     """Exercise installed notebook policy, settlement, reload refusal and cleanup."""
     acknowledgement = "resident_local_actor::completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control"
+    retained_job = "resident_local_actor::resident_captured_source_retains_the_parked_job_for_a_later_cell"
     tests = [acknowledgement] + ["resident_local_actor::" + name for name in (
         "reload_progress::invalid_authored_reload_arguments_release_the_invocation",
         "reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent",
         "reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings",
-        "resident_captured_source_retains_the_parked_job_for_a_later_cell",
-    )]
+    )] + [retained_job]
     env, resources, worker = compiler_service_test_inputs("exomonad-actor", "actor_notebook_contract_tests")
     env["TIDEPOOL_ACTOR_TEST_TRACE"] = "1"
     rules = []
     for target, selected in [
         ("actor_notebook_contract_tests", tests),
         ("actor_notebook_acknowledgement_test", [acknowledgement]),
+        ("actor_captured_job_type_test", [retained_job]),
     ]:
         rules.append("\n".join([
             "tidepool_rust_test_cases(",
