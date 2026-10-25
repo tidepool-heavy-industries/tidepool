@@ -326,6 +326,385 @@ mod tests {
 
     #[test]
     #[ignore = "requires the declared rooted compiler service"]
+    fn source_observation_consumes_a_checked_world_retained_terminal() {
+        use crate::cell_plan::{
+            ParsedCellPlanKind, WorldCellAdmissionSubject, WorldCellReservationRequest,
+        };
+        use crate::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources, CompilerWorld,
+            CompilerWorldBinding, CompilerWorldLexicalSurface, VisibleWorldBindings,
+            WorldSourceSelection,
+        };
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+        use tidepool_extract_cmd::{
+            settle_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose, CompilerTransactionOrigin,
+        };
+        let bodies = BTreeMap::from([(
+            PathBuf::from("Module.hs"),
+            Arc::<[u8]>::from(&b"module Module where\n"[..]),
+        )]);
+        let manifest = crate::cache::SourceRootManifest::from_file_digests(
+            bodies
+                .iter()
+                .map(|(path, body)| (path.clone(), blake3::hash(body).to_hex().to_string())),
+        )
+        .unwrap();
+        let sources = Arc::new(
+            CapturedCompilerSources::from_captured_roots(
+                vec![CapturedCompilerSourceRoot { manifest, bodies }],
+                Arc::from(&b"SOURCE offer retained terminal"[..]),
+                Arc::new(crate::artifacts::test_support::compiler_input_directory().unwrap()),
+            )
+            .unwrap(),
+        );
+        let source =
+            WorldSourceSelection::new(*sources.seal(), "SOURCE offer retained terminal").unwrap();
+        let compile_cell = |predecessor: Option<Arc<CompilerWorld>>,
+                            text: &str,
+                            generation: u64| {
+            let settled = settle_compiler_transaction_cancellable(
+                CompilerTransactionCancellation::new(),
+                |_| {},
+                || {
+                    let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
+                        .expect("declared compiler deployment");
+                    let (endpoint, _, _) =
+                        crate::toolchain::bind_admitted_extract_endpoint(&configured)
+                            .expect("configured compiler endpoint");
+                    let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
+                        .expect("admitted compiler endpoint");
+                    let world = match predecessor {
+                        Some(world) => world,
+                        None => crate::compiler_world::open_world(
+                            crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+                                None,
+                                VisibleWorldBindings::from_published_bindings(
+                                    0,
+                                    std::iter::empty(),
+                                )?,
+                                sources.clone(),
+                                CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
+                            )?,
+                            &endpoint,
+                        )?,
+                    };
+                    let plan = crate::compiler_world::plan_cell(
+                        &endpoint,
+                        &world,
+                        Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+                            source: text.into(),
+                            // Bind desugaring uses the authored surface's pure-failure instance.
+                            template: include_str!(
+                                "../../tests/fixtures/world-native/CellTemplate.hs"
+                            )
+                            .replace(
+                                "{{CELL_PRAGMAS}}",
+                                "{-# LANGUAGE FlexibleInstances #-}\n{{CELL_PRAGMAS}}",
+                            )
+                            .replace(
+                                "{{CELL_DECLS}}",
+                                "instance MonadFail (Eff effects) where fail = Prelude.error\n{{CELL_DECLS}}",
+                            ),
+                            turn_templates: Vec::new(),
+                        }),
+                        None,
+                    )?;
+                    let origin = CompilerTransactionOrigin::current()
+                        .expect("actual cell compiler operation");
+                    let subject = WorldCellAdmissionSubject::for_source_transaction(
+                        &origin,
+                        [7; 16],
+                        0,
+                        generation,
+                        generation,
+                        [b"SOURCE exact contribution control".to_vec()],
+                    )?;
+                    let requests = plan
+                        .items()
+                        .iter()
+                        .map(|item| match item.kind() {
+                            ParsedCellPlanKind::Prologue => WorldCellReservationRequest::Prologue {
+                                declaration: generation,
+                            },
+                            ParsedCellPlanKind::Declaration => {
+                                WorldCellReservationRequest::Declaration {
+                                    declaration: generation,
+                                }
+                            }
+                            ParsedCellPlanKind::Bind => WorldCellReservationRequest::Bind {
+                                value: generation,
+                                bindings: item
+                                    .binders()
+                                    .iter()
+                                    .map(|name| {
+                                        (
+                                            name.clone(),
+                                            tidepool_repr::SessionVarId::from_extract(
+                                                tidepool_codegen::prepared_program::session_var_id(
+                                                    &tidepool_repr::SessionModule::val(
+                                                        tidepool_repr::Generation(generation),
+                                                    )
+                                                    .module_name(),
+                                                    name,
+                                                ),
+                                            ),
+                                        )
+                                    })
+                                    .collect(),
+                            },
+                            _ => panic!("fixture uses checked binds and declarations"),
+                        })
+                        .collect();
+                    let reservation =
+                        plan.reserve(plan.issue_admission_token(subject, requests)?)?;
+                    let checked = crate::compiler_world::admit_world_cell_program(
+                        &endpoint,
+                        reservation,
+                        source.clone(),
+                        source.clone(),
+                        &origin,
+                    )?
+                    .map_err(|refusal| {
+                        CompileError::ExtractFailed(format!("SOURCE fixture refused: {refusal:?}"))
+                    })?;
+                    crate::artifacts::prepare_world_cell_program(checked)
+                },
+            );
+            if let Err(error) = settled.action() {
+                panic!(
+                    "SOURCE fixture preparation: {error:?}; close {:?}",
+                    settled.close()
+                );
+            }
+            assert!(matches!(settled.close(), CompilerTransactionClose::Clean));
+            let admission = settled.host_admission_cancellation().unwrap().clone();
+            settled
+                .into_outcome()
+                .action
+                .unwrap()
+                .seal(&admission)
+                .unwrap()
+        };
+        let first = compile_cell(None, "terminal <- pure (11 :: Int)", 11);
+        assert_eq!(first.items().len(), 1);
+        let item = &first.items()[0];
+        let binder = &first.world_program().item(0).unwrap().binders()[0];
+        let value = item
+            .native()
+            .unwrap()
+            .value_interface_certificate()
+            .unwrap();
+        let (entry, _) = value.world_type_parts().unwrap();
+        let expected_identity = SymbolIdentity {
+            unit: entry.descriptor.owner.unit.clone(),
+            module: binder.module().into(),
+            namespace: "value".into(),
+            occurrence: binder.name().into(),
+            record_parent: None,
+        };
+        let generation = value.owner().gen.0;
+        assert_eq!(binder.module(), value.owner().module_name());
+        let expected_artifact = entry.descriptor.id;
+        let initial = first.world_program().reservation().plan().world_owned();
+        let successor = first
+            .item_successor(
+                initial,
+                item.checked_item(),
+                [CompilerWorldBinding::from_checked_value(
+                    binder.name(),
+                    &expected_identity,
+                    tidepool_repr::SessionVarId::from_extract(binder.varid()),
+                    1,
+                    Arc::clone(&value),
+                )],
+            )
+            .unwrap();
+        let declaration_predecessor = successor.world().clone();
+        let declaration = compile_cell(
+            Some(declaration_predecessor.clone()),
+            "{-# NOINLINE child #-}\nchild :: Int\nchild = terminal",
+            12,
+        );
+        assert_eq!(
+            declaration.items().len(),
+            1,
+            "one actual authored child item"
+        );
+        let declaration_item = &declaration.items()[0];
+        let authored = declaration_item
+            .checked_item()
+            .planned_declaration()
+            .unwrap();
+        let child_module = authored.product().owner().module.clone();
+
+        let context = declaration_item.compiler_context();
+        let owner = ExactModuleIdentity {
+            unit: authored.product().owner().unit.clone(),
+            module: child_module,
+        };
+        assert!(context.source_scope().admits(&owner));
+        let primary = context
+            .capture_world_primary_inputs(context.toolchain_identity_sha256())
+            .unwrap();
+        let selected = primary
+            .inputs()
+            .compiler_source_support()
+            .compiler_primary_input(&owner)
+            .unwrap()
+            .unwrap();
+        let reference = ReceiptImportOwner::OriginalBinding {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+            interface: selected.interface(),
+            original: selected.original().unwrap(),
+            binder: SymbolIdentity {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                namespace: "value".into(),
+                occurrence: "child".into(),
+                record_parent: None,
+            },
+        };
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let membership = AuthenticatedOriginalBindings::issue(
+            primary.inputs().shared_compiler_source_support(),
+            operation.clone(),
+            [&reference],
+        )
+        .unwrap();
+        let chosen = membership
+            .available_group(&reference, &operation)
+            .unwrap()
+            .unwrap();
+        assert!(chosen.contribution().offer().is_full());
+        let before = context.snapshot();
+        let before_graph = context.artifact_view().capture_graph_selection();
+        let before_selected = context.artifact_view().selected_native_groups();
+        let before_passive_selected = membership
+            .acquisition()
+            .artifacts()
+            .selected_native_groups();
+        let passive = membership
+            .acquisition()
+            .artifacts()
+            .capture_graph_selection();
+        assert!(
+            !passive.native_groups.contains(&chosen.binding()),
+            "the declaration's Full offer owns a group absent from passive custody"
+        );
+        let observed = SourceDependencyBasis::observe(
+            &primary,
+            source_query(vec![reference.clone()], &operation),
+            &operation,
+        )
+        .unwrap();
+        let occurrences = observed.rows()[0]
+            .retained_occurrences()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            occurrences.len(),
+            1,
+            "the checked declaration captures a terminal"
+        );
+        assert_eq!(occurrences[0].identity, &expected_identity);
+        assert_eq!(occurrences[0].generation, generation);
+        assert_eq!(occurrences[0].binding.artifact, expected_artifact);
+        let selected = observed
+            .select_retained_values_for_use(&reference, &occurrences)
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].entry.descriptor.id, expected_artifact);
+        assert!(selected[0].matches_checked_value(&value).unwrap());
+        let actual = occurrences[0];
+        let ReceiptImportOwner::OriginalBinding {
+            interface: unrelated_binding,
+            ..
+        } = &reference
+        else {
+            unreachable!()
+        };
+        let mut unrelated_identity = actual.identity.clone();
+        unrelated_identity.occurrence.push_str("Outside");
+        let mut unrelated_demander = actual.demander;
+        unrelated_demander.original_ordinal += 1;
+        for outside in [
+            NativeRetainedOccurrence {
+                global_index: actual.global_index + 1,
+                ..actual
+            },
+            NativeRetainedOccurrence {
+                generation: actual.generation + 1,
+                ..actual
+            },
+            NativeRetainedOccurrence {
+                binding: unrelated_binding,
+                ..actual
+            },
+            NativeRetainedOccurrence {
+                identity: &unrelated_identity,
+                ..actual
+            },
+            NativeRetainedOccurrence {
+                demander: unrelated_demander,
+                ..actual
+            },
+        ] {
+            let error = observed
+                .select_retained_values_for_use(&reference, &[outside])
+                .err()
+                .expect("an altered occurrence is outside this exact SOURCE use");
+            assert!(matches!(error, CompileError::CompilerEvidence(error)
+            if matches!(error.as_ref(), CertificationError::Mismatch(
+                "SOURCE terminal exceeds its issued exact use"
+            ))));
+        }
+        let mut outside_reference = reference.clone();
+        let ReceiptImportOwner::OriginalBinding { binder, .. } = &mut outside_reference else {
+            unreachable!()
+        };
+        binder.occurrence.push_str("Outside");
+        let error = observed
+            .select_retained_values_for_use(&outside_reference, &occurrences)
+            .err()
+            .expect("another SOURCE use has no observed terminal authority");
+        assert!(matches!(error, CompileError::CompilerEvidence(error)
+        if matches!(error.as_ref(), CertificationError::Mismatch(
+            "SOURCE terminal has no issued exact use"
+        ))));
+        assert!(observed
+            .select_retained_values_for_use(&reference, &occurrences)
+            .is_ok());
+        let after = context.snapshot();
+        assert_eq!(
+            context.artifact_view().capture_graph_selection(),
+            before_graph
+        );
+        assert_eq!(after.native_availability, before.native_availability);
+        assert_eq!(after.recorded_rows(), before.recorded_rows());
+        assert_eq!(
+            context.artifact_view().selected_native_groups(),
+            before_selected
+        );
+        assert_eq!(
+            membership
+                .acquisition()
+                .artifacts()
+                .selected_native_groups(),
+            before_passive_selected
+        );
+        assert_eq!(
+            membership
+                .acquisition()
+                .artifacts()
+                .capture_graph_selection(),
+            passive
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the declared rooted compiler service"]
     fn source_dependency_observer_checks_actual_scope_without_native_acquisition() {
         let fixture =
             crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
