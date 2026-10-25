@@ -32,7 +32,7 @@ module Tidepool.ExactScope
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
   , WorldSourceClosureEntry(..)
-  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntriesAgree
+  , WorldTypeClosureEntry, readWorldTypeInputs, mergeWorldTypeInputs
   , worldTypeEntryArtifact, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryEvidence, worldTypeEntryInterfaceBody, worldTypeCanonicalInterfaceAdmission
   , VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs
   , verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, verifiedWorldDeclarationTypeInputs
@@ -2264,7 +2264,7 @@ worldBindingInterfaceArtifact binding =
 
 -- Select by submitted occurrences in the already admitted namespace. Value
 -- bodies and their authenticated checked-value role enter the shared decoder
--- together with the demanded primary TYPE closure.
+-- together with their manifest-selected TYPE closures.
 readWorldBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> [String]
   -> IO (Either String ([(String,WorldBinding)],[(VerifiedExactInterface,ArtifactBytes)],
       Map.Map InterfaceOwner WorldTypeClosureEntry))
@@ -2390,9 +2390,25 @@ decodeWorldCellOperand bytes = do
 -- together. This is type availability, never source or native execution rights.
 data WorldTypeClosureEntry = WorldTypeClosureEntry WorldArtifactBinding BS.ByteString ScopeInterfaceInput VerifiedExactInterface PackageImportEvidence ArtifactBytes
 
-worldTypeEntriesAgree :: WorldTypeClosureEntry -> WorldTypeClosureEntry -> Bool
-worldTypeEntriesAgree (WorldTypeClosureEntry binding semantic _ _ _ _) (WorldTypeClosureEntry other expected _ _ _ _) =
-  binding == other && semantic == expected
+-- The joined consumer checks leaves and dependencies together before an
+-- owner-keyed physical decoder can erase their exact logical associations.
+mergeWorldTypeInputs :: [WorldBinding] -> [Map.Map InterfaceOwner WorldTypeClosureEntry]
+  -> Either String (Map.Map InterfaceOwner WorldTypeClosureEntry)
+mergeWorldTypeInputs bindings contributions = do
+  let leaves = [(rowOwner (worldBindingRowInterface row),(worldBindingLeafBinding row,worldBindingSemanticRow row))
+        | binding <- bindings,let row = worldBindingRow binding]
+      entries = concatMap Map.toAscList contributions
+      association (WorldTypeClosureEntry binding semantic _ _ _ _) = (binding,semantic)
+  _ <- foldM insertWorldTypeAssociation Map.empty (leaves ++ [(key,association entry) | (key,entry) <- entries])
+  pure (Map.unions contributions)
+
+insertWorldTypeAssociation :: Map.Map InterfaceOwner (WorldArtifactBinding,BS.ByteString)
+  -> (InterfaceOwner,(WorldArtifactBinding,BS.ByteString))
+  -> Either String (Map.Map InterfaceOwner (WorldArtifactBinding,BS.ByteString))
+insertWorldTypeAssociation rows (key,value) = do
+  forM_ (Map.lookup key rows) $ \held -> unless (held == value)
+    (Left "world TYPE contributions select conflicting exact bindings")
+  pure (Map.insert key value rows)
 
 worldTypeEntryArtifact :: WorldTypeClosureEntry -> ExactIfaceArtifact
 worldTypeEntryArtifact (WorldTypeClosureEntry _ _ (ScopeInterfaceInput (artifact,_,_) _) _ _ _) = artifact
@@ -2533,9 +2549,8 @@ readManifestWorldTypeInputs (ExactInputOwner _ state) env facts custody contribu
     checked = foldM insert Map.empty contributions
     insert rows value@(binding,semantic,ScopeInterfaceInput input _) = do
       let key = rowOwner input
-      forM_ (Map.lookup key rows) $ \(held,expected,_) ->
-        unless (held == binding && expected == semantic)
-          (Left "world TYPE contributions select conflicting exact bindings")
+      _ <- insertWorldTypeAssociation (Map.map (\(held,expected,_) -> (held,expected)) (Map.restrictKeys rows (Set.singleton key)))
+        (key,(binding,semantic))
       forM_ (Map.lookup key (worldPrimarySelected (worldInputsPrimary facts))) $ \primary -> do
         unless (worldPrimaryInterfaceBinding primary == binding)
           (Left "world TYPE dependency conflicts with selected primary binding")
@@ -2820,6 +2835,8 @@ decodeWorldDependencyChanges bytes = do
   pure rows
 
 indexWorldDependencies :: [WorldArtifactBinding] -> [WorldAdmittedRow] -> IO (Map.Map WorldArtifactBinding WorldAdmittedRow)
+-- The manifest commits the binding-to-semantic association. Artifact IDs are
+-- issuer facts, not hashes of the receiving physical interface or image.
 indexWorldDependencies keys rows = do
   unless (length keys == length rows && Set.size (Set.fromList keys) == length keys)
     (worldCorrupt "compiler world dependency binding census differs from admitted rows")

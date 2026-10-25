@@ -353,7 +353,7 @@ import Tidepool.ExactScope
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , WorldCellOperandInputs, readWorldCellOperandWithOwner, worldCellOperandExposure, WorldCellOperandExposure(..)
   , worldCellOperandBinding, worldCellOperandInterface, worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes, worldCellOperandCapturedInputs
-  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntriesAgree, worldTypeEntryArtifact, worldTypeEntryEvidence, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryInterfaceBody, worldTypeCanonicalInterfaceAdmission, VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
+  , WorldTypeClosureEntry, readWorldTypeInputs, mergeWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryEvidence, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryInterfaceBody, worldTypeCanonicalInterfaceAdmission, VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeIncludePaths
@@ -3826,17 +3826,16 @@ resolveWorldCellInputs owner facts accumulated path consumer sourceOwners enviro
   let reject :: String -> IO value
       reject reason = emitWorldAcquisitionRejection "world value import" path reason >> throwIO WorldCellCorrupt
   readback <- readWorldBindingInputs owner environment facts [name | (name,WorldBaseBinding _) <- demanded]
-  (_,bodies,typeInputs) <- either reject pure readback
+  (selectedBindings,bodies,typeInputs) <- either reject pure readback
   private <- readIORef accumulated
   privateInputs <- either throwIO pure (hydratedClosureAsCapturedInputs private)
   let inputs = demanded
       prior = [value | (_,WorldPriorBinding value) <- inputs]
       operands = [value | (_,WorldOperandBinding value) <- inputs]
       typeContributions = typeInputs:[worldCellOperandTypes value | WorldCellOperandProjection value _ _ _ <- operands]
-  allTypes <- foldM (\rows contribution -> foldM (\selected (key,entry) -> do
-    forM_ (Map.lookup key selected) $ \held -> unless (worldTypeEntriesAgree held entry)
-      (reject "world and operand TYPE contributions select conflicting exact bindings")
-    pure (Map.insertWith (\_ held -> held) key entry selected)) rows (Map.toAscList contribution)) Map.empty typeContributions
+  allTypes <- either reject pure (mergeWorldTypeInputs
+    (map snd selectedBindings ++ [worldCellOperandBinding value | WorldCellOperandProjection value _ _ _ <- operands])
+    typeContributions)
   unless (all (\(WorldStagedValue producer _ _ _ _ _ _) -> producer < fromIntegral consumer) prior)
     (reject "prior value is not before the consuming stage")
   -- Value owners must never be source summaries: adding their retained policy
