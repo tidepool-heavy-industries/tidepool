@@ -691,13 +691,7 @@ impl<'a> WorldNativeDemandResolver<'a> {
         validation: &'a mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         let world = reservation.plan().world();
-        let mut primary = world.restoration.primary_inputs.clone();
-        if let Some(operand) = reservation.plan().operand() {
-            let types = crate::declaration_context::SelectedTypeInterfaces::from_checked_value(
-                operand.checked_row(),
-            );
-            primary = primary.with_type_interfaces(&[types])?.primary;
-        }
+        let primary = world.restoration.primary_inputs.clone();
         // Reserve the one terminal semantic-refusal reply before traversing
         // untrusted demand. Exhausting admission work must still be reportable.
         let messages = [

@@ -4778,9 +4778,6 @@ impl ArtifactInventory {
         // actual primary producer paired with the issued binding.
         let mut producer_entries = BTreeMap::new();
         for entry in expanded {
-            producer_entries
-                .entry(entry.descriptor.id)
-                .or_insert_with(|| Arc::clone(&entry));
             let entry = state.canonicalize(entry)?;
             let id = entry.descriptor.id;
             let retained = if let Some(previous) = supplied
@@ -4796,8 +4793,16 @@ impl ArtifactInventory {
                         return Err(metadata_conflict::refusal(&existing, &entry));
                     }
                 }
-                entry
+                Arc::clone(&entry)
             };
+            // Share the retained immutable facts after metadata validation while
+            // keeping this producer's admission, transport and custody facade.
+            let producer = if entry.has_fact_owner(retained.fact_owner()) {
+                entry
+            } else {
+                Arc::new(entry.adopt_facts(retained.fact_owner().clone()))
+            };
+            producer_entries.entry(id).or_insert(producer);
             supplied.insert(id, retained);
         }
         // Resolve the incoming namespace from authenticated rows and the parent
