@@ -6579,7 +6579,17 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         Succeeded -> do
           getSession >>= liftIO . validateCandidateHomeInterfaces
           current <- getSession
-          setSession current {hsc_mod_graph=mapMG restoreFreshSource (hsc_mod_graph current)}
+          -- Make prunes homes outside its deferred load graph. Restore the
+          -- validated memo selections, preserving any current SOURCE details
+          -- knots and executable capacity that Make installed or retied.
+          let restoreMemoHome home homes =
+                let name = moduleName (mi_module (hm_iface home))
+                in case lookupHpt homes name of
+                  Just _ -> homes
+                  Nothing -> addToHpt homes name home
+          setSession (hscUpdateHPT (\homes -> foldr restoreMemoHome homes
+            (Map.elems selectedMemoHomes)) current
+              {hsc_mod_graph=mapMG restoreFreshSource (hsc_mod_graph current)})
           cpAfterLoad plan freshIngress
           -- Make can replace a successful source home with an interface-only
           -- details knot. World completion retains the actual finalized source
