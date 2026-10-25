@@ -1833,6 +1833,7 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             'artifact_inventory::compiler_projection::acquisition_tests::completed_output_keeps_actual_world_producer_beside_equal_canonical_private_offer',
             'artifact_inventory::tests::bound_projection_rebinding_preserves_issuing_none_override',
             'artifact_inventory::tests::independent_native_admission_does_not_inherit_global_source_witness',
+            'artifact_inventory::tests::current_cohort_preserves_incoming_original_beside_equal_prior_authority',
             'artifact_inventory::tests::source_witness_histories_follow_selected_issuer',
             'artifact_inventory::tests::native_inventory_reuse_preserves_each_owners_source_admission_witness',
             'artifact_inventory::tests::artifact_subset_materialization_preserves_selected_custody_and_bounded_warm_reads',
