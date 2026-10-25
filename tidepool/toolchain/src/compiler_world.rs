@@ -2808,7 +2808,6 @@ impl CompilerWorld {
                 .replace_roots(&runtime_staged, vec![*primary_root.root().cid()])
                 .map_err(|error| source_failure(error.to_string()))?;
             let mut associations = prior.primary_associations.facts().clone();
-            let mut remaining = capture_allowance()?;
             let support = advance.primary.inputs().compiler_source_support();
             for (ordinal, owner) in advance.changed_owners.iter().enumerate() {
                 let selected = support.compiler_primary_input(owner)?.ok_or_else(|| {
@@ -2821,7 +2820,7 @@ impl CompilerWorld {
                     ordinal,
                     &mut rows,
                     &mut materializer,
-                    &mut remaining,
+                    &mut remaining_rows,
                 )?;
                 associations.insert(selected.owner().clone(), fact);
                 primary_changes.push(world_array(vec![
@@ -3401,12 +3400,12 @@ type WorldDependencyRows = imbl::OrdMap<ArtifactBinding, WorldDependencyEntry>;
 #[derive(Clone)]
 struct WorldDependencyEntry {
     row: CheckedValueDependencyRow,
-    semantic: ciborium::value::Value,
+    semantic: Arc<ciborium::value::Value>,
     references: std::num::NonZeroU64,
 }
 struct StagedWorldDependency {
     row: CheckedValueDependencyRow,
-    semantic: ciborium::value::Value,
+    semantic: Arc<ciborium::value::Value>,
     offered: ciborium::value::Value,
 }
 type WorldRowChanges = BTreeMap<cid::Cid, (i64, Arc<CheckedValueTypeProduct>)>;
@@ -3479,14 +3478,14 @@ fn encode_checked_value_row(
                     "dependency binding has conflicting immutable entry",
                 ));
             }
-            held.semantic.clone()
+            held.semantic.as_ref().clone()
         } else if let Some(held) = staged.get(binding) {
             if held.row.entry().as_ref() != dependency.entry().as_ref() {
                 return Err(source_failure(
                     "dependency binding has conflicting staged entry",
                 ));
             }
-            held.semantic.clone()
+            held.semantic.as_ref().clone()
         } else {
             let parts = dependency.parts()?;
             reserve_world_parts(&parts, remaining)?;
@@ -3496,7 +3495,7 @@ fn encode_checked_value_row(
                 *binding,
                 StagedWorldDependency {
                     row: dependency.clone(),
-                    semantic: semantic.clone(),
+                    semantic: Arc::new(semantic.clone()),
                     offered: dependency_offered,
                 },
             );
