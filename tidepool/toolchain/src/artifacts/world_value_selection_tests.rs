@@ -159,6 +159,40 @@ fn prepare_checked_value_type_pair(
         !row.type_product().dependencies().is_empty(),
         "nominal source establishes genuine HOME TYPE custody"
     );
+    let world = match kind {
+        ValueTypeFixture::SharedNominal => world,
+        ValueTypeFixture::CapturedNominal => {
+            let binder = &first
+                .world_program()
+                .item(0)
+                .expect("actual first World item")
+                .binders()[0];
+            let symbol = tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "main".into(),
+                module: binder.module().into(),
+                namespace: "value".into(),
+                occurrence: binder.name().into(),
+                record_parent: None,
+            };
+            first
+                .item_successor(
+                    &world,
+                    first.items()[0].checked_item(),
+                    [
+                        crate::compiler_world::CompilerWorldBinding::from_checked_value(
+                            binder.name(),
+                            &symbol,
+                            tidepool_repr::SessionVarId::from_extract(binder.varid()),
+                            0,
+                            row.clone(),
+                        ),
+                    ],
+                )
+                .expect("actual completed first World successor")
+                .world()
+                .clone()
+        }
+    };
     let operand = CompilerWorldCellOperand::from_checked_host_execution(
         &world,
         WorldCellOperandExposure::Input,
