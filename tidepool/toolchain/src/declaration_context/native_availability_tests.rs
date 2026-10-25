@@ -103,6 +103,11 @@ fn restore_fixture_support_in_view(
     issued: &ExactDeclarationContext,
     view: ArtifactView,
 ) -> Result<crate::artifact_inventory::CompilerSourceSupport, CompileError> {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     issued
         .compiler_source_support()
         .native_availability()
@@ -115,6 +120,7 @@ fn restore_fixture_support_in_view(
         &snapshot.roles,
         &snapshot.offers,
         &snapshot.native_availability,
+        &mut offer_validation,
     )?;
     assert!(
         issued
@@ -520,6 +526,11 @@ fn assert_offer_retention_matches_ordered_fold(
 }
 
 fn replay_offer_retention(indices: &[usize], foreign: bool, baseline_empty: bool) {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let inventory = ArtifactInventory::default();
@@ -557,7 +568,7 @@ fn replay_offer_retention(indices: &[usize], foreign: bool, baseline_empty: bool
             ArtifactView::clone(&source),
         );
         let full = offer_issuer
-            .issue_native_offer(&entry.descriptor.owner, Some(proof))
+            .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
             .unwrap();
         assert!(full.is_full());
         let partial = full
@@ -566,7 +577,7 @@ fn replay_offer_retention(indices: &[usize], foreign: bool, baseline_empty: bool
             .unwrap();
         assert!(!partial.is_full());
         let empty = offer_issuer
-            .issue_native_offer(&entry.descriptor.owner, None)
+            .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
             .unwrap();
         for offer in [&full, &partial, &empty] {
             eager_custody.push(eager_artifact_custody_reference(&source, offer));
@@ -654,6 +665,11 @@ fn generated_issued_offer_retention_preserves_every_ordered_prefix() {
 
 #[test]
 fn issued_offer_retention_records_cumulative_prefix_work() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let inventory = ArtifactInventory::default();
@@ -682,7 +698,7 @@ fn issued_offer_retention_records_cumulative_prefix_work() {
                 .unwrap()
                 .unwrap();
             offer_issuer
-                .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
                 .unwrap()
         })
         .collect::<Vec<_>>();
@@ -756,6 +772,11 @@ fn issued_offer_retention_records_cumulative_prefix_work() {
 
 #[test]
 fn issued_offer_retention_preserves_historical_canonical_custody() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let current = product("RetentionConflict", 92);
@@ -783,7 +804,7 @@ fn issued_offer_retention_preserves_historical_canonical_custody() {
             CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
             ArtifactView::clone(source),
         )
-        .issue_native_offer(&entry.descriptor.owner, Some(proof))
+        .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
         .unwrap()
     };
     let current_offer = issue(&context, &current_entry);
@@ -850,6 +871,11 @@ fn issued_offer_retention_preserves_historical_canonical_custody() {
 
 #[test]
 fn issued_offer_retention_preserves_materialization_parent_precedence() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let inventory = ArtifactInventory::default();
@@ -899,7 +925,11 @@ fn issued_offer_retention_preserves_materialization_parent_precedence() {
             CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
             ArtifactView::clone(&issuer),
         )
-        .issue_native_offer(&entry.descriptor.owner, Some(proof.clone()))
+        .issue_native_offer(
+            &entry.descriptor.owner,
+            Some(proof.clone()),
+            &mut offer_validation,
+        )
         .unwrap();
         eager_custody.push(eager_artifact_custody_reference(&issuer, &offer));
         offers.push(offer);
@@ -1113,6 +1143,11 @@ fn selected_output_carries_baseline_type_dependency_without_granting_body() {
 
 #[test]
 fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallback() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
 
     let native = product("CarriedDependency", 75);
@@ -1211,7 +1246,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         .unwrap()
         .is_some());
     let unambiguous = left_issuer
-        .issue_native_offer(owner, Some(selected_proof.clone()))
+        .issue_native_offer(owner, Some(selected_proof.clone()), &mut offer_validation)
         .unwrap();
     assert!(
         unambiguous.is_full(),
@@ -1219,7 +1254,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     );
     assert_eq!(unambiguous.proof(), Some(&selected_proof));
     let retained = broad_issuer
-        .issue_native_offer(owner, Some(left_proof.clone()))
+        .issue_native_offer(owner, Some(left_proof.clone()), &mut offer_validation)
         .expect("a supplied qualified proof must not be recaptured from broader custody");
     assert!(retained.is_full());
     assert_eq!(retained.original(), native_entry.descriptor.id);
@@ -1270,7 +1305,9 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     ] {
         let offers = supplied
             .iter()
-            .map(|proof| broad_issuer.issue_native_offer(owner, Some(proof.clone())))
+            .map(|proof| {
+                broad_issuer.issue_native_offer(owner, Some(proof.clone()), &mut offer_validation)
+            })
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(offers.len(), supplied.len());
@@ -1291,7 +1328,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     assert_eq!(competing.issued_groups(&broad).unwrap().len(), 4);
     assert!(competing.qualify_availability(&broad).unwrap().is_none());
     let competing_offer = broad_issuer
-        .issue_native_offer(owner, Some(competing.clone()))
+        .issue_native_offer(owner, Some(competing.clone()), &mut offer_validation)
         .unwrap();
     assert!(!competing_offer.is_full());
     assert_eq!(competing_offer.proof(), Some(&competing));
@@ -1325,9 +1362,11 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         .support_for_owners(vec![canonical.descriptor.owner.clone()])
         .unwrap();
     let other_original = fixture_compiler_support(baseline.clone(), other);
-    assert!(matches!(other_support.issue_native_offer(owner, None),
+    assert!(
+        matches!(other_support.issue_native_offer(owner, None, &mut offer_validation),
         Err(CompileError::ArtifactInventory(error))
-            if matches!(&error.failure, ArtifactInventoryFailure::MissingOriginal { owner: actual } if actual == owner)));
+            if matches!(&error.failure, ArtifactInventoryFailure::MissingOriginal { owner: actual } if actual == owner))
+    );
     for selected in [&other_original, &other_support] {
         let selected_graph = selected.artifacts().capture_graph_selection();
         let mismatch_owner = selected.retain_custody(&left).unwrap();
@@ -1345,7 +1384,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .unwrap()
             .is_none());
         assert!(
-            matches!(mismatch_owner.issue_native_offer(owner, Some(left_proof.clone())),
+            matches!(mismatch_owner.issue_native_offer(owner, Some(left_proof.clone()), &mut offer_validation),
             Err(CompileError::ArtifactInventory(error))
                 if matches!(&error.failure,
                     ArtifactInventoryFailure::MissingOriginal { owner: actual }
@@ -1354,7 +1393,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             "another selected carrier or a TYPE-only row cannot issue this proof"
         );
         let full = left_issuer
-            .issue_native_offer(owner, Some(left_proof.clone()))
+            .issue_native_offer(owner, Some(left_proof.clone()), &mut offer_validation)
             .unwrap();
         let narrowed = full
             .within_assembly(baseline.role_view(), &mismatch)
@@ -1382,7 +1421,11 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     ] {
         assert!(supplied
             .iter()
-            .map(|proof| broad_issuer.issue_native_offer(owner, Some(proof.clone())))
+            .map(|proof| broad_issuer.issue_native_offer(
+                owner,
+                Some(proof.clone()),
+                &mut offer_validation
+            ))
             .collect::<Result<Vec<_>, _>>()
             .is_err());
     }
@@ -1394,7 +1437,9 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         } else {
             supplied
                 .iter()
-                .map(|proof| issuer.issue_native_offer(owner, Some(proof.clone())))
+                .map(|proof| {
+                    issuer.issue_native_offer(owner, Some(proof.clone()), &mut offer_validation)
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
@@ -1453,6 +1498,11 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
 
 #[test]
 fn original_receipt_retains_transitive_support_without_unrelated_offer() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         NativeArtifactDemand, NativeOriginalRequirement, NativeRequirementRoot,
     };
@@ -1530,7 +1580,11 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             CompilerInputProjection::from_issued_entries(&entries).unwrap(),
             ArtifactView::clone(&full),
         )
-        .issue_native_offer(&entries[index].descriptor.owner, Some(proof))
+        .issue_native_offer(
+            &entries[index].descriptor.owner,
+            Some(proof),
+            &mut offer_validation,
+        )
         .unwrap()
     };
     let ancestor_offer = complete(0);
@@ -1539,7 +1593,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         CompilerInputProjection::from_issued_entries(&entries).unwrap(),
         ArtifactView::clone(&base),
     )
-    .issue_native_offer(&entries[1].descriptor.owner, None)
+    .issue_native_offer(&entries[1].descriptor.owner, None, &mut offer_validation)
     .unwrap();
     let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
     let transport_metadata = projection
@@ -2101,6 +2155,11 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
 
 #[test]
 fn optional_baseline_census_preserves_competing_exact_private_issuances() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         NativeArtifactDemand, NativeOriginalRequirement, NativeRequirementRoot,
     };
@@ -2140,7 +2199,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
             CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
             ArtifactView::clone(&source),
         )
-        .issue_native_offer(&entry.descriptor.owner, Some(proof))
+        .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
         .unwrap();
         (offer, source)
     };
@@ -2313,6 +2372,11 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
 
 #[test]
 fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let b_seed = product("BackedgeDependency", 98);
@@ -2367,7 +2431,11 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
         CompilerInputProjection::from_issued_entries(&entries).unwrap(),
         ArtifactView::clone(&full),
     )
-    .issue_native_offer(&entries[0].descriptor.owner, Some(proof))
+    .issue_native_offer(
+        &entries[0].descriptor.owner,
+        Some(proof),
+        &mut offer_validation,
+    )
     .unwrap();
     let dependency_groups = a_offer
         .dependency_group_carriers(&BTreeSet::from([b_id]))
@@ -2384,7 +2452,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
         CompilerInputProjection::from_issued_entries(&entries).unwrap(),
         ArtifactView::clone(&base),
     )
-    .issue_native_offer(&entries[1].descriptor.owner, None)
+    .issue_native_offer(&entries[1].descriptor.owner, None, &mut offer_validation)
     .unwrap();
     let projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
     let b = base.select_roots(vec![b_id]).unwrap();
@@ -2483,6 +2551,11 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
 
 #[test]
 fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let b_seed = product("ScopedBackedgeB", 172);
@@ -2634,7 +2707,11 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
         CompilerInputProjection::from_issued_entries(&entries).unwrap(),
         ArtifactView::clone(&current),
     )
-    .issue_native_offer(&entries[0].descriptor.owner, Some(proof))
+    .issue_native_offer(
+        &entries[0].descriptor.owner,
+        Some(proof),
+        &mut offer_validation,
+    )
     .unwrap();
     assert!(
         !offer.is_full(),
@@ -2766,6 +2843,11 @@ fn value_interface_append_keeps_materialized_inputs_until_last_context_release()
 
 #[test]
 fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let native = product("CustodyMaterialization", 96);
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
@@ -2897,7 +2979,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
             .compiler_source_support()
             .retain_custody(target.artifacts())
             .unwrap()
-            .issue_native_offer(&entry.descriptor.owner, Some(proof))
+            .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
             .unwrap();
         let retained_offers = context
             .compiler_source_support()
@@ -2946,6 +3028,11 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
 
 #[test]
 fn interface_only_full_availability_requires_explicit_original_acquisition() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("PrivateFullInterface", 121);
@@ -2961,7 +3048,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&full),
     )
-    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+    .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
     .unwrap();
     assert!(offer.is_full());
     let reusable_support = fixture_support_with_issued_offers(
@@ -3399,6 +3486,11 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
 
 #[test]
 fn private_native_scope_artifacts_keep_their_product_anchor() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("PrivateScopeProduct", 131);
@@ -3423,7 +3515,11 @@ fn private_native_scope_artifacts_keep_their_product_anchor() {
             .unwrap(),
         ArtifactView::clone(&full),
     )
-    .issue_native_offer(&native_entry.descriptor.owner, Some(proof))
+    .issue_native_offer(
+        &native_entry.descriptor.owner,
+        Some(proof),
+        &mut offer_validation,
+    )
     .unwrap();
     let issued = recover_fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[native_entry.clone(), plain_entry.clone()])
@@ -3503,6 +3599,11 @@ fn private_native_scope_artifacts_keep_their_product_anchor() {
 
 #[test]
 fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let entry = Arc::new(
@@ -3534,7 +3635,7 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
             CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
             ArtifactView::clone(&selected),
         )
-        .issue_native_offer(&entry.descriptor.owner, Some(proof))
+        .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
         .unwrap();
         assert!(!offer.is_full());
         partials.push(offer);
@@ -3543,7 +3644,7 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&full),
     )
-    .issue_native_offer(&entry.descriptor.owner, None)
+    .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
     .unwrap();
     for offers in [vec![], vec![empty], vec![partials[0].clone()], partials] {
         let metadata = projection
@@ -4450,6 +4551,11 @@ fn native_availability_failed_merge_preserves_qualified_owner() {
 
 #[test]
 fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let natives = [
@@ -4485,7 +4591,7 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
                 ArtifactView::clone(view),
             )
-            .issue_native_offer(&entry.descriptor.owner, Some(proof))
+            .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
             .unwrap();
             assert!(offer.is_full());
             offer
@@ -4744,6 +4850,11 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
 
 #[test]
 fn program_offer_only_append_refreshes_empty_native_candidates() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeArtifactDemand;
 
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
@@ -4770,7 +4881,7 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
             CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
             ArtifactView::clone(view),
         )
-        .issue_native_offer(&entry.descriptor.owner, None)
+        .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
         .unwrap();
         assert!(!offer.is_full());
         assert!(offer.proof().is_none());
@@ -4926,6 +5037,11 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
 
 #[test]
 fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{NativeArtifactDemand, NativeOriginalRequirement};
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("EqualPrivateFull", 125);
@@ -4976,7 +5092,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
                     ArtifactView::clone(view),
                 )
-                .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
                 .unwrap();
                 assert!(offer.is_full());
                 offer
@@ -5131,6 +5247,11 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
 
 #[test]
 fn private_transport_full_offer_cannot_borrow_another_offers_root() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         ExactArtifactSelection, NativeArtifactDemand, NativeOriginalRequirement,
     };
@@ -5166,11 +5287,15 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
         ArtifactView::clone(&full),
     );
     let unqualified = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, Some(no_groups))
+        .issue_native_offer(
+            &entry.descriptor.owner,
+            Some(no_groups),
+            &mut offer_validation,
+        )
         .unwrap();
     assert!(!unqualified.is_full());
     let complete = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, Some(issued))
+        .issue_native_offer(&entry.descriptor.owner, Some(issued), &mut offer_validation)
         .unwrap();
     assert!(complete.is_full());
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
@@ -5196,7 +5321,7 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
         assert!(!offers[0].is_full());
     }
     let empty_offer = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, None)
+        .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
         .unwrap();
     let empty = NativeInputSelection::issue_checked(
         offer_issuer.compiler_roles(),
@@ -5461,6 +5586,11 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
 
 #[test]
 fn private_transport_refuses_selected_dependency_product_and_interface_conflicts() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let dependency = product("CurrentDependency", 86);
     let consumer = dependent_product(
@@ -5550,7 +5680,7 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
                     CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
                     ArtifactView::clone(&issued),
                 )
-                .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
                 .unwrap()
             })
             .collect::<Vec<_>>();
@@ -5578,7 +5708,11 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
             CompilerInputProjection::from_issued_entries(&[Arc::clone(&entries[2])]).unwrap(),
             ArtifactView::clone(&current),
         )
-        .issue_native_offer(&entries[2].descriptor.owner, Some(current_proof))
+        .issue_native_offer(
+            &entries[2].descriptor.owner,
+            Some(current_proof),
+            &mut offer_validation,
+        )
         .unwrap();
         let current_source = fixture_compiler_support(current_projection.clone(), current.clone());
         let current_metadata = current_projection
@@ -5625,7 +5759,11 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&entries[1])]).unwrap(),
                 ArtifactView::clone(&issued),
             )
-            .issue_native_offer(&entries[1].descriptor.owner, Some(proof))
+            .issue_native_offer(
+                &entries[1].descriptor.owner,
+                Some(proof),
+                &mut offer_validation,
+            )
             .unwrap()],
         )
         .map(|_| ())
@@ -5716,6 +5854,11 @@ fn candidate_availability_keeps_partial_same_owner_input_permissions() {
 
 #[test]
 fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let helper = fixture_finalized_product(
         crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
@@ -5794,7 +5937,11 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         CompilerInputProjection::from_issued_entries(&entries).unwrap(),
         ArtifactView::clone(&full),
     )
-    .issue_native_offer(&authored_entry.descriptor.owner, Some(proof.clone()))
+    .issue_native_offer(
+        &authored_entry.descriptor.owner,
+        Some(proof.clone()),
+        &mut offer_validation,
+    )
     .unwrap();
     assert!(offer.is_full());
     let owners = entries
@@ -6499,6 +6646,11 @@ fn native_availability_preserves_ambiguity_and_explicit_selection_refuses_confli
 
 #[test]
 fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let target = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1)).module_name();
@@ -6537,7 +6689,7 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
         ArtifactView::clone(&full),
     );
     let empty = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, None)
+        .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
         .unwrap();
     let partial = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
@@ -6546,12 +6698,14 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
     .issue_native_offer(
         &entry.descriptor.owner,
         NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &sparse).unwrap(),
+        &mut offer_validation,
     )
     .unwrap();
     let complete = offer_issuer
         .issue_native_offer(
             &entry.descriptor.owner,
             NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &full).unwrap(),
+            &mut offer_validation,
         )
         .unwrap();
     assert!(!partial.is_full());
@@ -7927,6 +8081,11 @@ fn dependency_execution_graph_roots_stay_private_and_malformed_roots_refuse() {
 
 #[test]
 fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_admission() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("BoundedRequest", 117);
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
@@ -7967,7 +8126,11 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
             ArtifactView::clone(&selected),
         )
-        .issue_native_offer(&entry.descriptor.owner, requirements.first().cloned())
+        .issue_native_offer(
+            &entry.descriptor.owner,
+            requirements.first().cloned(),
+            &mut offer_validation,
+        )
         .unwrap();
         let support =
             fixture_support_with_issued_offers(projection.clone(), custody.clone(), [offer])
@@ -8136,6 +8299,11 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
 
 #[test]
 fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
 
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
@@ -8154,7 +8322,7 @@ fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
         ArtifactView::clone(&artifacts),
     );
     let full = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, Some(proof))
+        .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
         .unwrap();
     assert!(full.is_full());
     let partial = full
@@ -8163,7 +8331,7 @@ fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
         .unwrap();
     assert!(!partial.is_full());
     let empty = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, None)
+        .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
         .unwrap();
 
     for offer in [&full, &partial, &empty] {
@@ -8228,6 +8396,11 @@ fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
 
 #[test]
 fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     use crate::exact_context::{hydrate_context, Materializer, NativeOfferSnapshotBody};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
@@ -8248,7 +8421,11 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
         ArtifactView::clone(&artifacts),
     );
     let full = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, Some(proof.clone()))
+        .issue_native_offer(
+            &entry.descriptor.owner,
+            Some(proof.clone()),
+            &mut offer_validation,
+        )
         .unwrap();
     assert!(full.is_full());
     // Namespace withdrawal narrows an actual issuance. Restoring the original
@@ -8260,7 +8437,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
     assert!(!partial.is_full());
     assert!(proof.qualify_availability(&artifacts).unwrap().is_some());
     let empty = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, None)
+        .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
         .unwrap();
     let canonical = ArtifactEntry::canonical(match &entry.payload {
         ArtifactPayload::Original(product) => product.module_interface().clone(),
@@ -8296,7 +8473,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
     assert_eq!(canonical_support.native_offers().len(), 1);
     let empty_restored = canonical_support.native_offers()[0]
         .snapshot_facts()
-        .restore(&canonical_support.artifacts())
+        .restore(&canonical_support.artifacts(), &mut offer_validation)
         .unwrap();
     assert_eq!(empty_restored.snapshot_facts(), empty.snapshot_facts());
     let support = recover_fixture_compiler_support(projection.clone(), artifacts.clone(), [])
@@ -8524,6 +8701,11 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
 
 #[test]
 fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeArtifactDemand;
     use crate::exact_context::{hydrate_context, Materializer};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
@@ -8552,13 +8734,13 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&left),
     )
-    .issue_native_offer(&entry.descriptor.owner, None)
+    .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
     .unwrap();
     let right_offer = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&right),
     )
-    .issue_native_offer(&entry.descriptor.owner, None)
+    .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
     .unwrap();
     let left_graph = left_offer.custody_snapshot().graph_selection().unwrap();
     let right_graph = right_offer.custody_snapshot().graph_selection().unwrap();
@@ -8587,11 +8769,17 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
         right_offer.snapshot_facts().identity().unwrap()
     );
     assert!(
-        left_offer.snapshot_facts().restore(&right).is_err(),
+        left_offer
+            .snapshot_facts()
+            .restore(&right, &mut offer_validation)
+            .is_err(),
         "a competing carrier cannot satisfy exact Empty custody"
     );
     let artifacts = right.retain_custody(&left).unwrap();
-    let restored_left = left_offer.snapshot_facts().restore(&artifacts).unwrap();
+    let restored_left = left_offer
+        .snapshot_facts()
+        .restore(&artifacts, &mut offer_validation)
+        .unwrap();
     assert_eq!(restored_left.snapshot_facts(), left_offer.snapshot_facts());
     assert!(restored_left.proof().is_none());
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()])
@@ -8734,6 +8922,11 @@ fn compiled_publication_fixture() -> CompiledPublicationFixture {
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         ArtifactSelectionId, NativeArtifactDemand, NativeOriginalRequirement, ScopeProofV3,
     };
@@ -8828,6 +9021,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 .issue_native_offer(
                     &entry.descriptor.owner,
                     NativeOriginalRequirement::from_selected_view(id, &full).unwrap(),
+                    &mut offer_validation,
                 )
                 .unwrap();
             assert!(full_offer.is_full());
@@ -8864,6 +9058,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 .issue_native_offer(
                     &entry.descriptor.owner,
                     NativeOriginalRequirement::from_selected_view(id, &chosen).unwrap(),
+                    &mut offer_validation,
                 )
                 .unwrap();
             let mut issuer_projection = projection.clone();
@@ -9153,6 +9348,11 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
 
 #[test]
 fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawal() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::exact_context::{hydrate_context, Materializer};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
 
@@ -9229,7 +9429,7 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     let full = issued.owner.facts.compiler_support.native_offers()[0].clone();
     let empty = issued
         .compiler_source_support()
-        .issue_native_offer(&entry.descriptor.owner, None)
+        .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
         .unwrap();
     for (index, offer) in [full, empty].into_iter().enumerate() {
         let support = fixture_support_with_issued_offers(
@@ -9298,6 +9498,11 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
 
 #[test]
 fn historical_canonical_offer_histories_preserve_selected_request_and_recovery() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     use crate::exact_context::{hydrate_context, Materializer};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
@@ -9363,7 +9568,11 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .unwrap(),
                             ArtifactView::clone(&sources[0]),
                         )
-                        .issue_native_offer(&entries[0].descriptor.owner, Some(proof))
+                        .issue_native_offer(
+                            &entries[0].descriptor.owner,
+                            Some(proof),
+                            &mut offer_validation,
+                        )
                         .unwrap();
                         let partial_view = sources[0]
                             .inventory()
@@ -9389,7 +9598,11 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .unwrap(),
                             ArtifactView::clone(&partial_view),
                         )
-                        .issue_native_offer(&entries[0].descriptor.owner, Some(partial_proof))
+                        .issue_native_offer(
+                            &entries[0].descriptor.owner,
+                            Some(partial_proof),
+                            &mut offer_validation,
+                        )
                         .unwrap();
                         assert!(!partial.is_full());
                         assert_eq!(
@@ -9410,7 +9623,11 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                                 .unwrap(),
                                 ArtifactView::clone(&sources[0]),
                             )
-                            .issue_native_offer(&entries[0].descriptor.owner, None)
+                            .issue_native_offer(
+                                &entries[0].descriptor.owner,
+                                None,
+                                &mut offer_validation,
+                            )
                             .unwrap(),
                             1 => partial,
                             _ => full,
@@ -9527,7 +9744,11 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .unwrap(),
                             ArtifactView::clone(&sources[1]),
                         )
-                        .issue_native_offer(&entries[1].descriptor.owner, None)
+                        .issue_native_offer(
+                            &entries[1].descriptor.owner,
+                            None,
+                            &mut offer_validation,
+                        )
                         .unwrap();
                         if reverse {
                             offers.insert(0, auxiliary);
@@ -9814,6 +10035,11 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
 
 #[test]
 fn namespace_empty_full_offer_restores_its_own_exact_qualification() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let entry = Arc::new(
@@ -9831,7 +10057,7 @@ fn namespace_empty_full_offer_restores_its_own_exact_qualification() {
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&source),
     )
-    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+    .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
     .unwrap();
     assert!(full.is_full());
     let facts = full.snapshot_facts();
@@ -9846,23 +10072,34 @@ fn namespace_empty_full_offer_restores_its_own_exact_qualification() {
         .capture_graph_selection()
         .namespace
         .is_empty());
-    let restored = facts.restore(&support.artifacts()).unwrap();
+    let restored = facts
+        .restore(&support.artifacts(), &mut offer_validation)
+        .unwrap();
     assert!(restored.is_full());
     assert_eq!(restored.snapshot_facts(), facts);
     assert!(
-        facts.restore(&inventory.empty_view()).is_err(),
+        facts
+            .restore(&inventory.empty_view(), &mut offer_validation)
+            .is_err(),
         "missing recorded carrier/canonical custody must refuse"
     );
     let mut wrong = facts;
     wrong.interface = crate::artifact_inventory::ArtifactId([0; 32]);
     assert!(
-        wrong.restore(&support.artifacts()).is_err(),
+        wrong
+            .restore(&support.artifacts(), &mut offer_validation)
+            .is_err(),
         "a different recorded canonical identity must refuse"
     );
 }
 
 #[test]
 fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custody() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::IssuedNativeOffer;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let old = product("PrivateCustody", 91);
@@ -9886,7 +10123,7 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&old_entry)]).unwrap(),
         ArtifactView::clone(&old_source),
     )
-    .issue_native_offer(&old_entry.descriptor.owner, None)
+    .issue_native_offer(&old_entry.descriptor.owner, None, &mut offer_validation)
     .unwrap();
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), changed).unwrap());
     let current_source = inventory
@@ -10011,6 +10248,11 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let fixture = compiled_publication_fixture();
     let actual_owner = fixture.original.descriptor.owner.clone();
     let captured = CapturedTemplateImports::capture(
@@ -10139,7 +10381,11 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                     .unwrap(),
                 ArtifactView::clone(&views[1 - selected]),
             )
-            .issue_native_offer(&entries[1 - selected].descriptor.owner, None)
+            .issue_native_offer(
+                &entries[1 - selected].descriptor.owner,
+                None,
+                &mut offer_validation,
+            )
             .unwrap();
             let support = recover_fixture_compiler_support(
                 projection,
@@ -10323,6 +10569,11 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
 
 #[test]
 fn candidate_native_availability_preserves_unselected_historical_offers() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
 
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
@@ -10342,7 +10593,7 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
         ArtifactView::clone(&issued),
     );
     let full = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, Some(proof))
+        .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
         .unwrap();
     assert!(full.is_full());
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
@@ -10352,7 +10603,7 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
         .unwrap();
     assert!(!partial.is_full());
     let empty = offer_issuer
-        .issue_native_offer(&entry.descriptor.owner, None)
+        .issue_native_offer(&entry.descriptor.owner, None, &mut offer_validation)
         .unwrap();
     let baseline = type_context(&[historical, fresh.clone()]);
     let candidates = crate::module_candidates::CandidateSet {
@@ -11263,6 +11514,11 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
 
 #[test]
 fn candidate_custody_preserves_issued_availability_without_selecting_execution() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         ArtifactBindingNode, ExactArtifactSelection, IssuedNativeOffer, NativeOriginalRequirement,
     };
@@ -11684,7 +11940,11 @@ fn candidate_custody_preserves_issued_availability_without_selecting_execution()
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&historical_view),
     )
-    .issue_native_offer(&entry.descriptor.owner, Some(historical_proof))
+    .issue_native_offer(
+        &entry.descriptor.owner,
+        Some(historical_proof),
+        &mut offer_validation,
+    )
     .unwrap();
     assert!(historical.is_full());
     let group3 = |offer: &IssuedNativeOffer| {
@@ -11735,6 +11995,7 @@ fn candidate_custody_preserves_issued_availability_without_selecting_execution()
             &snapshot.roles,
             &snapshot.offers,
             &snapshot.native_availability,
+            &mut offer_validation,
         );
     assert!(matches!(&mismatched_issuer, Err(CompileError::ExtractFailed(detail))
         if detail == "artifact inventory: recovered native offer scope is outside acquisition custody"),
@@ -11864,6 +12125,11 @@ fn source_support_with_empty_native_permissions_discards_unrelated_parent_custod
 
 #[test]
 fn source_support_retains_every_original_in_a_shared_native_contribution() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let native = |module: &str, ordinal: u32, seed: u8| {
         fixture_finalized_product(
@@ -11920,7 +12186,11 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
         CompilerInputProjection::from_issued_entries(&entries).unwrap(),
         ArtifactView::clone(&root_view),
     )
-    .issue_native_offer(&entries[3].descriptor.owner, Some(proof))
+    .issue_native_offer(
+        &entries[3].descriptor.owner,
+        Some(proof),
+        &mut offer_validation,
+    )
     .unwrap();
     let shared = Arc::new(
         offer
@@ -12237,6 +12507,11 @@ fn recovery_inspection_ignores_unrelated_retained_native_inventory_growth() {
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof_custody() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::NativeOriginalRequirement;
     use crate::exact_context::{hydrate_context, Materializer};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
@@ -12343,6 +12618,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
                     &entry.descriptor.owner,
                     NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &chosen)
                         .unwrap(),
+                    &mut offer_validation,
                 )
                 .unwrap();
         let support = fixture_support_with_issued_offers(issuer_projection, chosen, [offer])

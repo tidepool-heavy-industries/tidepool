@@ -646,6 +646,11 @@ fn assert_sparse_partial_transport(context: &ExactDeclarationContext, original: 
 }
 
 fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::ArtifactBindingNode;
     let producer = [2; 32];
     let child_interface = crate::certified_products::fixture_module_interface(
@@ -804,7 +809,7 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
                 )
                 .unwrap();
                 let old = historical
-                    .issue_native_offer(&native.descriptor.owner, None)
+                    .issue_native_offer(&native.descriptor.owner, None, &mut offer_validation)
                     .unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection.clone(),
@@ -1254,6 +1259,11 @@ fn published_native_custody_does_not_require_dependency_namespace_originals() {
 #[test]
 #[ignore = "requires the declared rooted compiler service"]
 fn nested_publication_digest_cannot_change_recovered_source_or_native_selection() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::exact_context::{
         hydrate_context, ExactContextSnapshot, Materializer, PublicationNativeFacts,
         PublicationNativeMaps, RecordedCompilerRow, RecordedOriginalProvenance,
@@ -1388,6 +1398,7 @@ fn nested_publication_digest_cannot_change_recovered_source_or_native_selection(
         &altered.roles,
         &altered.offers,
         &altered.native_availability,
+        &mut offer_validation,
     )
     .unwrap();
     let unfinished = context

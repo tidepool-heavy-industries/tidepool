@@ -277,6 +277,11 @@ fn replay_native_transport_history(
     history: &NativeTransportHistory,
     coverage: &mut NativeTransportCoverage,
 ) {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
     };
@@ -495,7 +500,9 @@ fn replay_native_transport_history(
                 let issuer = &source_issuers[index];
                 let before = supplied
                     .iter()
-                    .map(|(owner, proof)| issuer.issue_native_offer(owner, Some(proof.clone())))
+                    .map(|(owner, proof)| {
+                        issuer.issue_native_offer(owner, Some(proof.clone()), &mut offer_validation)
+                    })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
                 // Restore this source's complete selected namespace, including
@@ -509,7 +516,11 @@ fn replay_native_transport_history(
                 let after = supplied
                     .iter()
                     .map(|(owner, proof)| {
-                        receiving_issuer.issue_native_offer(owner, Some(proof.clone()))
+                        receiving_issuer.issue_native_offer(
+                            owner,
+                            Some(proof.clone()),
+                            &mut offer_validation,
+                        )
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();

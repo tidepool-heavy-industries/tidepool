@@ -498,6 +498,11 @@ fn compiler_projection_dependency_refusals_preserve_exact_owners() {
 
 #[test]
 fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let catalog = Catalog::new(false, [1, 2, 3, 4, 5, 6]);
     let view = catalog.full_view();
     let selected = catalog.projection(&view, [Some(0); MODULES]);
@@ -510,7 +515,8 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
             view.clone(),
             selected.recorded_roles(),
             &Default::default(),
-            &Default::default()
+            &Default::default(),
+            &mut offer_validation
         )
         .unwrap()
         .recorded_rows(),
@@ -535,7 +541,8 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
             view.clone(),
             &misowned,
             &Default::default(),
-            &Default::default()
+            &Default::default(),
+            &mut offer_validation
         )
         .is_err(),
         "recorded roles are authenticated by their retained owner key"

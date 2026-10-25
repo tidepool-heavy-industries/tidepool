@@ -19,6 +19,11 @@ struct History {
 
 impl History {
     fn new() -> Self {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let products = [
             product("ColdExactHistory", 201),
             product("ColdExactHistory", 202),
@@ -59,7 +64,7 @@ impl History {
                 )
                 .unwrap();
                 let offer = issuer
-                    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
                     .unwrap();
                 assert!(offer.is_full());
                 offer
@@ -427,6 +432,11 @@ fn original_pair_membership_cannot_expand_explicit_empty_group_permission() {
 
 #[test]
 fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let history = History::new();
     let ArtifactPayload::Original(old) = &history.entries[0].payload else {
         unreachable!()
@@ -468,7 +478,7 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
     )
     .unwrap();
     let parent_offer = issuer
-        .issue_native_offer(&parent.descriptor.owner, Some(proof))
+        .issue_native_offer(&parent.descriptor.owner, Some(proof), &mut offer_validation)
         .unwrap();
     assert!(parent_offer.is_full());
     let expected = *parent_offer

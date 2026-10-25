@@ -11,6 +11,11 @@ const PRODUCER: &[u8] = b"distinct-original-candidate-history";
 
 #[test]
 fn candidate_availability_preserves_roles_and_historical_custody() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let products = [141, 142].map(|version| {
         fixture_finalized_product(
@@ -54,7 +59,7 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
     )
     .unwrap();
     let offer = issuer
-        .issue_native_offer(&a.descriptor.owner, Some(proof))
+        .issue_native_offer(&a.descriptor.owner, Some(proof), &mut offer_validation)
         .unwrap();
     assert!(offer.is_full());
     let original_offer = offer.snapshot_facts();
