@@ -3921,14 +3921,17 @@ mod tests {
         recovery
             .store
             .inject_fault(recovery_store::StoreFault::BeforeCommit);
-        assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| {
-                lib.retract("DirectFlag", settlement)
-            }),
-            Err(SessionError::RecoveryStoreRefused(
-                recovery_store::StoreRefusal::Storage(_)
-            ))
-        ));
+        let refused =
+            tidepool_testing::with_settlement(|settlement| lib.retract("DirectFlag", settlement));
+        assert!(
+            matches!(
+                &refused,
+                Err(SessionError::RecoveryStoreRefused(
+                    recovery_store::StoreRefusal::Storage(_)
+                ))
+            ),
+            "retraction must reach the injected storage refusal: {refused:?}"
+        );
         assert!(recovery.store.ensure_ready().is_ok());
         assert_eq!(recovery.state(), before);
         assert_eq!(lib.scope_tip(ScopeId::ROOT), original);
