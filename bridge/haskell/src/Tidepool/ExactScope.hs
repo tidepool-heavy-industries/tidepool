@@ -114,7 +114,7 @@ import Tidepool.ExecutionSource
 import Tidepool.LocalNativeDeclaration
   ( LocalNativeDeclarationAdmission, localNativeOwner, localNativeProof )
 import Tidepool.PackageWitness
-  ( AdmittedPackageImports, PackageImportEvidence, decodeCapturedPackageImports, emptyAdmittedPackageImports, extendAdmittedPackageImportsWith, extendAdmittedPackageImportsWithFacts
+  ( AdmittedPackageImports, PackageImportEvidence, decodeCapturedPackageImportsWithTiming, emptyAdmittedPackageImports, extendAdmittedPackageImportsWith, extendAdmittedPackageImportsWithFacts
   , revalidateAdmittedPackageImports, validateAdmittedPackageSelection )
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition)
 import Tidepool.NativeOriginalCensus
@@ -1454,7 +1454,7 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
              _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
              Right <$> memoOriginalFact counts timing "original_inputs.packages" packagesState
                (sha,exactUnit iface,exactModule iface,exactSha256 iface)
-               (either fail pure (decodeCapturedPackageImports iface payload))) emptyAdmittedPackageImports rows >>= either fail pure
+               (decodeCapturedPackageImportsWithTiming iface payload >>= either fail pure)) emptyAdmittedPackageImports rows >>= either fail pure
            let AdmittedScopeInputs order admitted _ _ _ = makeScopeInputs rows evidence roots
                inputs = AdmittedScopeInputs order admitted roots census Nothing
                sha = digest bytes
@@ -2158,7 +2158,12 @@ worldSuccessorChangedAliases (WorldSuccessorInputs _ aliases) = aliases
 
 data WorldDependencyEntry = WorldDependencyEntry !WorldAdmittedRow !Int
 
-data WorldAdmittedRow = WorldAdmittedRow !OfferedWorldRow !ScopeInterfaceInput !BS.ByteString !(Integer,Int)
+-- The admitted sidecar facts share the row's bounded byte owner and lifetime.
+-- They cannot outlive row retirement through a separate package-fact cache.
+data WorldAdmittedRow = WorldAdmittedRow !OfferedWorldRow !ScopeInterfaceInput !BS.ByteString !(Integer,Int) !PackageImportEvidence
+
+worldAdmittedInput :: WorldAdmittedRow -> ScopeInterfaceInput
+worldAdmittedInput (WorldAdmittedRow _ input _ _ _) = input
 
 -- Incoming block bodies are copied out of transport envelopes once. Persistent
 -- maps share unchanged bodies and child sets; root reference counts retire only
@@ -2273,22 +2278,31 @@ readWorldBindingInputs owner env facts occurrences = do
   if length selected /= length occurrences
     then pure (Left "world value demand contains an unbound occurrence")
     else fmap (\(captured,types) -> (selected,captured,types)) <$>
-      readWorldSelectedBindingInputs owner env facts (worldInputsCustody facts) (\key -> case Map.lookup key (worldInputsDependencyRows facts) of
+      readWorldSelectedBindingInputs owner env facts (worldInputsCustody facts) (worldInputsVisibleRows facts) (\key -> case Map.lookup key (worldInputsDependencyRows facts) of
         Just (WorldDependencyEntry row _) -> Just row
         Nothing -> Nothing) (map snd selected)
 
 -- Selected operands and namespace demands use the same checked-row reader. The
 -- row manifest selects its TYPE closure from the corresponding owned custody.
-readWorldSelectedBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> RequestOriginalInputs -> (WorldArtifactBinding -> Maybe WorldAdmittedRow) -> [WorldBinding]
+readWorldSelectedBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> RequestOriginalInputs
+  -> Map.Map InterfaceOwner WorldAdmittedRow -> (WorldArtifactBinding -> Maybe WorldAdmittedRow) -> [WorldBinding]
   -> IO (Either String ([(VerifiedExactInterface,ArtifactBytes)],Map.Map InterfaceOwner WorldTypeClosureEntry))
-readWorldSelectedBindingInputs owner env facts tokens dependencies selected = do
+readWorldSelectedBindingInputs owner env facts tokens visible dependencies selected = do
   let selectedRows = map worldBindingRow selected
       leafOwners = Set.fromList [rowOwner (worldBindingRowInterface row) | row <- selectedRows]
-      leaves = [(worldBindingLeafBinding row,worldBindingSemanticRow row,
-          ScopeInterfaceInput (worldBindingRowInterface row) CheckedValueEvidence) | row <- selectedRows]
       manifests = Map.unionsWith (++) [Map.map pure (worldBindingDependencyManifest row) | row <- selectedRows]
+  leaves <- forM selectedRows $ \row -> do
+    admitted@(WorldAdmittedRow _ input semantic _ _) <-
+      maybe (worldCorrupt "world value leaf lacks its admitted owner") pure
+        (Map.lookup (rowOwner (worldBindingRowInterface row)) visible)
+    unless (semantic == worldBindingSemanticRow row)
+      (worldCorrupt "world value leaf differs from its admitted semantic row")
+    case input of
+      ScopeInterfaceInput _ CheckedValueEvidence -> pure ()
+      _ -> worldCorrupt "world value leaf lost its admitted checked evidence"
+    pure (worldBindingLeafBinding row,semantic,admitted)
   demanded <- forM (Map.toAscList manifests) $ \(binding,semantics) -> do
-    WorldAdmittedRow _ row semantic _ <- maybe (worldCorrupt "world value dependency lacks its admitted owner") pure
+    row@(WorldAdmittedRow _ _ semantic _ _) <- maybe (worldCorrupt "world value dependency lacks its admitted owner") pure
       (dependencies binding)
     unless (all (== semantic) semantics) (worldCorrupt "world value dependency differs from its manifest")
     pure (binding,semantic,row)
@@ -2356,10 +2370,11 @@ readWorldCellOperandWithOwner owner@(ExactInputOwner _ state) env facts path exp
       frontier <- verifyWorldBlocks [cid] blocks
       (rows,custody,_) <- admitWorldRows state (worldInputsProducer facts) acquisition (offered:map snd dependencies)
       dependencyRows <- indexWorldDependencies (map fst dependencies) (drop 1 rows)
-      eligible <- worldVisibleSemantic <$> worldRowsByOwner (take 1 rows)
+      visible <- worldRowsByOwner (take 1 rows)
+      let eligible = worldVisibleSemantic visible
       (binding,semantic,rowBytes) <- readChangedWorldBinding frontier eligible reference
       _ <- establishWorldDependencies dependencyRows (Map.singleton cid (worldBindingRow binding,semantic,rowBytes,1))
-      inputs <- readWorldSelectedBindingInputs owner env facts custody (`Map.lookup` dependencyRows) [binding]
+      inputs <- readWorldSelectedBindingInputs owner env facts custody visible (`Map.lookup` dependencyRows) [binding]
       case inputs of
         Left reason -> worldCorrupt reason
         Right ([(verified,packages)],types)
@@ -2428,27 +2443,24 @@ worldTypeEntryEvidence (WorldTypeClosureEntry _ _ (ScopeInterfaceInput _ evidenc
 worldTypeEntryInterfaceBody :: WorldTypeClosureEntry -> ArtifactBytes
 worldTypeEntryInterfaceBody (WorldTypeClosureEntry _ _ _ _ _ body) = body
 
--- Decode each selected sidecar once. Its immutable token authenticates the
--- offered seal; the collective package owner checks installed bytes and the
--- current compiler selection before these facts become available to callers.
-readWorldPackageInputsWithCustody :: HscEnv -> RequestOriginalInputs -> Map.Map InterfaceOwner InterfaceRow
+-- Selection borrows facts from the exact admitted row. Its immutable token
+-- still authenticates the offered seal; installed bytes and the current package
+-- selection are checked freshly before these facts become available to callers.
+readWorldPackageInputsWithCustody :: HscEnv -> RequestOriginalInputs -> Map.Map InterfaceOwner WorldAdmittedRow
   -> IO (Either String (Map.Map InterfaceOwner PackageImportEvidence))
 readWorldPackageInputsWithCustody env custody rows = do
-  decoded <- forM (Map.toAscList rows) $ \(key,(artifact,path,sha)) -> do
-    body <- capturedRequestInputToken custody path sha
-    pure ((,) key <$> decodeCapturedPackageImports artifact (artifactBytes body))
-  case sequence decoded of
+  packages <- Map.traverseWithKey (\_ (WorldAdmittedRow _ (ScopeInterfaceInput (_,path,sha) _) _ _ evidence) -> do
+    _ <- capturedRequestInputToken custody path sha
+    pure evidence) rows
+  let inputs = Map.map (\row -> case worldAdmittedInput row of ScopeInterfaceInput input _ -> input) rows
+      readFacts row = pure $ maybe (Left "world package proof lost its selected owner") Right
+        (Map.lookup (rowOwner row) packages)
+  admitted <- extendAdmittedPackageImportsWithFacts readFacts emptyAdmittedPackageImports (Map.elems inputs)
+  case admitted of
     Left reason -> pure (Left reason)
-    Right pairs -> do
-      let packages = Map.fromList pairs
-          readFacts row = pure $ maybe (Left "world package proof lost its selected owner") Right
-            (Map.lookup (rowOwner row) packages)
-      admitted <- extendAdmittedPackageImportsWithFacts readFacts emptyAdmittedPackageImports (Map.elems rows)
-      case admitted of
-        Left reason -> pure (Left reason)
-        Right selection -> do
-          valid <- validateAdmittedPackageSelection env selection
-          pure (packages <$ valid)
+    Right selection -> do
+      valid <- validateAdmittedPackageSelection env selection
+      pure (packages <$ valid)
 
 -- Only exact Context-selected associations can supply required home types.
 -- Passive custody and other world versions cannot widen this lexical closure.
@@ -2463,27 +2475,27 @@ readWorldTypeInputs owner env facts roots = case walk Map.empty roots of
     walk selected (key:rest) = do
       association <- maybe (Left "demanded type lacks its exact Context association") Right
         (Map.lookup key (worldPrimarySelected (worldInputsPrimary facts)))
-      let row@(ScopeInterfaceInput (artifact,_,_) _) = worldPrimaryRow association
+      let ScopeInterfaceInput (artifact,_,_) _ = worldPrimaryRow association
       unless ((exactUnit artifact,exactModule artifact) == key)
         (Left "world demanded type has another selected interface owner")
       let binding = worldPrimaryInterfaceBinding association
-      semantic <- case Map.lookup key (worldInputsBaseRows facts) of
-        Just (WorldAdmittedRow _ _ value _) -> Right value
+      admitted@(WorldAdmittedRow _ _ semantic _ _) <- case Map.lookup key (worldInputsBaseRows facts) of
+        Just row -> Right row
         Nothing -> Left "world TYPE primary association lost its admitted row"
-      walk (Map.insert key (binding,semantic,row) selected) (exactRequirements artifact ++ rest)
+      walk (Map.insert key (binding,semantic,admitted) selected) (exactRequirements artifact ++ rest)
 
 
 -- Collapse owners only after comparing the exact binding and semantic facts.
 -- Custody comes from the demanded product, including operand-local transport.
 readManifestWorldTypeInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> RequestOriginalInputs
-  -> [(WorldArtifactBinding,BS.ByteString,ScopeInterfaceInput)]
+  -> [(WorldArtifactBinding,BS.ByteString,WorldAdmittedRow)]
   -> IO (Either String (Map.Map InterfaceOwner WorldTypeClosureEntry))
 readManifestWorldTypeInputs (ExactInputOwner _ state) env facts custody contributions = case checked >>= validate of
   Left reason -> pure (Left reason)
   Right selected -> do
-    let rows = Map.map (\(_,_,row) -> row) selected
-    packages <- readWorldPackageInputsWithCustody env custody
-      (Map.map (\(ScopeInterfaceInput row _) -> row) rows)
+    let admittedRows = Map.map (\(_,_,row) -> row) selected
+        rows = Map.map worldAdmittedInput admittedRows
+    packages <- readWorldPackageInputsWithCustody env custody admittedRows
     case packages of
       Left reason -> pure (Left reason)
       Right packageFacts -> do
@@ -2527,7 +2539,7 @@ readManifestWorldTypeInputs (ExactInputOwner _ state) env facts custody contribu
             pure (WorldTypeClosureEntry binding semantic row admitted evidence body)) rows
   where
     validate selected = do
-      let rows = Map.map (\(_,_,row) -> row) selected
+      let rows = Map.map (worldAdmittedInput . (\(_,_,row) -> row)) selected
       let seals = Map.map (\(ScopeInterfaceInput (artifact,_,_) _) -> exactSha256 artifact) rows
       forM_ (Map.elems rows) $ \(ScopeInterfaceInput (artifact,_,_) evidence) -> case evidence of
         ModuleInterfaceEvidence proof -> unless (canonicalRequirementsSelected seals artifact proof)
@@ -2543,7 +2555,8 @@ readManifestWorldTypeInputs (ExactInputOwner _ state) env facts custody contribu
       pure selected
 
     checked = foldM insert Map.empty contributions
-    insert rows value@(binding,semantic,ScopeInterfaceInput input _) = do
+    insert rows value@(binding,semantic,admitted) = do
+      let ScopeInterfaceInput input _ = worldAdmittedInput admitted
       let key = rowOwner input
       _ <- insertWorldTypeAssociation (Map.map (\(held,expected,_) -> (held,expected)) (Map.restrictKeys rows (Set.singleton key)))
         (key,(binding,semantic))
@@ -2551,7 +2564,7 @@ readManifestWorldTypeInputs (ExactInputOwner _ state) env facts custody contribu
         unless (worldPrimaryInterfaceBinding primary == binding)
           (Left "world TYPE dependency conflicts with selected primary binding")
         case Map.lookup key (worldInputsBaseRows facts) of
-          Just (WorldAdmittedRow _ _ expected _) -> unless (expected == semantic)
+          Just (WorldAdmittedRow _ _ expected _ _) -> unless (expected == semantic)
             (Left "world TYPE dependency conflicts with selected primary semantics")
           Nothing -> Left "world TYPE primary association lost its admitted row"
       pure (Map.insertWith (\_ held -> held) key value rows)
@@ -2731,14 +2744,14 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
       base <- worldRowsByOwner (take (length baseRows) admitted)
       visible <- worldRowsByOwner (take (length visibleRows) (drop (length baseRows) admitted))
       dependencies <- indexWorldDependencies (map fst dependencyRows) (drop (length baseRows + length visibleRows) admitted)
-      let pairs rows = [(offered,input) | WorldAdmittedRow offered input _ _ <- Map.elems rows]
+      let pairs rows = [(offered,input) | WorldAdmittedRow offered input _ _ _ <- Map.elems rows]
       primaryFacts <- readWorldPrimary frontier associationRoot producer (pairs base)
       lexical <- readWorldLexicalSurface frontier lexicalRoot primaryFacts
       (bindings,bindingCharge) <- readWorldBindings frontier bindingRoot producer (pairs visible)
       verified <- retainVerifiedWorldFrontier [associationRoot,bindingRoot,lexicalRoot] frontier
       bindingRows <- retainWorldBindingRows frontier producer visible bindings
       dependencyFacts <- establishWorldDependencies dependencies bindingRows
-      rowCharge <- foldM (\charge (WorldAdmittedRow _ _ _ more) -> checkedWorldCharge charge more)
+      rowCharge <- foldM (\charge (WorldAdmittedRow _ _ _ more _) -> checkedWorldCharge charge more)
         (64 * toInteger (length dependencyRows),length dependencyRows) admitted
       let identity = SHA.hash restoration
           sourceEntries = toInteger (length (worldSourceRoots sources))
@@ -2780,7 +2793,7 @@ admitWorldRows state producer acquisition offered = do
     forM offered $ \entry@((row@(iface,packages,packageSha),evidence),_) -> do
       _ <- verified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
       packageBytes <- verified packages (4 * 1024 * 1024) packageSha
-      _ <- either worldCorrupt pure (decodeCapturedPackageImports iface packageBytes)
+      packageFacts <- decodeCapturedPackageImportsWithTiming iface packageBytes >>= either worldCorrupt pure
       admitted <- case evidence of
         ParsedModuleEvidence descriptor -> do
           proof <- validateCanonicalRowUsing verified (readCertificateWith (\artifact cap -> artifactBytes <$> readToken artifact cap))
@@ -2794,7 +2807,7 @@ admitWorldRows state producer acquisition offered = do
       semantic <- toStrictByteString <$> worldSemanticRowEncoding producer entry
       let charge = (sum [toInteger (BS.length (TE.encodeUtf8 (T.pack path))) + toInteger (length sha)
             | (path,sha) <- worldOfferedSeals entry] + toInteger (BS.length semantic),1)
-      pure (WorldAdmittedRow entry (ScopeInterfaceInput row admitted) semantic charge)
+      pure (WorldAdmittedRow entry (ScopeInterfaceInput row admitted) semantic charge packageFacts)
   let users = Map.fromListWith (+) [(path,1) | entry <- offered, (path,_) <- worldOfferedSeals entry]
   let capturedBodies = requestInputBodies originals
   selected <- forM (Map.keys users) $ \path -> do
@@ -2851,7 +2864,7 @@ validateWorldBindingManifestWith dependency binding = do
       leafOwner = (exactUnit artifact,exactModule artifact)
   selected <- forM (Map.toAscList manifest) $ \(key,semantic) -> do
     when (key == leaf) (worldCorrupt "compiler world dependency manifest repeats its leaf")
-    row@(WorldAdmittedRow _ (ScopeInterfaceInput input _) expected _) <-
+    row@(WorldAdmittedRow _ (ScopeInterfaceInput input _) expected _ _) <-
       maybe (worldCorrupt "compiler world dependency manifest lacks its admitted binding") pure (dependency key)
     unless (semantic == expected) (worldCorrupt "compiler world dependency semantic association differs")
     pure (rowOwner input,(key,row))
@@ -2864,7 +2877,7 @@ validateWorldBindingManifestWith dependency binding = do
         | key == leafOwner = walk (Set.insert key seen) (exactRequirements artifact ++ rest)
         | otherwise = case Map.lookup key byOwner of
             Nothing -> worldCorrupt "compiler world dependency closure misses a required interface owner"
-            Just (_,WorldAdmittedRow _ (ScopeInterfaceInput (iface,_,_) _) _ _) ->
+            Just (_,WorldAdmittedRow _ (ScopeInterfaceInput (iface,_,_) _) _ _ _) ->
               walk (Set.insert key seen) (exactRequirements iface ++ rest)
   reached <- walk Set.empty [leafOwner]
   unless (Set.delete leafOwner reached == Map.keysSet byOwner)
@@ -2939,13 +2952,13 @@ advanceWorldDependencies original incoming edits previous next touched = do
 worldRowsByOwner :: [WorldAdmittedRow] -> IO (Map.Map InterfaceOwner WorldAdmittedRow)
 worldRowsByOwner rows = foldM insert Map.empty rows
   where
-    insert indexed value@(WorldAdmittedRow ((row,_),_) _ _ _) = do
+    insert indexed value@(WorldAdmittedRow ((row,_),_) _ _ _ _) = do
       when (Map.member (rowOwner row) indexed) (worldCorrupt "compiler world repeats an acquired row owner")
       pure (Map.insert (rowOwner row) value indexed)
 
 worldVisibleSemantic :: Map.Map InterfaceOwner WorldAdmittedRow -> Map.Map BS.ByteString ScopeInterfaceInput
 worldVisibleSemantic rows = Map.fromList
-  [(semantic,input) | WorldAdmittedRow _ input semantic _ <- Map.elems rows]
+  [(semantic,input) | WorldAdmittedRow _ input semantic _ _ <- Map.elems rows]
 
 checkedWorldCharge :: (Integer,Int) -> (Integer,Int) -> IO (Integer,Int)
 checkedWorldCharge (bytes,entries) (more,count) = do
@@ -3014,9 +3027,9 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
       dependencyIncoming <- indexWorldDependencies [key | (key,Just _) <- dependencyChanges] dependencyAdmitted
       (base,removedBase,addedBase) <- applyWorldRows (worldInputsBaseRows previous) primaryChanges primaryAdmitted
       (visible,removedVisible,addedVisible) <- applyWorldRows (worldInputsVisibleRows previous) visibleChanges visibleAdmitted
-      let semantic = foldl' (\rows (WorldAdmittedRow _ _ key _) -> Map.delete key rows)
+      let semantic = foldl' (\rows (WorldAdmittedRow _ _ key _ _) -> Map.delete key rows)
             (worldInputsVisibleSemantic previous) removedVisible
-          nextSemantic = foldl' (\rows (WorldAdmittedRow _ input key _) -> Map.insert key input rows) semantic addedVisible
+          nextSemantic = foldl' (\rows (WorldAdmittedRow _ input key _ _) -> Map.insert key input rows) semantic addedVisible
       (aliasChanges,nodeCharge) <- worldHamtChanges comparison oldBindings bindings
         (T.unpack <$> worldBindingText) (E.encodeString . T.pack) decodeWorldBindingValue
       (nextBindings,nextRows,semanticUsers,bindingCharge) <- applyWorldBindings frontier nextSemantic
@@ -3032,11 +3045,11 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
           added = addedBase ++ addedVisible ++ addedDependencies
       (custody,users) <- editWorldCustody (worldInputsCustody previous) (worldInputsCustodyUsers previous)
         incoming removed added
-      rowCharge <- foldM (\cost (WorldAdmittedRow _ _ _ (bytes,count)) -> checkedWorldCharge cost (-bytes,-count))
+      rowCharge <- foldM (\cost (WorldAdmittedRow _ _ _ (bytes,count) _) -> checkedWorldCharge cost (-bytes,-count))
         (worldInputsRowCharge previous) removed
         >>= \cost -> checkedWorldCharge cost
           (64 * toInteger (length addedDependencies-length removedDependencies),length addedDependencies-length removedDependencies)
-        >>= \cost -> foldM (\next (WorldAdmittedRow _ _ _ charge) -> checkedWorldCharge next charge) cost added
+        >>= \cost -> foldM (\next (WorldAdmittedRow _ _ _ charge _) -> checkedWorldCharge next charge) cost added
       primaryFacts <- if associations == oldAssociations
         then do
           unless (null removedBase && null addedBase)
@@ -3046,7 +3059,7 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
           timing <- readTimingEnabled
           emitCount timing "world.successor.primary_full_validation_rows" (toInteger (Map.size base))
           readWorldPrimary frontier associations producer
-            [(row,input) | WorldAdmittedRow row input _ _ <- Map.elems base]
+            [(row,input) | WorldAdmittedRow row input _ _ _ <- Map.elems base]
       lexical <- if lexicalRoot == oldLexical && associations == oldAssociations
         then pure (worldInputsLexicalSurface previous)
         else readWorldLexicalSurface frontier lexicalRoot primaryFacts
@@ -3125,7 +3138,7 @@ applyWorldRows original changes admitted = do
       case (before,after) of
         -- Physical aliases do not replace immutable semantic facts. Retain the
         -- existing correlated row and its sealed bodies when its image agrees.
-        (Just (WorldAdmittedRow _ _ old _),Just (WorldAdmittedRow _ _ new _)) | old == new -> pure (rows,removed,added)
+        (Just (WorldAdmittedRow _ _ old _ _),Just (WorldAdmittedRow _ _ new _ _)) | old == new -> pure (rows,removed,added)
         _ -> pure (maybe (Map.delete key rows) (\row -> Map.insert key row rows) after
           ,maybe removed (:removed) before,maybe added (:added) after)
 
@@ -3133,9 +3146,9 @@ editWorldCustody :: RequestOriginalInputs -> Map.Map FilePath Int -> RequestOrig
   -> [WorldAdmittedRow] -> [WorldAdmittedRow] -> IO (RequestOriginalInputs,Map.Map FilePath Int)
 editWorldCustody original users incoming removed added = do
   (released,remaining) <- foldM release (original,users)
-    [path | WorldAdmittedRow offered _ _ _ <- removed,(path,_) <- worldOfferedSeals offered]
+    [path | WorldAdmittedRow offered _ _ _ _ <- removed,(path,_) <- worldOfferedSeals offered]
   foldM acquire (released,remaining)
-    [(path,sha) | WorldAdmittedRow offered _ _ _ <- added,(path,sha) <- worldOfferedSeals offered]
+    [(path,sha) | WorldAdmittedRow offered _ _ _ _ <- added,(path,sha) <- worldOfferedSeals offered]
   where
     release (custody,counts) path = case Map.lookup path counts of
       Just 1 -> do
@@ -3207,7 +3220,7 @@ validateChangedVisibleRows :: Map.Map BS.ByteString ScopeInterfaceInput
 validateChangedVisibleRows eligible previous retained semanticUsers removed added changes = do
   let changedCIDs = Set.fromList [cid | (before,after) <- Map.elems changes
         ,(_,_,_,_,cid) <- maybe [] pure before ++ maybe [] pure after]
-      touched = Set.fromList ([semantic | WorldAdmittedRow _ _ semantic _ <- removed ++ added]
+      touched = Set.fromList ([semantic | WorldAdmittedRow _ _ semantic _ _ <- removed ++ added]
         ++ [semantic | cid <- Set.toList changedCIDs,rows <- [previous,retained]
           ,Just (_,semantic,_,_) <- [Map.lookup cid rows]])
       -- One visible semantic row can have several provenance records; check
@@ -3823,7 +3836,7 @@ retainWorldBindingRows frontier _producer visible bindings = foldM retain Map.em
       case Map.lookup cid indexed of
         Just (held,semantic,bytes,users) -> pure (Map.insert cid (held,semantic,bytes,users+1) indexed)
         Nothing -> do
-          WorldAdmittedRow _ _ semantic _ <- maybe (worldCorrupt "world binding lost its visible row owner") pure
+          WorldAdmittedRow _ _ semantic _ _ <- maybe (worldCorrupt "world binding lost its visible row owner") pure
             (Map.lookup (exactUnit artifact,exactModule artifact) visible)
           body <- maybe (worldCorrupt "world binding row body is absent") pure (Map.lookup cid frontier)
           pure (Map.insert cid (row,semantic,worldBindingRetainedBytes row body,1) indexed)

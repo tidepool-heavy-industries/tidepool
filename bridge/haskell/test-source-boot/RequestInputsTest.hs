@@ -1326,7 +1326,9 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
         TList [TList [u,n,path,sha,TList (TList [TString "other-unit",TString "Other.Module"]:requires),packages,packageSha,evidence],image]
       changeRequires _ = error "world requirement control requires a genuine row"
   BS.writeFile sourcePath sources
-  original <- readPacket "world-v6-valid" originalPacket
+  (original,admissionDiagnostics) <- captureDiagnostics (readPacket "world-v6-valid" originalPacket)
+  unless (sum (counterValues "package_proof.sidecar_decodes" admissionDiagnostics) == toInteger (length base))
+    (fail "World admission did not parse each selected row's package sidecar exactly once")
   unless (worldInputsIdentityBytes original == SHA.hash product
       && worldInputsCompilerIdentity original == compilerIdentity
       && Map.null (worldInputsBindings original) && worldInputsBindingScope original == 0
@@ -1528,11 +1530,25 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   exported <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
     environment <- getSession
     owner <- liftIO newExactInputOwner
-    types <- liftIO (readWorldTypeInputs owner environment original selectedOwners) >>= either (liftIO . fail) pure
+    (selectedTypes,selectedDiagnostics) <- liftIO (captureDiagnostics
+      (readWorldTypeInputs owner environment original selectedOwners))
+    types <- either (liftIO . fail) pure selectedTypes
     (_,warm) <- liftIO (captureDiagnostics (readWorldTypeInputs owner environment original selectedOwners >>= either fail pure))
+    liftIO $ unless (null (counterValues "package_proof.sidecar_decodes" selectedDiagnostics)
+        && null (counterValues "package_proof.sidecar_decodes" warm)
+        && counterValues "package_proof.union_extensions" selectedDiagnostics == [1]
+        && counterValues "package_proof.union_extensions" warm == [1])
+      (fail "World TYPE selection reparsed admitted package facts or skipped installed-package validation")
     liftIO $ unless (sum [sum (counterValues ("exact_iface_decode_reuse." ++ snd key) warm)
           | key <- selectedOwners] == toInteger (length selectedOwners))
       (fail "World type closure allocated an independent decoder instead of reusing its owner")
+    (successorTypes,successorDiagnostics) <- liftIO (captureDiagnostics
+      (readWorldTypeInputs owner environment (worldSuccessorFacts next) selectedOwners))
+    successorEntries <- either (liftIO . fail) pure successorTypes
+    liftIO $ unless (Map.map worldTypeEntryPackages successorEntries == Map.map worldTypeEntryPackages types
+        && null (counterValues "package_proof.sidecar_decodes" successorDiagnostics)
+        && counterValues "package_proof.union_extensions" successorDiagnostics == [1])
+      (fail "unchanged successor rows lost their admitted package facts or their current validation")
     let leaves = [(exactUnit artifact,exactModule artifact)
           | (artifact,_,_) <- scopeInterfaces scope, null (exactRequirements artifact)
           , (exactUnit artifact,exactModule artifact) `elem` selectedOwners]
@@ -1573,7 +1589,11 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
         changed = environment {hsc_unit_env=ue_setUnits units (hsc_unit_env environment),hsc_FC=freshFinder}
     liftIO $ unless (any (not . null . packageInterfaces . worldTypeEntryPackages) (Map.elems types))
       (fail "World package mismatch control needs a genuine recorded package root")
-    mismatch <- liftIO (readWorldTypeInputs owner changed original selectedOwners)
+    (mismatch,mismatchDiagnostics) <- liftIO (captureDiagnostics
+      (readWorldTypeInputs owner changed original selectedOwners))
+    liftIO $ unless (null (counterValues "package_proof.sidecar_decodes" mismatchDiagnostics)
+        && counterValues "package_proof.union_extensions" mismatchDiagnostics == [1])
+      (fail "changed package selection bypassed validation or reparsed retained facts")
     case mismatch of
       Left _ -> pure ()
       Right _ -> liftIO (fail "World type closure accepted a different current package selection")

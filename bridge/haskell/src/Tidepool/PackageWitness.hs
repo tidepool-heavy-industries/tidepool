@@ -3,6 +3,7 @@ module Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), CompilerProvidedImport(..)
   , emptyPackageImports, encodeCompilerProvidedImport, packageImportRoot, validatePackageImportRoot
   , sealPackageImports, readPackageImports, revalidatePackageImports, encodePackageImports, decodeCapturedPackageImports
+  , decodeCapturedPackageImportsWithTiming
   , AdmittedPackageImports, emptyAdmittedPackageImports, extendAdmittedPackageImports
   , revalidateAdmittedPackageImports, validateAdmittedPackageSelection, extendAdmittedPackageImportsWith
   , extendAdmittedPackageImportsWithFacts
@@ -21,6 +22,7 @@ import Codec.CBOR.Encoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Exception (IOException, try, bracket, evaluate)
+import Control.DeepSeq (rnf)
 import Control.Monad (replicateM, unless, when, foldM, forM, forM_)
 import Control.Monad.State.Strict (StateT(..), evalStateT, get, put)
 import Control.Monad.IO.Class (liftIO)
@@ -353,6 +355,25 @@ decodeCapturedPackageImports iface bytes = case deserialiseFromBytes decodeRoots
     | not (BL.null remaining) || owner /= (exactUnit iface,exactModule iface,exactSha256 iface)
         || encodeRoots iface roots /= bytes -> Left "captured package evidence differs from its interface"
     | otherwise -> Right roots
+
+-- Retention owners keep fully evaluated facts, rather than a suspended parser
+-- over captured bytes. Selection and installed-byte checks remain separate.
+decodeCapturedPackageImportsWithTiming
+  :: ExactIfaceArtifact -> BS.ByteString -> IO (Either String PackageImportEvidence)
+decodeCapturedPackageImportsWithTiming iface bytes = do
+  timing <- readTimingEnabled
+  emitCount timing "package_proof.sidecar_decodes" 1
+  case decodeCapturedPackageImports iface bytes of
+    Left reason -> pure (Left reason)
+    Right evidence -> do
+      _ <- evaluate (forcePackageImportEvidence evidence)
+      pure (Right evidence)
+
+forcePackageImportEvidence :: PackageImportEvidence -> ()
+forcePackageImportEvidence evidence =
+  rnf [(packageUnit root,packageModule root,packagePath root,packageSha256 root)
+      | root <- packageInterfaces evidence]
+    `seq` foldr (\CompilerPrimitive complete -> complete) () (compilerProvided evidence)
 
 -- Only enabled diagnostics force the digest before reporting its bytes. The
 -- ordinary path retains the caller's lazy digest evaluation. No contents or
