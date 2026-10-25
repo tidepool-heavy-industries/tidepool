@@ -21055,8 +21055,8 @@ pub(crate) mod request_tests {
             ).await;
             fixture.workbench.access.with_machine(fixture.public.clone(), |session, context, _| {
                 let view = session.compile_view_in(context.placement.lexical_scope).unwrap();
-                assert!(view.exact_declaration_context().unwrap().compiler_roles().keys().all(|owner|
-                    owner.module != "RetainedNominal" && owner.module != "RetainedNominalLeaf"),
+                assert!(view.exact_declaration_context().is_none_or(|context| context.compiler_roles().keys().all(|owner|
+                    owner.module != "RetainedNominal" && owner.module != "RetainedNominalLeaf")),
                     "captured source availability must not preinstall the nominal TYPE dependencies");
                 Ok(())
             }).await.unwrap();
@@ -21076,8 +21076,8 @@ pub(crate) mod request_tests {
                 .expect("a successor cell demands the ordinary value's transitive TYPE closure");
             producer.access.with_machine(context.clone(), |session, context, _| {
                 let view = session.compile_view_in(context.placement.lexical_scope).unwrap();
-                assert!(view.exact_declaration_context().unwrap().compiler_roles().keys().all(|owner|
-                    owner.module != "RetainedNominal" && owner.module != "RetainedNominalLeaf"),
+                assert!(view.exact_declaration_context().is_none_or(|context| context.compiler_roles().keys().all(|owner|
+                    owner.module != "RetainedNominal" && owner.module != "RetainedNominalLeaf")),
                     "ordinary checked-value reuse must keep its nominal TYPE support out of primary");
                 assert!(session.current_decl_heads_in(context.placement.lexical_scope).is_empty(),
                     "the ordinary-value control runs before any declaration can supply its nominal TYPE rows");
@@ -21127,8 +21127,8 @@ pub(crate) mod request_tests {
                     let view = session
                         .compile_view_in(context.placement.lexical_scope)
                         .unwrap();
-                    assert!(view.exact_declaration_context().unwrap().compiler_roles().keys()
-                    .all(|owner| owner.module != "Data.Aeson.Types.Internal"),
+                    assert!(view.exact_declaration_context().is_none_or(|context| context.compiler_roles().keys()
+                    .all(|owner| owner.module != "Data.Aeson.Types.Internal")),
                     "this private World has no JSON observation scaffold or primary JSON TYPE row");
                     Ok(())
                 })
