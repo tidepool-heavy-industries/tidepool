@@ -7123,6 +7123,52 @@ mod tests {
     use super::*;
 
     impl AcquiredNativeClosures {
+        pub(crate) fn assert_physical_issuance_conflict(
+            held: &Arc<crate::linked_native::AcquiredNativeClosure>,
+            incoming: &Arc<crate::linked_native::AcquiredNativeClosure>,
+        ) {
+            let held = Self::one(Arc::clone(held)).unwrap();
+            let incoming = Self::one(Arc::clone(incoming)).unwrap();
+            let common = held
+                .homes
+                .keys()
+                .filter(|binding| incoming.homes.contains_key(*binding))
+                .collect::<Vec<_>>();
+            assert!(
+                !common.is_empty(),
+                "genuine restored owners overlap in HOME bindings"
+            );
+            for binding in &common {
+                let left = &held.homes[*binding];
+                let right = &incoming.homes[*binding];
+                assert_eq!(
+                    left.code().id(),
+                    right.code().id(),
+                    "the control changes physical issuer, not linked code"
+                );
+                assert!(!left
+                    .issued_home_row()
+                    .unwrap()
+                    .same_selected_issuance(right.issued_home_row().unwrap()));
+            }
+            assert!(
+                matches!(held.append(&incoming), Err(CompileError::ExtractFailed(detail))
+                if detail.ends_with("acquired HOME binding has competing physical occurrences"))
+            );
+            let operation =
+                tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+            for binding in common {
+                let retained = held.group_owner(*binding, &operation).unwrap().unwrap();
+                assert!(
+                    retained
+                        .issued_home_row()
+                        .unwrap()
+                        .same_selected_issuance(held.homes[binding].issued_home_row().unwrap()),
+                    "a refused append preserves the prior successful demand"
+                );
+            }
+        }
+
         /// Observe real issued owners. The independent reference model retains
         /// pointers, so equal immutable records cannot erase acquisition choices.
         pub(crate) fn assert_collection_history(
@@ -7155,6 +7201,7 @@ mod tests {
                     assert!(actual.components.ptr_eq(&repeated.components));
                     assert!(actual.recorded.ptr_eq(&repeated.recorded));
                     assert!(actual.packages.ptr_eq(&repeated.packages));
+                    assert!(actual.homes.ptr_eq(&repeated.homes));
                     assert!(actual.same_held_owners(&repeated));
                 }
                 let replay = order.iter().rev().fold(Self::default(), |prior, owner| {

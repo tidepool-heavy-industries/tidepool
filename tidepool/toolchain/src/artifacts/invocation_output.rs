@@ -1346,6 +1346,12 @@ mod tests {
             Arc::clone(second.closure()),
             Arc::clone(first.closure()),
         ]);
+        let authentication =
+            crate::linked_native::tests::assert_actual_target_authentication(&second);
+        assert!(
+            authentication.home_scope,
+            "the actual dependent target exercises HOME restoration"
+        );
         for name in ["first", "second"] {
             let target = &output.targets[name];
             let selected = linked(name);
