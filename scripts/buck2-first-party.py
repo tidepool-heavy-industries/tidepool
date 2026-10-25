@@ -1477,6 +1477,7 @@ def runtime_test_cases(binary):
         "inspection_key_invalidates_hidden_inherited_binding_projection",
         "never_visible_input_retirement_keeps_hidden_classification_until_last_lease",
     )]
+    tests.append("session::resident::custody_release_tests::actor_checkout_settles_dropped_custody_before_scope_validation")
     tests.append("session::persistent::package_runtime_tests::refused_install_retains_primary_and_uncertain_abort_separately")
     compiler_env, compiler_resources, worker = test_runtime_inputs("tidepool-runtime", "")
     compiler_arguments = runtime_arguments(
