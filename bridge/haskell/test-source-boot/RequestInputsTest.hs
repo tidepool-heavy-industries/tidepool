@@ -840,6 +840,32 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     _ -> fail "genuine primary control lost its actual row owner"
   unless (all (worldHasSelectedSource original) selectedOwners)
     (fail "genuine Context source owners lost their exact acquired association")
+  -- A dependency table is the exact census of live value manifests. Genuine
+  -- primary custody cannot make an unreferenced dependency binding live.
+  primaryRows <- worldFixtureHamtRows blockPairs primary
+  dependencyBinding <- case primaryRows of
+    (owner,reference):_ -> do
+      unit <- worldFixtureField "unit" owner
+      name <- worldFixtureField "module" owner
+      fact <- worldFixtureLink reference >>= worldFixtureBlock blockPairs
+      binding <- case fact of
+        TList [TString "TPCWPRIMARY2",TList (_:interface:_),_] -> pure interface
+        _ -> fail "dependency census control needs a genuine primary interface binding"
+      row <- case [row | row@(TList [TList [u,n,_,_,_,_,_,_],_]) <- base
+          , (u,n) == (unit,name)] of
+        [row] -> pure row
+        _ -> fail "dependency census control needs its exact admitted transport row"
+      pure (binding,row)
+    _ -> fail "dependency census control needs a selected primary row"
+  let (dependencyKey,dependencyRow) = dependencyBinding
+      withDependencies dependencies (TList fields) = case splitAt 6 fields of
+        (prefix,TList [rows,visible,_]:rest) ->
+          TList (prefix ++ [TList [rows,visible,TList dependencies]] ++ rest)
+        _ -> error "dependency census control lost its current World carrier"
+      withDependencies _ _ = error "dependency census control needs a World carrier"
+      unreferencedDependency = TList [dependencyKey,dependencyRow]
+  requireCorrupt (Just "compiler world dependency row census differs from live row facts")
+    "world-unreferenced-dependency" (withDependencies [unreferencedDependency] originalPacket)
   unless (null (worldLexicalImportLines (worldInputsLexicalSurface original))
       && isNothing (worldLexicalDeclaration (worldInputsLexicalSurface original)))
     (fail "empty published lexical selection was inferred from other acquired interfaces")
@@ -936,6 +962,23 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   unless (worldInputsIdentityBytes (worldSuccessorFacts equivalent) == worldInputsIdentityBytes imported
       && worldInputsCompilerIdentity (worldSuccessorFacts equivalent) == worldInputsCompilerIdentity imported)
     (fail "compatible independently authenticated frontier changed the next immutable product")
+  let withDependencyEdits edits (TList [tag,receipt,changed,primaryEdits,visibleEdits,_,_]) =
+        TList [tag,receipt,changed,primaryEdits,visibleEdits,TList edits,acquisition]
+      withDependencyEdits _ _ = error "dependency edit control lost its current successor carrier"
+      unchangedFacts before after = worldInputsIdentityBytes before == worldInputsIdentityBytes after
+        && worldInputsCompilerIdentity before == worldInputsCompilerIdentity after
+        && worldInputsRetainedCharge before == worldInputsRetainedCharge after
+        && Map.keysSet (worldInputsBindings before) == Map.keysSet (worldInputsBindings after)
+  unrelatedDependency <- try (readSuccessor "dependency-without-live-row" original
+    (withDependencyEdits [unreferencedDependency] (successor product [])))
+  case unrelatedDependency of
+    Left (WorldInputsFailure WorldInputsCorrupt reason)
+      | "compiler world dependency edits differ from net live row-CID transitions" `isInfixOf` reason -> pure ()
+    Left failure -> throwIO failure
+    Right _ -> fail "successor accepted dependency custody without a live row-CID transition"
+  afterRefusal <- readSuccessor "dependency-refusal-predecessor" original (successor product [])
+  unless (unchangedFacts original (worldSuccessorFacts afterRefusal))
+    (fail "failed dependency admission mutated its held predecessor")
   requireSuccessorCorrupt "missing-changed-block" original (successor importedProduct [])
   requireSuccessorCorrupt "corrupt-changed-block" original
     (successor importedProduct [(importsRoot,importsBody <> BS.singleton 0)])
@@ -1146,8 +1189,9 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
       (packet version product primary blockPairs base [] acquisition emptyBinding)
     requireCorrupt Nothing ("old-restoration-v" ++ show version)
       (packet 6 (restoration version context primary emptyBinding) primary blockPairs base [] acquisition emptyBinding)
-  requireSuccessorCorrupt "old-successor-v4" original
-    (TList [TString "TPCWSUCC4",TBytes product,blocks [],TList [],TList [],noInputs])
+  forM_ [4,5 :: Int] $ \version ->
+    requireSuccessorCorrupt ("old-successor-v" ++ show version) original
+      (TList [TString (T.pack ("TPCWSUCC" ++ show version)),TBytes product,blocks [],TList [],TList [],noInputs])
   let oldBindings = encode (TList [TString "TPCWBIND3",TInt 0,TBytes emptyBinding])
       oldBindingPacket = case originalPacket of
         TList fields -> TList (take 8 fields ++ [TBytes oldBindings] ++ drop 9 fields)
