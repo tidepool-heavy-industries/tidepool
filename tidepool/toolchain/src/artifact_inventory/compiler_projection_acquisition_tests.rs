@@ -1047,6 +1047,11 @@ fn assert_world_completed_output_keeps_actual_producer(
         assert!(prior_product.execution_source().is_some());
         assert!(product.source_admission().is_none());
         assert!(prior_product.source_admission().is_some());
+        assert_current_producer_excludes_historical_original(
+            stage.as_ref(),
+            &producer,
+            &prior_acquisition,
+        );
         let offer = stage
             .source_selection()
             .completed_compiler_output_offer(owner)
@@ -1171,6 +1176,63 @@ fn assert_world_completed_output_keeps_actual_producer(
             owner,
         );
     }
+}
+
+fn assert_current_producer_excludes_historical_original(
+    source: &crate::declaration_context::CapturedCompilerStage,
+    current: &Arc<ArtifactEntry>,
+    historical: &Arc<ArtifactEntry>,
+) {
+    assert_ne!(current.descriptor.id, historical.descriptor.id);
+    assert_eq!(current.descriptor.owner, historical.descriptor.owner);
+    let canonical = |entry: &ArtifactEntry| {
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            unreachable!()
+        };
+        ArtifactEntry::canonical_artifact_id(product.module_interface())
+    };
+    assert_eq!(canonical(current), canonical(historical));
+    let projection =
+        CompilerInputProjection::from_issued_entries(&[Arc::clone(current)]).unwrap();
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let mut pending =
+        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &source.issued_artifacts().metadata_snapshot(),
+            &validation.inventory,
+        )
+        .unwrap();
+    assert!(pending.has_unissued_current_native_products());
+    let captured = crate::declaration_context::CapturedCompilerStage::issue(
+        &mut pending,
+        source.issued_artifacts(),
+        vec![Arc::clone(current), Arc::clone(historical)],
+        &mut validation,
+    )
+    .unwrap();
+    for entry in [current, historical] {
+        assert!(captured
+            .issued_artifacts()
+            .observed_payload(&entry.descriptor.id)
+            .is_some_and(|retained| retained.same_issuing_authority(entry)));
+    }
+    assert_eq!(
+        captured
+            .producer_certificates()
+            .iter()
+            .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
+            .map(|entry| entry.descriptor.id)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([current.descriptor.id]),
+        "historical Original custody does not make it a current producer"
+    );
+    let receipt = captured
+        .source_selection()
+        .completed_compiler_output_offer(&current.descriptor.owner)
+        .unwrap()
+        .unwrap();
+    assert!(receipt.original_acquisition().same_issuing_authority(current));
+    assert_eq!(receipt.original(), current.descriptor.id);
 }
 
 fn assert_fresh_world_original_selection(
