@@ -780,6 +780,7 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
         | "compiler world dependency semantic association differs" `isInfixOf` reason -> pure ()
       Left failure -> throwIO failure
       Right _ -> fail "World value receiver accepted a manifest with another semantic association"
+    physical <- worldValueColdPhysical initial >>= newIORef
     (final,history) <- foldM (\(before,observed) step -> case step of
       TList [TString label,successor,cold] -> do
         let name = T.unpack label
@@ -797,13 +798,19 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
           (fail ("writer dependency transitions differ from independent live-CID census: " ++ name))
         next <- worldSuccessorFacts <$> readNext ("value-next-" ++ name) before successor
         independent <- readCold ("value-cold-" ++ name) cold
+        priorPhysical <- readIORef physical
+        nextPhysical <- worldValueSuccessorPhysical priorPhysical successor
+        coldPhysical <- worldValueColdPhysical cold
+        nextPhysicalCharge <- worldValuePhysicalCharge nextPhysical
+        coldPhysicalCharge <- worldValuePhysicalCharge coldPhysical
         unless (summary next == summary independent)
           (fail ("incremental receiver differs from full cold admission: " ++ name
             ++ "; world=" ++ show (worldInputsIdentityBytes next == worldInputsIdentityBytes independent)
             ++ "; compiler=" ++ show (worldInputsCompilerIdentity next == worldInputsCompilerIdentity independent)
             ++ "; aliases=" ++ show (Map.map (worldBindingRowFactCID . worldBindingRow) (worldInputsBindings next)
               == Map.map (worldBindingRowFactCID . worldBindingRow) (worldInputsBindings independent))
-            ++ "; charges=" ++ show (worldInputsRetainedCharge next,worldInputsRetainedCharge independent)))
+            ++ "; charges=" ++ show (worldInputsRetainedCharge next,worldInputsRetainedCharge independent)
+            ++ "; physical=" ++ show (nextPhysicalCharge,coldPhysicalCharge)))
         unless (Map.null required) $ do
           let omitted = case successor of
                 TList [tag,receipt,blocks,primary,visible,TList (_:rest),acquisition] ->
@@ -814,6 +821,7 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
           retry <- worldSuccessorFacts <$> readNext ("value-retry-" ++ name) before successor
           unless (summary retry == summary independent)
             (fail "refused value transition changed its held predecessor")
+        writeIORef physical nextPhysical
         pure (next,cold:observed)
       _ -> fail "World value fixture history has an invalid step") (original,[]) steps
     unless (length history == 7 && Map.null (worldInputsBindings final))
@@ -905,6 +913,66 @@ worldValueTransportOwner :: Term -> IO (String,String)
 worldValueTransportOwner (TList [TList [TString unit,TString name,_,_,_,_,_,_],_]) =
   pure (T.unpack unit,T.unpack name)
 worldValueTransportOwner _ = fail "value census needs an exact offered interface row"
+
+type WorldValuePhysical = (Map.Map BS.ByteString Term,Map.Map T.Text (Integer,T.Text))
+
+worldValueColdPhysical :: Term -> IO WorldValuePhysical
+worldValueColdPhysical (TList [TString "TPCWORLD",_,_,_,_,_,TList [TList base,TList visible,TList dependencies],acquisition,_,_,_]) = do
+  ordinary <- concat <$> forM [(0,base),(1,visible)] (\(kind,rows) -> forM rows $ \row -> do
+    (unit,name) <- worldValueTransportOwner row
+    pure (encode (TList [TInt kind,TList [TString (T.pack unit),TString (T.pack name)]]),row))
+  retained <- forM dependencies $ \entry -> case entry of
+    TList [binding,row] -> pure (encode (TList [TInt 2,binding]),row)
+    _ -> fail "physical census needs exact dependency rows"
+  parts <- worldValuePartInventory acquisition
+  pure (Map.fromList (ordinary ++ retained),parts)
+worldValueColdPhysical _ = fail "physical census needs a complete cold World"
+
+worldValueSuccessorPhysical :: WorldValuePhysical -> Term -> IO WorldValuePhysical
+worldValueSuccessorPhysical (rows,parts) (TList [TString "TPCWSUCC6",_,_,TList primary,TList visible,TList dependencies,acquisition]) = do
+  incoming <- worldValuePartInventory acquisition
+  forM_ (Map.toList (Map.intersectionWith (,) incoming parts)) $ \(_,facts) ->
+    unless (uncurry (==) facts) (fail "physical census observed conflicting bytes at one retained path")
+  edits <- concat <$> forM [(0,primary),(1,visible),(2,dependencies)] (\(kind,changes) -> forM changes $ \entry -> case entry of
+    TList [key,row] -> do
+      owner <- if kind == 2 then pure key else TList <$> sequence
+        [worldFixtureField "unit" key,worldFixtureField "module" key]
+      pure (encode (TList [TInt kind,owner]),row)
+    _ -> fail "physical census needs exact successor row edits")
+  let changed = foldl (\held (key,row) -> if row == TNull then Map.delete key held else Map.insert key row held) rows edits
+  pure (changed,Map.union incoming parts)
+worldValueSuccessorPhysical _ _ = fail "physical census needs its current successor"
+
+worldValuePartInventory :: Term -> IO (Map.Map T.Text (Integer,T.Text))
+worldValuePartInventory (TList [TString "TPCWORLDFIXTUREBYTES2",_,TList images]) = do
+  parts <- concat <$> forM images (\image -> case image of
+    TList [_,_,_,_,TList parts] -> forM parts $ \part -> case part of
+      TList [_,TString path,TString seal,count,_,_] -> do
+        size <- case count of
+          TInt size | size >= 0 -> pure (toInteger size)
+          TInteger size | size >= 0 -> pure size
+          _ -> fail "physical census needs unsigned part lengths"
+        pure (path,(size,seal))
+      _ -> fail "physical census needs exact owned input parts"
+    _ -> fail "physical census needs exact owned images")
+  foldM (\held (path,facts) -> case Map.lookup path held of
+    Just previous | previous /= facts -> fail "physical census observed incompatible aliases"
+    _ -> pure (Map.insert path facts held)) Map.empty parts
+worldValuePartInventory _ = fail "physical census needs explicit fixture DATA"
+
+worldValuePhysicalCharge :: WorldValuePhysical -> IO (Integer,Int)
+worldValuePhysicalCharge (rows,parts) = do
+  metadata <- forM (Map.elems rows) $ \row -> case row of
+    TList [TList [_,_,path,seal,_,packages,packageSeal,TList (_:proof)],_] ->
+      pure ([path,seal,packages,packageSeal] ++ filter (/= TNull) proof)
+    _ -> fail "physical census needs the current offered row"
+  let paths = Set.fromList [path | fields <- metadata,(index,TString path) <- zip [0 :: Int ..] fields,even index]
+      selected = Map.restrictKeys parts paths
+  unless (Map.keysSet selected == paths) (fail "physical census lost a live row's owned part")
+  textBytes <- forM (concat metadata) $ \field -> case field of
+    TString value -> pure (toInteger (BS.length (TE.encodeUtf8 value)))
+    _ -> fail "physical census needs path and seal text"
+  pure (sum (map (fst . snd) (Map.toList selected)) + sum textBytes,Map.size selected)
 
 -- Preserve the genuine physical rows and rehash only a deliberately corrupted
 -- row-fact association plus its parents, so CID integrity cannot mask refusal.
