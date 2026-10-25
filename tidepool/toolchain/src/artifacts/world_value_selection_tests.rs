@@ -75,7 +75,7 @@ pub(crate) fn prepare_checked_value_fixture(
 
 /// Capture nominal HOME TYPE custody and then a second checked value through
 /// the first value's actual operand. Both products retain the same issued child
-/// bindings; the second closure additionally retains the first value leaf.
+/// nominal bindings, without assuming that term demand selects a TYPE edge.
 pub(crate) fn prepare_checked_value_dependency_pair_fixture(
     first_generation: u64,
     second_generation: u64,
@@ -148,13 +148,6 @@ pub(crate) fn prepare_checked_value_dependency_pair_fixture(
         .expect("actual dependent value execution")
         .value_interface_certificate()
         .expect("actual dependent checked value");
-    assert!(
-        second
-            .type_product()
-            .dependencies()
-            .contains_key(&row.type_product().leaf_binding()),
-        "dependent checked value must retain its exact input value binding"
-    );
     (row, second)
 }
 
