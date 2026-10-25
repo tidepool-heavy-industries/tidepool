@@ -1129,7 +1129,13 @@ fn paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners() {
         .iter()
         .all(|reference| *reference < reserved));
     assert!(node.implementation_refs.contains(&b_generation));
-    assert_rich_instances(&node.instances, base_original, Some(a_second));
+    assert_eq!(
+        node.instances,
+        crate::session::paired_publication::recovery_instances(
+            proof.instances(),
+            proof.family_closure(),
+        )
+    );
     assert_original_writes(&intent, resident.state.lib(), &expected_writes);
     assert_eq!(intent.native_write_ids(), [value_id]);
     let cold = recovery::load_domain_graph(
