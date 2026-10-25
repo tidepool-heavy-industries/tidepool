@@ -117,7 +117,7 @@ import Tidepool.ExactScope
   , worldSourceRoots, worldSourceFiles, worldOriginalReferenceFor
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
   , readWorldBindingInputs, worldBindingRow, worldBindingRowFactCID, worldBindingRowInterface
-  , readWorldCellOperandWithOwner, worldCellOperandTypes
+  , readWorldCellOperandWithOwner, worldCellOperandTypes, worldCellOperandBinding, mergeWorldTypeInputs
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readPackageInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation
@@ -863,6 +863,23 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
         liftIO $ unless (Set.size (leafOwnersOf shared) == 2
             && Map.keysSet sharedTypes == Set.union (leafOwnersOf shared) sharedOwners)
           (fail "simultaneous leaf demand dropped a selected leaf from its complete TYPE closure")
+        -- This changes receiver DATA coherently, not Rust issuance evidence.
+        -- Passive selection alternatives can coexist, but one demand cannot
+        -- collapse different exact bindings merely because artifacts agree.
+        alternateCold <- liftIO (forkWorldValueDependencySelection sharedCold)
+        alternate <- liftIO (readCold "value-passive-selection-alternative" alternateCold)
+        liftIO $ unless (Map.keysSet (worldInputsBindings alternate) == Map.keysSet (worldInputsBindings shared))
+          (fail "passive TYPE alternative changed the visible namespace")
+        forM_ ["left","second"] $ \alias -> do
+          result <- liftIO (readWorldBindingInputs owner environment alternate [alias])
+          liftIO $ case result of
+            Right _ -> pure ()
+            Left reason -> fail ("passive exact selection refused its individual demand: " ++ reason)
+        combined <- liftIO (readWorldBindingInputs owner environment alternate ["left","second"])
+        liftIO $ case combined of
+          Left "world TYPE contributions select conflicting exact bindings" -> pure ()
+          Left reason -> fail ("active exact-selection conflict had another refusal: " ++ reason)
+          Right _ -> fail "active TYPE demand collapsed same-artifact different-selection bindings"
         primary <- liftIO (readWorldTypeInputs owner environment original (Set.toList dependencyOwners))
         liftIO $ case primary of
           Left _ -> pure ()
@@ -882,6 +899,18 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
         liftIO $ unless (not (Set.null operandDependencies)
             && Map.keysSet (worldCellOperandTypes admitted) == Set.insert operandLeaf operandDependencies)
           (fail "operand lost its independently owned TYPE dependencies after World retirement")
+        aliasedOperand <- liftIO (aliasWorldValueOperand work operand)
+        (aliasedPath,aliasedSeal) <- liftIO (writeDescriptor "value-operand-physical-alias" aliasedOperand)
+        aliased <- liftIO (readWorldCellOperandWithOwner owner environment original aliasedPath aliasedSeal)
+        liftIO $ unless (worldBindingRowFactCID (worldBindingRow (worldCellOperandBinding aliased))
+            == worldBindingRowFactCID (worldBindingRow (worldCellOperandBinding admitted)))
+          (fail "operand physical aliases changed its genuine logical row CID")
+        liftIO $ case mergeWorldTypeInputs
+            (worldCellOperandBinding aliased:Map.elems (worldInputsBindings original))
+            [types,worldCellOperandTypes aliased] of
+          Right joined | Map.keysSet joined == Map.keysSet types -> pure ()
+          Left reason -> fail ("World/operand physical aliases failed logical agreement: " ++ reason)
+          _ -> fail "World/operand physical alias merge widened its selected TYPE owners"
         let withoutDependencies = case operand of
               TList [tag,exposure,reference,blocks,leaf,_,acquisition] ->
                 TList [tag,exposure,reference,blocks,leaf,TList [],acquisition]
@@ -986,7 +1015,7 @@ worldValuePhysicalCharge (rows,parts) = do
 -- Preserve the genuine physical rows and rehash only a deliberately corrupted
 -- row-fact association plus its parents, so CID integrity cannot mask refusal.
 crossWorldValueManifest :: Term -> IO Term
-crossWorldValueManifest original@(TList [tag,version,TBytes restoration,source,producer,profile,rows,acquisition,TBytes visibility,TBytes primary,TList blocks]) = do
+crossWorldValueManifest original@(TList [_,_,_,_,_,_,_,_,_,_,TList blocks]) = do
   pairs <- forM blocks $ \entry -> case entry of
     TList [TBytes cid,TBytes body] -> pure (cid,body)
     _ -> fail "manifest corruption needs genuine CID/body blocks"
@@ -998,6 +1027,14 @@ crossWorldValueManifest original@(TList [tag,version,TBytes restoration,source,p
       pure (TList [semantic,leaf,certified,receipt,TList
         (TList [binding,TList [unit,name,TBytes (BS.map (`xor` 1) seal),image,role,requires]]:rest)])
     _ -> fail "manifest corruption needs a nonempty genuine dependency manifest"
+  rewriteWorldValueRowFact original cid replacement
+crossWorldValueManifest _ = fail "manifest corruption needs its complete cold carrier"
+
+rewriteWorldValueRowFact :: Term -> BS.ByteString -> Term -> IO Term
+rewriteWorldValueRowFact (TList [tag,version,TBytes restoration,source,producer,profile,rows,acquisition,TBytes visibility,TBytes primary,TList blocks]) cid replacement = do
+  pairs <- forM blocks $ \entry -> case entry of
+    TList [TBytes key,TBytes body] -> pure (key,body)
+    _ -> fail "row-fact mutation needs genuine CID/body blocks"
   (scope,bindingRoot) <- worldFixtureTerm visibility >>= \term -> case term of
     TList [TString "TPCWBIND4",scope,TBytes root] -> pure (scope,root)
     _ -> fail "manifest corruption needs its actual occurrence root"
@@ -1014,7 +1051,82 @@ crossWorldValueManifest original@(TList [tag,version,TBytes restoration,source,p
         ,TBytes (encode changedVisibility),TBytes primary
         ,TList [TList [TBytes key,TBytes body] | (key,body) <- changed]])
     _ -> fail "manifest corruption changed another compiler root"
-crossWorldValueManifest _ = fail "manifest corruption needs its complete cold carrier"
+rewriteWorldValueRowFact _ _ _ = fail "row-fact mutation needs its complete cold carrier"
+
+-- A decoder-boundary alternative keeps the genuine artifact and physical
+-- interface while changing only its selected binding association. It makes no
+-- claim that Rust would issue a proof for these deliberately changed facts.
+forkWorldValueDependencySelection :: Term -> IO Term
+forkWorldValueDependencySelection original@(TList fields) = do
+  (aliases,counts,_) <- worldValueColdCensus original
+  cid <- maybe (fail "selection control needs the second genuine value") pure (Map.lookup "second" aliases)
+  pairs <- case reverse fields of
+    TList blocks:_ -> forM blocks $ \entry -> case entry of
+      TList [TBytes key,TBytes body] -> pure (key,body)
+      _ -> fail "selection control needs CID/body blocks"
+    _ -> fail "selection control omitted its frontier"
+  row <- worldFixtureBlock pairs cid
+  (replacement,previous,revised) <- case row of
+    TList [semantic,leaf,certified,receipt,TList manifest] -> do
+      previous <- case [binding | TList [binding,_] <- manifest
+          ,Map.findWithDefault 0 (encode binding) counts > 1] of
+        previous:_ -> pure previous
+        _ -> fail "selection control needs a genuinely shared dependency"
+      revised <- case previous of
+        TMap entries -> TMap <$> forM entries (\entry -> case entry of
+          (TString "selection",TList (TInt byte:rest)) ->
+            pure (TString "selection",TList (TInt (byte `xor` 1):rest))
+          other -> pure other)
+        _ -> fail "selection control needs an exact artifact binding"
+      before <- worldValueBindingOrder previous
+      after <- worldValueBindingOrder revised
+      unless (fst before == fst after && snd before /= snd after)
+        (fail "selection control did not preserve the artifact and change the selection")
+      changed <- forM manifest $ \entry -> case entry of
+        TList [binding,value] -> do
+          let actual = if binding == previous then revised else binding
+          key <- worldValueBindingOrder actual
+          pure (key,TList [actual,value])
+        _ -> fail "selection control needs complete manifest associations"
+      pure (TList [semantic,leaf,certified,receipt,TList (map snd (sortOn fst changed))],previous,revised)
+    _ -> fail "selection control needs the complete coupled row fact"
+  changed <- rewriteWorldValueRowFact original cid replacement
+  case changed of
+    TList carrier -> case splitAt 6 carrier of
+      (prefix,TList [base,visible,TList dependencies]:rest) -> do
+        supplied <- case [value | TList [binding,value] <- dependencies,binding == previous] of
+          [value] -> pure value
+          _ -> fail "selection control lacks its genuine physical dependency"
+        ordered <- forM (TList [revised,supplied]:dependencies) $ \entry -> case entry of
+          TList [binding,_] -> (,) <$> worldValueBindingOrder binding <*> pure entry
+          _ -> fail "selection control needs binding-keyed dependency transport"
+        pure (TList (prefix ++ [TList [base,visible,TList (map snd (sortOn fst ordered))]] ++ rest))
+      _ -> fail "selection control lost the cold row table"
+    _ -> fail "selection control lost its cold carrier"
+forkWorldValueDependencySelection _ = fail "selection control needs a cold World"
+
+worldValueBindingOrder :: Term -> IO (BS.ByteString,BS.ByteString)
+worldValueBindingOrder binding = (,) <$> digestField "artifact" <*> digestField "selection"
+  where
+    digestField name = worldFixtureField name binding >>= \field -> case field of
+      TList values | length values == 32 -> BS.pack <$> forM values (\value -> case value of
+        TInt byte | byte >= 0 && byte <= 255 -> pure (fromIntegral byte)
+        _ -> fail "selection control needs fixed digest bytes")
+      _ -> fail "selection control needs exact binding digests"
+
+aliasWorldValueOperand :: FilePath -> Term -> IO Term
+aliasWorldValueOperand work (TList [tag,exposure,reference,blocks,leaf,dependencies,acquisition@(TList [kind,arenas,images])]) = do
+  parts <- worldValuePartInventory acquisition
+  let aliases = Map.fromList [(path,T.pack (work </> ("absent-operand-type-alias-" ++ show index)))
+        | (index,path) <- zip [0 :: Int ..] (Map.keys parts)]
+      relocate (TString value) = TString (Map.findWithDefault value value aliases)
+      relocate (TList values) = TList (map relocate values)
+      relocate value = value
+  forM_ (Map.elems aliases) $ \path -> do
+    exists <- doesFileExist (T.unpack path)
+    when exists (fail "operand alias control requires absent physical paths")
+  pure (TList [tag,exposure,reference,blocks,relocate leaf,relocate dependencies,TList [kind,arenas,relocate images]])
+aliasWorldValueOperand _ _ = fail "operand alias control needs its complete owned descriptor"
 
 sealWorldValueDescriptor :: IORef [Handle] -> Term -> IO Term
 sealWorldValueDescriptor handles (TList fields) = do
