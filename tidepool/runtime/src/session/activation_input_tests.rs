@@ -21,6 +21,7 @@ use super::world_cell_test_support::{
     InputRecipe,
 };
 use super::*;
+use crate::session::prepared::tests::{assert_isolated_apply_support, assert_no_turn_scaffolds};
 use crate::session::{
     insert_preamble_imports, resident_workbench_templates,
     turn::{self, run_turn, CompiledTurn, TurnRequest, TurnResult},
@@ -7143,10 +7144,36 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         .retain_visible_binding_custody("activationFunctionReply")
         .unwrap()
         .unwrap();
+    let activation_frame = source
+        .parked
+        .iter()
+        .find(|entry| entry.name == activation.cont_id())
+        .unwrap()
+        .id;
     let engine = source.state.prepared_mut().unwrap();
+    let source_support = assert_isolated_apply_support(engine);
+    let reply_handle = engine.prepared_handle_of(reply.handle.unwrap()).unwrap();
+    let reply_owner = engine.owner_of_handle(reply_handle).unwrap();
+    assert_ne!(reply_owner, source_support);
+    assert_eq!(engine.hosting_program(reply_handle), Some(source_support));
+    let parked_before = engine.parked(activation_frame).unwrap();
+    assert_eq!(parked_before.1.runner, source_support);
+    assert_ne!(parked_before.1.reply.owner(), source_support);
+    assert_ne!(
+        parked_before
+            .1
+            .reply
+            .site_owner()
+            .unwrap_or(parked_before.1.reply.owner()),
+        source_support
+    );
     let collections = engine.heap_stats().gc_count;
     engine.quiesce_and_collect_now().unwrap();
     assert_eq!(engine.heap_stats().gc_count, collections + 1);
+    assert_eq!(assert_isolated_apply_support(engine), source_support);
+    assert_eq!(engine.parked(activation_frame), Some(parked_before));
+    assert_eq!(engine.owner_of_handle(reply_handle), Some(reply_owner));
+    assert_eq!(engine.hosting_program(reply_handle), Some(source_support));
     assert!(source.parked_holes().contains(&submission.cont_id()));
     assert!(source.parked_holes().contains(&activation.cont_id()));
     let publication = suspended(
@@ -7213,6 +7240,29 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         ResidentOutcome::Completed { .. }
     ));
     drop(source_lease);
+    let engine = source.state.prepared_mut().unwrap();
+    let captured_handle = engine
+        .prepared_handle_of(captured.custody().handle.unwrap())
+        .unwrap();
+    let captured_owner = engine.owner_of_handle(captured_handle).unwrap();
+    assert_ne!(captured_owner, source_support);
+    assert_eq!(
+        engine.hosting_program(captured_handle),
+        Some(source_support)
+    );
+    let collections = engine.heap_stats().gc_count;
+    engine.quiesce_and_collect_now().unwrap();
+    assert_eq!(engine.heap_stats().gc_count, collections + 1);
+    assert_eq!(assert_isolated_apply_support(engine), source_support);
+    assert_no_turn_scaffolds(engine);
+    assert_eq!(
+        engine.owner_of_handle(captured_handle),
+        Some(captured_owner)
+    );
+    assert_eq!(
+        engine.hosting_program(captured_handle),
+        Some(source_support)
+    );
     let before_release = source.value_handle_count();
     drop(captured);
     source.settle_dropped_custody();
@@ -7245,14 +7295,35 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
     let destination_lease = destination.lease_bindings(&[]);
     assert!(imported.belongs_to_bindings(&destination_lease));
     assert_eq!(&expected, imported.type_witness());
-    let engine = destination.state.require_prepared().unwrap();
-    let collections = engine.heap_stats().gc_count;
-    engine.quiesce_and_collect_now().unwrap();
-    assert_eq!(engine.heap_stats().gc_count, collections + 1);
     let probe = destination
         .retain_visible_binding_custody("ownedResultProbe")
         .unwrap()
         .unwrap();
+    let entry = destination
+        .retain_visible_binding_custody("ownedEntryProbe")
+        .unwrap()
+        .unwrap();
+    let engine = destination.state.require_prepared().unwrap();
+    let destination_support = assert_isolated_apply_support(engine);
+    let roots = [imported.custody(), &probe, &entry]
+        .into_iter()
+        .map(|root| {
+            let handle = engine.prepared_handle_of(root.handle.unwrap()).unwrap();
+            let owner = engine.owner_of_handle(handle).unwrap();
+            assert_ne!(owner, destination_support);
+            assert_eq!(engine.hosting_program(handle), Some(destination_support));
+            (handle, owner)
+        })
+        .collect::<Vec<_>>();
+    let collections = engine.heap_stats().gc_count;
+    engine.quiesce_and_collect_now().unwrap();
+    assert_eq!(engine.heap_stats().gc_count, collections + 1);
+    assert_eq!(assert_isolated_apply_support(engine), destination_support);
+    assert_no_turn_scaffolds(engine);
+    for (handle, owner) in roots {
+        assert_eq!(engine.owner_of_handle(handle), Some(owner));
+        assert_eq!(engine.hosting_program(handle), Some(destination_support));
+    }
     let ResidentOutcome::Completed { result, .. } =
         source_action(&mut destination, |destination, settlement| {
             destination.run_rooted_application(
@@ -7269,10 +7340,6 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         panic!("native callable result probe must complete")
     };
     assert_eq!(result.to_json(), serde_json::json!(42));
-    let entry = destination
-        .retain_visible_binding_custody("ownedEntryProbe")
-        .unwrap()
-        .unwrap();
     let ResidentOutcome::Completed { result, .. } =
         source_action(&mut destination, |destination, settlement| {
             destination.run_rooted_entry_borrowed(
@@ -8129,12 +8196,19 @@ fn frozen_activation_replays_same_input_and_refuses_second_private_input() {
             (handle, engine.owner_of_handle(handle).unwrap())
         })
         .collect::<Vec<_>>();
+    let support = assert_isolated_apply_support(engine);
+    for (handle, owner) in &captured_owners {
+        assert_ne!(*owner, support);
+        assert_eq!(engine.hosting_program(*handle), Some(support));
+    }
     let collections = engine.heap_stats().gc_count;
     engine.quiesce_and_collect_now().unwrap();
     assert_eq!(engine.heap_stats().gc_count, collections + 1);
+    assert_eq!(assert_isolated_apply_support(engine), support);
+    assert_no_turn_scaffolds(engine);
     for (handle, owner) in captured_owners {
         assert_eq!(engine.owner_of_handle(handle), Some(owner));
-        assert!(engine.hosting_program(handle).is_none());
+        assert_eq!(engine.hosting_program(handle), Some(support));
     }
     let second = captured.pop().unwrap();
     let first = captured.pop().unwrap();
