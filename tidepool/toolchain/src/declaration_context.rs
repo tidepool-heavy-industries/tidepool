@@ -17703,7 +17703,7 @@ pub(crate) fn bind_certified_segment_artifacts_with_validation(
         .map_err(compiler_evidence_failure)
 }
 
-/// Check the inventory's selected dependency closure without issuing group rows.
+/// Check selected dependency membership and retain its operation-owned rows.
 pub(crate) fn validate_artifact_view_groups_with_validation(
     view: &ArtifactView,
     validation: &mut PackageInterfaceValidation,
@@ -17723,10 +17723,13 @@ pub(crate) fn validate_artifact_view_groups_with_validation(
     )
     .map_err(compiler_evidence_failure)?;
     inventory
-        .validate_selected_scope(
+        .certify_selected_scope(
             crate::artifact_inventory::SelectedOriginalGroupScope::selected(view),
+            &BTreeMap::new(),
             validation,
+            None,
         )
+        .map(|_| ())
         .map_err(compiler_evidence_failure)
 }
 

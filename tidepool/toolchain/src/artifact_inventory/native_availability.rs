@@ -2339,11 +2339,13 @@ impl CheckedNativeAvailability {
         .map_err(evidence)?;
         for contribution in &contributions {
             inventory
-                .validate_selected_scope(
+                .certify_selected_scope(
                     crate::artifact_inventory::SelectedOriginalGroupScope::contribution(
                         contribution,
                     ),
+                    &BTreeMap::new(),
                     validation,
+                    None,
                 )
                 .map_err(evidence)?;
         }

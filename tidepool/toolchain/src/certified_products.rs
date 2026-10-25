@@ -2173,6 +2173,12 @@ impl CertifiedRetainedCoreProducts {
 }
 
 impl PendingCertifiedGroup {
+    fn same_authenticated_group(&self, original: &AuthenticatedOriginalGroup) -> bool {
+        self.origin == original.origin
+            && self.owner == original.owner
+            && Arc::ptr_eq(&self.group, &original.group)
+    }
+
     pub(crate) fn same_issuance(&self, other: &Self) -> bool {
         self.origin == other.origin
             && self.owner == other.owner
@@ -11895,6 +11901,78 @@ pub(crate) struct SelectedScopeCertification {
         BTreeMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
 }
 
+/// Operation-local proof reuse. A scope must authenticate its own membership
+/// and ordered destinations before it can retain one of these immutable rows.
+#[derive(Default)]
+pub(crate) struct NativeGroupRowAssembly {
+    rows:
+        imbl::OrdMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
+}
+
+impl NativeGroupRowAssembly {
+    fn checked_row(
+        &mut self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        original: &AuthenticatedOriginalGroup,
+        imports: CheckedSelectedImports,
+        current: Option<&PendingCertifiedGroup>,
+        issued: Option<&Arc<IssuedSelectedNativeGroup>>,
+        operation: &InventoryOperation,
+    ) -> CertResult<Arc<IssuedSelectedNativeGroup>> {
+        let check = |row: &IssuedSelectedNativeGroup| {
+            if !row.product().same_authenticated_group(original)
+                || row.product().imports() != imports.pending.as_ref()
+                || row.imports() != imports.selected.as_ref()
+            {
+                return Err(CertificationError::Mismatch(
+                    "native row differs from authenticated scope",
+                ));
+            }
+            if current.is_some_and(|product| !product.same_issuance(row.product())) {
+                return Err(CertificationError::Mismatch(
+                    "native row changed its physical product issuer",
+                ));
+            }
+            Ok(())
+        };
+        if let Some(row) = self.rows.get(&binding) {
+            check(row)?;
+            if issued.is_some_and(|incoming| !row.same_selected_issuance(incoming)) {
+                return Err(CertificationError::Mismatch(
+                    "native row has competing selected issuers",
+                ));
+            }
+            return Ok(Arc::clone(row));
+        }
+        operation.reserve::<(
+            crate::artifact_inventory::NativeGroupBinding,
+            Arc<IssuedSelectedNativeGroup>,
+        )>(1)?;
+        let row = match issued {
+            Some(row) => Arc::clone(row),
+            None => {
+                operation.reserve::<IssuedSelectedNativeGroup>(1)?;
+                let product = match current {
+                    Some(group) => group.clone(),
+                    None => PendingCertifiedGroup {
+                        origin: original.origin,
+                        owner: original.owner.clone(),
+                        group: Arc::clone(&original.group),
+                        imports: Arc::clone(&imports.pending),
+                    },
+                };
+                Arc::new(IssuedSelectedNativeGroup {
+                    product: Arc::new(product),
+                    imports: Arc::clone(&imports.selected),
+                })
+            }
+        };
+        check(&row)?;
+        self.rows.insert(binding, Arc::clone(&row));
+        Ok(row)
+    }
+}
+
 struct CheckedSelectedImports {
     pending: Arc<[PendingImportOwner]>,
     selected: Arc<[SelectedNativeImport]>,
@@ -12043,43 +12121,6 @@ impl<'a> OriginalValidationInventory<'a> {
             >,
         >,
     ) -> CertResult<SelectedScopeCertification> {
-        self.selected_scope(
-            scope,
-            current,
-            OriginalNativeUse::SelectedGroups,
-            validation,
-            issued,
-        )
-    }
-
-    pub(crate) fn validate_selected_scope(
-        &mut self,
-        scope: SelectedOriginalGroupScope<'_>,
-        validation: &mut PackageInterfaceValidation,
-    ) -> CertResult<()> {
-        self.selected_scope(
-            scope,
-            &BTreeMap::new(),
-            OriginalNativeUse::Availability,
-            validation,
-            None,
-        )
-        .map(|_| ())
-    }
-
-    fn selected_scope(
-        &mut self,
-        scope: SelectedOriginalGroupScope<'_>,
-        current: &BTreeMap<crate::artifact_inventory::NativeGroupBinding, &PendingCertifiedGroup>,
-        native_use: OriginalNativeUse,
-        validation: &mut PackageInterfaceValidation,
-        issued: Option<
-            &BTreeMap<
-                crate::artifact_inventory::NativeGroupBinding,
-                Arc<IssuedSelectedNativeGroup>,
-            >,
-        >,
-    ) -> CertResult<SelectedScopeCertification> {
         let operation = Arc::clone(&validation.inventory);
         let bindings = scope
             .bindings(&operation)
@@ -12142,41 +12183,25 @@ impl<'a> OriginalValidationInventory<'a> {
                     return Err(CertificationError::Mismatch("shared original home groups"));
                 }
             }
-            if native_use == OriginalNativeUse::SelectedGroups {
-                if let Some(row) = issued.and_then(|rows| rows.get(&binding)) {
-                    if current
-                        .get(&binding)
-                        .is_none_or(|product| !product.same_issuance(row.product()))
-                        || row.imports() != imports.selected.as_ref()
-                    {
-                        return Err(CertificationError::Mismatch(
-                            "physical cohort changed its issued native row",
-                        ));
-                    }
-                    rows.insert(binding, Arc::clone(row));
-                    continue;
+            if let Some(row) = issued.and_then(|rows| rows.get(&binding)) {
+                if current
+                    .get(&binding)
+                    .is_none_or(|product| !product.same_issuance(row.product()))
+                {
+                    return Err(CertificationError::Mismatch(
+                        "physical cohort changed its issued native row",
+                    ));
                 }
-                operation.reserve::<(
-                    crate::artifact_inventory::NativeGroupBinding,
-                    IssuedSelectedNativeGroup,
-                )>(1)?;
-                let product = match current.get(&binding) {
-                    Some(group) => (*group).clone(),
-                    None => PendingCertifiedGroup {
-                        origin: original.origin,
-                        owner: original.owner.clone(),
-                        group: Arc::clone(&original.group),
-                        imports: Arc::clone(&imports.pending),
-                    },
-                };
-                rows.insert(
-                    binding,
-                    Arc::new(IssuedSelectedNativeGroup {
-                        product: Arc::new(product),
-                        imports: imports.selected,
-                    }),
-                );
             }
+            let row = validation.native_group_rows.checked_row(
+                binding,
+                original,
+                imports,
+                current.get(&binding).copied(),
+                issued.and_then(|rows| rows.get(&binding)),
+                &operation,
+            )?;
+            rows.insert(binding, row);
         }
         Ok(SelectedScopeCertification { rows })
     }
@@ -18350,6 +18375,92 @@ pub(crate) mod tests {
             assert!(weak.upgrade().is_none());
             eprintln!("original_membership_history owners=2 groups={} overlay_calls={overlay_calls} recovered=2", ordinals.len());
         }
+    }
+
+    #[test]
+    fn scoped_row_assembly_reuses_only_authenticated_physical_issuance() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, ArtifactPayload};
+        let issue = || {
+            let product = full_native_fixture("ScopedRowOwner", vec![(7, vec![])], 1);
+            let entry = Arc::new(
+                ArtifactEntry::original(product.module_interface().producer_sha256(), product)
+                    .unwrap(),
+            );
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+                .unwrap();
+            (entry, view)
+        };
+        let (left, left_view) = issue();
+        let (right, right_view) = issue();
+        assert_eq!(
+            left.descriptor.id, right.descriptor.id,
+            "equal certified bytes alone do not share an issuer"
+        );
+        let certify = |entry: &ArtifactEntry,
+                       view: &crate::artifact_inventory::ArtifactView,
+                       validation: &mut PackageInterfaceValidation| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            let available = BTreeMap::from([(entry.descriptor.id, product)]);
+            OriginalValidationInventory::selected(&available, &validation.inventory)
+                .unwrap()
+                .certify_selected_scope(
+                    SelectedOriginalGroupScope::selected(view),
+                    &BTreeMap::new(),
+                    validation,
+                    None,
+                )
+        };
+        let mut validation = PackageInterfaceValidation::default();
+        let first = certify(&left, &left_view, &mut validation).unwrap().rows;
+        let repeated = certify(&left, &left_view, &mut validation).unwrap().rows;
+        let (binding, row) = first.first_key_value().unwrap();
+        assert!(Arc::ptr_eq(row, &repeated[binding]));
+        assert_eq!(
+            SelectedOriginalGroupScope::selected(&right_view)
+                .bindings(&validation.inventory)
+                .unwrap(),
+            vec![*binding]
+        );
+        assert!(matches!(
+            certify(&right, &right_view, &mut validation),
+            Err(CertificationError::Mismatch(
+                "native row differs from authenticated scope"
+            ))
+        ));
+        let foreign = certify(
+            &right,
+            &right_view,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .rows;
+        let ArtifactPayload::Original(product) = &left.payload else {
+            unreachable!()
+        };
+        let available = BTreeMap::from([(left.descriptor.id, product)]);
+        let mut fresh = PackageInterfaceValidation::default();
+        let current = BTreeMap::from([(*binding, foreign[binding].product().as_ref())]);
+        let refused = OriginalValidationInventory::selected(&available, &fresh.inventory)
+            .unwrap()
+            .certify_selected_scope(
+                SelectedOriginalGroupScope::selected(&left_view),
+                &current,
+                &mut fresh,
+                None,
+            );
+        assert!(
+            matches!(
+                refused,
+                Err(CertificationError::Mismatch(
+                    "native row differs from authenticated scope"
+                ))
+            ),
+            "an uncached current row must pass the same physical-owner check"
+        );
     }
 
     #[test]
