@@ -816,12 +816,22 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
         selected <- liftIO (readWorldBindingInputs owner environment original (Map.keys aliases))
           >>= either (liftIO . fail) pure
         let (_,captured,types) = selected
-            leafOwners = Set.fromList
+            leafOwnersOf facts = Set.fromList
               [(exactUnit artifact,exactModule artifact)
-              | binding <- Map.elems (worldInputsBindings original)
+              | binding <- Map.elems (worldInputsBindings facts)
               , let (artifact,_,_) = worldBindingRowInterface (worldBindingRow binding)]
-        liftIO $ unless (not (null captured) && Map.keysSet types == Set.union leafOwners dependencyOwners)
+        liftIO $ unless (not (null captured) && Map.keysSet types == Set.union (leafOwnersOf original) dependencyOwners)
           (fail "manifest demand lost its exact retained TYPE closure")
+        sharedCold <- liftIO $ case [cold | TList [TString "distinct-shared",_,cold] <- steps] of
+          [cold] -> pure cold
+          _ -> fail "value history omitted its two distinct simultaneously selected leaves"
+        shared <- liftIO (readCold "value-simultaneous-leaves" sharedCold)
+        (sharedAliases,_,sharedOwners) <- liftIO (worldValueColdCensus sharedCold)
+        (_,_,sharedTypes) <- liftIO (readWorldBindingInputs owner environment shared (Map.keys sharedAliases))
+          >>= either (liftIO . fail) pure
+        liftIO $ unless (Set.size (leafOwnersOf shared) == 2
+            && Map.keysSet sharedTypes == Set.union (leafOwnersOf shared) sharedOwners)
+          (fail "simultaneous leaf demand dropped a selected leaf from its complete TYPE closure")
         primary <- liftIO (readWorldTypeInputs owner environment original (Set.toList dependencyOwners))
         liftIO $ case primary of
           Left _ -> pure ()
