@@ -4579,7 +4579,7 @@ impl ArtifactInventory {
                     .get(&entry.descriptor.id)
                     .ok_or_else(|| failure("current cohort lacks its admitted producer outcome"))?;
                 if incoming.entry.as_ref() != entry.as_ref() {
-                    return Err(metadata_conflict::refusal(entry.descriptor.id));
+                    return Err(metadata_conflict::refusal(entry, &incoming.entry));
                 }
                 Ok(Arc::clone(&incoming.entry))
             })
