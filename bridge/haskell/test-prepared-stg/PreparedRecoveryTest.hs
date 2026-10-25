@@ -33,7 +33,9 @@ import Tidepool.FinalizedModule (newFinalizedModule)
 import GHC.Driver.Main (hscTidy)
 import GHC.Driver.Session (updOptLevel, targetProfile)
 import GHC.Core.DataCon (promoteDataCon, dataConName, dataConTyCon, dataConOrigArgTys)
-import GHC.Core.Type (splitTyConApp_maybe)
+import GHC.Core.Type (splitForAllTyCoVars, splitFunTys, splitTyConApp_maybe)
+import GHC.Core.TyCo.FVs (tyCoVarsOfType)
+import GHC.Types.Var.Set (isEmptyVarSet)
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.TyCon (tyConDataCons)
 import GHC.Types.TypeEnv (typeEnvTyCons)
@@ -54,7 +56,7 @@ import GHC.Types.Name (mkSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Types.Unique (mkUnique, getKey)
-import GHC.Types.Var (varName, varUnique)
+import GHC.Types.Var (varName, varUnique, varType)
 import GHC.Unit.Types (unitString, GenWithIsBoot(..), mkModule, stringToUnit)
 import GHC.Unit.Module.Location (ml_hi_file, ml_dyn_hi_file)
 import GHC.Unit.Finder (addModuleToFinder, initFinderCache)
@@ -998,6 +1000,9 @@ packageGroupContextIsolation = withRootProjectionFixture $ \environment _ contex
       direct = context { projectionEntry = root, projectionAuxiliaryRoots = [root,concrete] }
       entryOnly = direct { projectionAuxiliaryRoots = [concrete] }
   (identifier,_) <- resolvePackageGlobal environment root >>= either fail pure
+  let (variables,bodyType) = splitForAllTyCoVars (varType identifier)
+  assert (null variables && isEmptyVarSet (tyCoVarsOfType (snd (splitFunTys bodyType))))
+    "package context control requires a genuinely monomorphic answer"
   cache <- newFatIfaceCache
   owners <- newOwnerInterfaceCache
   bodies <- newPreparedBodyCache
