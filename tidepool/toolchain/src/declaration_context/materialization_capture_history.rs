@@ -955,7 +955,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
         use crate::host_work::{HostWorkCounter, HostWorkObservation};
         let overlay = |parents, paths| {
             Arc::new(RetainedArtifactMaterialization {
-            checked_value_product: None,
+                checked_value_product: None,
                 kind: MaterializationKind::Issued,
                 _directory: None,
                 _parents: parents,
