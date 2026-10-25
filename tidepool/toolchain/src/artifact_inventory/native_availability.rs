@@ -1831,6 +1831,23 @@ impl std::fmt::Debug for NativeOfferCustody {
 pub(crate) struct IssuedNativeOffer(Arc<NativeOfferFacts>);
 
 impl IssuedNativeOffer {
+    pub(crate) fn seed_native_group_rows(
+        &self,
+        bindings: &BTreeSet<NativeGroupBinding>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        let operation = Arc::clone(&validation.inventory);
+        for binding in bindings {
+            if let Some(row) = self.0.rows.get(binding) {
+                validation
+                    .native_group_rows
+                    .retain_issued(*binding, row, &operation)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn same_recorded_facts(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0) || self.snapshot_facts() == other.snapshot_facts()
     }
@@ -2395,6 +2412,7 @@ impl ValidatedFreshNativeAvailability {
 impl CheckedNativeAvailability {
     pub(super) fn validate_current_cohort(
         self,
+        selection: &crate::certified_products::CertifiedSourceSelection,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
         let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
@@ -2432,6 +2450,7 @@ impl CheckedNativeAvailability {
         .map_err(evidence)?;
         let mut offers = Vec::with_capacity(self.offers.len());
         for offer in self.offers {
+            selection.seed_native_group_rows(&offer.bindings(), validation)?;
             let rows = offer.certify_rows(&mut inventory, validation)?;
             offers.push(offer.seal(rows));
         }

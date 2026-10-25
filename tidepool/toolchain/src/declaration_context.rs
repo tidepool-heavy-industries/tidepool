@@ -1039,12 +1039,26 @@ impl<'a> PhysicalCohortInputs<'a> {
             .groups
             .lock()
             .expect("physical group issuance lock");
+        let (_, selected) = view.selected_native_binding_rows();
+        let mut offered = self
+            .compiler_inputs()
+            .native_availability()
+            .issued_group_rows(&selected.iter().copied().collect(), &validation.inventory)?;
+        for (binding, row) in issued.iter() {
+            if let Some(prior) = offered.get(binding) {
+                if !prior.same_selected_issuance(row) {
+                    return Err(failure("physical cohort changed its demanded native row"));
+                }
+            } else {
+                offered.insert(*binding, Arc::clone(row));
+            }
+        }
         let groups = certify_artifact_view_groups(
             view,
             Some(candidates),
             baseline,
             validation,
-            Some(&issued),
+            Some(&offered),
             NativeGroupBaselineScope::SelectedBindings,
         )?;
         for (binding, row) in &groups.rows {
@@ -2239,6 +2253,67 @@ impl NativeDemandBudget<'_> {
 }
 
 impl RequestNativeAvailability {
+    /// Borrow existing witnesses for exact bindings without selecting new groups.
+    pub(crate) fn issued_group_rows(
+        &self,
+        bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<
+        BTreeMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
+        CompileError,
+    > {
+        let mut rows: BTreeMap<_, Arc<IssuedSelectedNativeGroup>> = BTreeMap::new();
+        for binding in bindings {
+            crate::host_work::checkpoint()?;
+            operation
+                .charge(1)
+                .map_err(|error| compiler_evidence_failure(error.into()))?;
+            let Some(available) = self.0.get(&binding.binding.artifact()) else {
+                continue;
+            };
+            if !available.permits(binding.original_ordinal) {
+                continue;
+            }
+            for contribution in available.contributions.iter() {
+                if !contribution.contains_group(*binding) {
+                    continue;
+                }
+                let row = contribution.issued_group(*binding)?;
+                if let Some(prior) = rows.get(binding) {
+                    if !prior.same_selected_issuance(row) {
+                        return Err(failure(
+                            "available HOME binding has competing selected issuers",
+                        ));
+                    }
+                } else {
+                    operation
+                        .reserve::<(
+                            crate::artifact_inventory::NativeGroupBinding,
+                            Arc<IssuedSelectedNativeGroup>,
+                        )>(1)
+                        .map_err(|error| compiler_evidence_failure(error.into()))?;
+                    rows.insert(*binding, Arc::clone(row));
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    pub(crate) fn seed_native_group_rows(
+        &self,
+        bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        let operation = Arc::clone(&validation.inventory);
+        for (binding, row) in self.issued_group_rows(bindings, &operation)? {
+            validation
+                .native_group_rows
+                .retain_issued(binding, &row, &operation)
+                .map_err(compiler_evidence_failure)?;
+        }
+        Ok(())
+    }
+
     /// Derive immutable facts only at a real row construction or mutation. The
     /// acquisition/permission owner remains the row, never these durable facts.
     pub(crate) fn row_snapshot_facts(
@@ -4006,29 +4081,25 @@ impl DemandNativeInputs {
                     });
                     let prior = prior_native_demand_row(acquisitions, binding, &budget)?;
                     let local = certified.get(&binding).or(prior);
-                    if let Some(row) = local {
-                        budget.reserve::<(
-                            crate::artifact_inventory::NativeGroupBinding,
-                            Arc<IssuedSelectedNativeGroup>,
-                        )>(1)?;
-                        issued_rows.insert(binding, Arc::clone(&row.issued));
+                    let offered = contribution.issued_group(binding)?;
+                    if held.is_some_and(|held| !held.same_issuance(offered.product()))
+                        || local.is_some_and(|local| !local.issued.same_selected_issuance(offered))
+                    {
+                        return Err(failure(
+                            "selected HOME binding changed its acquired occurrence",
+                        ));
                     }
-                    let local = local.map(|row| row.issued.product());
-                    if let (Some(held), Some(local)) = (held, local) {
-                        if !held.same_issuance(local) {
-                            return Err(failure(
-                                "selected HOME binding changed its acquired occurrence",
-                            ));
-                        }
-                    }
-                    if let Some(product) = held.or(local) {
-                        budget.reserve::<(
-                            crate::artifact_inventory::NativeGroupBinding,
-                            Arc<PendingCertifiedGroup>,
-                            [usize; 4],
-                        )>(1)?;
-                        held_products.insert(binding, Arc::clone(product));
-                    }
+                    budget.reserve::<(
+                        crate::artifact_inventory::NativeGroupBinding,
+                        Arc<IssuedSelectedNativeGroup>,
+                    )>(1)?;
+                    issued_rows.insert(binding, Arc::clone(offered));
+                    budget.reserve::<(
+                        crate::artifact_inventory::NativeGroupBinding,
+                        Arc<PendingCertifiedGroup>,
+                        [usize; 4],
+                    )>(1)?;
+                    held_products.insert(binding, Arc::clone(offered.product()));
                 }
             }
             let previous = held_products

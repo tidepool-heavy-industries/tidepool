@@ -4571,7 +4571,7 @@ impl ArtifactInventory {
             },
         )?;
         native_availability::CheckedNativeAvailability::from_cohort_custody(custody, &originals)?
-            .validate_current_cohort(validation)
+            .validate_current_cohort(selection, validation)
     }
 
     /// Issue complete private products using only the request's exact external

@@ -636,6 +636,7 @@ pub(crate) struct AcquiredNativeClosures {
     owners: imbl::OrdMap<[u8; 32], Arc<[Arc<crate::linked_native::AcquiredNativeClosure>]>>,
     components: crate::exact_context::NativeComponentRecords,
     recorded: crate::exact_context::NativeAcquiredClosureRecords,
+    homes: imbl::OrdMap<NativeGroupBinding, crate::linked_native::AcquiredNativeCode>,
     // Payload custody for persistence, never occurrence or executable permission.
     packages: imbl::OrdMap<ArtifactId, Arc<crate::certified_products::CertifiedPackageCodeProduct>>,
 }
@@ -681,40 +682,43 @@ impl AcquiredNativeClosures {
         binding: NativeGroupBinding,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Option<crate::linked_native::AcquiredNativeCode>, CompileError> {
+        crate::host_work::checkpoint()?;
+        operation
+            .charge(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        Ok(self.homes.get(&binding).cloned())
+    }
+
+    fn same_home(
+        prior: &crate::linked_native::AcquiredNativeCode,
+        incoming: &crate::linked_native::AcquiredNativeCode,
+    ) -> Result<(), CompileError> {
         use crate::linked_native::NativeCodeGrant;
-        let mut selected: Option<crate::linked_native::AcquiredNativeCode> = None;
-        for closure in self.iter() {
-            crate::host_work::checkpoint()?;
-            operation
-                .charge(1)
-                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-            let Some(incoming) = closure.home(binding) else {
-                continue;
-            };
-            if let Some(prior) = &selected {
-                let (
-                    NativeCodeGrant::Home { product: held, .. },
-                    NativeCodeGrant::Home {
-                        product: incoming_product,
-                        ..
-                    },
-                ) = (prior.grant(), incoming.grant())
-                else {
-                    return Err(failure("acquired HOME lookup changed occurrence kind"));
-                };
-                if !held.same_issuance(incoming_product) {
-                    return Err(failure(
-                        "acquired HOME binding has competing physical occurrences",
-                    ));
-                }
-                if prior.code().id() != incoming.code().id() {
-                    return Err(failure("acquired HOME binding has competing linked code"));
-                }
-            } else {
-                selected = Some(incoming);
-            }
+        let (
+            NativeCodeGrant::Home {
+                binding: held_binding,
+                product: held,
+            },
+            NativeCodeGrant::Home { binding, product },
+        ) = (prior.grant(), incoming.grant())
+        else {
+            return Err(failure("acquired HOME lookup changed occurrence kind"));
+        };
+        if held_binding != binding
+            || !held.same_issuance(product)
+            || !prior
+                .issued_home_row()
+                .zip(incoming.issued_home_row())
+                .is_some_and(|(held, row)| held.same_selected_issuance(row))
+        {
+            return Err(failure(
+                "acquired HOME binding has competing physical occurrences",
+            ));
         }
-        Ok(selected)
+        if prior.code().id() != incoming.code().id() {
+            return Err(failure("acquired HOME binding has competing linked code"));
+        }
+        Ok(())
     }
 
     fn one(owner: Arc<crate::linked_native::AcquiredNativeClosure>) -> Result<Self, CompileError> {
@@ -725,6 +729,7 @@ impl AcquiredNativeClosures {
         }
         let mut components = crate::exact_context::NativeComponentRecords::new();
         let mut packages = imbl::OrdMap::new();
+        let mut homes = imbl::OrdMap::new();
         for acquired in owner.acquired() {
             crate::host_work::checkpoint()?;
             if let crate::linked_native::NativeCodeGrant::Package { product, .. } = acquired.grant()
@@ -735,6 +740,13 @@ impl AcquiredNativeClosures {
                     }
                 } else {
                     packages.insert(product.artifact_id(), Arc::clone(product));
+                }
+            }
+            if let crate::linked_native::NativeCodeGrant::Home { binding, .. } = acquired.grant() {
+                if let Some(prior) = homes.get(&binding) {
+                    Self::same_home(prior, &acquired)?;
+                } else {
+                    homes.insert(binding, acquired.clone());
                 }
             }
             let component = acquired.code().component();
@@ -762,6 +774,7 @@ impl AcquiredNativeClosures {
             owners: imbl::OrdMap::unit(identity, vec![owner].into()),
             components,
             recorded,
+            homes,
             packages,
         })
     }
@@ -865,6 +878,14 @@ impl AcquiredNativeClosures {
                 }
             } else {
                 retained.components.insert(*identity, record.clone());
+            }
+        }
+        for (binding, acquired) in &incoming.homes {
+            crate::host_work::checkpoint()?;
+            if let Some(prior) = retained.homes.get(binding) {
+                Self::same_home(prior, acquired)?;
+            } else {
+                retained.homes.insert(*binding, acquired.clone());
             }
         }
         for (id, product) in &incoming.packages {
@@ -2300,6 +2321,13 @@ pub(crate) struct CarriedCompilerSelection {
     rows: SelectedCompilerRows,
 }
 impl CarriedCompilerSelection {
+    pub(crate) fn seed_native_group_rows(
+        &self,
+        bindings: &BTreeSet<NativeGroupBinding>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        self.base.seed_native_group_rows(bindings, validation)
+    }
     pub(crate) fn empty() -> Self {
         CompilerSourceSupport::empty().carry_compiler_selection()
     }
@@ -4259,6 +4287,16 @@ impl CompilerSourceSupport {
                 owner: owner.clone(),
             })
         })?;
+        if let Some(proof) = &proof {
+            // This only reuses physical evidence. The issuer below independently
+            // authenticates the complete proof and exact carrier pair.
+            let groups = &proof.selection.graph_selection().native_groups;
+            validation
+                .inventory
+                .reserve::<(NativeGroupBinding, [usize; 4])>(groups.len())
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            self.seed_native_group_rows(&groups.iter().copied().collect(), validation)?;
+        }
         IssuedNativeOffer::issue(input, proof, validation)
     }
 
@@ -4908,6 +4946,31 @@ impl CompilerSourceSupport {
         let result = draft.close();
         timing.finish(result.is_ok());
         result
+    }
+
+    pub(crate) fn seed_native_group_rows(
+        &self,
+        bindings: &BTreeSet<NativeGroupBinding>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        self.native_availability
+            .seed_native_group_rows(bindings, validation)?;
+        let operation = Arc::clone(&validation.inventory);
+        for binding in bindings {
+            if let Some(acquired) = self
+                .acquired_native_closures()
+                .group_owner(*binding, &operation)?
+            {
+                let row = acquired
+                    .issued_home_row()
+                    .ok_or_else(|| failure("acquired HOME lost its checked row"))?;
+                validation
+                    .native_group_rows
+                    .retain_issued(*binding, row, &operation)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn native_availability(

@@ -17,6 +17,19 @@ pub(crate) fn restore_acquired_native_closures(
     operation
         .reserve::<([u8; 32], Arc<NativeAcquiredClosureFacts>)>(closures.len())
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let home_bindings = closures
+        .values()
+        .flat_map(|facts| &facts.occurrences)
+        .filter_map(|row| match row.occurrence {
+            NativeOccurrenceId::Home(binding) => Some(binding),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let home_grants = crate::certified_products::acquire_linked_home_grants(
+        artifacts,
+        &home_bindings,
+        validation,
+    )?;
     let mut prepared = Vec::new();
     let mut bodies = BTreeMap::<NativeCodeLocation, NativeCodeBody>::new();
     for (identity, facts) in closures {
@@ -41,9 +54,16 @@ pub(crate) fn restore_acquired_native_closures(
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
-        let home = crate::certified_products::acquire_linked_home_grants(
-            artifacts, &bindings, validation,
-        )?;
+        let home = bindings
+            .iter()
+            .map(|binding| {
+                home_grants
+                    .get(binding)
+                    .cloned()
+                    .map(|grant| (*binding, grant))
+                    .ok_or_else(|| refusal("recorded HOME grant is absent"))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         let selected_occurrences = facts
             .occurrences
             .iter()

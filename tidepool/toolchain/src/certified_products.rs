@@ -5665,6 +5665,26 @@ impl NativeGroupCandidates {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn seed_native_group_rows(
+        &self,
+        bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<(), crate::CompileError> {
+        self.compiler_rows
+            .seed_native_group_rows(bindings, validation)?;
+        self.private_native
+            .seed_native_group_rows(bindings, validation)?;
+        if let CertifiedInputOrigin::Continuation(source) = &self.input_origin {
+            source.seed_native_group_rows(bindings, validation)?;
+        }
+        for product in self.prior_program_products.iter() {
+            product
+                .own_offer()
+                .seed_native_group_rows(bindings, validation)?;
+        }
+        Ok(())
+    }
+
     fn prior_program_product(
         &self,
         unit: &str,
@@ -11857,6 +11877,10 @@ impl AcquiredHomeCodeGrant {
     pub(crate) fn product(&self) -> &Arc<PendingCertifiedGroup> {
         self.row.product()
     }
+    pub(crate) fn issued_row(&self) -> &Arc<IssuedSelectedNativeGroup> {
+        &self.row
+    }
+
     pub(crate) fn imports(&self) -> &[SelectedNativeImport] {
         self.row.imports()
     }
@@ -11910,6 +11934,29 @@ pub(crate) struct NativeGroupRowAssembly {
 }
 
 impl NativeGroupRowAssembly {
+    pub(crate) fn retain_issued(
+        &mut self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        row: &Arc<IssuedSelectedNativeGroup>,
+        operation: &InventoryOperation,
+    ) -> CertResult<()> {
+        operation.charge(1)?;
+        if let Some(prior) = self.rows.get(&binding) {
+            if !prior.same_selected_issuance(row) {
+                return Err(CertificationError::Mismatch(
+                    "native row has competing selected issuers",
+                ));
+            }
+        } else {
+            operation.reserve::<(
+                crate::artifact_inventory::NativeGroupBinding,
+                Arc<IssuedSelectedNativeGroup>,
+            )>(1)?;
+            self.rows.insert(binding, Arc::clone(row));
+        }
+        Ok(())
+    }
+
     fn checked_row(
         &mut self,
         binding: crate::artifact_inventory::NativeGroupBinding,
