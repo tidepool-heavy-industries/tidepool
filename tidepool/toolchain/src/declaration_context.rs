@@ -27674,7 +27674,15 @@ mod tests {
             ValueRowCustody::Packet
         ));
         let second_packet = tempfile::tempdir().unwrap();
-        let second_request = context
+        assert!(
+            context
+                .prepare_fixture_compilation(second_packet.path(), &producer)
+                .is_err(),
+            "a packet cannot reuse its previous physical materialization owner"
+        );
+        let (second_context, second_producer) = metadata_fixture();
+        assert_eq!(producer, second_producer);
+        let second_request = second_context
             .prepare_fixture_compilation(second_packet.path(), &producer)
             .unwrap();
         let second_owner = &second_request.materialization;
@@ -27707,6 +27715,7 @@ mod tests {
         drop(request);
         drop(second_request);
         drop(context);
+        drop(second_context);
         assert!(weak.upgrade().is_none());
         assert!(second_weak.upgrade().is_none());
         assert!(paths.iter().all(|path| path.is_file()));
