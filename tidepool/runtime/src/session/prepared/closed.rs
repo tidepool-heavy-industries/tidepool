@@ -86,6 +86,15 @@ pub(in crate::session) struct NativeInstantiationPlan {
     linked: Arc<LinkedNativeTarget>,
     programs: BTreeMap<NativeCodeId, Arc<PreparedNativeCode>>,
     target: Arc<CompiledProgram>,
+    apply_support: Option<ApplySupportPlan>,
+}
+
+/// The reduced compiler helpers and their exact slots in the issued target.
+/// This image owns no invocation or mutable source selection.
+struct ApplySupportPlan {
+    image: Arc<CompiledProgram>,
+    entry: ValueId,
+    target_globals: Vec<usize>,
 }
 
 pub(in crate::session) struct ClosedInstantiationPlan {
@@ -212,11 +221,84 @@ impl NativeInstantiationPlan {
             registry,
         )
         .map_err(PreparedRuntimeError::Compile)?;
+        let apply_support = Self::prepare_apply_support(linked, &programs, registry)?;
         Ok(Self {
             linked: Arc::clone(linked),
             programs,
             target,
+            apply_support,
         })
+    }
+
+    fn prepare_apply_support(
+        linked: &LinkedNativeTarget,
+        programs: &BTreeMap<NativeCodeId, Arc<PreparedNativeCode>>,
+        registry: &ImageRegistry,
+    ) -> Result<Option<ApplySupportPlan>, PreparedRuntimeError> {
+        let Some(prepared) = linked.prepared().extract_apply_support()? else {
+            return Ok(None);
+        };
+        let target_globals = prepared
+            .globals()
+            .iter()
+            .map(|global| {
+                linked
+                    .prepared()
+                    .globals()
+                    .iter()
+                    .position(|original| original.identity == global.identity)
+                    .ok_or_else(PreparedRuntimeError::certified_target_owners)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut imports = Vec::with_capacity(target_globals.len());
+        let mut pending = Vec::new();
+        for index in &target_globals {
+            let LinkedNativeTargetImport::Code { acquired, value } = &linked.imports()[*index]
+            else {
+                return Err(PreparedRuntimeError::certified_target_owners());
+            };
+            if !matches!(acquired.grant(), NativeCodeGrant::Package { .. }) {
+                return Err(PreparedRuntimeError::certified_target_owners());
+            }
+            pending.push(acquired.code().clone());
+            imports.push(NativeCodeImport::Code {
+                code: acquired.code().clone(),
+                value: *value,
+            });
+        }
+        // A package spelling alone cannot authorize a permanent root. Check
+        // the actual closed package graph selected by the installing target.
+        let mut visited = BTreeSet::new();
+        while let Some(code) = pending.pop() {
+            if !visited.insert(code.id()) {
+                continue;
+            }
+            let definitions = code.body().definitions();
+            if !matches!(code.body(), NativeCodeBody::Package(_))
+                || !definitions.sites().is_empty()
+                || !definitions.constructor_replies().is_empty()
+            {
+                return Err(PreparedRuntimeError::certified_target_owners());
+            }
+            for import in code.imports() {
+                match import {
+                    NativeCodeImport::Code { code, .. } => pending.push(code),
+                    NativeCodeImport::Retained(_) => {
+                        return Err(PreparedRuntimeError::certified_target_owners());
+                    }
+                }
+            }
+        }
+        let (owners, packages, sources) =
+            Self::literal_inputs(prepared.globals(), imports.into_iter(), programs)?;
+        let image =
+            CompiledProgram::prepare_target_code(&prepared, &owners, &packages, &sources, registry)
+                .map_err(PreparedRuntimeError::Compile)?;
+        Ok(Some(ApplySupportPlan {
+            image,
+            entry: prepared.entry(),
+            target_globals,
+        }))
     }
     fn target_imports(
         linked: &LinkedNativeTarget,
@@ -249,7 +331,9 @@ impl NativeInstantiationPlan {
         &self.target
     }
     pub(in crate::session) fn images(&self) -> impl Iterator<Item = &Arc<CompiledProgram>> {
-        std::iter::once(&self.target).chain(self.programs.values().map(|program| program.image()))
+        std::iter::once(&self.target)
+            .chain(self.apply_support.iter().map(|support| &support.image))
+            .chain(self.programs.values().map(|program| program.image()))
     }
     fn literal_inputs(
         globals: &[tidepool_repr::execution_schema::GlobalDecl],
@@ -355,6 +439,19 @@ impl NativeInstantiationPlan {
             image: self.target.clone(),
             imports: imports(Self::target_imports(&self.linked).collect())?,
         });
+        if let Some(support) = &self.apply_support {
+            let target_imports = Self::target_imports(&self.linked).collect::<Vec<_>>();
+            batch.push(BatchProgram {
+                image: Arc::clone(&support.image),
+                imports: imports(
+                    support
+                        .target_globals
+                        .iter()
+                        .map(|index| target_imports[*index].clone())
+                        .collect(),
+                )?,
+            });
+        }
         Ok(batch)
     }
 }
@@ -1101,10 +1198,32 @@ impl PreparedEngine {
                     })
                 })
                 .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
+            let target_index = batch.len();
             batch.push(BatchProgram {
                 image: Arc::clone(&plan.target),
                 imports: imports(&instantiation.target_imports)?,
             });
+            let support = self
+                .apply_host
+                .is_none()
+                .then_some(plan.apply_support.as_ref())
+                .flatten();
+            if let Some(support) = support {
+                let slots = support
+                    .target_globals
+                    .iter()
+                    .map(|index| {
+                        imports(std::slice::from_ref(&instantiation.target_imports[*index]))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                batch.push(BatchProgram {
+                    image: Arc::clone(&support.image),
+                    imports: slots,
+                });
+            }
             let make_facts = |occurrence: Option<NativeOccurrence>| -> Result<ProgramFacts, PreparedRuntimeError> {
                 let (mut facts, imports) = match occurrence {
                     Some(occurrence) => {
@@ -1148,6 +1267,12 @@ impl PreparedEngine {
             facts.push(make_facts(None)?);
             let settled = SettledIds::from_facts(self.programs.values().chain(facts.iter()))?;
             facts.last_mut().expect("target is final").settled = settled;
+            if let Some(support) = support {
+                let mut support_facts =
+                    ProgramFacts::from_image(&support.image, Some(support.entry));
+                support_facts.settled = settled;
+                facts.push(support_facts);
+            }
             let direct = facts
                 .iter()
                 .map(|facts| facts.native_sources.clone())
@@ -1178,7 +1303,15 @@ impl PreparedEngine {
                 };
                 native_slots.push((permit.clone(), instance));
             }
-            let target = *installed.programs.last().expect("target is final");
+            let target = installed.programs[target_index];
+            let apply_support = if support.is_some() {
+                Some((
+                    installed.programs[target_index + 1],
+                    admitted.pop().expect("support is final"),
+                ))
+            } else {
+                None
+            };
             attachments.extend(installed.source_attachments);
             Ok(CertifiedTurnInstall {
                 native_sources: admitted
@@ -1188,11 +1321,12 @@ impl PreparedEngine {
                     .native_sources
                     .clone(),
                 target,
-                groups: installed.programs[..installed.programs.len() - 1].to_vec(),
+                groups: installed.programs[..target_index].to_vec(),
                 leases: installed.leases,
                 domain_leases: attachments,
                 native_slots,
                 admitted,
+                apply_support,
             })
         })();
         match result {

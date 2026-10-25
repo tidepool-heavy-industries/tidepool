@@ -989,6 +989,7 @@ pub(crate) struct CertifiedTurnInstall {
         tidepool_codegen::prepared_program::GroupInstanceId,
     )>,
     admitted: Vec<AdmittedProgramFacts>,
+    apply_support: Option<(ProgramId, AdmittedProgramFacts)>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -2503,6 +2504,8 @@ fn site_field(field: &HaskellValue, table: &DataConTable) -> Option<u64> {
 pub struct PreparedEngine {
     machine: PreparedMachine<'static>,
     programs: BTreeMap<ProgramId, ProgramFacts>,
+    /// Closed compiler helpers whose pin belongs to the engine, not a turn.
+    apply_host: Option<ProgramId>,
     /// The machine-owned site index: which installed program's site table is
     /// authoritative for each typed site id. Extended in the install
     /// transaction before any code is compiled; a conflicting duplicate
@@ -2924,6 +2927,7 @@ impl PreparedEngine {
         Self {
             machine,
             programs: BTreeMap::new(),
+            apply_host: None,
             sites: BTreeMap::new(),
             constructor_replies: BTreeMap::new(),
             old_bytes: 0,
@@ -3362,6 +3366,21 @@ impl PreparedEngine {
         for (id, admitted) in programs.zip(staged.admitted) {
             self.publish_admitted_program(id, admitted);
         }
+        if let Some((program, admitted)) = staged.apply_support {
+            if self.apply_host.is_none() {
+                self.publish_admitted_program(program, admitted);
+                self.apply_host = Some(program);
+            } else {
+                // Another staged turn may have committed support first. Its
+                // engine pin already owns the capability; this batch's unused
+                // projection can retire without replacing that owner.
+                assert!(
+                    self.unpin(program),
+                    "unused support retains its install pin"
+                );
+            }
+            self.installs_since_major += 1;
+        }
         self.machine.commit_world_native_slots(native_slots);
         self.installs_since_major += staged.groups.len() + 1;
         for group in staged.groups {
@@ -3392,6 +3411,7 @@ impl PreparedEngine {
             .groups
             .into_iter()
             .chain(std::iter::once(staged.target))
+            .chain(staged.apply_support.map(|(program, _)| program))
         {
             assert!(
                 self.unpin(program),
@@ -3569,15 +3589,8 @@ impl PreparedEngine {
         self.programs.contains_key(&owner).then_some(owner)
     }
 
-    /// The program that should host a rooted apply of `handle`: the program
-    /// whose descriptor owns the object `handle` refers to, when that
-    /// program is still installed and admits both generic apply roots; else
-    /// the most recently installed program that admits them. Every
-    /// executable template emits `__applyEntry`/`__applyValue` beside its
-    /// settled scaffold, so any installed program is normally a candidate —
-    /// preferring the object's own owner keeps a rooted apply within the
-    /// program whose code produced the closure whenever that is still live,
-    /// without depending on install order to matter for correctness.
+    /// Use the live defining program's helpers or the engine's closed support.
+    /// An unrelated turn never supplies the lifetime of a rooted application.
     pub(crate) fn hosting_program(&self, handle: PreparedHandle) -> Option<ProgramId> {
         fn admits_apply_roots(facts: &ProgramFacts) -> bool {
             facts.apply_entry.is_some() && facts.apply_value.is_some()
@@ -3586,11 +3599,8 @@ impl PreparedEngine {
         if self.programs.get(&owner).is_some_and(admits_apply_roots) {
             return Some(owner);
         }
-        self.programs
-            .iter()
-            .rev()
-            .find(|&(_, facts)| admits_apply_roots(facts))
-            .map(|(id, _)| *id)
+        self.apply_host
+            .filter(|host| self.programs.get(host).is_some_and(admits_apply_roots))
     }
 
     /// Apply a rooted `Int -> Eff effects a` closure `f` to `argument` through the
@@ -4695,9 +4705,9 @@ impl PreparedEngine {
 
     /// Release a pin taken at install time ([`Self::install`],
     /// [`Self::bootstrap`]). `false` if it was not held (already unpinned,
-    /// or an unknown program).
+    /// or an unknown program). Engine-owned apply support is not a turn pin.
     pub fn unpin(&mut self, program: ProgramId) -> bool {
-        self.machine.unpin(program)
+        self.apply_host != Some(program) && self.machine.unpin(program)
     }
 
     /// Whether [`Self::quiesce_and_collect`] should actually run a major
@@ -4929,6 +4939,52 @@ pub(super) mod tests {
     use super::*;
     use tidepool_codegen::prepared_program::DemandedImage;
     use tidepool_repr::execution_schema::CertifiedGroup;
+
+    /// Inspect the real installed owner, without issuing a substitute program.
+    pub(in crate::session) fn assert_isolated_apply_support(
+        engine: &mut PreparedEngine,
+    ) -> ProgramId {
+        let host = engine
+            .apply_host
+            .expect("certified turn installed engine support");
+        let facts = &engine.programs[&host];
+        assert_eq!(facts.tops.len(), 3);
+        assert_eq!(
+            facts
+                .tops
+                .values()
+                .map(|(identity, _)| identity.occurrence.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                PREPARED_RESUME_TARGET,
+                PREPARED_APPLY_ENTRY_TARGET,
+                PREPARED_APPLY_VALUE_TARGET
+            ]),
+        );
+        assert!(facts.sites.is_empty());
+        assert!(facts.constructor_replies.is_empty());
+        assert_eq!(facts.types.graph().node_count(), 0);
+        assert!(facts
+            .native_sources
+            .same_selected_acquisitions(&NativeSourceCustody::default()));
+        assert!(facts.code_owner.is_none());
+        assert!(facts.settled.is_some());
+        assert!(
+            !engine.unpin(host),
+            "a turn cannot release the engine's support pin"
+        );
+        host
+    }
+
+    pub(in crate::session) fn assert_no_turn_scaffolds(engine: &PreparedEngine) {
+        assert!(
+            engine.programs.values().all(|facts| !matches!(
+                facts.code_owner,
+                Some(NativeProgramCode::Invocation { .. })
+            )),
+            "apply support must not keep completed turn scaffolds alive"
+        );
+    }
 
     #[test]
     fn checked_input_refusal_preserves_its_typed_transition_cause() {
