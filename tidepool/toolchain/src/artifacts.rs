@@ -11713,6 +11713,7 @@ pub(crate) mod test_support {
 
     pub(crate) use super::exact_source_fixture::ExactSourceFixture;
     pub(crate) use super::world_value_selection_tests::prepare_checked_value_fixture;
+    pub(crate) use super::world_value_selection_tests::prepare_checked_value_dependency_pair_fixture;
 
     /// These callers declare an owned-resident compiler, so the isolated runner
     /// owns the input tree through case settlement, independently of automatic

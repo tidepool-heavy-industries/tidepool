@@ -4130,8 +4130,8 @@ pub(crate) fn world_context_fixture(
 pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>, CompileError> {
     use ciborium::value::Value;
     use std::collections::BTreeSet;
-    let (first, _) = crate::artifacts::test_support::prepare_checked_value_fixture(601);
-    let (second, _) = crate::artifacts::test_support::prepare_checked_value_fixture(602);
+    let (first, second) =
+        crate::artifacts::test_support::prepare_checked_value_dependency_pair_fixture(601, 602);
     assert!(
         !first.type_product().dependencies().is_empty(),
         "fixture must own genuine TYPE dependencies"

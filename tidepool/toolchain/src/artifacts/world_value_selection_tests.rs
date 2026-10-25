@@ -73,6 +73,91 @@ pub(crate) fn prepare_checked_value_fixture(
     (value, producer_bytes)
 }
 
+/// Capture nominal HOME TYPE custody and then a second checked value through
+/// the first value's actual operand. Both products retain the same issued child
+/// bindings; the second closure additionally retains the first value leaf.
+pub(crate) fn prepare_checked_value_dependency_pair_fixture(
+    first_generation: u64,
+    second_generation: u64,
+) -> (
+    Arc<crate::checked_cell::CheckedValueArtifact>,
+    Arc<crate::checked_cell::CheckedValueArtifact>,
+) {
+    let ((endpoint, world, source, prepared), admission) = settle(|| {
+        let (endpoint, world, source) = open_world_with_primary_and_module(
+            None,
+            include_str!("../../tests/fixtures/world-native/WorldTypeNominal.hs").as_bytes(),
+            None,
+        )?;
+        let template = include_str!("../../tests/fixtures/world-native/CellTemplate.hs").replace(
+            "{{CELL_IMPORTS}}",
+            "import qualified Module as Nominal\n{{CELL_IMPORTS}}",
+        );
+        let checked = prepare_checked_with_template(
+            &endpoint,
+            &world,
+            &source,
+            "let supplied = Nominal.token".into(),
+            None,
+            &[(first_generation, "supplied")],
+            template.into(),
+        )?;
+        Ok((
+            endpoint,
+            world,
+            source,
+            prepare_world_cell_program(checked)?,
+        ))
+    });
+    let first = prepared
+        .seal(&admission)
+        .expect("actual nominal value compiler END");
+    let execution = first.items()[0]
+        .native()
+        .expect("actual nominal value execution");
+    let row = execution
+        .value_interface_certificate()
+        .expect("actual nominal checked value");
+    assert!(
+        !row.type_product().dependencies().is_empty(),
+        "nominal source establishes genuine HOME TYPE custody"
+    );
+    let operand = CompilerWorldCellOperand::from_checked_host_execution(
+        &world,
+        WorldCellOperandExposure::Input,
+        0,
+        execution,
+    )
+    .expect("nominal operand from its checked execution");
+    let (prepared, admission) = settle(|| {
+        let checked = prepare_checked(
+            &endpoint,
+            &world,
+            &source,
+            "let supplied = input",
+            Some(operand),
+            &[(second_generation, "supplied")],
+        )?;
+        prepare_world_cell_program(checked)
+    });
+    let second = prepared
+        .seal(&admission)
+        .expect("actual dependent value compiler END");
+    let second = second.items()[0]
+        .native()
+        .expect("actual dependent value execution")
+        .value_interface_certificate()
+        .expect("actual dependent checked value");
+    assert!(
+        second
+            .type_product()
+            .dependencies()
+            .contains_key(&row.type_product().leaf_binding()),
+        "dependent checked value must retain its exact input value binding"
+    );
+    (row, second)
+}
+
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_world_value_selection_test owns it"]
 fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
