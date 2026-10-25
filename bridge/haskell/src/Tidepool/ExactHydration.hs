@@ -483,7 +483,7 @@ data CapturedCompilerInterface = DecodedTypeInterface !ModIface
   | DecodedCheckedValueInterface !SessionModule !ModIface !ArtifactBytes
   | CompletedHomeInterface !CompletedInterfaceOwner
 
--- Called only after the World reader has authenticated the checked-value role
+-- Called only after the owning reader has authenticated the checked-value role
 -- and package token. A value-shaped module name alone cannot issue this product.
 admitCheckedValueInterface :: ArtifactBytes -> VerifiedExactInterface -> Either String VerifiedExactInterface
 admitCheckedValueInterface packages (VerifiedExactInterface artifact product' body issuer) = do

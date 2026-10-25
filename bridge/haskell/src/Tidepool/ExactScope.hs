@@ -1136,15 +1136,16 @@ readScopedInterfaceClosure env scope originals values = do
           checked = [(selected,path,sha)
             | (key,ScopeInterfaceInput (selected,path,sha) CheckedValueEvidence) <- Map.toAscList rows
             , key `Set.member` requested]
-      valid <- if null checked then pure (Right ()) else validateAdmittedPackageSelection env roots
-      case valid of
-        Left reason -> pure (Left reason)
-        Right () -> do
-          custody <- maybe (fail "checked scope lacks its captured input owner") pure (scopeCapturedInputs scope)
-          packages <- forM checked $ \(artifact,path,sha) -> do
-            body <- capturedRequestInputToken custody path sha
-            pure (artifact,body)
-          pure (admitCheckedValueInputs captured packages)
+      if null checked then pure (Right captured) else do
+        valid <- validateAdmittedPackageSelection env roots
+        case valid of
+          Left reason -> pure (Left reason)
+          Right () -> do
+            custody <- maybe (fail "checked scope lacks its captured input owner") pure (scopeCapturedInputs scope)
+            packages <- forM checked $ \(artifact,path,sha) -> do
+              body <- capturedRequestInputToken custody path sha
+              pure (artifact,body)
+            pure (admitCheckedValueInputs captured packages)
 
 validateExactScopeEnvironment :: HscEnv -> ExactScope -> IO (Either String ())
 validateExactScopeEnvironment env scope = do
