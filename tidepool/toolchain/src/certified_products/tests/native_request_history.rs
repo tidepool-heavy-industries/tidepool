@@ -550,22 +550,27 @@ fn replay_native_transport_history(
             }
         }
     }
-    let context = |view: &ArtifactView| {
-        let view = inventory
-            .empty_view()
-            .merge_fixture_compiler_inputs(&CompilerInputProjection::default(), view, &interfaces)
-            .unwrap()
-            .0;
-        let support =
-            issue_fixture_compiler_support(interfaces.clone(), view, &mut offer_validation)
-                .unwrap();
-        Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
+    let context =
+        |view: &ArtifactView,
+         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+            let view = inventory
+                .empty_view()
+                .merge_fixture_compiler_inputs(
+                    &CompilerInputProjection::default(),
+                    view,
+                    &interfaces,
+                )
                 .unwrap()
-                .extend_issued_compiler_support(&support)
-                .unwrap(),
-        )
-    };
+                .0;
+            let support =
+                issue_fixture_compiler_support(interfaces.clone(), view, validation).unwrap();
+            Arc::new(
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_issued_compiler_support(&support)
+                    .unwrap(),
+            )
+        };
     let private = std::array::from_fn::<_, 2, _>(|index| {
         // The existing role issuer selects the parent Original's exact Group
         // root. Its TYPE child is reached through the issued dependency edge.
@@ -672,7 +677,7 @@ fn replay_native_transport_history(
             .all(|(received, issued)| received.same_issuance(issued)));
         input
     });
-    let base_context = context(&base);
+    let base_context = context(&base, &mut offer_validation);
     let first = usize::from(reverse);
     let closed = private.each_ref().map(|input| {
         crate::artifact_inventory::CompilerSourceSupport::close_complete_output(input).unwrap()
@@ -1137,7 +1142,7 @@ fn replay_native_transport_history(
             NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
-    let actual_context = context(&base);
+    let actual_context = context(&base, &mut offer_validation);
     let actual_request = ExactCompileContext::new(actual_context)
         .prepare_compilation_with_private_input(
             &root.path().join("new-output-input"),

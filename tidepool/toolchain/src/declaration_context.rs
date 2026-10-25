@@ -27725,19 +27725,18 @@ mod tests {
         // Exercise the receiving request path as well as the lower writer:
         // its base context is unchanged while private exact scopes differ.
         let scaffold = ProtectedScaffoldRequirements::default();
-        let request_inputs = |view: &ArtifactView| {
-            let support = issue_fixture_compiler_support(
-                projection.clone(),
-                view.clone(),
-                &mut offer_validation,
-            )
-            .unwrap();
-            let private = OriginalCompilerInputs::from_issued_support(&support);
-            let request = scaffold.compiler_inputs(&context, Some(&private)).unwrap();
-            (request, private)
-        };
-        let (first_inputs, first_private) = request_inputs(&first);
-        let (second_inputs, second_private) = request_inputs(&second);
+        let request_inputs =
+            |view: &ArtifactView,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let support =
+                    issue_fixture_compiler_support(projection.clone(), view.clone(), validation)
+                        .unwrap();
+                let private = OriginalCompilerInputs::from_issued_support(&support);
+                let request = scaffold.compiler_inputs(&context, Some(&private)).unwrap();
+                (request, private)
+            };
+        let (first_inputs, first_private) = request_inputs(&first, &mut offer_validation);
+        let (second_inputs, second_private) = request_inputs(&second, &mut offer_validation);
         let first_request_bindings = first_inputs
             .artifacts()
             .selected_native_binding_rows()
@@ -37130,73 +37129,76 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         );
         let mut offer_validation =
             crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
-        let make_context = |bytes: &[u8], selected: bool| {
-            let owner = identity("main", "CapturedInterface");
-            let mut packages = Vec::new();
-            ciborium::ser::into_writer(
-                &Value::Array(vec![
-                    text("TPPKGROOTS"),
-                    text("2"),
-                    Value::Array(vec![
-                        text(&owner.unit),
-                        text(&owner.module),
-                        text(sha256(bytes)),
+        let make_context =
+            |bytes: &[u8],
+             selected: bool,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let owner = identity("main", "CapturedInterface");
+                let mut packages = Vec::new();
+                ciborium::ser::into_writer(
+                    &Value::Array(vec![
+                        text("TPPKGROOTS"),
+                        text("2"),
+                        Value::Array(vec![
+                            text(&owner.unit),
+                            text(&owner.module),
+                            text(sha256(bytes)),
+                        ]),
+                        Value::Array(vec![]),
+                        Value::Array(vec![]),
                     ]),
-                    Value::Array(vec![]),
-                    Value::Array(vec![]),
-                ]),
-                &mut packages,
-            )
-            .unwrap();
-            let interface = CertifiedJoinedInterface::from_certification(
-                [7; 32],
-                owner.unit.clone(),
-                owner.module.clone(),
-                bytes.to_vec(),
-                packages,
-            )
-            .unwrap();
-            let inventory = ArtifactInventory::default();
-            let entries = vec![Arc::new(ArtifactEntry::interface(
-                interface,
-                JoinedInterfaceRole::LexicalJoin,
-                vec![],
-            ))];
-            let compiler_projection =
-                CompilerInputProjection::from_issued_entries(&entries).unwrap();
-            Arc::new(ExactDeclarationContext::from_facts(
-                DeclarationContextFacts {
-                    source_scope: SourceLexicalScope::default(),
-                    compiler_support: recover_fixture_compiler_support(
-                        compiler_projection,
-                        inventory
-                            .admit_shared(&inventory.empty_view(), entries)
-                            .unwrap(),
-                        [],
-                        &mut offer_validation,
-                    )
-                    .unwrap(),
-
-                    producer: [7; 32],
-
-                    template_imports: None,
-
-                    lexical: crate::exact_context::ExactLexicalSnapshot::default()
-                        .replace(if selected {
-                            vec![ExactLexicalNode {
-                                owner,
-                                imports: vec![],
-                            }]
-                        } else {
-                            vec![]
-                        })
+                    &mut packages,
+                )
+                .unwrap();
+                let interface = CertifiedJoinedInterface::from_certification(
+                    [7; 32],
+                    owner.unit.clone(),
+                    owner.module.clone(),
+                    bytes.to_vec(),
+                    packages,
+                )
+                .unwrap();
+                let inventory = ArtifactInventory::default();
+                let entries = vec![Arc::new(ArtifactEntry::interface(
+                    interface,
+                    JoinedInterfaceRole::LexicalJoin,
+                    vec![],
+                ))];
+                let compiler_projection =
+                    CompilerInputProjection::from_issued_entries(&entries).unwrap();
+                Arc::new(ExactDeclarationContext::from_facts(
+                    DeclarationContextFacts {
+                        source_scope: SourceLexicalScope::default(),
+                        compiler_support: recover_fixture_compiler_support(
+                            compiler_projection,
+                            inventory
+                                .admit_shared(&inventory.empty_view(), entries)
+                                .unwrap(),
+                            [],
+                            validation,
+                        )
                         .unwrap(),
-                },
-            ))
-        };
-        let initial = make_context(b"first interface", true);
-        let current = make_context(b"first interface", false);
-        let changed = make_context(b"changed interface", false);
+
+                        producer: [7; 32],
+
+                        template_imports: None,
+
+                        lexical: crate::exact_context::ExactLexicalSnapshot::default()
+                            .replace(if selected {
+                                vec![ExactLexicalNode {
+                                    owner,
+                                    imports: vec![],
+                                }]
+                            } else {
+                                vec![]
+                            })
+                            .unwrap(),
+                    },
+                ))
+            };
+        let initial = make_context(b"first interface", true, &mut offer_validation);
+        let current = make_context(b"first interface", false, &mut offer_validation);
+        let changed = make_context(b"changed interface", false, &mut offer_validation);
         // Read-only graph observation accepts selected lexical anchors. It does
         // not issue output completion or an activation display owner.
         let joined_graph = initial

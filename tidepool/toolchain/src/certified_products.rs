@@ -21277,7 +21277,7 @@ pub(crate) mod tests {
             } else {
                 inventory.empty_view()
             };
-            let issue = |marker, version| {
+            let issue = |marker, version, validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
                 let view = inventory
                     .admit_recovery_selection(
                         &carrier,
@@ -21300,17 +21300,17 @@ pub(crate) mod tests {
                 let issuer = issue_fixture_compiler_support(
                     projection.clone(),
                     view.clone(),
-                    &mut offer_validation,
+                    validation,
                 )
                 .unwrap();
                 let offer = issuer
-                    .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof), validation)
                     .unwrap();
                 assert!(offer.is_full());
                 (view, offer)
             };
-            let (left, a) = issue("HistoricalIssuerA", 132);
-            let (right, b) = issue("CurrentIssuerB", 133);
+            let (left, a) = issue("HistoricalIssuerA", 132, &mut offer_validation);
+            let (right, b) = issue("CurrentIssuerB", 133, &mut offer_validation);
             let exact_groups = |view: &ArtifactView| {
                 view.capture_graph_selection()
                     .roots
@@ -21686,9 +21686,9 @@ pub(crate) mod tests {
                     }
                 ])
             );
-            let selected_fragment = |view: ArtifactView| {
+            let selected_fragment = |view: ArtifactView, validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
                 let issued =
-                    issue_fixture_compiler_support(projection.clone(), view, &mut offer_validation)
+                    issue_fixture_compiler_support(projection.clone(), view, validation)
                         .unwrap();
                 let context = ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
@@ -21705,8 +21705,8 @@ pub(crate) mod tests {
                     .unwrap()
                     .unwrap()
             };
-            let explicit_a = selected_fragment(left);
-            let explicit_b = selected_fragment(right);
+            let explicit_a = selected_fragment(left, &mut offer_validation);
+            let explicit_b = selected_fragment(right, &mut offer_validation);
             assert_ne!(
                 explicit_a
                     .issued_input_decisions()

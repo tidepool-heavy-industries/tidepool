@@ -7260,28 +7260,30 @@ mod tests {
             crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
-        let issue = |marker: &str| {
-            let mut issued = entries.clone();
-            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
-                marker,
-                &[],
-            )));
-            let view = inventory
-                .admit_shared_with_demand(
-                    &inventory.empty_view(),
-                    issued,
-                    NativeArtifactDemand::AllGroups,
+        let issue =
+            |marker: &str,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let mut issued = entries.clone();
+                issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                    marker,
+                    &[],
+                )));
+                let view = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        issued,
+                        NativeArtifactDemand::AllGroups,
+                    )
+                    .unwrap();
+                CompilerSourceSupport::from_selected_issuance(
+                    CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+                    view,
+                    validation,
                 )
-                .unwrap();
-            CompilerSourceSupport::from_selected_issuance(
-                CompilerInputProjection::from_issued_entries(&entries).unwrap(),
-                view,
-                &mut offer_validation,
-            )
-            .unwrap()
-        };
-        let first = issue("PrimaryFirst");
-        let second = issue("PrimarySecond");
+                .unwrap()
+            };
+        let first = issue("PrimaryFirst", &mut offer_validation);
+        let second = issue("PrimarySecond", &mut offer_validation);
         let owner = &entries[1].descriptor.owner;
         let row = &first.selected[owner];
         let foreign = &second.selected[owner];
@@ -10156,45 +10158,62 @@ mod tests {
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let foreign_inventory = ArtifactInventory::default();
-        let issue = |marker: &str, with_caller: bool, empty: bool, foreign: bool| {
-            let inventory = if foreign {
-                &foreign_inventory
-            } else {
-                &inventory
-            };
-            let selected = if with_caller {
-                &entries[..]
-            } else {
-                &entries[..2]
-            };
-            let mut issued = selected.to_vec();
-            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
-                marker,
-                &[],
-            )));
-            let view = inventory
-                .admit_shared_with_demand(
-                    &inventory.empty_view(),
-                    issued,
-                    if empty {
-                        NativeArtifactDemand::ScopeInterfaces
-                    } else {
-                        NativeArtifactDemand::AllGroups
-                    },
+        let issue =
+            |marker: &str,
+             with_caller: bool,
+             empty: bool,
+             foreign: bool,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let inventory = if foreign {
+                    &foreign_inventory
+                } else {
+                    &inventory
+                };
+                let selected = if with_caller {
+                    &entries[..]
+                } else {
+                    &entries[..2]
+                };
+                let mut issued = selected.to_vec();
+                issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                    marker,
+                    &[],
+                )));
+                let view = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        issued,
+                        if empty {
+                            NativeArtifactDemand::ScopeInterfaces
+                        } else {
+                            NativeArtifactDemand::AllGroups
+                        },
+                    )
+                    .unwrap();
+                CompilerSourceSupport::from_selected_issuance(
+                    CompilerInputProjection::from_issued_entries(selected).unwrap(),
+                    view,
+                    validation,
                 )
-                .unwrap();
-            CompilerSourceSupport::from_selected_issuance(
-                CompilerInputProjection::from_issued_entries(selected).unwrap(),
-                view,
-                &mut offer_validation,
-            )
-            .unwrap()
-        };
+                .unwrap()
+            };
         for (empty_winner, cross_inventory) in
             [(false, false), (true, false), (false, true), (true, true)]
         {
-            let winner = issue("WinnerMarker", false, empty_winner, false);
-            let historical = issue("HistoricalMarker", true, false, cross_inventory);
+            let winner = issue(
+                "WinnerMarker",
+                false,
+                empty_winner,
+                false,
+                &mut offer_validation,
+            );
+            let historical = issue(
+                "HistoricalMarker",
+                true,
+                false,
+                cross_inventory,
+                &mut offer_validation,
+            );
             let parent = &entries[1];
             let owner = &parent.descriptor.owner;
             let pair = |support: &CompilerSourceSupport| {
@@ -10376,30 +10395,33 @@ mod tests {
             crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
-        let issue = |marker: &str, with_caller: bool| {
-            let selected = if with_caller {
-                &entries[..]
-            } else {
-                &entries[..2]
+        let issue =
+            |marker: &str,
+             with_caller: bool,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let selected = if with_caller {
+                    &entries[..]
+                } else {
+                    &entries[..2]
+                };
+                let mut issued = selected.to_vec();
+                issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                    marker,
+                    &[],
+                )));
+                let view = inventory
+                    .admit_shared(&inventory.empty_view(), issued)
+                    .unwrap();
+                CompilerSourceSupport::from_selected_issuance(
+                    CompilerInputProjection::from_issued_entries(selected).unwrap(),
+                    view,
+                    validation,
+                )
+                .unwrap()
             };
-            let mut issued = selected.to_vec();
-            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
-                marker,
-                &[],
-            )));
-            let view = inventory
-                .admit_shared(&inventory.empty_view(), issued)
-                .unwrap();
-            CompilerSourceSupport::from_selected_issuance(
-                CompilerInputProjection::from_issued_entries(selected).unwrap(),
-                view,
-                &mut offer_validation,
-            )
-            .unwrap()
-        };
-        let winner = issue("SelectedNamespaceMarker", false);
-        let historical = issue("HistoricalNamespaceMarker", true);
-        let extra = issue("CustodyOnlyMarker", false);
+        let winner = issue("SelectedNamespaceMarker", false, &mut offer_validation);
+        let historical = issue("HistoricalNamespaceMarker", true, &mut offer_validation);
+        let extra = issue("CustodyOnlyMarker", false, &mut offer_validation);
         let mut losing = historical
             .artifacts
             .retain_custody(&extra.artifacts)

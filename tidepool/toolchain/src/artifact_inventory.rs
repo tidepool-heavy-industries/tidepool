@@ -11949,24 +11949,28 @@ mod tests {
         );
         let original_roles =
             CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
-        let issue = |view: &ArtifactView| {
-            let source = crate::declaration_context::issue_fixture_compiler_support(
-                original_roles.clone(),
-                view.clone(),
-                &mut offer_validation,
-            )
-            .unwrap();
-            let output =
-                crate::declaration_context::OriginalCompilerInputs::from_issued_support(&source);
-            let complete = CompilerSourceSupport::close_complete_output(&output).unwrap();
-            let types = complete
-                .selected_interfaces()
-                .unwrap()
-                .support_for_owners(vec![native.descriptor.owner.clone()])
+        let issue =
+            |view: &ArtifactView,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let source = crate::declaration_context::issue_fixture_compiler_support(
+                    original_roles.clone(),
+                    view.clone(),
+                    validation,
+                )
                 .unwrap();
-            types.retain_template_availability(&complete).unwrap()
-        };
-        let mut support = issue(&left);
+                let output =
+                    crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                        &source,
+                    );
+                let complete = CompilerSourceSupport::close_complete_output(&output).unwrap();
+                let types = complete
+                    .selected_interfaces()
+                    .unwrap()
+                    .support_for_owners(vec![native.descriptor.owner.clone()])
+                    .unwrap();
+                types.retain_template_availability(&complete).unwrap()
+            };
+        let mut support = issue(&left, &mut offer_validation);
         let key = NativeGroupKey {
             artifact: id,
             original_ordinal: 7,
@@ -11999,7 +12003,7 @@ mod tests {
             let right = capture(&format!("OtherHiddenCarrier{index}"), selected);
             assert_ne!(left.namespace()[&id], right.namespace()[&id]);
             if competing {
-                let other = issue(&right);
+                let other = issue(&right, &mut offer_validation);
                 let other_groups = groups(&other);
                 assert_eq!(other_groups.len(), 1);
                 assert_eq!(other_groups, recorded_groups(&right));

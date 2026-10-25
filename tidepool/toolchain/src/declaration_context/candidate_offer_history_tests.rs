@@ -71,21 +71,23 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
     let view = inventory
         .admit_shared(&inventory.empty_view(), vec![canonical])
         .unwrap();
-    let context = |offers: Vec<IssuedNativeOffer>| {
-        ExactDeclarationContext::from_facts(DeclarationContextFacts {
-            producer: producer.sha256(),
-            source_scope: SourceLexicalScope::default(),
-            compiler_support: recover_fixture_compiler_support(
-                projection.clone(),
-                view.clone(),
-                offers,
-                &mut offer_validation,
-            )
-            .unwrap(),
-            lexical: Default::default(),
-            template_imports: None,
-        })
-    };
+    let context =
+        |offers: Vec<IssuedNativeOffer>,
+         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+            ExactDeclarationContext::from_facts(DeclarationContextFacts {
+                producer: producer.sha256(),
+                source_scope: SourceLexicalScope::default(),
+                compiler_support: recover_fixture_compiler_support(
+                    projection.clone(),
+                    view.clone(),
+                    offers,
+                    validation,
+                )
+                .unwrap(),
+                lexical: Default::default(),
+                template_imports: None,
+            })
+        };
     let candidates = crate::module_candidates::CandidateSet {
         manifest_path: PathBuf::from("candidate-history-does-not-read-manifest"),
         by_owner: BTreeMap::new(),
@@ -169,9 +171,9 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
         }
     };
     // Availability retains certified B bytes independently of compiler roles.
-    assert_candidate(context(vec![]), false);
+    assert_candidate(context(vec![], &mut offer_validation), false);
     for copies in [1, 2] {
-        let live = context(vec![offer.clone(); copies]);
+        let live = context(vec![offer.clone(); copies], &mut offer_validation);
         let snapshot = live.snapshot();
         let store = MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
