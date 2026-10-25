@@ -3462,12 +3462,7 @@ fn encode_checked_value_row(
     reserve_world_row(product.leaf_entry(), remaining)?;
     // Include the full binding key, its canonical serde codec and temporary and
     // retained manifest/index cells before allocating the manifest vector.
-    let binding_bytes = 9 + 2 * (9 + 9 + 32 * 9);
-    let manifest_bytes = u64::try_from(product.dependencies().len())
-        .map_err(|_| source_size_failure())?
-        .checked_mul(3 * binding_bytes + 512)
-        .and_then(|bytes| bytes.checked_add(binding_bytes + 4 * 9))
-        .ok_or_else(source_size_failure)?;
+    let manifest_bytes = binding_manifest_metadata_bound(product.dependencies().len())?;
     *remaining = remaining
         .checked_sub(manifest_bytes)
         .ok_or_else(|| binding_capture_refusal(manifest_bytes, *remaining))?;
@@ -3512,14 +3507,44 @@ fn encode_checked_value_row(
             semantic,
         ]));
     }
-    let fact = world_array(vec![
+    let fact = world_value_row_fact(
         world_semantic_row(&offered, &rows.producer)?,
-        world_artifact_binding(product.leaf_binding())?,
-        world_blob(artifact.certified_interface().artifact_id().0),
-        world_blob(artifact.world_issuer().1),
-        world_array(manifest),
-    ]);
+        product.leaf_binding(),
+        artifact.certified_interface().artifact_id(),
+        &artifact.world_issuer().1,
+        manifest,
+    )?;
     Ok((offered, fact))
+}
+
+fn binding_manifest_metadata_bound(dependencies: usize) -> Result<u64, CompileError> {
+    let binding_bytes = 9 + 2 * (9 + 9 + 32 * 9);
+    u64::try_from(dependencies)
+        .map_err(|_| source_size_failure())?
+        .checked_mul(3 * binding_bytes + 512)
+        .and_then(|bytes| bytes.checked_add(binding_bytes + 4 * 9))
+        .ok_or_else(source_size_failure)
+}
+
+fn world_value_row_fact(
+    semantic: ciborium::value::Value,
+    binding: ArtifactBinding,
+    artifact: crate::artifact_inventory::ArtifactId,
+    receipt: &[u8],
+    manifest: Vec<ciborium::value::Value>,
+) -> Result<ciborium::value::Value, CompileError> {
+    if binding.artifact != artifact {
+        return Err(source_failure(
+            "checked value leaf binding differs from its certified artifact",
+        ));
+    }
+    Ok(world_array(vec![
+        semantic,
+        world_artifact_binding(binding)?,
+        world_blob(artifact.0),
+        world_blob(receipt),
+        world_array(manifest),
+    ]))
 }
 
 fn record_row_change(
@@ -3539,6 +3564,7 @@ where
     J: IntoIterator<Item = ArtifactBinding>,
 {
     let mut deltas = BTreeMap::<ArtifactBinding, i64>::new();
+    let mut remaining = capture_allowance()?;
     for (change, dependencies) in changes {
         crate::host_work::checkpoint()?;
         if !(-1..=1).contains(&change) {
@@ -3551,6 +3577,14 @@ where
         }
         for binding in dependencies {
             crate::host_work::checkpoint()?;
+            if !deltas.contains_key(&binding) {
+                let bytes = (std::mem::size_of::<ArtifactBinding>()
+                    + std::mem::size_of::<i64>()
+                    + 4 * std::mem::size_of::<usize>()) as u64;
+                remaining = remaining
+                    .checked_sub(bytes)
+                    .ok_or_else(|| binding_capture_refusal(bytes, remaining))?;
+            }
             let delta = deltas.entry(binding).or_default();
             *delta = delta.checked_add(change).ok_or_else(source_size_failure)?;
         }
@@ -9167,6 +9201,126 @@ mod answer_tests {
         );
     }
     #[test]
+    fn complete_value_row_fact_binds_exact_dependency_associations() {
+        use crate::artifact_inventory::{ArtifactId, ArtifactSelectionId};
+        let binding = |artifact, selection| ArtifactBinding {
+            artifact: ArtifactId([artifact; 32]),
+            selection: ArtifactSelectionId([selection; 32]),
+        };
+        let leaf = binding(1, 2);
+        let dependency = binding(3, 4);
+        let row = |path| {
+            world_array(vec![
+                world_array(vec![
+                    world_text("main"),
+                    world_text("Dependency"),
+                    world_text(path),
+                    world_text("interface-hash"),
+                    world_array(Vec::new()),
+                    world_text("/package-alias"),
+                    world_text("package-hash"),
+                    world_array(vec![world_text("value")]),
+                ]),
+                world_blob([7; 32]),
+            ])
+        };
+        let semantic = world_semantic_row(&row("/original"), &[5; 32]).unwrap();
+        let relocated = world_semantic_row(&row("/relocated"), &[5; 32]).unwrap();
+        assert_eq!(semantic, relocated);
+        let fact = |leaf, dependency, dep_semantic, receipt: &[u8]| {
+            world_value_row_fact(
+                world_text("leaf-semantic"),
+                leaf,
+                leaf.artifact,
+                receipt,
+                vec![world_array(vec![
+                    world_artifact_binding(dependency).unwrap(),
+                    dep_semantic,
+                ])],
+            )
+            .unwrap()
+        };
+        let cid = |fact| {
+            let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+            Materializer::new(&store).materialize_value(&fact).unwrap()
+        };
+        let original = cid(fact(leaf, dependency, semantic.clone(), &[6; 32]));
+        assert_eq!(
+            original,
+            cid(fact(leaf, dependency, relocated, &[6; 32])),
+            "physical aliases have the same row CID"
+        );
+        assert_ne!(
+            original,
+            cid(fact(binding(1, 8), dependency, semantic.clone(), &[6; 32]))
+        );
+        assert_ne!(
+            original,
+            cid(fact(leaf, binding(3, 8), semantic.clone(), &[6; 32]))
+        );
+        assert_ne!(
+            original,
+            cid(fact(
+                leaf,
+                dependency,
+                world_text("different-semantic"),
+                &[6; 32]
+            ))
+        );
+        assert_ne!(original, cid(fact(leaf, dependency, semantic, &[8; 32])));
+        assert!(world_value_row_fact(
+            world_text("leaf"),
+            leaf,
+            ArtifactId([9; 32]),
+            &[6; 32],
+            Vec::new()
+        )
+        .is_err());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+        #[test]
+        fn dependency_deltas_match_full_distinct_row_census(
+            generated in proptest::collection::vec((0usize..8, 0usize..5), 0..100)
+        ) {
+            use crate::artifact_inventory::{ArtifactId, ArtifactSelectionId};
+            use std::collections::BTreeSet;
+            let binding = |n| ArtifactBinding { artifact: ArtifactId([n; 32]), selection: ArtifactSelectionId([1; 32]) };
+            let manifests = [vec![binding(1), binding(2)], vec![binding(2), binding(3)], vec![binding(2)], Vec::new()];
+            let mut aliases = [None::<usize>; 8];
+            let mut counts = BTreeMap::<ArtifactBinding, i64>::new();
+            // Cover shared dependencies, same-row aliases, last alias, atomic
+            // replacement, net-zero changes and an unrelated primary-only step.
+            let prefix = [(0,0),(1,0),(2,1),(0,4),(1,4),(2,0),(3,0),(2,4),(3,4),(7,4)];
+            for (slot, row) in prefix.into_iter().chain(generated) {
+                let before = aliases.iter().flatten().copied().collect::<BTreeSet<_>>();
+                aliases[slot] = (row < manifests.len()).then_some(row);
+                let after = aliases.iter().flatten().copied().collect::<BTreeSet<_>>();
+                let changes = before.difference(&after).map(|row| (-1, manifests[*row].clone()))
+                    .chain(after.difference(&before).map(|row| (1, manifests[*row].clone())));
+                let deltas = dependency_count_deltas(changes).unwrap();
+                for (binding, delta) in deltas {
+                    let count = counts.entry(binding).or_default();
+                    *count += delta;
+                    proptest::prop_assert!(*count >= 0);
+                }
+                counts.retain(|_, count| *count != 0);
+                // Independent cold census starts from aliases and deduplicates
+                // whole live rows, then recomputes every dependency count.
+                let mut oracle = BTreeMap::<ArtifactBinding, i64>::new();
+                for row in aliases.iter().flatten().copied().collect::<BTreeSet<_>>() {
+                    for dependency in &manifests[row] { *oracle.entry(*dependency).or_default() += 1; }
+                }
+                proptest::prop_assert_eq!(&counts, &oracle);
+            }
+            proptest::prop_assert!(dependency_count_deltas([(2, manifests[0].clone())]).is_err());
+            proptest::prop_assert!(dependency_count_deltas([(-2, manifests[0].clone())]).is_err());
+            proptest::prop_assert!(dependency_count_deltas([(-1, manifests[0].clone()), (1, manifests[0].clone())]).unwrap().is_empty());
+        }
+    }
+
+    #[test]
     #[ignore = "requires declared compiler; genuine World TYPE transport fixture issuer owns it"]
     fn genuine_world_type_transport_matches_cold_dependency_census() {
         let directory = tempfile::tempdir().unwrap();
@@ -9344,7 +9498,8 @@ mod answer_tests {
                 module: format!("Dependency.LongModule{n}"),
             })
             .collect::<Vec<_>>();
-        let row_bound = binding_row_metadata_bound("main", "ValueOwner", &requires).unwrap();
+        let row_bound = binding_row_metadata_bound("main", "ValueOwner", &requires).unwrap()
+            + binding_manifest_metadata_bound(0).unwrap();
         assert!(row_bound > binding_row_metadata_bound("main", "ValueOwner", &[]).unwrap());
         let semantic = world_array(vec![
             world_text("main"),
@@ -9359,7 +9514,13 @@ mod answer_tests {
                     .collect(),
             ),
         ]);
-        let row_fact = world_array(vec![semantic, world_blob([2; 32]), world_blob([3; 32])]);
+        let binding = ArtifactBinding {
+            artifact: crate::artifact_inventory::ArtifactId([2; 32]),
+            selection: crate::artifact_inventory::ArtifactSelectionId([4; 32]),
+        };
+        let row_fact =
+            world_value_row_fact(semantic, binding, binding.artifact, &[3; 32], Vec::new())
+                .unwrap();
         assert!(world_bytes(&row_fact).unwrap().len() as u64 <= row_bound);
         let store = fvm_ipld_blockstore::MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
