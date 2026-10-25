@@ -4150,6 +4150,120 @@ pub(crate) fn world_captured_value_transport_fixture(
 }
 
 #[cfg(test)]
+pub(crate) fn world_historical_value_transport_fixture(
+    directory: &Path,
+) -> Result<Vec<u8>, CompileError> {
+    use ciborium::value::Value;
+    let (first, second) =
+        crate::artifacts::test_support::prepare_checked_value_historical_pair_fixture();
+    assert_eq!(
+        first.type_product().dependencies().len(),
+        1,
+        "first nominal fixture has one exact HOME dependency"
+    );
+    assert_eq!(
+        second.type_product().dependencies().len(),
+        1,
+        "second nominal fixture has one exact HOME dependency"
+    );
+    let (first_binding, first_dependency) =
+        first.type_product().dependencies().iter().next().unwrap();
+    let (second_binding, second_dependency) =
+        second.type_product().dependencies().iter().next().unwrap();
+    assert_eq!(
+        first_dependency.entry().descriptor.owner,
+        second_dependency.entry().descriptor.owner
+    );
+    assert_ne!(
+        first_binding, second_binding,
+        "historical versions must have different full bindings"
+    );
+    assert_ne!(
+        first_binding.artifact, second_binding.artifact,
+        "genuine nominal representations differ"
+    );
+    let symbol = |row: &CheckedValueArtifact| tidepool_repr::execution_schema::SymbolIdentity {
+        unit: "main".into(),
+        module: row.owner().module_name(),
+        namespace: "value".into(),
+        occurrence: "supplied".into(),
+        record_parent: None,
+    };
+    let first_symbol = symbol(&first);
+    let second_symbol = symbol(&second);
+    let inputs = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+        None,
+        VisibleWorldBindings::from_published_bindings(
+            0,
+            [
+                CompilerWorldBinding::from_checked_value(
+                    "first",
+                    &first_symbol,
+                    tidepool_repr::SessionVarId::from_extract(77),
+                    0,
+                    first.clone(),
+                ),
+                CompilerWorldBinding::from_checked_value(
+                    "second",
+                    &second_symbol,
+                    tidepool_repr::SessionVarId::from_extract(78),
+                    0,
+                    second.clone(),
+                ),
+            ],
+        )?,
+        Arc::new(CapturedCompilerSources::from_captured_roots(
+            Vec::new(),
+            Arc::from([]),
+            Arc::new(()),
+        )?),
+        CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
+    )?;
+    let world = CompilerWorld {
+        restoration: inputs.prepare_for(first.world_issuer().0, [0; 32])?,
+        realization: Arc::new(Mutex::new(None)),
+        position: None,
+    };
+    assert_eq!(world.restoration.dependency_rows.len(), 2);
+    assert!(world
+        .restoration
+        .dependency_rows
+        .values()
+        .all(|row| row.references.get() == 1));
+    let cold = world_transport_fixture_descriptor(&world.restoration, &directory.join("cold"))?;
+    let operand =
+        |name: &str, var: u64, row: Arc<CheckedValueArtifact>| -> Result<Value, CompileError> {
+            let binder = world_array(vec![
+                world_text("supplied"),
+                var.into(),
+                world_text(row.owner().module_name()),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ]);
+            let operand = CompilerWorldCellOperand::from_binder(
+                &world,
+                WorldCellOperandExposure::Input,
+                0,
+                &binder,
+                row,
+            )?;
+            world_transport_fixture_value(
+                &operand.request.descriptor,
+                &operand.input_files,
+                &directory.join(name),
+            )
+        };
+    world_bytes(&world_array(vec![
+        world_text("TPCWHISTORICALTYPEFIXTURE1"),
+        cold,
+        operand("first", 77, first)?,
+        operand("second", 78, second)?,
+    ]))
+}
+
+#[cfg(test)]
 fn world_value_transport_fixture_rows(
     directory: &Path,
     first: Arc<CheckedValueArtifact>,
@@ -9400,6 +9514,20 @@ mod answer_tests {
             proptest::prop_assert!(dependency_count_deltas([(-2, manifests[0].clone())]).is_err());
             proptest::prop_assert!(dependency_count_deltas([(-1, manifests[0].clone()), (1, manifests[0].clone())]).unwrap().is_empty());
         }
+    }
+
+    #[test]
+    #[ignore = "requires declared compiler; genuine historical TYPE fixture issuer owns it"]
+    fn genuine_historical_type_versions_remain_passive_custody() {
+        let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
+        let encoded = world_historical_value_transport_fixture(directory.path()).unwrap();
+        std::fs::write(directory.path().join("packet.cbor"), &encoded).unwrap();
+        assert_eq!(
+            answer_array(&answer_cbor(&encoded).unwrap(), 4)
+                .unwrap()
+                .len(),
+            4
+        );
     }
 
     #[test]

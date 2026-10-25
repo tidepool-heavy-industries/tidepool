@@ -104,9 +104,20 @@ pub(crate) fn prepare_checked_value_captured_type_pair_fixture(
     )
 }
 
+pub(crate) fn prepare_checked_value_historical_pair_fixture() -> (
+    Arc<crate::checked_cell::CheckedValueArtifact>,
+    Arc<crate::checked_cell::CheckedValueArtifact>,
+) {
+    let (first, _) = prepare_checked_value_type_pair(601, 602, ValueTypeFixture::SharedNominal);
+    let (second, _) =
+        prepare_checked_value_type_pair(603, 604, ValueTypeFixture::HistoricalNominal);
+    (first, second)
+}
+
 enum ValueTypeFixture {
     SharedNominal,
     CapturedNominal,
+    HistoricalNominal,
 }
 
 fn prepare_checked_value_type_pair(
@@ -120,9 +131,15 @@ fn prepare_checked_value_type_pair(
     let ((endpoint, world, source, prepared), admission) = settle(|| {
         let (endpoint, world, source) = open_world_with_primary_and_module(
             None,
-            include_str!("../../tests/fixtures/world-native/WorldTypeNominal.hs").as_bytes(),
             match kind {
-                ValueTypeFixture::SharedNominal => None,
+                ValueTypeFixture::HistoricalNominal => {
+                    include_str!("../../tests/fixtures/world-native/WorldTypeHistorical.hs")
+                }
+                _ => include_str!("../../tests/fixtures/world-native/WorldTypeNominal.hs"),
+            }
+            .as_bytes(),
+            match kind {
+                ValueTypeFixture::SharedNominal | ValueTypeFixture::HistoricalNominal => None,
                 ValueTypeFixture::CapturedNominal => Some(capture_declared_scaffold_sources()?),
             },
         )?;
@@ -160,7 +177,7 @@ fn prepare_checked_value_type_pair(
         "nominal source establishes genuine HOME TYPE custody"
     );
     let world = match kind {
-        ValueTypeFixture::SharedNominal => world,
+        ValueTypeFixture::SharedNominal | ValueTypeFixture::HistoricalNominal => world,
         ValueTypeFixture::CapturedNominal => {
             let binder = &first
                 .world_program()
@@ -202,14 +219,16 @@ fn prepare_checked_value_type_pair(
     .expect("nominal operand from its checked execution");
     let (prepared, admission) = settle(|| {
         let checked = match kind {
-            ValueTypeFixture::SharedNominal => prepare_checked(
-                &endpoint,
-                &world,
-                &source,
-                "let supplied = input",
-                Some(operand),
-                &[(second_generation, "supplied")],
-            )?,
+            ValueTypeFixture::SharedNominal | ValueTypeFixture::HistoricalNominal => {
+                prepare_checked(
+                    &endpoint,
+                    &world,
+                    &source,
+                    "let supplied = input",
+                    Some(operand),
+                    &[(second_generation, "supplied")],
+                )?
+            }
             ValueTypeFixture::CapturedNominal => {
                 let template =
                     include_str!("../../tests/fixtures/world-native/SelectionTemplate.hs")
