@@ -433,7 +433,7 @@ async fn resident_captured_source_retains_the_parked_job_for_a_later_cell() {
         fixture
             .check_value(
                 "captured-job-value",
-                &format!("{observation} == (42 :: Int)"),
+                &format!("{observation} () == (42 :: Int)"),
             )
             .await;
         assert_eq!(
