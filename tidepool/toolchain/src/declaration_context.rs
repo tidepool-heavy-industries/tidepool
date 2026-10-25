@@ -25416,6 +25416,33 @@ mod tests {
             .0;
         let original = &first.groups.rows[&child_binding];
         let repeated = &second.groups.rows[&child_binding];
+        let child_offer = cold.native_selection.availability.0[&child_binding.binding.artifact()]
+            .contributions
+            .iter()
+            .find(|contribution| {
+                contribution.offer().original() == child_binding.binding.artifact()
+            })
+            .expect("the child has its own genuine Full issuance");
+        let omitted = child_offer
+            .original_groups(child_binding.binding.artifact())
+            .find(|binding| binding.original_ordinal == 9001)
+            .unwrap();
+        let (restricted, _) = child_offer
+            .for_groups_with_operation(&BTreeSet::from([child_binding]), &validation.inventory)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            restricted.issued_group(child_binding).unwrap(),
+            &original.issued
+        ));
+        assert!(
+            restricted.issued_group(omitted).is_err(),
+            "retained sibling row storage cannot bypass contribution membership"
+        );
+        let (empty, _) = child_offer
+            .for_groups_with_operation(&BTreeSet::new(), &validation.inventory)
+            .unwrap();
+        assert!(empty.issued_group(child_binding).is_err());
+
         assert!(
             cold.compiler_source_support()
                 .acquired_native_closures()
