@@ -214,11 +214,7 @@ fn prepare_checked_value_type_pair(
                 let template =
                     include_str!("../../tests/fixtures/world-native/SelectionTemplate.hs")
                         .replace("{{OPERAND_MODULE}}", &operand.symbol().module)
-                        .replace("{{OPERAND_BINDER}}", &operand.symbol().occurrence)
-                        .replace(
-                            "{{CELL_IMPORTS}}",
-                            "import qualified Module as Nominal\n{{CELL_IMPORTS}}",
-                        );
+                        .replace("{{OPERAND_BINDER}}", &operand.symbol().occurrence);
                 let plan = crate::compiler_world::plan_cell(
                     &endpoint,
                     &world,

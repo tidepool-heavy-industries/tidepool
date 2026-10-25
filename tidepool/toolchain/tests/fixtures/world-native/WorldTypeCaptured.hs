@@ -1,3 +1,4 @@
-data Wrapped = Wrapped Nominal.Token
-captured () = Wrapped TidepoolHostInput.supplied
+data Wrapped = Wrapped Int
+{-# NOINLINE captured #-}
+captured () = Wrapped (seq TidepoolHostInput.supplied 37)
 let supplied = captured ()
