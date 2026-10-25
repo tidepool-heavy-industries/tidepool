@@ -940,6 +940,10 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                     candidateGroupOrdinal group)
                 | candidate <- cached
                 , group <- candidateGroups candidate ]
+                `Set.union` Set.fromList
+                [ (T.pack (originalUnit product),T.pack (originalModule product),originalOrdinal group)
+                | product <- unrecoveredExactProducts reconciled
+                , group <- originalGroups product ]
               expectedHomeRoots = packageLinkIndexExpectedHomeRoots packageLinks
               expectedProductCoordinates = Set.fromList
                 [(unit,name,ordinal) | (_,unit,name,ordinal) <- Set.toList expectedHomeRoots]

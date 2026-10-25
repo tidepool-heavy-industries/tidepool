@@ -68,7 +68,7 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.Process (proc, readCreateProcessWithExitCode)
-import Tidepool.OriginalProductRoots (emptyOriginalExternalDemand)
+import Tidepool.OriginalProductRoots (emptyOriginalExternalDemand, reconcileOriginalProducts)
 import Tidepool.ExecutionProjection qualified as Projection
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities, preparedTopIdentityBindings
@@ -1079,7 +1079,8 @@ scenario = do
                 (projectPreparedModuleProducts context (closureHomeModules closure)) ]
       assert (Map.size homeProducts == length (closureHomeModules closure))
         "every fresh HOME owner has its actual projected product"
-      paired <- either (fail . show) pure (projectPreparedPackageTarget hsc [] "" context homeProducts [] emptyOriginalExternalDemand Map.empty
+      reconciled <- either fail pure (reconcileOriginalProducts Nothing [])
+      paired <- either (fail . show) pure (projectPreparedPackageTarget hsc [] "" context homeProducts [] reconciled emptyOriginalExternalDemand Map.empty
         (closureHomeModules closure) (closureComponentSelections closure) (closureReachability closure))
       assert (null (Projection.packageTargetHomeImports paired))
         "fresh embedded HOME bodies require no external HOME coordinate"

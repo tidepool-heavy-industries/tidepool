@@ -424,6 +424,10 @@ enum HomeMembership {
     PriorProgram {
         product_index: usize,
     },
+    InputOriginal {
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        issued: Arc<IssuedSelectedNativeGroup>,
+    },
 }
 
 /// An annotation applicable to an already issued physical source row. This
@@ -497,7 +501,7 @@ impl ValidatedHomeContracts {
                 HomeMembership::CurrentReceipt { original }
             } else {
                 operation.charge(source_selection.prior_program_products.len())?;
-                let (product_index, product) = source_selection
+                if let Some((product_index, product)) = source_selection
                     .prior_program_products
                     .iter()
                     .enumerate()
@@ -505,16 +509,26 @@ impl ValidatedHomeContracts {
                         let owner = product.row().original_owner();
                         owner.unit == key.unit && owner.module == key.module
                     })
-                    .ok_or(CertificationError::Mismatch(
-                        "prior HOME lacks its exact program issuer",
-                    ))?;
-                check_prior_home_package_links(
-                    product,
-                    key.original_ordinal,
+                {
+                    check_prior_home_package_links(
+                        product,
+                        key.original_ordinal,
+                        roots,
+                        &receipt.package_links.occurrences,
+                    )?;
+                    HomeMembership::PriorProgram { product_index }
+                } else if let Some((binding, issued)) = source_selection.input_home_group(
+                    key,
                     roots,
                     &receipt.package_links.occurrences,
-                )?;
-                HomeMembership::PriorProgram { product_index }
+                    operation,
+                )? {
+                    HomeMembership::InputOriginal { binding, issued }
+                } else {
+                    return Err(CertificationError::Mismatch(
+                        "prior HOME lacks its exact program issuer",
+                    ));
+                }
             };
             operation.charge(
                 key.target
@@ -545,6 +559,90 @@ impl ValidatedHomeContracts {
             ));
         }
         Ok(())
+    }
+}
+
+impl CertifiedSourceSelection {
+    /// Resolve an input annotation through this request's recorded native choice.
+    /// The wire coordinate is only a lookup; the chosen owner grants membership.
+    fn input_home_group(
+        &self,
+        key: &PackageHomeRootKey,
+        links: &[PackageLink],
+        occurrences: &[PackageOccurrenceRow],
+        operation: &InventoryOperation,
+    ) -> CertResult<
+        Option<(
+            crate::artifact_inventory::NativeGroupBinding,
+            Arc<IssuedSelectedNativeGroup>,
+        )>,
+    > {
+        let Some(ReceiptSourceSelection::Native { interface, native }) =
+            self.modules.get(&(key.unit.clone(), key.module.clone()))
+        else {
+            return Ok(None);
+        };
+        let ReceiptNativeState::Input(row) = &native.state else {
+            return Ok(None);
+        };
+        if !matches!(native.version(), ReceiptSourceVersion::Original) {
+            return Err(CertificationError::Mismatch("HOME input Original version"));
+        }
+        let CertifiedInputOrigin::Continuation(source) = &self.input_origin else {
+            return Err(CertificationError::Mismatch(
+                "HOME input lacks request owner",
+            ));
+        };
+        let original = native.original_artifact_id()?;
+        let entry = row
+            .target_original(&native.owner)
+            .ok_or(CertificationError::Mismatch("HOME input Original custody"))?;
+        let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
+            return Err(CertificationError::Mismatch("HOME input Original payload"));
+        };
+        if entry.descriptor.id != original
+            || product.owner() != &native.owner
+            || crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(
+                product.module_interface(),
+            ) != *interface
+        {
+            return Err(CertificationError::Mismatch(
+                "HOME input exact owner and canonical",
+            ));
+        }
+        let group = product
+            .original_native()
+            .group(key.original_ordinal)
+            .ok_or(CertificationError::Mismatch("HOME input original ordinal"))?;
+        let support = row
+            .choose_group(
+                source,
+                crate::artifact_inventory::NativeGroupKey {
+                    artifact: original,
+                    original_ordinal: key.original_ordinal,
+                },
+                crate::declaration_context::NativeGroupChoiceIdentity::CompilerRole(*interface),
+                &native.owner,
+                operation,
+            )
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+            .ok_or(CertificationError::Mismatch(
+                "HOME input ordinal permission",
+            ))?;
+        check_ordered_home_package_links(group.imports().iter(), links, occurrences)?;
+        let issued = Arc::clone(
+            support
+                .issued_group()
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?,
+        );
+        if issued.product().owner() != &native.owner
+            || issued.product().group().original_ordinal() != key.original_ordinal
+        {
+            return Err(CertificationError::Mismatch(
+                "HOME input chosen product owner",
+            ));
+        }
+        Ok(Some((support.binding(), issued)))
     }
 }
 
@@ -633,6 +731,22 @@ impl BoundPackageSelection {
         let (key, membership) = &contracts.memberships[index];
         let original = match membership {
             HomeMembership::CurrentReceipt { original } => *original,
+            HomeMembership::InputOriginal {
+                binding: selected,
+                issued,
+            } => {
+                if !matches!(
+                    row.source_association(),
+                    crate::artifact_inventory::ResolvedSourceAssociation::Historical
+                ) || selected != &binding
+                {
+                    return Ok(None);
+                }
+                if !issued.matches_selected_product(row.group(), row.imports()) {
+                    return Err(CertificationError::Mismatch("HOME input selected issuance"));
+                }
+                selected.binding.artifact()
+            }
             HomeMembership::PriorProgram { product_index } => {
                 let product = &contracts.prior_products[*product_index];
                 product.row().original_artifact_id()
@@ -4003,18 +4117,13 @@ fn decode_package_links(
                 ));
             }
         } else if let PackageLinkTargets::WorldStage(prior) = &targets {
-            let product =
-                prior
-                    .physical_product(&unit, &module)?
-                    .ok_or(CertificationError::Receipt(
-                        "package HOME root is not an issued prior program group",
-                    ))?;
-            check_prior_home_package_links(product, original_ordinal, &links, &occurrences)?;
-        } else {
-            return Err(CertificationError::Receipt(
-                "package HOME root is not an issued receipt group",
-            ));
+            if let Some(product) = prior.physical_product(&unit, &module)? {
+                check_prior_home_package_links(product, original_ordinal, &links, &occurrences)?;
+            }
         }
+        // Input and prior-stage membership require the captured request owner.
+        // The mandatory ValidatedHomeContracts issuer checks every annotation
+        // before a decoded receipt can become captured executable products.
         if home_roots
             .insert(
                 PackageHomeRootKey {
@@ -5804,9 +5913,11 @@ impl CertifiedSourceSelection {
                 unit: key.unit.clone(),
                 module: key.module.clone(),
             };
-            let product = inputs.prior_nominal_source_product(&owner)?.ok_or(
-                CertificationError::Mismatch("prior HOME lacks its exact program issuer"),
-            )?;
+            let Some(product) = inputs.prior_nominal_source_product(&owner)? else {
+                // Input HOME annotations have no same-program predecessor.
+                // Their exact membership is checked by the mandatory issuer.
+                continue;
+            };
             if products
                 .iter()
                 .any(|existing| Arc::ptr_eq(existing, product))
@@ -11877,7 +11988,15 @@ impl AcquiredHomeCodeGrant {
 impl IssuedSelectedNativeGroup {
     /// Physical issuance and its ordered selected destinations are inseparable.
     pub(crate) fn same_selected_issuance(&self, other: &Self) -> bool {
-        self.product.same_issuance(&other.product) && self.imports == other.imports
+        self.matches_selected_product(&other.product, &other.imports)
+    }
+
+    pub(crate) fn matches_selected_product(
+        &self,
+        product: &PendingCertifiedGroup,
+        imports: &[SelectedNativeImport],
+    ) -> bool {
+        self.product.same_issuance(product) && self.imports.as_ref() == imports
     }
 
     pub(crate) fn from_certified(
@@ -16942,6 +17061,321 @@ pub(crate) mod tests {
         Arc::new(testing::prepare(wire).unwrap())
     }
 
+    fn assert_input_home_contract_ingress_controls(
+        receipt: &CertifiedReceipt,
+        selection: &CertifiedSourceSelection,
+        groups: &IssuedGroupCandidates,
+        operation: &Arc<InventoryOperation>,
+        physical: &crate::artifact_inventory::ArtifactView,
+    ) -> (usize, usize) {
+        let issue = |receipt: &CertifiedReceipt, selected: &CertifiedSourceSelection| {
+            ValidatedHomeContracts::issue(receipt, selected, &groups, operation)
+        };
+        let contracts = issue(&receipt, &selection).expect("actual HOME contracts authenticate");
+        let mut checked = 0;
+        let mut reordered_count = 0;
+        for (key, membership) in contracts.memberships.iter() {
+            let HomeMembership::InputOriginal { binding, issued } = membership else {
+                continue;
+            };
+            let links = &receipt.package_links.home_roots[key];
+            assert_eq!(binding.original_ordinal, key.original_ordinal);
+            assert_eq!(issued.product().owner().unit, key.unit);
+            assert_eq!(issued.product().owner().module, key.module);
+            if links.is_empty() {
+                continue;
+            }
+            let refuses = |receipt: &CertifiedReceipt, expected| {
+                assert!(
+                    matches!(issue(receipt, &selection), Err(CertificationError::Mismatch(actual)) if actual == expected),
+                    "actual input HOME contract must refuse {expected}"
+                );
+            };
+            let mut missing = receipt.clone();
+            Arc::make_mut(&mut missing.package_links.home_roots)
+                .get_mut(key)
+                .unwrap()
+                .pop();
+            refuses(&missing, "HOME package link count differs from its globals");
+            let mut extra = receipt.clone();
+            Arc::make_mut(&mut extra.package_links.home_roots)
+                .get_mut(key)
+                .unwrap()
+                .push(links[0].clone());
+            refuses(&extra, "HOME package link count differs from its globals");
+            let mut wrong_interface = receipt.clone();
+            let mut occurrences = wrong_interface.package_links.occurrences.to_vec();
+            let mut substitute = occurrences[links[0].occurrence() as usize].clone();
+            substitute.id = occurrences.len() as u32;
+            substitute.defining_interface_sha256[0] ^= 1;
+            Arc::make_mut(&mut wrong_interface.package_links.home_roots)
+                .get_mut(key)
+                .unwrap()[0] = PackageLink::Local {
+                occurrence: substitute.id,
+            };
+            occurrences.push(substitute);
+            wrong_interface.package_links.occurrences = occurrences.into();
+            refuses(&wrong_interface, "HOME ordered package import");
+            if let Some(other) = links.iter().position(|link| {
+                let left = &receipt.package_links.occurrences[links[0].occurrence() as usize];
+                let right = &receipt.package_links.occurrences[link.occurrence() as usize];
+                (
+                    left.unit.as_str(),
+                    left.module.as_str(),
+                    left.defining_interface_sha256,
+                ) != (
+                    right.unit.as_str(),
+                    right.module.as_str(),
+                    right.defining_interface_sha256,
+                )
+            }) {
+                let mut reordered = receipt.clone();
+                Arc::make_mut(&mut reordered.package_links.home_roots)
+                    .get_mut(key)
+                    .unwrap()
+                    .swap(0, other);
+                refuses(&reordered, "HOME ordered package import");
+                reordered_count += 1;
+            }
+            // Change the selected owner context, since the wire key carries no version.
+            for change_product in [false, true] {
+                let mut crossed = selection.clone();
+                let native = match Arc::make_mut(&mut crossed.modules)
+                    .get_mut(&(key.unit.clone(), key.module.clone()))
+                    .unwrap()
+                {
+                    ReceiptSourceSelection::Native { native, .. } => native,
+                    _ => panic!("actual input native selection"),
+                };
+                if change_product {
+                    native.owner.product_sha256[0] ^= 1;
+                } else {
+                    native.owner.module_version.0[0] ^= 1;
+                }
+                assert!(matches!(
+                    issue(&receipt, &crossed),
+                    Err(CertificationError::Mismatch("HOME input Original custody"))
+                ));
+            }
+            let ReceiptSourceSelection::Native { native, .. } =
+                &selection.modules[&(key.unit.clone(), key.module.clone())]
+            else {
+                unreachable!("actual input selection")
+            };
+            let ReceiptNativeState::Input(row) = &native.state else {
+                unreachable!("actual input row")
+            };
+            // Restrict genuine contributions through their production owner,
+            // then restore those derived permission facts through the reader.
+            let mut facts =
+                crate::declaration_context::RequestNativeAvailability::row_snapshot_facts(row)
+                    .unwrap();
+            facts.mode = crate::declaration_context::NativeTransportMode::IssuedGroups;
+            facts.contributions.clear();
+            let mut offers = BTreeMap::new();
+            for offer in row.offers() {
+                offers.insert(offer.snapshot_identity().unwrap(), offer.clone());
+                let contribution = Arc::new(
+                    offer
+                        .contribution_for(&BTreeSet::from([binding.binding.artifact()]))
+                        .unwrap()
+                        .expect("actual contribution contains its Original"),
+                );
+                let restricted = contribution.for_groups(&BTreeSet::new()).unwrap();
+                let membership = restricted.snapshot_facts().unwrap();
+                facts
+                    .contributions
+                    .insert(membership.identity().unwrap(), membership);
+            }
+            let partial = crate::declaration_context::RequestNativeAvailability::restore(
+                &std::iter::once((facts.original, facts)).collect(),
+                &offers,
+                physical,
+            )
+            .expect("derived partial permissions restore through the production reader");
+            let omitted = partial.issued_row(binding.binding.artifact()).unwrap();
+            assert!(!omitted.permits(key.original_ordinal));
+            let mut omitted_selection = selection.clone();
+            let ReceiptSourceSelection::Native { native, .. } =
+                Arc::make_mut(&mut omitted_selection.modules)
+                    .get_mut(&(key.unit.clone(), key.module.clone()))
+                    .unwrap()
+            else {
+                unreachable!()
+            };
+            native.state = ReceiptNativeState::Input(Arc::clone(omitted));
+            match issue(&receipt, &omitted_selection) {
+                Err(CertificationError::OriginalClosure(error)) => assert!(matches!(
+                    error.as_ref(), CompileError::CompilerEvidence(error)
+                        if matches!(error.as_ref(), CertificationError::InputDecision {
+                            reason: InputDecisionRefusal::UnavailableChosenBinding, ..
+                        })
+                )),
+                other => {
+                    panic!("partial input must preserve its unavailable recorded choice: {other:?}")
+                }
+            }
+            let mut absent_ordinal = receipt.clone();
+            let roots = Arc::make_mut(&mut absent_ordinal.package_links.home_roots);
+            let original_links = roots.remove(key).unwrap();
+            roots.insert(
+                PackageHomeRootKey {
+                    original_ordinal: u32::MAX,
+                    ..key.clone()
+                },
+                original_links,
+            );
+            refuses(&absent_ordinal, "HOME input original ordinal");
+            let mut unknown = receipt.clone();
+            Arc::make_mut(&mut unknown.package_links.home_roots).insert(
+                PackageHomeRootKey {
+                    module: "AbsentInputHomeContractOwner".into(),
+                    ..key.clone()
+                },
+                links.clone(),
+            );
+            refuses(&unknown, "prior HOME lacks its exact program issuer");
+            checked += 1;
+        }
+        (checked, reordered_count)
+    }
+
+    #[test]
+    fn input_home_contracts_bind_selected_issuer_and_ordered_package_slots() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, CompilerSourceSupport,
+        };
+        use crate::declaration_context::{
+            CapturedCompilerStage, ExactCompileContext, ExactDeclarationContext,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut packages = BTreeMap::new();
+        let mut imports = Vec::new();
+        let mut occurrences = Vec::new();
+        for (index, module) in ["FirstPackage", "SecondPackage"].into_iter().enumerate() {
+            let bytes = module.as_bytes();
+            let path = directory.path().join(format!("{module}.hi"));
+            std::fs::write(&path, bytes).unwrap();
+            let seal = sha(bytes);
+            packages.insert(
+                ("package".into(), module.into()),
+                PackageInterfaceWitness {
+                    selected_path: path,
+                    sha256: seal,
+                },
+            );
+            imports.push(PendingImportOwner::Package {
+                unit: "package".into(),
+                module: module.into(),
+                binder: SymbolIdentity {
+                    unit: "package".into(),
+                    ..testing::identity(module, "entry")
+                },
+                interface_digest: seal,
+            });
+            occurrences.push(PackageOccurrenceRow {
+                id: index as u32,
+                envelope_sha256: [index as u8 + 1; 32],
+                unit: "package".into(),
+                module: module.into(),
+                defining_interface_sha256: seal,
+                defining_version_sha256: [7; 32],
+                imports: Vec::new(),
+            });
+        }
+        let producer_bytes = b"input-home-contract-owner";
+        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+            producer_bytes,
+        )
+        .sha256();
+        let product = fixture_finalized_product(
+            original_groups_fixture(
+                "InputHome",
+                vec![(7, imports), (11, Vec::new())],
+                7,
+                &packages,
+            ),
+            producer,
+        );
+        let mut validation = PackageInterfaceValidation::default();
+        let operation = Arc::clone(&validation.inventory);
+        let entry = Arc::new(
+            ArtifactEntry::original_with_validation(producer, product, &mut validation).unwrap(),
+        );
+        let inventory = ArtifactInventory::default();
+        let physical = inventory
+            .admit_shared(&inventory.empty_view(), vec![Arc::clone(&entry)])
+            .unwrap();
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap();
+        let mut produced = CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &physical.metadata_snapshot(),
+            &operation,
+        )
+        .unwrap();
+        let stage = CapturedCompilerStage::issue(
+            &mut produced,
+            &physical,
+            vec![Arc::clone(&entry)],
+            &mut validation,
+        )
+        .unwrap();
+        let support =
+            CompilerSourceSupport::close_complete_output(stage.compiler_inputs()).unwrap();
+        let owner = entry.descriptor.owner.clone();
+        let context = ExactDeclarationContext::retained_execution_support_fixture(
+            producer,
+            support,
+            vec![crate::declaration_join::ExactLexicalNode {
+                owner: owner.clone(),
+                imports: Vec::new(),
+            }],
+            owner,
+            &[],
+        )
+        .unwrap();
+        let request = ExactCompileContext::new(Arc::new(context))
+            .prepare_compilation(&directory.path().join("request"), producer_bytes)
+            .unwrap();
+        let selection =
+            CertifiedSourceSelection::from_compiler_inputs(request.compiler_inputs(), &operation)
+                .unwrap();
+        let key = PackageHomeRootKey {
+            target: "target".into(),
+            unit: "fixture".into(),
+            module: "InputHome".into(),
+            original_ordinal: 7,
+        };
+        let mut manifest = PackageLinks::empty_for_target("target");
+        manifest.occurrences = occurrences.into();
+        Arc::make_mut(&mut manifest.home_roots).insert(
+            key,
+            vec![
+                PackageLink::Local { occurrence: 0 },
+                PackageLink::Local { occurrence: 1 },
+            ],
+        );
+        let receipt = CertifiedReceipt {
+            package_products: Vec::new(),
+            package_links: manifest,
+            modules: Vec::new(),
+            targets: BTreeMap::new(),
+            packages,
+            finalization: fixture_finalization(None, &[]),
+            source_recipe: WorkerExecutionSource::Ordinary,
+        };
+        assert_eq!(
+            assert_input_home_contract_ingress_controls(
+                &receipt,
+                &selection,
+                &IssuedGroupCandidates::empty(),
+                &operation,
+                stage.issued_artifacts(),
+            ),
+            (1, 1)
+        );
+    }
     fn full_native_fixture(
         module: &str,
         groups: Vec<(u32, Vec<PendingImportOwner>)>,
@@ -38109,6 +38543,17 @@ None,
                     ]),
                     value_array([package_links_local(1)]),
                 ]),
+                // Input membership is raw data until the captured request's
+                // mandatory HOME issuer authenticates its selected owner.
+                value_array([
+                    value_array([
+                        value_text("target"),
+                        value_text("input"),
+                        value_text("InputHome"),
+                        Value::Integer(5.into()),
+                    ]),
+                    value_array([package_links_local(0)]),
+                ]),
             ],
         );
         let decoded = decode_package_links(
@@ -38119,10 +38564,11 @@ None,
             &operation,
         )
         .unwrap();
-        assert_eq!(decoded.version, 3);
+        assert_eq!(decoded.version, 4);
         assert_eq!(decoded.occurrences().len(), 2);
         assert_eq!(decoded.occurrences()[0].id(), 0);
         assert_eq!(decoded.occurrences()[1].id(), 1);
+        assert_eq!(decoded.home_roots.len(), 3);
         assert_eq!(
             decoded.target_roots.get("target").map(Vec::as_slice),
             Some(&[PackageLink::Local { occurrence: 1 }][..])
@@ -38234,7 +38680,7 @@ None,
         let out_of_range = package_links_manifest(
             &products,
             vec![package_links_occurrence(0, [1; 32], value_array([]))],
-            vec![],
+            vec![value_array([value_text("target"), value_array([])])],
             vec![value_array([
                 value_array([
                     value_text("target"),
@@ -38303,7 +38749,7 @@ None,
         let duplicate_home = package_links_manifest(
             &products,
             vec![],
-            vec![],
+            vec![value_array([value_text("target"), value_array([])])],
             vec![
                 value_array([
                     value_array([

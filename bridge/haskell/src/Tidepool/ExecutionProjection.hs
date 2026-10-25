@@ -75,9 +75,10 @@ import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
-import Tidepool.ExactScope (WorldOriginalReference)
+import Tidepool.ExactScope (WorldOriginalReference, ExactProduct(..), ExactOriginalGroup(..))
 import Tidepool.OriginalProductRoots
-  ( PriorHomeGroup, OriginalExternalDemand, originalExternalHomeGroups, originalExternalPriorHomeGroups )
+  ( PriorHomeGroup, OriginalExternalDemand, originalExternalHomeGroups, originalExternalPriorHomeGroups
+  , ReconciledOriginalProducts, unrecoveredExactProducts )
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -982,11 +983,12 @@ packageTargetCurrentHomeGroups = targetCurrentHomeGroups
 
 projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> Text
   -> ProjectionContext -> Map Module (Map Word32 ProjectedGroup) -> [ModuleCandidate]
+  -> ReconciledOriginalProducts
   -> OriginalExternalDemand
   -> Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
   -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
   -> Either ProjectionError PreparedPackageTarget
-projectPreparedPackageTarget env hostBindings targetName context homeProducts cached externalDemand originalImports
+projectPreparedPackageTarget env hostBindings targetName context homeProducts cached exactInputs externalDemand originalImports
     home components reach = do
   let reachedHome = originalExternalHomeGroups externalDemand
       currentHome = Set.intersection reachedHome (Set.fromList
@@ -1087,9 +1089,17 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
                 (fromIntegral (candidateGroupOrdinal group))
         , demanded
         , not (null identities) ]
+      inputHomeImports =
+        [ (Text.pack (originalUnit product), Text.pack (originalModule product), originalOrdinal group, identities)
+        | product <- unrecoveredExactProducts exactInputs
+        , group <- originalGroups product
+        , isReachedHome (Text.pack (originalUnit product)) (Text.pack (originalModule product)) (originalOrdinal group)
+        , let identities = [identity | (identity, required) <- originalGlobals group
+                                    , required, isPackageImportIdentity identity]
+        , not (null identities) ]
   homeImports <- do
     byOwner <- foldM insertHomeImport Map.empty
-      (preparedHomeImports ++ productHomeImports ++ cachedHomeImports)
+      (preparedHomeImports ++ productHomeImports ++ cachedHomeImports ++ inputHomeImports)
     pure [ (unit,name,ordinal,identities)
          | ((unit,name,ordinal),identities) <- Map.toAscList byOwner ]
   let targetImports =

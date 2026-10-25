@@ -91,7 +91,7 @@ import Tidepool.DependencyPlan
 import Tidepool.OriginalProductRoots
   ( PriorOriginalExternalDemand(..), originalExternalPackageGlobals
   , emptyOriginalExternalDemand, requiredOriginalExternalDemandForSeeds
-  , unrecoveredExactProducts )
+  , reconcileOriginalProducts, unrecoveredExactProducts )
 import Tidepool.PreparedStg (PreparedModule, pmModule, pmYieldSites, pmIdentityResolver
   , preparedComponentVersion, preparedComponentModules, capturePreparedPackageInterfaces)
 import Tidepool.FatIface (fatOriginalOwner)
@@ -768,13 +768,14 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
            ++ [binder | candidate <- candidates, group <- candidateGroups candidate
             , binder <- candidateGroupBinders group])]
     (originalModules,productContext,originalBindings,admittedOriginalBinders,
-      originalGroupMetadata,originalPackageGlobals,homeProductGroups) <- case intent of
+      originalGroupMetadata,originalPackageGlobals,homeProductGroups,reconciledInputs) <- case intent of
       PortableExecutable -> do
         unless (isNothing exactScope && null candidates && Map.null retainedGenerations
             && null hostBindings) $
           fail "portable output cannot consume retained native or host-binding inputs"
+        reconciled <- either fail pure (reconcileOriginalProducts Nothing [])
         pure (modules,Nothing,Map.empty,Set.empty,Map.empty
-          ,const (const (Right emptyOriginalExternalDemand)),Map.empty)
+          ,const (const (Right emptyOriginalExternalDemand)),Map.empty,reconciled)
       NativeOriginals -> do
         (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
           prepareCompilationOriginals completion prior (contextFor firstTarget) externalOriginalBinders
@@ -808,7 +809,8 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                   Nothing -> stagedOriginalExternalDemand priorNative identity)
                 (map globalIdentity globals ++ bindings)
         pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
-          currentOriginalGroupMetadata inventory,originalPackageGlobals,homeProductGroups)
+          currentOriginalGroupMetadata inventory,originalPackageGlobals,homeProductGroups,
+          currentReconciledOriginalProducts inventory)
     let withOriginals context = context {projectionCurrentOriginals = originalBindings}
     finalProjections <- newIORef Map.empty
     finalDependencySelections <- newIORef Map.empty
@@ -886,7 +888,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                     home = closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents
                 let homeProducts = homeProductGroups
                 paired <- project (projectPreparedPackageTarget hscEnv hostBindings (T.pack target)
-                  finalContext homeProducts candidates demand originalImports
+                  finalContext homeProducts candidates reconciledInputs demand originalImports
                   (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
                   packageComponents (closureReachability recovered))
                 let groups = packageTargetGroups paired

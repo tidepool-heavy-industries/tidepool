@@ -2025,6 +2025,7 @@ tidepool_rust_test_cases(
     name = "toolchain_compiler_free_index_view_tests",
     binary = ":tidepool_toolchain_unit_tests_binary",
     exact_tests = [
+        "certified_products::tests::input_home_contracts_bind_selected_issuer_and_ordered_package_slots",
         "declaration_context::tests::retained_group_materialization_keeps_scope_aliases_on_cold_and_cache_hits",
         "declaration_context::tests::nonempty_native_imports_keep_issued_rows_through_custody_and_request",
         "source_bundle::tests::materialization_repairs_a_stale_or_partial_completion_marker",
@@ -2064,7 +2065,7 @@ tidepool_rust_test_cases(
         "artifact_inventory::view_read_properties::persistent_payload_history_releases_ancestors_and_shares_immutable_entries",
         "artifact_inventory::view_read_properties::persistent_captures_share_payload_and_scope_owners",
     ],
-    expected_count = 38,
+    expected_count = 39,
     jobs = 1,
     timeout = 600,
     test_rule_timeout_ms = 660000,
