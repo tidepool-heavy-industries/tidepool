@@ -6305,6 +6305,7 @@ struct MaterializationCacheId(usize);
 #[derive(Clone)]
 struct MaterializationSource {
     cache: Arc<MaterializationCache>,
+    type_products: Arc<Mutex<BTreeMap<ArtifactBinding, Arc<crate::declaration_context::CheckedValueTypeProduct>>>>,
     // Ordered direct edges preserve physical file-cache precedence. Every ID
     // stays backed by the view's source map; none grants artifact authority.
     parents: Arc<[MaterializationCacheId]>,
@@ -6726,6 +6727,7 @@ impl ViewLease {
             materialization_sources,
             materialization: MaterializationSource {
                 cache: Arc::new(lease.materialization),
+                type_products: Default::default(),
                 parents: lease
                     .parents
                     .iter()
@@ -7479,62 +7481,59 @@ impl ArtifactView {
         })
     }
 
-    /// Retain one certified checked-value leaf under its exact scoped binding.
-    /// This additive cache entry never claims a complete compiler closure.
+    /// Cache a complete expected TYPE product while keeping physical leaf overlays.
+    /// Receiver caches are locked before ancestor caches; prepare cannot reenter them.
     pub(crate) fn retain_checked_value_materialization(
         &self,
-        value: &crate::recovery_artifacts::CertifiedValueInterface,
+        binding: ArtifactBinding,
+        entries: &imbl::OrdMap<ArtifactBinding, Arc<ArtifactEntry>>,
         prepare: impl FnOnce(
-            Arc<ArtifactEntry>,
             Option<Arc<crate::declaration_context::RetainedArtifactRow>>,
-        ) -> Result<
-            crate::declaration_context::RetainedArtifactMaterialization,
-            CompileError,
-        >,
-    ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
-    {
-        let id = value.artifact_id();
-        let binding = self
-            .lease
-            .selection
-            .namespace
-            .get(&id)
-            .ok_or_else(|| failure("checked value lacks its selected binding"))?;
-        let entry = self
-            .lease
-            .payloads
-            .get(&id)
-            .ok_or_else(|| failure("checked value lacks acquired interface custody"))?;
-        if entry.requirements != value.requirements()
-            || !matches!(&entry.payload, ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) if interface == value.interface())
-        {
-            return Err(failure(
-                "checked value differs from its acquired issuing row",
-            ));
-        }
-        let key = MaterializationKey::CheckedValueLeaf(*binding);
+            Option<Arc<crate::declaration_context::CheckedValueTypeProduct>>,
+        ) -> Result<Arc<crate::declaration_context::CheckedValueTypeProduct>, CompileError>,
+    ) -> Result<Arc<crate::declaration_context::CheckedValueTypeProduct>, CompileError> {
+        let entry = entries.get(&binding)
+            .ok_or_else(|| failure("checked value TYPE closure lacks its leaf"))?;
+        let key = MaterializationKey::CheckedValueLeaf(binding);
         let mut cache = self.lease.lock_materialization()?;
-        if let Some(retained) = cache.get(&key) {
-            return Ok(retained.clone());
+        let mut products = crate::host_work::lock_with_wait(&self.lease.materialization.type_products, || {})?;
+        if let Some(product) = products.get(&binding) {
+            if !product.matches_expected(binding, entries) {
+                return Err(failure("cached checked value TYPE product differs from its expected closure"));
+            }
+            return Ok(product.clone());
         }
-        // Prefer the current owner's exact acquired value row, then its
-        // recorded inherited custody. Dedicated provenance includes full facts.
-        let mut borrowed = cache
-            .values()
-            .rev()
-            .find_map(|owner| owner.issued_value_row(entry));
-        if borrowed.is_none() {
+        let mut inherited_product = None;
+        let mut pending = self.lease.materialization.parents.iter().copied().collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            crate::host_work::checkpoint()?;
+            if !visited.insert(id) { continue; }
+            let source = &self.lease.materialization_sources[&id];
+            let ancestor = crate::host_work::lock_with_wait(&source.type_products, || {})?;
+            if let Some(product) = ancestor.get(&binding) {
+                if !product.matches_expected(binding, entries) {
+                    return Err(failure("inherited checked value TYPE product differs from its expected closure"));
+                }
+                inherited_product = Some(product.clone());
+                break;
+            }
+            pending.extend(source.parents.iter().copied());
+        }
+        let mut borrowed = cache.values().rev().find_map(|owner| owner.issued_value_row(entry));
+        if borrowed.is_none() && inherited_product.is_none() {
             let mut inherited = Vec::new();
-            self.lease
-                .collect_inherited_materializations(&mut inherited, &mut BTreeSet::new())?;
-            borrowed = inherited
-                .iter()
-                .rev()
-                .find_map(|owner| owner.issued_value_row(entry));
+            self.lease.collect_inherited_materializations(&mut inherited, &mut BTreeSet::new())?;
+            borrowed = inherited.iter().rev().find_map(|owner| owner.issued_value_row(entry));
         }
-        let retained = Arc::new(prepare(entry.clone(), borrowed)?);
-        cache.insert(key, retained.clone());
-        Ok(retained)
+        let product = prepare(borrowed, inherited_product)?;
+        if !product.matches_expected(binding, entries) {
+            return Err(failure("prepared checked value TYPE product differs from its expected closure"));
+        }
+        cache.entry(key).or_insert_with(|| Arc::new(
+            crate::declaration_context::RetainedArtifactMaterialization::checked_value_product_leaf(&product)));
+        products.insert(binding, product.clone());
+        Ok(product)
     }
 
     fn checked_value_leaves(

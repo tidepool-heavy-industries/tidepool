@@ -1308,7 +1308,8 @@ pub struct CheckedValueArtifact {
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
     template_imports: Option<Arc<crate::declaration_context::TemplateImportEvidence>>,
-    row: Arc<crate::declaration_context::RetainedArtifactRow>,
+    row: Arc<crate::declaration_context::CheckedValueTypeProduct>,
+    type_interfaces: Arc<crate::declaration_context::SelectedTypeInterfaces>,
     original_interface_prototype: Option<Arc<ExactHostBindingPrototype>>,
 }
 
@@ -1696,7 +1697,9 @@ impl HostBindingInterfaceOffer {
                 path,
             },
             authority: (self.prototype.producer, Sha256::digest(receipt).into()),
-            certified_interface: certificate,
+            certified_interface: certificate.clone(),
+            type_interfaces: crate::declaration_context::SelectedTypeInterfaces::issue_checked_value(
+                &compiler_support, &certificate)?,
             compiler_support,
             source_lexical: Vec::new(),
             template_imports: None,
@@ -1836,9 +1839,9 @@ impl CheckedValueImportAuthority {
                     return Err(failure("World TYPE inputs require an issued checked value"));
                 }
             };
-            contexts.push(Arc::new(
-                crate::declaration_context::SelectedTypeInterfaces::from_checked_value(original)?,
-            ));
+            contexts.push(
+                crate::declaration_context::SelectedTypeInterfaces::from_checked_value(original),
+            );
         }
         Ok(contexts)
     }
@@ -2191,7 +2194,9 @@ impl CheckedValueInputs {
         let artifact = Arc::new(CheckedValueArtifact {
             interface: input,
             authority: (cell.producer, cell.receipt_digest),
-            certified_interface: certificate,
+            certified_interface: certificate.clone(),
+            type_interfaces: crate::declaration_context::SelectedTypeInterfaces::issue_checked_value(
+                &compiler_support, &certificate)?,
             compiler_support,
             source_lexical,
             template_imports,
@@ -2204,16 +2209,11 @@ impl CheckedValueInputs {
 }
 
 impl CheckedValueArtifact {
-    pub(crate) fn world_type_parts(
-        &self,
-    ) -> Result<
-        (
-            Arc<crate::artifact_inventory::ArtifactEntry>,
-            Vec<crate::declaration_context::original_inputs::OriginalInputPart>,
-        ),
-        CompileError,
-    > {
-        self.row.world_type_parts()
+    pub(crate) fn type_product(&self) -> &Arc<crate::declaration_context::CheckedValueTypeProduct> {
+        &self.row
+    }
+    pub(crate) fn type_interfaces(&self) -> &Arc<crate::declaration_context::SelectedTypeInterfaces> {
+        &self.type_interfaces
     }
 
     pub(crate) fn world_issuer(&self) -> ([u8; 32], [u8; 32]) {
@@ -2223,7 +2223,7 @@ impl CheckedValueArtifact {
     /// Type transport can share aliases only when their issuing row is the
     /// same immutable owner. Equal payloads or receipts alone do not prove that.
     pub(crate) fn same_world_type_row(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.row, &other.row)
+        self.row.same_issued_product(&other.row)
             && self.authority == other.authority
             && self.certified_interface.artifact_id() == other.certified_interface.artifact_id()
     }
@@ -5243,7 +5243,7 @@ mod tests {
         generation: u64,
     ) -> (
         crate::declaration_context::RetainedValueSourceSurface,
-        Arc<crate::declaration_context::RetainedArtifactRow>,
+        Arc<crate::declaration_context::CheckedValueTypeProduct>,
         Arc<crate::recovery_artifacts::CertifiedValueInterface>,
     ) {
         let (_inputs, owner, path) = prepare_test_value_interface_files(generation, demands_epoch);
@@ -6239,7 +6239,7 @@ mod tests {
     fn check_authored_lifetime_graph(
         captured: &(
             crate::declaration_context::RetainedValueSourceSurface,
-            Arc<crate::declaration_context::RetainedArtifactRow>,
+            Arc<crate::declaration_context::CheckedValueTypeProduct>,
             Arc<crate::recovery_artifacts::CertifiedValueInterface>,
         ),
         context: &crate::declaration_context::ExactDeclarationContext,
@@ -6619,7 +6619,7 @@ mod tests {
         observe: impl Fn(
             &(
                 crate::declaration_context::RetainedValueSourceSurface,
-                Arc<crate::declaration_context::RetainedArtifactRow>,
+                Arc<crate::declaration_context::CheckedValueTypeProduct>,
                 Arc<crate::recovery_artifacts::CertifiedValueInterface>,
             ),
             &crate::declaration_context::ExactDeclarationContext,
@@ -6649,7 +6649,7 @@ mod tests {
     fn capture_value_custody_histories() -> Vec<(
         (
             crate::declaration_context::RetainedValueSourceSurface,
-            Arc<crate::declaration_context::RetainedArtifactRow>,
+            Arc<crate::declaration_context::CheckedValueTypeProduct>,
             Arc<crate::recovery_artifacts::CertifiedValueInterface>,
         ),
         Vec<u8>,
@@ -6671,7 +6671,7 @@ mod tests {
     ) -> Vec<(
         (
             crate::declaration_context::RetainedValueSourceSurface,
-            Arc<crate::declaration_context::RetainedArtifactRow>,
+            Arc<crate::declaration_context::CheckedValueTypeProduct>,
             Arc<crate::recovery_artifacts::CertifiedValueInterface>,
         ),
         Vec<u8>,

@@ -8235,8 +8235,7 @@ mod module_product_tests {
                 Arc::ptr_eq(&value, &native.value_interface_certificate().unwrap()),
                 "type projection preserves the actual compiled value owner"
             );
-            value
-                .world_type_parts()
+            value.type_product().leaf_parts()
                 .expect("the original value retains its actual row input owners");
             program
                 .validate_typed_entries()
@@ -8427,7 +8426,8 @@ mod module_product_tests {
                     .unwrap()
                     .value_interface_certificate()
                     .unwrap();
-                let (entry, parts) = row.world_type_parts().unwrap();
+                let entry = row.type_product().leaf_entry();
+                let parts = row.type_product().leaf_parts().unwrap();
                 value_rows.push(Arc::downgrade(&row));
                 value_paths.push(parts.iter().find(|part| part.kind == crate::declaration_context::original_inputs::OriginalInputKind::Interface).unwrap().path.clone());
                 value_files.push(

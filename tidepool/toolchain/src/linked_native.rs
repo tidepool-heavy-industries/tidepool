@@ -620,7 +620,7 @@ impl AcquiredNativeCode {
             .artifacts
             .observed_payload(&binding.artifact)
             .ok_or_else(|| refusal("acquired retained import lost its immutable payload"))?;
-        let (actual, _) = row.world_type_parts()?;
+        let actual = row.type_product().leaf_entry();
         Ok(selected.as_ref() == actual.as_ref())
     }
 

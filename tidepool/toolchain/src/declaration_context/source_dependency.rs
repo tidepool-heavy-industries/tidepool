@@ -496,7 +496,7 @@ mod tests {
             .unwrap()
             .value_interface_certificate()
             .unwrap();
-        let (entry, _) = value.world_type_parts().unwrap();
+        let entry = value.type_product().leaf_entry();
         let expected_identity = SymbolIdentity {
             unit: entry.descriptor.owner.unit.clone(),
             module: binder.module().into(),

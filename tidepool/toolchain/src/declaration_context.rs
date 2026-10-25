@@ -282,36 +282,23 @@ impl SelectedTypeInterfaces {
 }
 
 impl SelectedTypeInterfaces {
-    /// The actual checked Val interface and its sealed TYPE requirements,
-    /// without source names, original bodies, or executable group authority.
+    /// Borrow the constructor-validated TYPE projection without revisiting its graph.
     pub(crate) fn from_checked_value(
         value: &crate::checked_cell::CheckedValueArtifact,
-    ) -> Result<SelectedTypeInterfaces, CompileError> {
-        let certified = value.certified_interface();
-        let interface = certified.interface();
-        let producer = interface.toolchain_identity_sha256();
-        if producer == [0; 32] || value.world_issuer().0 != producer {
-            return Err(failure(
-                "checked value TYPE row has another compiler producer",
-            ));
-        }
-        let selected = value.compiler_source_support().selected_interfaces()?;
-        let owner = identity(interface.unit(), interface.module());
-        let row = selected
-            .get(&owner)
-            .ok_or_else(|| failure("checked value TYPE row lacks its issued interface"))?;
-        if row.descriptor.id != certified.artifact_id()
-            || row.descriptor.producer_sha256 != producer
-        {
-            return Err(failure(
-                "checked value TYPE row differs from its certified interface",
-            ));
-        }
-        Ok(SelectedTypeInterfaces {
-            support: selected.type_interfaces_for_owners(vec![owner])?,
-            producer,
+    ) -> Arc<SelectedTypeInterfaces> {
+        value.type_interfaces().clone()
+    }
+
+    pub(crate) fn issue_checked_value(
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        certificate: &CertifiedValueInterface,
+    ) -> Result<Arc<Self>, CompileError> {
+        let (_, _, support) = support.selected_interfaces()?.checked_value_type_closure(certificate)?;
+        Ok(Arc::new(Self {
+            support,
+            producer: certificate.interface().toolchain_identity_sha256(),
             identity: OnceLock::new(),
-        })
+        }))
     }
 
     pub(crate) fn from_checked_value_signature(
@@ -3203,7 +3190,7 @@ impl RetainedValueEvidence {
         &self,
         row: &crate::checked_cell::CheckedValueArtifact,
     ) -> Result<bool, CompileError> {
-        let (actual, _) = row.world_type_parts()?;
+        let actual = row.type_product().leaf_entry();
         Ok(self.entry.as_ref() == actual.as_ref())
     }
 }
@@ -7432,12 +7419,61 @@ impl MaterializationFacts<'_> {
     }
 }
 
+/// Immutable physical TYPE custody, coupled to one exact authenticated binding.
+#[derive(Clone, Debug)]
+pub(crate) struct CheckedValueDependencyRow {
+    entry: Arc<ArtifactEntry>,
+    row: Arc<RetainedArtifactRow>,
+}
+
+impl CheckedValueDependencyRow {
+    pub(crate) fn entry(&self) -> &Arc<ArtifactEntry> { &self.entry }
+    pub(crate) fn parts(&self) -> Result<Vec<original_inputs::OriginalInputPart>, CompileError> {
+        self.row.original_input_parts(&self.entry)
+    }
+    fn matches(&self, entry: &ArtifactEntry) -> bool {
+        self.entry.same_issued_facts(entry)
+            && matches!(&self.row.value_custody, ValueRowCustody::Private(issued) if issued.same_issued_facts(entry))
+    }
+}
+
+/// Complete TYPE product. It retains no view, support, or producing cache.
+#[derive(Debug)]
+pub(crate) struct CheckedValueTypeProduct {
+    leaf_binding: ArtifactBinding,
+    leaf: CheckedValueDependencyRow,
+    dependencies: imbl::OrdMap<ArtifactBinding, CheckedValueDependencyRow>,
+}
+
+impl CheckedValueTypeProduct {
+    pub(crate) fn leaf_binding(&self) -> ArtifactBinding { self.leaf_binding }
+    pub(crate) fn leaf_entry(&self) -> &Arc<ArtifactEntry> { self.leaf.entry() }
+    pub(crate) fn leaf_parts(&self) -> Result<Vec<original_inputs::OriginalInputPart>, CompileError> { self.leaf.parts() }
+    pub(crate) fn dependencies(&self) -> &imbl::OrdMap<ArtifactBinding, CheckedValueDependencyRow> { &self.dependencies }
+    pub(crate) fn matches_expected(&self, leaf: ArtifactBinding, entries: &imbl::OrdMap<ArtifactBinding, Arc<ArtifactEntry>>) -> bool {
+        self.leaf_binding == leaf && entries.len() == self.dependencies.len() + 1
+            && entries.get(&leaf).is_some_and(|entry| self.leaf.matches(entry))
+            && self.dependencies.iter().all(|(binding, row)| entries.get(binding).is_some_and(|entry| row.matches(entry)))
+    }
+    pub(crate) fn same_issued_product(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other) || (self.leaf_binding == other.leaf_binding
+            && Arc::ptr_eq(&self.leaf.row, &other.leaf.row)
+            && self.leaf.entry.same_issued_facts(&other.leaf.entry)
+            && self.dependencies.len() == other.dependencies.len()
+            && self.dependencies.iter().all(|(binding, row)| other.dependencies.get(binding)
+                .is_some_and(|other| Arc::ptr_eq(&row.row, &other.row) && row.entry.same_issued_facts(&other.entry))))
+    }
+    pub(crate) fn checked_value_interface(&self) -> &ExactIfaceArtifact { self.leaf.row.checked_value_interface() }
+    #[cfg(test)]
+    pub(crate) fn checked_value_transport(&self) -> &crate::owned_input_arena::OwnedInputSlice { self.leaf.row.checked_value_transport() }
+}
+
 /// A physical promotion belongs to one actual captured output certificate.
 /// Its row cannot be supplied or rebound independently of that issuer.
 #[derive(Debug)]
 pub(crate) struct CheckedValueRowIssuer {
     certificate: Arc<CertifiedValueInterface>,
-    row: std::sync::Mutex<Option<Arc<RetainedArtifactRow>>>,
+    row: std::sync::Mutex<Option<Arc<CheckedValueTypeProduct>>>,
     #[cfg(test)]
     promotions: std::sync::atomic::AtomicU64,
 }
@@ -7592,60 +7628,65 @@ impl RetainedArtifactMaterialization {
         (owners, rows)
     }
 
-    /// Issue a value-sized physical leaf on the value's existing support view.
-    /// Descendant requests discover this same cache entry as inherited custody.
+    /// Issue all physical TYPE rows under the value's exact scoped closure.
     pub(crate) fn capture_checked_value(
         support: &crate::artifact_inventory::CompilerSourceSupport,
         source: CheckedValueRowSource<'_>,
-    ) -> Result<Arc<RetainedArtifactRow>, CompileError> {
+    ) -> Result<Arc<CheckedValueTypeProduct>, CompileError> {
         let (value, issuer) = match source {
             CheckedValueRowSource::Fresh(value) => (value, None),
             CheckedValueRowSource::Produced(issuer) => (issuer.certificate.as_ref(), Some(issuer)),
         };
-        let owner = identity(value.interface().unit(), value.interface().module());
-        let selected = support.selected_interfaces()?;
-        let entry = selected
-            .get(&owner)
-            .ok_or_else(|| failure("checked value has no selected row"))?
-            .clone();
-        if entry.descriptor.id != value.artifact_id()
-            || entry.requirements != value.requirements()
-            || !matches!(&entry.payload, ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) if interface == value.interface())
-        {
-            return Err(failure(
-                "checked value row differs from its issuing certificate",
-            ));
-        }
-        let materialization =
-            support
-                .artifacts()
-                .retain_checked_value_materialization(value, |entry, borrowed| {
-                    let mut issued = issuer.map(|issuer| crate::host_work::lock_with_wait(&issuer.row, || {})).transpose()?;
-                    if let Some(row) = issued.as_ref().and_then(|row| row.as_ref()) {
-                        return Ok(Self::checked_value_leaf(value.artifact_id(), row.clone()));
-                    }
-                    let mut validation = PackageInterfaceValidation::default();
-                    let (row, fresh) = match borrowed {
-                        Some(row) => (row, false),
-                        None => (Arc::new(RetainedArtifactRow::issue_value(entry, &mut validation, ValueRowLocation::Private)?), true),
-                    };
-                    #[cfg(test)]
-                    let work = validation.work();
-                    if let Some(issued) = &mut issued { **issued = Some(row.clone()); }
-                    #[cfg(test)]
-                    if fresh { if let Some(issuer) = issuer { issuer.promotions.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } }
-                    tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_row_attach", fresh_rows = usize::from(fresh), borrowed_rows = usize::from(!fresh), "attached exact output row custody");
-                    let retained = Self::checked_value_leaf(value.artifact_id(), row);
-                    #[cfg(test)]
-                    let retained = Self { payload_work: work, ..retained };
-                    Ok(retained)
-                })?;
-        let mut rows = BTreeMap::new();
-        materialization.visit_owners(&mut BTreeSet::new(), &mut |owner| {
-            rows.extend(owner.rows.iter().map(|(id, row)| (*id, row.clone())));
-        });
-        rows.remove(&value.artifact_id())
-            .ok_or_else(|| failure("issued checked value row is absent"))
+        let (leaf_binding, entries, _) = support.selected_interfaces()?.checked_value_type_closure(value)?;
+        support.artifacts().retain_checked_value_materialization(leaf_binding, &entries, |borrowed, inherited| {
+            let mut issued = issuer.map(|issuer| crate::host_work::lock_with_wait(&issuer.row, || {})).transpose()?;
+            if let Some(product) = issued.as_ref().and_then(|issued| issued.as_ref()) {
+                if !product.matches_expected(leaf_binding, &entries) {
+                    return Err(failure("produced checked value TYPE product differs from its expected closure"));
+                }
+                return Ok(product.clone());
+            }
+            if let Some(product) = inherited {
+                if !product.matches_expected(leaf_binding, &entries) {
+                    return Err(failure("cached checked value TYPE product differs from its expected closure"));
+                }
+                if let Some(issued) = &mut issued { **issued = Some(product.clone()); }
+                return Ok(product);
+            }
+            let mut validation = PackageInterfaceValidation::default();
+            let fresh = borrowed.is_none();
+            let leaf_entry = entries[&leaf_binding].clone();
+            let leaf_row = match borrowed {
+                Some(row) => row,
+                None => Arc::new(RetainedArtifactRow::issue_value(leaf_entry.clone(), &mut validation, ValueRowLocation::Private)?),
+            };
+            let mut dependencies = imbl::OrdMap::new();
+            for (binding, entry) in &entries {
+                crate::host_work::checkpoint()?;
+                if *binding == leaf_binding { continue; }
+                dependencies.insert(*binding, CheckedValueDependencyRow {
+                    entry: entry.clone(),
+                    row: Arc::new(RetainedArtifactRow::issue_type(entry.clone(), &mut validation, ValueRowLocation::Private)?),
+                });
+            }
+            let product = Arc::new(CheckedValueTypeProduct {
+                leaf_binding,
+                leaf: CheckedValueDependencyRow { entry: leaf_entry, row: leaf_row },
+                dependencies,
+            });
+            if !product.matches_expected(leaf_binding, &entries) {
+                return Err(failure("issued checked value TYPE product differs from its expected closure"));
+            }
+            if let Some(issued) = &mut issued { **issued = Some(product.clone()); }
+            #[cfg(test)]
+            if fresh { if let Some(issuer) = issuer { issuer.promotions.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } }
+            let _ = fresh;
+            Ok(product)
+        })
+    }
+
+    pub(crate) fn checked_value_product_leaf(product: &CheckedValueTypeProduct) -> Self {
+        Self::checked_value_leaf(product.leaf_binding.artifact, product.leaf.row.clone())
     }
 
     fn checked_value_leaf(id: ArtifactId, row: Arc<RetainedArtifactRow>) -> Self {
@@ -8157,6 +8198,17 @@ impl RetainedArtifactRow {
                 "value row factory requires an acquired value interface",
             ));
         }
+        Self::issue_type(entry, validation, location)
+    }
+
+    fn issue_type(
+        entry: Arc<ArtifactEntry>,
+        validation: &mut PackageInterfaceValidation,
+        location: ValueRowLocation,
+    ) -> Result<Self, CompileError> {
+        if !matches!(&entry.payload, ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface | JoinedInterfaceRole::LexicalJoin)) {
+            return Err(failure("TYPE row factory requires an acquired type interface"));
+        }
         let before = validation.work();
         let owner = entry.descriptor.owner.clone();
         let (directory, value_custody) = match location {
@@ -8219,7 +8271,10 @@ impl RetainedArtifactRow {
             interface_evidence: scope_interface_evidence(&entry, directory.path(), validation)?,
             _directory: directory,
             payload: RetainedArtifactPayload::InterfaceOnly,
-            canonical_custody: None,
+            canonical_custody: match &entry.payload {
+                ArtifactPayload::Canonical(interface) => Some(interface.clone()),
+                _ => None,
+            },
         };
         let after = validation.work();
         let work = recovery_artifacts::RecoveryArtifactWork {
@@ -8233,29 +8288,6 @@ impl RetainedArtifactRow {
                         promoted_bytes = work.written_bytes, promotion_read_bytes = work.read_bytes,
                         promotion_hash_bytes = work.hash_bytes, "issued value-sized immutable input row");
         Ok(row)
-    }
-
-    pub(crate) fn world_type_parts(
-        &self,
-    ) -> Result<(Arc<ArtifactEntry>, Vec<original_inputs::OriginalInputPart>), CompileError> {
-        let ValueRowCustody::Private(entry) = &self.value_custody else {
-            return Err(failure(
-                "world binding requires its actual private issued row",
-            ));
-        };
-        let parts = self
-            .original_input_parts(entry)?
-            .into_iter()
-            .filter(|part| {
-                !matches!(
-                    part.kind,
-                    original_inputs::OriginalInputKind::Native
-                        | original_inputs::OriginalInputKind::Census
-                        | original_inputs::OriginalInputKind::Graph
-                )
-            })
-            .collect();
-        Ok((Arc::clone(entry), parts))
     }
 
     pub(crate) fn checked_value_transport(&self) -> &crate::owned_input_arena::OwnedInputSlice {
