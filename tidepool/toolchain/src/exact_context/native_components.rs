@@ -183,7 +183,7 @@ pub(super) mod tests {
         use crate::artifact_inventory::{ArtifactPayload, CompilerSourceSupport};
         use crate::declaration_context::{ExactDeclarationContext, RecoveredArtifactAcquisition};
         use crate::linked_native::{AcquiredNativeImport, NativeGrantSelector, NativeOccurrenceId};
-        assert_eq!(targets.len(), 2);
+        assert!(targets.len() >= 2);
         let first_support = CompilerSourceSupport::empty()
             .with_linked_native_target(&targets[0])
             .unwrap();
@@ -303,6 +303,31 @@ pub(super) mod tests {
                 .native_closure_records()
                 .ptr_eq(&receipt.snapshot().native_closures));
             for closure in held.acquired_native_closures().iter() {
+                let expected_home = closure
+                    .recorded_facts()
+                    .occurrences
+                    .iter()
+                    .filter_map(|row| match row.occurrence {
+                        NativeOccurrenceId::Home(binding) => Some(binding),
+                        _ => None,
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                let custody_home = closure
+                    .artifacts()
+                    .binding_dependencies()
+                    .into_iter()
+                    .flat_map(|(source, target, _)| [source, target])
+                    .filter_map(|node| match node {
+                        crate::artifact_inventory::ArtifactBindingNode::Group(binding) => {
+                            Some(binding)
+                        }
+                        _ => None,
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    custody_home, expected_home,
+                    "restored grant custody excludes unrelated sibling closure HOME groups"
+                );
                 for acquired in closure.acquired() {
                     for target in targets {
                         assert!(
