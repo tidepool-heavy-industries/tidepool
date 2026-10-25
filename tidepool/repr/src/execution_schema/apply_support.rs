@@ -2,7 +2,6 @@
 
 use super::*;
 use recursion::MappableFrame;
-use std::collections::BTreeSet;
 
 const HELPERS: [&str; 3] = ["__resume", "__applyEntry", "__applyValue"];
 
@@ -181,10 +180,13 @@ fn package(unit: &str, name: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('-'))
 }
 
-fn allowed_constructor(declaration: &ConstructorDecl, resume_unit: &str) -> bool {
+fn allowed_constructor(declaration: &ConstructorDecl, resume_unit: &str, word_width: u8) -> bool {
     let symbol = &declaration.identity.symbol;
     let family = &declaration.identity.family;
-    if symbol.namespace != "constructor" || symbol.record_parent.is_some() {
+    if symbol.namespace != "constructor"
+        || symbol.record_parent.is_some()
+        || declaration.result_rep != RuntimeRep::LiftedRef
+    {
         return false;
     }
     let wired_int = symbol.unit == "ghc-prim"
@@ -195,7 +197,11 @@ fn allowed_constructor(declaration: &ConstructorDecl, resume_unit: &str) -> bool
         && family.symbol.namespace == "type"
         && family.symbol.occurrence == "Int"
         && family.symbol.record_parent.is_none()
-        && family.version == TypeVersion::WiredIn;
+        && family.version == TypeVersion::WiredIn
+        && declaration.field_reps == [RuntimeRep::Int(word_width)]
+        && declaration.strict_fields == [true]
+        && declaration.tag == 1
+        && declaration.family_size == 1;
     let settled = symbol.unit == resume_unit
         && symbol.module == "Tidepool.Internal.Resume"
         && matches!(symbol.occurrence.as_str(), "Done" | "Suspended")
@@ -203,7 +209,21 @@ fn allowed_constructor(declaration: &ConstructorDecl, resume_unit: &str) -> bool
         && family.symbol.module == symbol.module
         && family.symbol.namespace == "type"
         && family.symbol.occurrence == "Settled"
-        && family.symbol.record_parent.is_none();
+        && family.symbol.record_parent.is_none()
+        && declaration.family_size == 2
+        && match symbol.occurrence.as_str() {
+            "Done" => {
+                declaration.tag == 1
+                    && declaration.field_reps == [RuntimeRep::LiftedRef]
+                    && declaration.strict_fields == [true]
+            }
+            "Suspended" => {
+                declaration.tag == 2
+                    && declaration.field_reps == [RuntimeRep::LiftedRef; 2]
+                    && declaration.strict_fields == [true, false]
+            }
+            _ => false,
+        };
     wired_int || settled
 }
 
@@ -309,19 +329,30 @@ pub(super) fn extract(program: &PreparedProgram) -> Result<Option<PreparedProgra
         resume_unit.ok_or_else(|| refuse("helpers lack their resume package references"))?;
     // Settled declarations, when emitted, also serve the runtime's settled-layer
     // observer. Missing declarations stay missing; the linked package owns them.
+    let mut settled_family = None;
     for (index, constructor) in source.constructors.iter().enumerate() {
         if constructor.identity.symbol.unit == resume_unit
             && constructor.identity.family.symbol.occurrence == "Settled"
         {
+            if settled_family
+                .replace(&constructor.identity.family)
+                .is_some_and(|family| family != &constructor.identity.family)
+            {
+                return Err(refuse("helper carries competing Settled families"));
+            }
             tables
                 .constructors
                 .insert(ConstructorId(index as u32), ConstructorId(index as u32));
         }
     }
     for id in tables.constructors.keys() {
-        if !allowed_constructor(&source.constructors[id.0 as usize], resume_unit) {
+        let constructor = &source.constructors[id.0 as usize];
+        if !allowed_constructor(constructor, resume_unit, source.envelope.target.word_width) {
             return Err(refuse("helper references a user constructor"));
         }
+        budget.charge(OperationBudget::constructor_copy_work(
+            &constructor.identity,
+        )?)?;
     }
     for (index, new) in tables.signatures.values_mut().enumerate() {
         *new = SignatureId(index as u32);

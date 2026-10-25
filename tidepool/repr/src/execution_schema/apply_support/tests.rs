@@ -341,3 +341,219 @@ fn rejects_reachable_user_constructor_and_literal_but_drops_unrelated_data() {
         expected
     );
 }
+
+#[test]
+fn remaps_nested_function_captures_and_join_signatures() {
+    for join in [false, true] {
+        let mut wire = fixture();
+        wire.signatures[4] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        let Group::NonRecursive(top) = wire.bindings.last_mut().unwrap() else {
+            unreachable!()
+        };
+        let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+            unreachable!()
+        };
+        let nested = *body;
+        let caller = wire.expressions.nodes.len();
+        wire.expressions.nodes.push(if join {
+            ExprFrame::Jump {
+                join: JoinId(7),
+                arguments: vec![],
+            }
+        } else {
+            ExprFrame::Call {
+                callee: local(44),
+                signature: SignatureId(4),
+                arguments: vec![],
+            }
+        });
+        *body = wire.expressions.nodes.len();
+        wire.expressions.nodes.push(if join {
+            ExprFrame::LetJoins {
+                bindings: Group::NonRecursive(JoinBinding {
+                    id: JoinId(7),
+                    signature: SignatureId(4),
+                    parameters: vec![],
+                    body: nested,
+                }),
+                body: caller,
+            }
+        } else {
+            ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(44),
+                    rhs: HeapRhs::Function {
+                        signature: SignatureId(4),
+                        parameters: vec![],
+                        captures: vec![ValueRef::Local(ValueId(40)), ValueRef::Local(ValueId(41))],
+                        body: nested,
+                    },
+                }),
+                body: caller,
+            }
+        });
+        let compact = testing::prepare(wire)
+            .unwrap()
+            .extract_apply_support()
+            .unwrap()
+            .unwrap();
+        assert_eq!(compact.signatures().len(), 4);
+        let nested_signature = compact
+            .expressions()
+            .nodes
+            .iter()
+            .find_map(|frame| match frame {
+                ExprFrame::LetJoins {
+                    bindings: Group::NonRecursive(binding),
+                    ..
+                } => {
+                    assert_eq!(binding.id, JoinId(7));
+                    Some(binding.signature)
+                }
+                ExprFrame::Let {
+                    bindings:
+                        Group::NonRecursive(HeapBinding {
+                            rhs:
+                                HeapRhs::Function {
+                                    signature,
+                                    captures,
+                                    ..
+                                },
+                            ..
+                        }),
+                    ..
+                } => {
+                    assert_eq!(
+                        captures,
+                        &[ValueRef::Local(ValueId(40)), ValueRef::Local(ValueId(41))]
+                    );
+                    Some(*signature)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(nested_signature, SignatureId(3));
+    }
+}
+
+#[test]
+fn malformed_complete_helper_contract_is_a_typed_refusal() {
+    let mut wire = fixture();
+    wire.signatures[4] = Signature {
+        arguments: vec![RuntimeRep::LiftedRef; 3],
+        results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+    };
+    let Group::NonRecursive(top) = &mut wire.bindings[1] else {
+        unreachable!()
+    };
+    let HeapRhs::Function {
+        signature,
+        parameters,
+        ..
+    } = &mut top.binding.rhs
+    else {
+        unreachable!()
+    };
+    *signature = SignatureId(4);
+    parameters.push(ValueId(22));
+    let source = testing::prepare(wire).unwrap();
+    assert!(matches!(
+        source.extract_apply_support(),
+        Err(ParseError::InvalidReference(_))
+    ));
+}
+
+#[test]
+fn refuses_reachable_machine_operations() {
+    let mut wire = fixture();
+    wire.operations.push(OperationDecl {
+        identity: OperationIdentity::Capability {
+            name: "fixture-capability".into(),
+        },
+        signature: SignatureId(1),
+    });
+    wire.expressions.nodes[8] = ExprFrame::Operation {
+        operation: OperationId(0),
+        arguments: vec![local(41)],
+    };
+    let source = testing::prepare(wire).unwrap();
+    assert!(matches!(
+        source.extract_apply_support(),
+        Err(ParseError::InvalidReference(_))
+    ));
+}
+
+#[test]
+fn preserves_only_actual_resume_settled_declarations_when_present() {
+    let mut wire = fixture();
+    let mut settled = Vec::new();
+    for (name, fields, tag) in [("Done", 1, 1), ("Suspended", 2, 2)] {
+        let field_reps = vec![RuntimeRep::LiftedRef; fields];
+        let declaration = ConstructorDecl {
+            identity: ConstructorIdentity {
+                symbol: symbol(
+                    "tidepool-resume-hash",
+                    "Tidepool.Internal.Resume",
+                    "constructor",
+                    name,
+                ),
+                family: testing::type_identity(symbol(
+                    "tidepool-resume-hash",
+                    "Tidepool.Internal.Resume",
+                    "type",
+                    "Settled",
+                )),
+            },
+            host_id: crate::DataConId(2000 + tag),
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps,
+            strict_fields: if name == "Done" {
+                vec![true]
+            } else {
+                vec![true, false]
+            },
+            layout: CheckedLayout {
+                fields: (0..fields)
+                    .map(|index| FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: index as u32 * 8,
+                    })
+                    .collect(),
+                alignment: 8,
+                payload_size: fields as u32 * 8,
+                root_mask: vec![true; fields],
+            },
+            tag: tag as u32,
+            family_size: 2,
+        };
+        wire.constructors.push(declaration.clone());
+        settled.push(declaration);
+    }
+    let compact = testing::prepare(wire.clone())
+        .unwrap()
+        .extract_apply_support()
+        .unwrap()
+        .unwrap();
+    assert_eq!(&compact.constructors()[1..], settled.as_slice());
+    let mut competing = wire.clone();
+    let mut alternate = competing.constructors[2].clone();
+    alternate.identity.family.version = TypeVersion::GhcAbi([9; 16]);
+    alternate.host_id = crate::DataConId(9000);
+    competing.constructors.push(alternate);
+    let original = testing::prepare(competing).unwrap();
+    assert!(matches!(
+        original.extract_apply_support(),
+        Err(ParseError::InvalidReference(_))
+    ));
+    // A structurally valid but differently shaped declaration does not become
+    // the runtime's settled observation merely by retaining its spelling.
+    wire.constructors[2].strict_fields = vec![false];
+    let original = testing::prepare(wire).unwrap();
+    assert!(matches!(
+        original.extract_apply_support(),
+        Err(ParseError::InvalidReference(_))
+    ));
+}
