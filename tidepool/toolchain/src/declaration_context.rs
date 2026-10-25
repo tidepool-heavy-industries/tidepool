@@ -27833,25 +27833,35 @@ mod tests {
         let view = inventory
             .admit_shared(&inventory.empty_view(), entries)
             .unwrap();
-        let support =
-            issue_fixture_compiler_support(projection, view, &mut offer_validation).unwrap();
-        let mut records = support.recorded_rows().clone();
-        for record in records.values_mut() {
-            if let crate::exact_context::RecordedCompilerRow::Original { native_choices, .. } =
-                record
-            {
-                *native_choices = crate::exact_context::RecordedNativeChoices::Unissued;
-            }
-        }
-        let facts = support.native_fact_owner();
-        let support = crate::artifact_inventory::CompilerSourceSupport::authenticate_recorded_rows(
-            support.artifacts().clone(),
-            &records,
-            &facts.offers,
-            &facts.native_availability,
+        let issued =
+            issue_fixture_compiler_support(projection.clone(), view.clone(), &mut offer_validation)
+                .unwrap();
+        let support = recover_fixture_compiler_support(
+            projection,
+            view,
+            issued.native_offers().iter().cloned(),
             &mut offer_validation,
         )
+        .unwrap()
+        .retain_normalized_availability(issued.native_availability())
         .unwrap();
+        let unissued = support
+            .recorded_rows()
+            .values()
+            .filter(|record| {
+                matches!(
+                    record,
+                    crate::exact_context::RecordedCompilerRow::Original {
+                        native_choices: crate::exact_context::RecordedNativeChoices::Unissued,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            unissued, 2,
+            "recorded-role ingress requires a real request-policy transition"
+        );
         let context = Arc::new(ExactDeclarationContext::from_facts(
             DeclarationContextFacts {
                 source_scope: SourceLexicalScope::default(),
@@ -27865,6 +27875,23 @@ mod tests {
         let request = context
             .prepare_fixture_compilation(packet.path(), producer)
             .unwrap();
+        assert_eq!(
+            request
+                .compiler_inputs()
+                .compiler_source_support()
+                .recorded_rows()
+                .values()
+                .filter(|record| matches!(
+                    record,
+                    crate::exact_context::RecordedCompilerRow::Original {
+                        native_choices: crate::exact_context::RecordedNativeChoices::Issued { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            2,
+            "the actual request resolves both selected native policies"
+        );
         assert!(
             context
                 .artifact_view()
