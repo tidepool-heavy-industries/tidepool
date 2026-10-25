@@ -2769,6 +2769,16 @@ impl CompilerWorld {
                 inputs.lexical = lexical.clone();
             }
         }
+        let delta = prior.inputs.bindings.advance(query_scope, changes)?;
+        inputs.bindings = delta.bindings;
+        if query_scope != prior.inputs.bindings.query_scope {
+            let restoration = inputs.prepare_for(primary_inputs, prior.producer, prior.profile)?;
+            return Ok(Arc::new(Self {
+                restoration,
+                realization: Arc::new(Mutex::new(None)),
+                position,
+            }));
+        }
         let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
         inputs.directory = directory.clone();
         let mut facts = prior.bindings.facts().clone();
@@ -2838,8 +2848,6 @@ impl CompilerWorld {
                     .materialize(primary_inputs.context(), &mut materializer)?;
             }
         }
-        let delta = prior.inputs.bindings.advance(query_scope, changes)?;
-        inputs.bindings = delta.bindings;
         for owner in delta.rows {
             let selected = inputs.bindings.rows.get(&owner);
             let previous = prior.inputs.bindings.rows.get(&owner);
@@ -4359,8 +4367,18 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
             None,
             Vec::new(),
         )?)))?;
-    let primary_only = current.with_primary_and_lexical(&[], Some(&lexical))?;
+    let primary_only = current.with_primary_and_lexical(
+        &[crate::declaration_context::SelectedTypeInterfaces::from_checked_value(&first)],
+        Some(&lexical),
+    )?;
     let descriptor = answer_cbor(&std::fs::read(&primary_only.restoration.descriptor)?)?;
+    assert!(
+        !answer_array(&descriptor, 7)?[3]
+            .as_array()
+            .ok_or_else(|| source_failure("fixture primary changes"))?
+            .is_empty(),
+        "primary-only fixture must transport actual TYPE additions"
+    );
     assert!(answer_array(&answer_array(&descriptor, 7)?[5], 0)?.is_empty());
     current = retain_step("primary-only", primary_only)?;
     let empty = current.project_bindings(0, [("renamed".into(), None)], None)?;
@@ -9199,6 +9217,44 @@ mod answer_tests {
                 .is_err()
         );
     }
+    #[test]
+    fn scope_change_rebuilds_cold_world_instead_of_emitting_foreign_successor() {
+        let inputs = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+            None,
+            VisibleWorldBindings::from_published_bindings(0, []).unwrap(),
+            Arc::new(
+                CapturedCompilerSources::from_captured_roots(
+                    Vec::new(),
+                    Arc::from([]),
+                    Arc::new(()),
+                )
+                .unwrap(),
+            ),
+            CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None).unwrap(),
+        )
+        .unwrap();
+        let predecessor = Arc::new(CompilerWorld {
+            restoration: inputs.prepare_for([3; 32], [4; 32]).unwrap(),
+            realization: Arc::new(Mutex::new(None)),
+            position: None,
+        });
+        let next = predecessor.project_bindings(1, [], None).unwrap();
+        assert!(next.restoration.successor.is_none());
+        assert_eq!(predecessor.restoration.inputs.bindings.query_scope, 0);
+        assert_eq!(next.restoration.inputs.bindings.query_scope, 1);
+        assert_ne!(predecessor.logical_id(), next.logical_id());
+        let descriptor =
+            answer_cbor(&std::fs::read(&next.restoration.descriptor).unwrap()).unwrap();
+        assert_eq!(
+            answer_text(&answer_array(&descriptor, 11).unwrap()[0]).unwrap(),
+            "TPCWORLD"
+        );
+        assert_eq!(
+            next.restoration.prepare_cold().unwrap().logical_id,
+            next.restoration.logical_id
+        );
+    }
+
     #[test]
     fn complete_value_row_fact_binds_exact_dependency_associations() {
         use crate::artifact_inventory::{ArtifactId, ArtifactSelectionId};
