@@ -33,6 +33,79 @@ impl OutputSink for QuietOutput {
 }
 type PublicationSession = ResidentSession<frunk::HNil, QuietOutput>;
 
+fn assert_rich_instances(
+    instances: &tidepool_toolchain::declaration_join::InstanceInventory,
+    base: Generation,
+    boolean_instance: Option<Generation>,
+) {
+    let base = SessionModule::lib(base).module_name();
+    let mut expected_classes = BTreeSet::from([
+        (
+            base.clone(),
+            "$fDisplayPublicRecord".to_owned(),
+            "Tidepool.Inspection.Display".to_owned(),
+            "Display".to_owned(),
+        ),
+        (
+            base.clone(),
+            "$fGenericPublicRecord".to_owned(),
+            "GHC.Internal.Generics".to_owned(),
+            "Generic".to_owned(),
+        ),
+        (
+            base.clone(),
+            "$fPublicClassInt".to_owned(),
+            base.clone(),
+            "PublicClass".to_owned(),
+        ),
+    ]);
+    let mut expected_families = BTreeSet::from([
+        (base.clone(), "Rep_PublicRecord".to_owned()),
+        (base.clone(), "D:R:PublicFamilyInt".to_owned()),
+    ]);
+    if let Some(generation) = boolean_instance {
+        let module = SessionModule::lib(generation).module_name();
+        expected_classes.insert((
+            module.clone(),
+            "$fPublicClassBool".to_owned(),
+            base,
+            "PublicClass".to_owned(),
+        ));
+        expected_families.insert((module, "D:R:PublicFamilyBool".to_owned()));
+    }
+    let actual_classes = instances
+        .classes
+        .iter()
+        .map(|instance| {
+            assert_eq!(instance.dfun.unit, "main");
+            assert_eq!(instance.dfun.namespace, ExportNamespace::Value);
+            assert_eq!(instance.class.namespace, ExportNamespace::Type);
+            assert!(instance.dfun.record_parent.is_none());
+            assert!(instance.class.record_parent.is_none());
+            (
+                instance.dfun.module.clone(),
+                instance.dfun.occurrence.clone(),
+                instance.class.module.clone(),
+                instance.class.occurrence.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(instances.classes.len(), expected_classes.len());
+    assert_eq!(actual_classes, expected_classes);
+    let actual_families = instances
+        .families
+        .iter()
+        .map(|family| {
+            assert_eq!(family.unit, "main");
+            assert_eq!(family.namespace, ExportNamespace::Type);
+            assert!(family.record_parent.is_none());
+            (family.module.clone(), family.occurrence.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(instances.families.len(), expected_families.len());
+    assert_eq!(actual_families, expected_families);
+}
+
 fn begin_execution(
     resident: &mut PublicationSession,
     source: &Arc<crate::session::RuntimeLexicalScopeLease>,
@@ -861,7 +934,11 @@ fn paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners() {
     );
     let base_intent = resident.freeze_private_execution(&base_admission).unwrap();
     let base = certify_declarations(&mut resident, &public_source, owner.clone(), base_intent);
-    assert_eq!(base.accepted_join_for_test().instances().classes.len(), 1);
+    assert_rich_instances(
+        base.accepted_join_for_test().instances(),
+        base_original,
+        None,
+    );
     assert!(matches!(
         resident
             .attempt_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
@@ -994,8 +1071,7 @@ fn paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners() {
     assert!(reserved > refused_generation);
     assert!(Arc::ptr_eq(publication.intent(), &intent));
     let proof = publication.accepted_join_for_test().clone();
-    assert_eq!(proof.instances().classes.len(), 2);
-    assert_eq!(proof.instances().families.len(), 2);
+    assert_rich_instances(proof.instances(), base_original, Some(a_second));
     assert!(proof.family_closure().len() >= 2);
     for (name, original) in [
         ("firstPrivate", a_first),
@@ -1053,7 +1129,7 @@ fn paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners() {
         .iter()
         .all(|reference| *reference < reserved));
     assert!(node.implementation_refs.contains(&b_generation));
-    assert_eq!(node.instances.classes.len(), 2);
+    assert_rich_instances(&node.instances, base_original, Some(a_second));
     assert_original_writes(&intent, resident.state.lib(), &expected_writes);
     assert_eq!(intent.native_write_ids(), [value_id]);
     let cold = recovery::load_domain_graph(
@@ -1522,7 +1598,18 @@ fn paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_su
         .instances()
         .classes
         .is_empty());
-    assert_tip_instance_counts(resident.state.lib(), value_only, 1, 1);
+    assert_rich_instances(
+        resident
+            .state
+            .lib()
+            .log
+            .certified_authored_at(initial)
+            .unwrap()
+            .instances(),
+        initial,
+        None,
+    );
+    assert_tip_instance_counts(resident.state.lib(), value_only, 3, 2);
     let baseline_intent = resident.freeze_private_execution(&baseline).unwrap();
     let baseline_publication =
         certify_declarations(&mut resident, &source, owner.clone(), baseline_intent);
@@ -1555,21 +1642,10 @@ fn paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_su
         .is_empty());
     let intent = resident.freeze_private_execution(&a).unwrap();
     let accepted_a = certify_declarations(&mut resident, &source, owner.clone(), intent.clone());
-    assert_eq!(
-        accepted_a
-            .accepted_join_for_test()
-            .instances()
-            .classes
-            .len(),
-        2
-    );
-    assert_eq!(
-        accepted_a
-            .accepted_join_for_test()
-            .instances()
-            .families
-            .len(),
-        2
+    assert_rich_instances(
+        accepted_a.accepted_join_for_test().instances(),
+        initial,
+        Some(private),
     );
     assert!(accepted_a
         .accepted_join_for_test()

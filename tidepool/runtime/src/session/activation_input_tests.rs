@@ -236,8 +236,19 @@ impl InputFixture {
         )
         .unwrap()
         .with_validation_include(self.recipe.include.clone());
-        let original = self
-            .producer
+        Self::fresh_with_selected_receiver(
+            library,
+            &self.recipe,
+            include_str!("fixtures/activation-input-receiver.hs"),
+            2,
+            Some(self.protocol_original_selection()),
+        )
+    }
+
+    fn protocol_original_selection(
+        &self,
+    ) -> Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection> {
+        self.producer
             .published_source_original_selection(
                 self.producer
                     .ordinary_original_compile_input()
@@ -248,14 +259,7 @@ impl InputFixture {
                     module: "Tidepool.Agent.Ref.Internal".into(),
                 },
             )
-            .expect("producer issues its actual RunRequest source selection");
-        Self::fresh_with_selected_receiver(
-            library,
-            &self.recipe,
-            include_str!("fixtures/activation-input-receiver.hs"),
-            2,
-            Some(original),
-        )
+            .expect("producer issues its actual RunRequest source selection")
     }
 
     fn fresh_in(session: SessionId, root: &tempfile::TempDir, recipe: &InputRecipe) -> TestSession {
@@ -310,16 +314,9 @@ impl InputFixture {
                 .begin_private_execution(ScopeId::ROOT)),
             Err(SessionError::MissingPublishedCompilerWorld(ScopeId::ROOT))
         ));
-        if let Some(original) = original {
+        if let Some(original) = &original {
             let public = resident.public_scope();
-            let staged = source_action(&mut resident, |resident, _| {
-                resident.stage_published_source_originals_in(public, original)
-            })
-            .expect("stage the same producer's original closure for the receiver World");
-            source_action(&mut resident, |resident, _| {
-                resident.publish_source_originals(staged)
-            })
-            .expect("publish the producer-issued selection before World capture");
+            publish_protocol_original(&mut resident, public, original.clone());
         }
         resident.bootstrap_world(recipe);
         let previous_context = resident.run_context();
@@ -332,6 +329,15 @@ impl InputFixture {
             .unwrap();
         let (bound, receiver, reservation) =
             compile_checked_binding(&mut resident, recipe, receiver_source, execution.clone());
+        if let Some(original) = &original {
+            assert!(receiver
+                .original_execution_context()
+                .unwrap()
+                .published_source_original_selections()
+                .unwrap()
+                .iter()
+                .any(|selected| selected.same_authenticated_selection(original)));
+        }
         assert_eq!(
             bound.len(),
             binding_count,
@@ -496,6 +502,27 @@ impl InputFixture {
         );
         (submission, activation)
     }
+}
+
+fn publish_protocol_original(
+    resident: &mut TestSession,
+    scope: ScopeId,
+    original: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
+) {
+    let staged = source_action(resident, |resident, _| {
+        resident.stage_published_source_originals_in(scope, original.clone())
+    })
+    .expect("stage the actual protocol Original for its receiving scope");
+    source_action(resident, |resident, _| {
+        resident.publish_source_originals(staged)
+    })
+    .expect("publish the issued protocol selection before World capture");
+    assert!(resident
+        .state
+        .lib()
+        .published_source_selections_in(scope)
+        .iter()
+        .any(|selected| Arc::ptr_eq(selected, &original)));
 }
 
 /// Run one runtime source phase under the compiler transaction it requires.
@@ -5284,7 +5311,19 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .unwrap_or_else(|error| {
             panic!("fresh declaration library must attach recovery: {error:?}")
         });
-    let mut resident = InputFixture::fresh_with_library(library, &recipe);
+    let protocol_bootstrap = InputFixture::compile(
+        include_str!("fixtures/activation-input-function.hs"),
+        false,
+        session,
+    );
+    let protocol_original = protocol_bootstrap.protocol_original_selection();
+    let mut resident = InputFixture::fresh_with_selected_receiver(
+        library,
+        &recipe,
+        include_str!("fixtures/activation-input-receiver.hs"),
+        2,
+        Some(protocol_original.clone()),
+    );
     let selected_sources =
         |selection: &tidepool_codegen::prepared_program::SourceDomainSelection| {
             selection
@@ -5337,6 +5376,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         ..resident.public_context()
     };
     resident.set_run_context(public_context).unwrap();
+    publish_protocol_original(&mut resident, public, protocol_original);
     resident.bootstrap_world(&recipe);
     let before = resident.public_visibility_snapshot_in(public).unwrap();
     let before_binding_ids = resident
@@ -7071,7 +7111,8 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         false,
         SessionId(1750),
     );
-    let mut source = InputFixture::fresh_with_receiver(
+    let protocol_original = fixture.protocol_original_selection();
+    let mut source = InputFixture::fresh_with_selected_receiver(
         SessionLib::open(
             fixture.session,
             fixture.root.path(),
@@ -7081,7 +7122,8 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         .with_validation_include(fixture.recipe.include.clone()),
         &fixture.recipe,
         include_str!("fixtures/owned-result-receiver.hs"),
-        4,
+        5,
+        Some(protocol_original.clone()),
     );
     let reservation = fixture.start(&mut source);
     let (submission, activation) = fixture.deliver(&mut source, reservation, 41);
@@ -7101,6 +7143,12 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         .retain_visible_binding_custody("activationFunctionReply")
         .unwrap()
         .unwrap();
+    let engine = source.state.prepared_mut().unwrap();
+    let collections = engine.heap_stats().gc_count;
+    engine.quiesce_and_collect_now().unwrap();
+    assert_eq!(engine.heap_stats().gc_count, collections + 1);
+    assert!(source.parked_holes().contains(&submission.cont_id()));
+    assert!(source.parked_holes().contains(&activation.cont_id()));
     let publication = suspended(
         source_action(&mut source, |source, settlement| {
             source.resume_handle(activation, reply, settlement)
@@ -7180,7 +7228,7 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
     );
     drop(source);
     let destination_root = tempfile::tempdir().unwrap();
-    let mut destination = InputFixture::fresh_with_receiver(
+    let mut destination = InputFixture::fresh_with_selected_receiver(
         SessionLib::open(
             SessionId(1751),
             destination_root.path(),
@@ -7190,18 +7238,17 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         .with_validation_include(fixture.recipe.include.clone()),
         &fixture.recipe,
         include_str!("fixtures/owned-result-receiver.hs"),
-        4,
+        5,
+        Some(protocol_original),
     );
     let imported = destination.import_result(parcel).unwrap();
     let destination_lease = destination.lease_bindings(&[]);
     assert!(imported.belongs_to_bindings(&destination_lease));
     assert_eq!(&expected, imported.type_witness());
-    destination
-        .state
-        .require_prepared()
-        .unwrap()
-        .quiesce_and_collect_now()
-        .unwrap();
+    let engine = destination.state.require_prepared().unwrap();
+    let collections = engine.heap_stats().gc_count;
+    engine.quiesce_and_collect_now().unwrap();
+    assert_eq!(engine.heap_stats().gc_count, collections + 1);
     let probe = destination
         .retain_visible_binding_custody("ownedResultProbe")
         .unwrap()
@@ -7222,6 +7269,27 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         panic!("native callable result probe must complete")
     };
     assert_eq!(result.to_json(), serde_json::json!(42));
+    let entry = destination
+        .retain_visible_binding_custody("ownedEntryProbe")
+        .unwrap()
+        .unwrap();
+    let ResidentOutcome::Completed { result, .. } =
+        source_action(&mut destination, |destination, settlement| {
+            destination.run_rooted_entry_borrowed(
+                "applyEntryAfterRetirement",
+                &entry,
+                41,
+                RealmId::ROOT,
+                None,
+                settlement,
+            )
+        })
+        .unwrap()
+    else {
+        panic!("native entry probe must complete after collection")
+    };
+    assert_eq!(result.to_json(), serde_json::json!(42));
+    drop(entry);
     drop(probe);
     drop(imported);
     drop(destination_lease);

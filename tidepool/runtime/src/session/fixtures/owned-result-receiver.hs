@@ -6,3 +6,5 @@ let activationReceiver :: AgentProtocol () -> Eff '[Core.ActorLocal AgentProtoco
     activationFunctionReply value = value + 1
     ownedResultProbe :: ResponseResult (Int -> Int) -> Eff '[Core.ActorLocal AgentProtocol, Core.AgentTools, Core.AgentSession, Core.Actor, Core.FsRead, Core.Worktree, Core.Notifications, Core.Console, Core.Sleep] Int
     ownedResultProbe (ResponseResult value _ _) = pure (value 41)
+    ownedEntryProbe :: Int -> Eff '[Core.ActorLocal AgentProtocol, Core.AgentTools, Core.AgentSession, Core.Actor, Core.FsRead, Core.Worktree, Core.Notifications, Core.Console, Core.Sleep] Int
+    ownedEntryProbe value = pure (value + 1)
