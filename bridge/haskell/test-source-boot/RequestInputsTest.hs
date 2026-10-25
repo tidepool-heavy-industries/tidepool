@@ -760,8 +760,12 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
             Left failure -> throwIO failure
             Right _ -> fail ("World value receiver accepted " ++ label)
         summary facts = (worldInputsIdentityBytes facts,worldInputsCompilerIdentity facts
-          ,worldInputsRetainedCharge facts
           ,Map.map (worldBindingRowFactCID . worldBindingRow) (worldInputsBindings facts))
+        logicalCharge facts (physicalBytes,physicalEntries) = do
+          let (bytes,entries) = worldInputsRetainedCharge facts
+          unless (bytes >= physicalBytes && entries >= physicalEntries)
+            (fail "World retention charge does not cover its independent live physical census")
+          pure (bytes-physicalBytes,entries-physicalEntries)
     original <- readCold "value-initial" initial
     (aliases,counts,_) <- worldValueColdCensus initial
     unless (Map.size aliases == 2 && Set.size (Set.fromList (Map.elems aliases)) == 1
@@ -803,6 +807,12 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
         coldPhysical <- worldValueColdPhysical cold
         nextPhysicalCharge <- worldValuePhysicalCharge nextPhysical
         coldPhysicalCharge <- worldValuePhysicalCharge coldPhysical
+        nextLogicalCharge <- logicalCharge next nextPhysicalCharge
+        coldLogicalCharge <- logicalCharge independent coldPhysicalCharge
+        unless (nextLogicalCharge == coldLogicalCharge)
+          (fail ("incremental logical retention differs from cold after independent physical census: " ++ name
+            ++ "; charges=" ++ show (worldInputsRetainedCharge next,worldInputsRetainedCharge independent)
+            ++ "; physical=" ++ show (nextPhysicalCharge,coldPhysicalCharge)))
         unless (summary next == summary independent)
           (fail ("incremental receiver differs from full cold admission: " ++ name
             ++ "; world=" ++ show (worldInputsIdentityBytes next == worldInputsIdentityBytes independent)
@@ -819,7 +829,8 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
           refuse ("a missing dependency transition at " ++ name)
             (readNext ("value-missing-edit-" ++ name) before omitted)
           retry <- worldSuccessorFacts <$> readNext ("value-retry-" ++ name) before successor
-          unless (summary retry == summary independent)
+          unless (summary retry == summary next
+              && worldInputsRetainedCharge retry == worldInputsRetainedCharge next)
             (fail "refused value transition changed its held predecessor")
         writeIORef physical nextPhysical
         pure (next,cold:observed)
