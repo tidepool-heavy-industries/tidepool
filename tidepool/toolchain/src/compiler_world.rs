@@ -9405,8 +9405,9 @@ mod answer_tests {
     #[test]
     #[ignore = "requires declared compiler; genuine captured TYPE fixture issuer owns it"]
     fn genuine_captured_type_transport_retains_visible_dependency_leaf() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
         let encoded = world_captured_value_transport_fixture(directory.path()).unwrap();
+        std::fs::write(directory.path().join("packet.cbor"), &encoded).unwrap();
         assert_eq!(
             answer_array(&answer_cbor(&encoded).unwrap(), 4)
                 .unwrap()
@@ -9418,8 +9419,9 @@ mod answer_tests {
     #[test]
     #[ignore = "requires declared compiler; genuine World TYPE transport fixture issuer owns it"]
     fn genuine_world_type_transport_matches_cold_dependency_census() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
         let encoded = world_value_transport_fixture(directory.path()).unwrap();
+        std::fs::write(directory.path().join("packet.cbor"), &encoded).unwrap();
         let packet = answer_cbor(&encoded).unwrap();
         let fields = answer_array(&packet, 4).unwrap();
         assert_eq!(answer_text(&fields[0]).unwrap(), "TPCWVALUETYPEFIXTURE1");

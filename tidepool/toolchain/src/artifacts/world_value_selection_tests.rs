@@ -320,18 +320,33 @@ fn prepare_checked_value_type_pair(
             unit: "main".into(),
             module: row.owner().module_name(),
         };
+        let declaration_owner = crate::declaration_join::ExactModuleIdentity {
+            unit: "main".into(),
+            module: tidepool_repr::SessionModule::lib(tidepool_repr::Generation(
+                second_generation + 10,
+            ))
+            .module_name(),
+        };
         assert!(
             second
                 .type_product()
-                .dependencies()
-                .values()
-                .any(|dependency| {
-                    matches!(
-                        dependency.entry().payload,
-                        crate::artifact_inventory::ArtifactPayload::Canonical(_)
-                    ) && dependency.entry().requirements.contains(&first_owner)
-                }),
-            "a genuine canonical declaration must require the input value interface"
+                .leaf_entry()
+                .requirements
+                .contains(&declaration_owner),
+            "B must require the actual nominal Lib owner"
+        );
+        let declaration = second
+            .type_product()
+            .dependencies()
+            .values()
+            .find(|dependency| dependency.entry().descriptor.owner == declaration_owner)
+            .expect("complete B product retains its exact Lib dependency");
+        assert!(
+            matches!(
+                declaration.entry().payload,
+                crate::artifact_inventory::ArtifactPayload::Canonical(_)
+            ) && declaration.entry().requirements.contains(&first_owner),
+            "the actual canonical Lib must require the input value interface"
         );
     }
     (row, second)
