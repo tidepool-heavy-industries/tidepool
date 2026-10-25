@@ -954,7 +954,8 @@ pub(crate) struct CapturedCompilerStage {
     physical_artifacts: ArtifactView,
     output: IssuedOriginalOutput,
     operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    facts: BTreeMap<ArtifactId, crate::artifact_inventory::ArtifactFactsHandle>,
+    // Value receipts precede interning and retain their original fact owner.
+    original_value_facts: BTreeMap<ArtifactId, crate::artifact_inventory::ArtifactFactsHandle>,
     // Admission issues only demanded rows. Their owner survives every target
     // projection of this physical cohort; retained availability is not demand.
     groups: std::sync::Mutex<
@@ -966,7 +967,7 @@ impl std::fmt::Debug for CapturedCompilerStage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CapturedCompilerStage")
-            .field("facts", &self.facts)
+            .field("original_value_facts", &self.original_value_facts)
             .field("groups", &self.groups)
             .finish_non_exhaustive()
     }
@@ -1091,10 +1092,11 @@ impl<'a> PhysicalCohortInputs<'a> {
             .observed_payload(&entry.descriptor.id)
             .is_some_and(|resident| {
                 resident.has_fact_owner(entry.fact_owner())
-                    || self.stage.producer_certificates().iter().any(|produced| {
-                        produced.descriptor.id == entry.descriptor.id
-                            && entry.has_fact_owner(produced.fact_owner())
-                    })
+                    || self
+                        .stage
+                        .original_value_facts
+                        .get(&entry.descriptor.id)
+                        .is_some_and(|produced| entry.has_fact_owner(produced))
             })
     }
 }
@@ -1152,8 +1154,11 @@ impl CapturedCompilerStage {
                 ));
             }
         }
-        let producer_certificates = entries.clone().into();
-        let mut facts = BTreeMap::new();
+        let producer_ids = entries
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<Vec<_>>();
+        let mut original_value_facts = BTreeMap::new();
         for entry in &entries {
             if entry.descriptor.kind != crate::artifact_inventory::ArtifactKind::ValueInterface {
                 continue;
@@ -1162,7 +1167,7 @@ impl CapturedCompilerStage {
                 .inventory
                 .reserve::<(ArtifactId, crate::artifact_inventory::ArtifactFactsHandle)>(1)
                 .map_err(|error| compiler_evidence_failure(error.into()))?;
-            facts.insert(entry.descriptor.id, entry.fact_owner().clone());
+            original_value_facts.insert(entry.descriptor.id, entry.fact_owner().clone());
         }
         let admission = baseline.inventory().admit_product_artifacts(
             baseline,
@@ -1170,6 +1175,11 @@ impl CapturedCompilerStage {
             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             Some(selection),
         )?;
+        let producer_certificates = producer_ids
+            .into_iter()
+            .map(|id| admission.producer_entry(id).map(Arc::clone))
+            .collect::<Result<Vec<_>, _>>()?
+            .into();
         let physical = admission.artifacts.clone();
         let projection = selection
             .compiler_projection(&physical)
@@ -1206,7 +1216,7 @@ impl CapturedCompilerStage {
             physical_artifacts: physical,
             output,
             operation: Arc::clone(&validation.inventory),
-            facts,
+            original_value_facts,
             groups: Default::default(),
         })
     }

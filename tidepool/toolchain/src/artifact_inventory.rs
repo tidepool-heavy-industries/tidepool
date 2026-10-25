@@ -935,6 +935,18 @@ pub(crate) struct ArtifactAdmission {
     supplied: BTreeMap<ArtifactId, SuppliedArtifactOutcome>,
 }
 
+impl ArtifactAdmission {
+    pub(crate) fn producer_entry(
+        &self,
+        id: ArtifactId,
+    ) -> Result<&Arc<ArtifactEntry>, CompileError> {
+        self.supplied
+            .get(&id)
+            .map(|outcome| &outcome.entry)
+            .ok_or_else(|| failure("compiler output lacks its admitted producer outcome"))
+    }
+}
+
 /// Ownership issued by the admission solver, before deriving a selected view.
 struct IssuedArtifactCustody {
     lease: Arc<ViewLease>,
@@ -4574,14 +4586,11 @@ impl ArtifactInventory {
             .entries()
             .iter()
             .map(|entry| {
-                let incoming = admission
-                    .supplied
-                    .get(&entry.descriptor.id)
-                    .ok_or_else(|| failure("current cohort lacks its admitted producer outcome"))?;
-                if incoming.entry.as_ref() != entry.as_ref() {
-                    return Err(metadata_conflict::refusal(entry, &incoming.entry));
+                let incoming = admission.producer_entry(entry.descriptor.id)?;
+                if incoming.as_ref() != entry.as_ref() {
+                    return Err(metadata_conflict::refusal(entry, incoming));
                 }
-                Ok(Arc::clone(&incoming.entry))
+                Ok(Arc::clone(incoming))
             })
             .collect::<Result<Vec<_>, CompileError>>()?;
         let custody = self.issue_selected_custody(

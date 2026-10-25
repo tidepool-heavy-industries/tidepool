@@ -98,9 +98,9 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
         .map(|demand| {
             let inventory = ArtifactInventory::default();
             let mut offer_validation =
-                crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
-                    Arc::clone(&offer_operation),
-                );
+                crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(Arc::clone(
+                    &offer_operation,
+                ));
             let entries = vec![Arc::clone(entry)];
             CompilerSourceSupport::from_selected_issuance(
                 CompilerInputProjection::from_issued_entries(&entries).unwrap(),
@@ -168,9 +168,9 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
     let shared_inputs = acquisitions.map(|entry| {
         let inventory = ArtifactInventory::default();
         let mut offer_validation =
-            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
-                Arc::clone(&offer_operation),
-            );
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(Arc::clone(
+                &offer_operation,
+            ));
         let entries = vec![Arc::clone(entry)];
         let base = inventory
             .admit_shared_with_demand(
