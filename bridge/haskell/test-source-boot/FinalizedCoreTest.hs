@@ -600,7 +600,7 @@ capturedConsumerChecks libdir work scope artifact coreBytes summary proof = do
     bracket (BS.writeFile (exactPath artifact) (BS.singleton 0) >> BS.writeFile corePath (BS.singleton 0))
       (\_ -> BS.writeFile (exactPath artifact) original >> BS.writeFile corePath coreBytes) $ \_ -> do
         let consume = runGhc (Just libdir) $ do
-              _ <- setSessionDynFlags (gopt_unset (ms_hspp_opts summary) Opt_ExternalInterpreter)
+              _ <- setSessionDynFlags (ms_hspp_opts summary)
                 {backend=noBackend,ghcLink=NoLink,importPaths=[work],hiDir=Just work,objectDir=Just work}
               fresh <- getSession
               loaded <- liftIO (requireRight =<< readScopedInterfaces fresh scope [artifact])
