@@ -37,6 +37,9 @@ TRACE_QUEUE_LIMIT = 256
 TRACE_QUEUE_BYTE_LIMIT = 64 << 10
 TRANSACTION_DIRECTORY_LIMIT = 4096
 TRANSACTION_CAPTURE_LIMIT = 256
+# Diagnostic request/cwd observations use the compiler's 16 MiB request frame
+# ceiling. Hash incrementally; oversized or unstable evidence stays incomplete.
+TRANSACTION_REQUEST_BYTE_LIMIT = 16 << 20
 COMPILER_SELECTION_RESOURCES = (
     'TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT',
     'TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG',
@@ -859,6 +862,72 @@ def bounded_trace_identity(value):
             and len(value.encode('utf-8')) <= TRACE_IDENTITY_BYTE_LIMIT)
 
 
+def transaction_input_identity(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError('transaction input is not a regular file')
+        if before.st_size == 0:
+            raise ValueError('transaction input is empty')
+        if before.st_size > TRANSACTION_REQUEST_BYTE_LIMIT:
+            raise ValueError('transaction input exceeds diagnostic request bound')
+        digest, size = hashlib.sha256(), 0
+        while chunk := stream.read(64 << 10):
+            size += len(chunk)
+            if size > TRANSACTION_REQUEST_BYTE_LIMIT:
+                raise ValueError('transaction input exceeds diagnostic request bound')
+            digest.update(chunk)
+        after = os.fstat(stream.fileno())
+        current = path.stat(follow_symlinks=False)
+    def identity(value):
+        return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+    if identity(before) != identity(after) or identity(before) != identity(current):
+        raise ValueError('transaction input changed during observation')
+    return size, digest.hexdigest()
+
+
+def associate_prepared_captures(summaries):
+    transactions = summaries['transactions']
+    associations = {}
+    if (any(row['phase'] == 'prepared' for row in transactions)
+            and summaries['transaction_discovery_complete']
+            and not summaries['transactions_truncated'] and not summaries['issues']):
+        by_input = {}
+        for row in transactions:
+            directory = Path(row['path']).parent
+            try:
+                if (directory / 'transaction.json.pending').exists() or (directory / 'transaction.json.pending').is_symlink():
+                    raise ValueError('transaction capture still has a pending marker')
+                key = (transaction_input_identity(directory / 'compiler-request.bin'),
+                       transaction_input_identity(directory / 'compiler-cwd.bin'))
+                by_input.setdefault(key, []).append(row)
+            except (OSError, ValueError) as error:
+                summaries['issues'].append(f"{row['path']}: cannot associate prepared capture: {error}")
+        # Request content is diagnostic correlation, not a physical-attempt ID.
+        # Preparation may retain a separate directory from relocated execution;
+        # neither a phase label nor a same-request retry proves unique execution.
+        if not summaries['issues']:
+            for rows in by_input.values():
+                prepared = [row for row in rows if row['phase'] == 'prepared']
+                completed = [row for row in rows if row['phase'] == 'compiler_completed']
+                if len(rows) != 2 or len(prepared) != 1 or len(completed) != 1:
+                    continue
+                before, after = prepared[0], completed[0]
+                if (before['submission'] == 'not_attempted'
+                        and before['compiler_process_success'] is None
+                        and after['submission'] == 'observed'
+                        and type(after['compiler_process_success']) is bool
+                        and before['primary_error'] is None and after['primary_error'] is None):
+                    associations[before['path']] = after['path']
+    for row in transactions:
+        if row['path'] in associations:
+            row['associated_completed_capture'] = associations[row['path']]
+            row['association_basis'] = 'unique_same_case_request_and_cwd_content'
+        elif row['phase'] != 'compiler_completed':
+            summaries['issues'].append(f"{row['path']}: compiler transaction capture is not completed")
+
+
 def diagnostic_summaries(artifact_root):
     """Keep bounded compiler outcome/timing evidence after success scratch removal."""
     def read_json(path):
@@ -918,10 +987,9 @@ def diagnostic_summaries(artifact_root):
             report = read_json(path)
             summary = {key: report.get(key) for key in (
                 'phase', 'compiler_process_success', 'original_directory',
-                'artifact_bytes', 'artifact_byte_limit', 'artifact_entry_limit')}
+                'artifact_bytes', 'artifact_byte_limit', 'artifact_entry_limit',
+                'submission', 'primary_error')}
             summary['path'] = str(path)
-            if report.get('phase') != 'compiler_completed':
-                summaries['issues'].append(f'{path}: compiler transaction capture is not completed')
             files = report['files']
             if not isinstance(files, list):
                 raise ValueError('compiler diagnostic files are not an array')
@@ -938,6 +1006,7 @@ def diagnostic_summaries(artifact_root):
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
             summaries['issues'].append(f'{path}: {error}')
     summaries['transactions_truncated'] = transaction_count > len(transactions)
+    associate_prepared_captures(summaries)
     def summarize_compiler(compiler):
         result = {'path': str(compiler), 'authority': False, 'issues': []}
         marker = compiler / 'owned-service.json'

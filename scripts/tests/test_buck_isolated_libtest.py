@@ -418,6 +418,90 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(len(transaction['issues']), 8)
         self.assertEqual(len(transaction['issues'][0]), 2048)
 
+    def write_transaction_capture(self, root, name, phase, **changes):
+        directory = root / 'compiler-transactions' / name
+        directory.mkdir(parents=True)
+        report = {'phase': phase, 'files': [], 'issues': [], 'primary_error': None,
+                  'submission': 'observed' if phase == 'compiler_completed' else 'not_attempted',
+                  'compiler_process_success': True if phase == 'compiler_completed' else None}
+        report.update(changes)
+        (directory / 'transaction.json').write_text(json.dumps(report))
+        (directory / 'compiler-request.bin').write_bytes(b'fixed request with relocated output path')
+        (directory / 'compiler-cwd.bin').write_bytes(b'/captured/working/directory')
+        return directory
+
+    def test_relocated_preparation_associates_with_complete_execution_without_relabeling(self):
+        for success in (True, False):
+            with self.subTest(compiler_process_success=success):
+                root = Path(self.tmp.name) / f'relocated-{success}'
+                preparation = self.write_transaction_capture(root, 'input', 'prepared')
+                execution = self.write_transaction_capture(root, 'output', 'compiler_completed',
+                                                           compiler_process_success=success)
+                summary = runner.diagnostic_summaries(root)
+                self.assertEqual(summary['issues'], [])
+                rows = {row['path']: row for row in summary['transactions']}
+                prepared = rows[str(preparation / 'transaction.json')]
+                self.assertEqual(prepared['phase'], 'prepared')
+                self.assertEqual(prepared['submission'], 'not_attempted')
+                self.assertIsNone(prepared['compiler_process_success'])
+                self.assertEqual(prepared['associated_completed_capture'], str(execution / 'transaction.json'))
+                self.assertEqual(rows[str(execution / 'transaction.json')]['compiler_process_success'], success)
+                self.assertEqual(summary['physical_compiler_timing']['physical_request_count'], 0)
+                self.assertEqual(summary['physical_compiler_timing']['data_status'], 'trace_absent')
+                self.assertFalse(summary['physical_compiler_timing']['complete'])
+
+    def test_prepared_capture_requires_unique_complete_same_case_request_and_cwd(self):
+        variants = ('absent', 'request', 'cwd', 'another_case', 'duplicate_preparation',
+                    'duplicate_execution', 'started', 'preparing', 'refused', 'wrong_submission',
+                    'missing_outcome', 'primary_error', 'capture_issue', 'pending', 'missing_input',
+                    'symlink', 'nonregular', 'empty_request', 'empty_cwd')
+        for variant in variants:
+            with self.subTest(variant=variant):
+                root = Path(self.tmp.name) / f'uncorrelated-{variant}'
+                phase = {'preparing': 'preparing', 'refused': 'preparation_refused'}.get(variant, 'prepared')
+                preparation = self.write_transaction_capture(root, 'input', phase)
+                if variant != 'absent':
+                    execution = self.write_transaction_capture(
+                        root / 'different-case' if variant == 'another_case' else root,
+                        'output', 'compiler_started' if variant == 'started' else 'compiler_completed',
+                        **({'submission': 'not_observed'} if variant == 'wrong_submission' else
+                           {'compiler_process_success': None} if variant == 'missing_outcome' else
+                           {'primary_error': 'failed capture'} if variant == 'primary_error' else
+                           {'issues': ['capture omitted bytes']} if variant == 'capture_issue' else {}))
+                    if variant in ('request', 'cwd'):
+                        (execution / f'compiler-{variant}.bin').write_bytes(b'different content')
+                    elif variant in ('empty_request', 'empty_cwd'):
+                        name = variant.removeprefix('empty_')
+                        for directory in (preparation, execution):
+                            (directory / f'compiler-{name}.bin').write_bytes(b'')
+                    elif variant == 'duplicate_preparation':
+                        self.write_transaction_capture(root, 'another-input', 'prepared')
+                    elif variant == 'duplicate_execution':
+                        self.write_transaction_capture(root, 'another-output', 'compiler_completed')
+                    elif variant == 'pending':
+                        (execution / 'transaction.json.pending').write_text('{}')
+                    elif variant in ('missing_input', 'symlink', 'nonregular'):
+                        path = execution / 'compiler-request.bin'
+                        path.unlink()
+                        if variant == 'symlink':
+                            path.symlink_to(preparation / 'compiler-request.bin')
+                        elif variant == 'nonregular':
+                            path.mkdir()
+                summary = runner.diagnostic_summaries(root)
+                self.assertTrue(summary['issues'])
+                self.assertFalse(any('associated_completed_capture' in row for row in summary['transactions']))
+
+    def test_preparation_association_refuses_incomplete_discovery_and_oversized_inputs(self):
+        for limit in ('TRANSACTION_CAPTURE_LIMIT', 'TRANSACTION_DIRECTORY_LIMIT', 'TRANSACTION_REQUEST_BYTE_LIMIT'):
+            with self.subTest(limit=limit):
+                root = Path(self.tmp.name) / limit
+                self.write_transaction_capture(root, 'input', 'prepared')
+                self.write_transaction_capture(root, 'output', 'compiler_completed')
+                with patch.object(runner, limit, 1):
+                    summary = runner.diagnostic_summaries(root)
+                self.assertTrue(summary['issues'] or summary['transactions_truncated'])
+                self.assertFalse(any('associated_completed_capture' in row for row in summary['transactions']))
+
     def test_exception_paths_capture_hosted_cleanup_and_keep_process_fact_separate(self):
         for index, error in enumerate((subprocess.TimeoutExpired([], 1),
                                       runner.RunnerInterrupted(signal.SIGTERM), OSError('spawn failed'))):
