@@ -28,6 +28,7 @@ use crate::session::{
     ModuleEnv, SessionCompileView, SessionId,
 };
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
@@ -153,6 +154,51 @@ struct InputFixture {
     producer: CompiledTurn,
 }
 
+#[derive(Clone)]
+struct ProtocolOriginal {
+    selection: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
+    constructors: BTreeSet<(
+        tidepool_repr::execution_schema::ConstructorIdentity,
+        tidepool_repr::DataConId,
+    )>,
+}
+
+fn run_request_constructors(
+    turn: &CompiledTurn,
+) -> BTreeSet<(
+    tidepool_repr::execution_schema::ConstructorIdentity,
+    tidepool_repr::DataConId,
+)> {
+    let constructors = turn
+        .certification
+        .as_ref()
+        .unwrap()
+        .linked_target
+        .as_ref()
+        .unwrap()
+        .acquired()
+        .flat_map(|acquired| {
+            acquired
+                .code()
+                .body()
+                .definitions()
+                .constructors()
+                .iter()
+                .filter(|decl| {
+                    decl.identity.symbol.unit == "main"
+                        && decl.identity.symbol.namespace == "constructor"
+                        && decl.identity.symbol.record_parent.is_none()
+                        && decl.identity.symbol.module == "Tidepool.Agent.Ref.Internal"
+                        && decl.identity.symbol.occurrence == "RunRequest"
+                })
+                .map(|decl| (decl.identity.clone(), decl.host_id))
+                .collect::<Vec<_>>()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(constructors.len(), 1, "one issued RunRequest constructor");
+    constructors
+}
+
 impl InputFixture {
     fn compile(source: &str, opaque: bool, session: SessionId) -> Self {
         let (root, recipe) = Self::source_recipe(opaque);
@@ -242,14 +288,13 @@ impl InputFixture {
             &self.recipe,
             include_str!("fixtures/activation-input-receiver.hs"),
             2,
-            Some(self.protocol_original_selection()),
+            Some(self.protocol_original()),
         )
     }
 
-    fn protocol_original_selection(
-        &self,
-    ) -> Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection> {
-        self.producer
+    fn protocol_original(&self) -> ProtocolOriginal {
+        let selection = self
+            .producer
             .published_source_original_selection(
                 self.producer
                     .ordinary_original_compile_input()
@@ -260,7 +305,11 @@ impl InputFixture {
                     module: "Tidepool.Agent.Ref.Internal".into(),
                 },
             )
-            .expect("producer issues its actual RunRequest source selection")
+            .expect("producer issues its actual RunRequest source selection");
+        ProtocolOriginal {
+            selection,
+            constructors: run_request_constructors(&self.producer),
+        }
     }
 
     fn fresh_in(session: SessionId, root: &tempfile::TempDir, recipe: &InputRecipe) -> TestSession {
@@ -293,7 +342,7 @@ impl InputFixture {
         recipe: &InputRecipe,
         receiver_source: &str,
         binding_count: usize,
-        original: Option<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
+        original: Option<ProtocolOriginal>,
     ) -> TestSession {
         let mut resident = TestSession::unbootstrapped(
             frunk::HNil,
@@ -317,7 +366,7 @@ impl InputFixture {
         ));
         if let Some(original) = &original {
             let public = resident.public_scope();
-            publish_protocol_original(&mut resident, public, original.clone());
+            publish_protocol_original(&mut resident, public, original.selection.clone());
         }
         resident.bootstrap_world(recipe);
         let previous_context = resident.run_context();
@@ -331,13 +380,56 @@ impl InputFixture {
         let (bound, receiver, reservation) =
             compile_checked_binding(&mut resident, recipe, receiver_source, execution.clone());
         if let Some(original) = &original {
-            assert!(receiver
-                .original_execution_context()
-                .unwrap()
+            let receiver_context = receiver.original_execution_context().unwrap();
+            let published_roles =
+                |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
+                    context
+                        .compiler_input_roles()
+                        .into_iter()
+                        .filter(tidepool_toolchain::artifact_inventory::CompilerInputRole::is_published_source_original)
+                        .collect::<Vec<_>>()
+                };
+            let expected_roles = published_roles(original.selection.context());
+            assert_eq!(expected_roles.len(), 1);
+            let tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal {
+                interface,
+                original: source_original,
+                ..
+            } = &expected_roles[0]
+            else {
+                panic!("producer selection carries its published Original role")
+            };
+            let selections = receiver_context
                 .published_source_original_selections()
-                .unwrap()
+                .unwrap();
+            let selected = selections
                 .iter()
-                .any(|selected| selected.same_authenticated_selection(original)));
+                .find(|selected| {
+                    selected.public_root() == original.selection.public_root()
+                        && selected.revision() == original.selection.revision()
+                })
+                .expect("receiver retains the producer's protocol publication");
+            assert_eq!(published_roles(selected.context()), expected_roles);
+            let producer_graph = original
+                .selection
+                .context()
+                .artifact_view()
+                .capture_graph_selection();
+            let receiver_graph = receiver_context.artifact_view().capture_graph_selection();
+            for artifact in [interface, source_original] {
+                let expected = producer_graph
+                    .namespace
+                    .iter()
+                    .find(|binding| &binding.artifact == artifact)
+                    .expect("producer retains the exact protocol artifact binding");
+                let received = receiver_graph
+                    .namespace
+                    .iter()
+                    .find(|binding| &binding.artifact == artifact)
+                    .expect("receiver retains the exact protocol artifact binding");
+                assert_eq!(received, expected);
+            }
+            assert_eq!(run_request_constructors(&receiver), original.constructors);
         }
         assert_eq!(
             bound.len(),
@@ -5317,7 +5409,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         false,
         session,
     );
-    let protocol_original = protocol_bootstrap.protocol_original_selection();
+    let protocol_original = protocol_bootstrap.protocol_original();
     let mut resident = InputFixture::fresh_with_selected_receiver(
         library,
         &recipe,
@@ -5377,7 +5469,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         ..resident.public_context()
     };
     resident.set_run_context(public_context).unwrap();
-    publish_protocol_original(&mut resident, public, protocol_original);
+    publish_protocol_original(&mut resident, public, protocol_original.selection.clone());
     resident.bootstrap_world(&recipe);
     let before = resident.public_visibility_snapshot_in(public).unwrap();
     let before_binding_ids = resident
@@ -5459,6 +5551,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     );
 
     let (bound, producer, reservation) = checked.compile_binding(&mut resident, 1);
+    assert_eq!(
+        run_request_constructors(&producer),
+        protocol_original.constructors
+    );
     assert!(bound.is_empty());
     assert!(resident
         .current_decl_heads_in(producer_scope)
@@ -7112,7 +7208,7 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         false,
         SessionId(1750),
     );
-    let protocol_original = fixture.protocol_original_selection();
+    let protocol_original = fixture.protocol_original();
     let mut source = InputFixture::fresh_with_selected_receiver(
         SessionLib::open(
             fixture.session,
