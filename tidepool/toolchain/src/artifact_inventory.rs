@@ -7504,7 +7504,8 @@ impl ArtifactView {
                     "cached checked value TYPE product differs from its expected closure",
                 ));
             }
-            return Ok(product.clone());
+            // Even a cache hit must validate and retain the actual produced issuer.
+            return prepare(&[], Some(product.clone()));
         }
         let mut physical = cache.values().rev().cloned().collect::<Vec<_>>();
         self.lease
@@ -7628,7 +7629,7 @@ impl ArtifactView {
                     ));
                 }
             }
-            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_materializations(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
+            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_products(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
             retained.insert(key, complete.clone());
             return Ok(complete);
         }
@@ -7702,7 +7703,7 @@ impl ArtifactView {
             return Ok(None);
         };
         let leaves = self.checked_value_materializations(&retained, metadata);
-        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_materializations(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
+        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_products(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
         retained.insert(key, complete.clone());
         Ok(Some(complete))
     }
