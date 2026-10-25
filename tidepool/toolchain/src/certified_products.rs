@@ -11496,19 +11496,7 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
     available: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
-    validate_owned_originals_with_validation(
-        products,
-        current_groups,
-        available,
-        validation,
-        OriginalNativeUse::SelectedGroups,
-    )
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OriginalNativeUse {
-    SelectedGroups,
-    Availability,
+    validate_owned_originals_with_validation(products, current_groups, available, validation)
 }
 
 pub(crate) fn validate_available_originals_with_validation(
@@ -11613,7 +11601,6 @@ fn validate_owned_originals_with_validation(
     current_groups: &[PendingCertifiedGroup],
     available: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
-    native_use: OriginalNativeUse,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
     if products.is_empty() {
         return Ok(Vec::new());
@@ -11768,9 +11755,7 @@ fn validate_owned_originals_with_validation(
                 }
             }
         }
-        if native_use == OriginalNativeUse::SelectedGroups
-            && !shared.contains(&(witness.owner.unit.clone(), witness.owner.module.clone()))
-        {
+        if !shared.contains(&(witness.owner.unit.clone(), witness.owner.module.clone())) {
             result.extend(
                 witness
                     .groups
