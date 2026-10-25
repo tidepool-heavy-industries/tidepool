@@ -109,7 +109,7 @@ import Tidepool.ExactScope
   , worldInputsSources, worldSourceDomainSha256
   , worldSourceRoots, worldSourceFiles, worldOriginalReferenceFor
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
-  , readWorldBindingInputs, worldBindingRow, worldBindingRowFactCID
+  , readWorldBindingInputs, worldBindingRow, worldBindingRowFactCID, worldBindingRowInterface
   , readWorldCellOperandWithOwner, worldCellOperandTypes
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readPackageInterface)
@@ -816,7 +816,11 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
         selected <- liftIO (readWorldBindingInputs owner environment original (Map.keys aliases))
           >>= either (liftIO . fail) pure
         let (_,captured,types) = selected
-        liftIO $ unless (not (null captured) && Map.keysSet types == dependencyOwners)
+            leafOwners = Set.fromList
+              [(exactUnit artifact,exactModule artifact)
+              | binding <- Map.elems (worldInputsBindings original)
+              , let (artifact,_,_) = worldBindingRowInterface (worldBindingRow binding)]
+        liftIO $ unless (not (null captured) && Map.keysSet types == Set.union leafOwners dependencyOwners)
           (fail "manifest demand lost its exact retained TYPE closure")
         primary <- liftIO (readWorldTypeInputs owner environment original (Set.toList dependencyOwners))
         liftIO $ case primary of
