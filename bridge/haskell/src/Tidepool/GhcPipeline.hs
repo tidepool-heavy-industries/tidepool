@@ -6111,8 +6111,19 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           (Map.elems acceptedCandidates)
         candidateKeys = Set.fromList [mkNodeKey (ModuleNode [] (admittedCandidateSummary candidate))
           | candidate <- Map.elems acceptedCandidates]
+        loadDependencies = sourceLoadDependencyGraph modGraphRaw
+        loadDependents = Map.fromListWith Set.union
+          [(dependency,Set.singleton owner) | (owner,dependencies) <- Map.toList loadDependencies
+            , dependency <- Set.toList dependencies]
+        -- A selected SOURCE memo borrows the current ordinary target's details
+        -- knot. Keep its component and dependencies in Make so GHC can retie
+        -- that knot, even when an accepted candidate would defer the importer.
+        sourceMemoKeys = Set.fromList [mkNodeKey (ModuleNode [] summary)
+          | summary <- sourceOrder, ms_mod summary `Map.member` validatedMemo
+          , not (null (ms_srcimps summary))]
+        sourceMemoDependencies = reverseDependencyClosure loadDependents sourceMemoKeys
         deferred = if loadRequired then Set.empty else
-          reverseDependencyClosure (sourceLoadDependencyGraph modGraphRaw) candidateKeys
+          reverseDependencyClosure loadDependencies candidateKeys `Set.difference` sourceMemoDependencies
         candidateLoadGraph = mkModuleGraph
           [node | node <- mgModSummaries' (cpLoadGraph originalPlan)
             , mkNodeKey node `Set.notMember` deferred]
