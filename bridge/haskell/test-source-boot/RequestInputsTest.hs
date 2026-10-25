@@ -47,7 +47,7 @@ import System.Timeout (timeout)
 import Test.QuickCheck
 import Test.QuickCheck.Random (mkQCGen)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT)
-import GHC (getSession, setSession, setContext, InteractiveImport(..), simpleImportDecl, exprType, TcRnExprMode(TM_Inst)
+import GHC (getSession, setSession
   , Ghc, GhcPs, ParsedModule(..), Target(..), guessTarget, setTargets, depanal, parseModule
   , ms_mod_name, ms_hspp_opts, ms_textual_imps, ms_srcimps)
 import GHC.Data.FastString (mkFastString)
@@ -68,11 +68,18 @@ import GHC.Unit.State (UnitState(..))
 import GHC.Unit.Info (unitImportDirs, unitLibraryDirs, unitLibraryDynDirs, unitIncludeDirs)
 import GHC.Types.Unique.Map (mapUniqMap)
 import GHC.Tc.Types (tcg_mod)
-import GHC.Types.TypeEnv (typeEnvIds)
+import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
+import GHC.Types.Avail (availNames)
+import GHC.Core.TyCon (tyConName, tyConDataCons)
+import GHC.Core.DataCon (dataConName, dataConOrigArgTys)
+import GHC.Core.Multiplicity (scaledThing)
+import GHC.Core.Type (eqType)
+import GHC.Builtin.Types (intTy)
 import GHC.Types.Var (varName)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Unit.Home.ModInfo (lookupHpt, hm_details)
+import GHC.Unit.Home.ModInfo (lookupHpt, hm_details, hm_iface)
+import GHC.Unit.Module.ModIface (mi_exports)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Driver.Session (DynFlags, importPaths, xopt)
 import GHC.Driver.Env (hsc_units)
@@ -1275,10 +1282,26 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
     hydrated <- liftIO (hydrateExactScope environment
       [(worldTypeEntryArtifact entry,worldTypeEntryInterface entry) | entry <- Map.elems types])
     setSession hydrated
-    when (("main","CanonicalSource") `elem` selectedOwners) $ do
-      setContext [IIDecl (simpleImportDecl (mkModuleName "CanonicalSource"))]
-      _ <- exprType TM_Inst "(\\x -> x) :: CanonicalSource.Retained -> CanonicalSource.Retained"
-      pure ()
+    when (("main","CanonicalSource") `elem` selectedOwners) $ liftIO $ do
+      dependency <- maybe (fail "TYPE hydration lost its defining dependency HMI") pure
+        (lookupHpt (hsc_HPT hydrated) (mkModuleName "CanonicalDependency"))
+      facade <- maybe (fail "TYPE hydration lost its reexporting HMI") pure
+        (lookupHpt (hsc_HPT hydrated) (mkModuleName "CanonicalSource"))
+      retained <- case [owner | owner <- typeEnvTyCons (md_types (hm_details dependency))
+          , occNameString (nameOccName (tyConName owner)) == "Retained"] of
+        [owner] -> pure owner
+        _ -> fail "TYPE hydration did not resolve the actual Retained definition"
+      constructor <- case tyConDataCons retained of
+        [constructor] -> pure constructor
+        _ -> fail "TYPE hydration changed the retained datatype definition"
+      let exported = concatMap availNames (mi_exports (hm_iface facade))
+          definingOwner = nameModule_maybe (tyConName retained)
+      unless (definingOwner == Just (mkModule (stringToUnit "main") (mkModuleName "CanonicalDependency"))
+          && tyConName retained `elem` exported && dataConName constructor `elem` exported
+          && case dataConOrigArgTys constructor of
+            [field] -> eqType (scaledThing field) intTy
+            _ -> False)
+        (fail "TYPE hydration lost the genuine reexport Names or defining constructor field")
     setSession environment
     freshFinder <- liftIO initFinderCache
     let unavailable unit = unit {unitImportDirs=[PackageText.pack (work </> "absent-package-root")]}
