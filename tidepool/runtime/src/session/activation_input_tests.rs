@@ -5344,10 +5344,27 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .bindings()
         .source_domain_selection_in(resident.state.scope_tree(), public)
         .unwrap();
+    let physical_sources =
+        |selection: &tidepool_codegen::prepared_program::SourceDomainSelection| {
+            let mut rows = selected_sources(selection)
+                .into_iter()
+                .map(|(binder, key, handle)| (binder.source, key, handle))
+                .collect::<Vec<_>>();
+            rows.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+            rows
+        };
     assert_eq!(
-        selected_sources(&before_selection),
-        selected_sources(&parent_selection)
+        physical_sources(&before_selection),
+        physical_sources(&parent_selection)
     );
+    for (binder, lease) in before_selection.inherited() {
+        assert_eq!(
+            binder.domain,
+            before_selection
+                .domain_for_owner(before_selection.current(), lease.owner())
+                .unwrap()
+        );
+    }
     let before_binding_tip = resident.state.bindings().tip_id(public);
 
     let producer_execution = Arc::new(source_action(&mut resident, |resident, _| {
@@ -7984,7 +8001,8 @@ fn frozen_activation_replays_same_input_and_refuses_second_private_input() {
         .iter()
         .map(|hole| hole.to_string())
         .collect::<Vec<_>>();
-    let producer_scope = resident.mint_scope(caller.lexical_scope).unwrap();
+    let producer_lease = resident.retain_lexical_scope(caller.lexical_scope).unwrap();
+    let producer_scope = producer_lease.scope();
     resident
         .set_run_context(SessionRunContext {
             lexical_scope: producer_scope,
@@ -8021,7 +8039,8 @@ fn frozen_activation_replays_same_input_and_refuses_second_private_input() {
     );
     resident.set_run_context(caller).unwrap();
     assert_eq!(resident.run_context(), caller);
-    resident.retire_scope(producer_scope);
+    drop(producer_lease);
+    resident.settle_dropped_custody();
     assert!(!resident.state.scope_tree().is_live(producer_scope));
     assert!(resident.state.scope_tree().is_live(caller.lexical_scope));
     let engine = resident.state.prepared_mut().unwrap();
@@ -8039,6 +8058,7 @@ fn frozen_activation_replays_same_input_and_refuses_second_private_input() {
     assert_eq!(engine.heap_stats().gc_count, collections + 1);
     for (handle, owner) in captured_owners {
         assert_eq!(engine.owner_of_handle(handle), Some(owner));
+        assert!(engine.hosting_program(handle).is_none());
     }
     let second = captured.pop().unwrap();
     let first = captured.pop().unwrap();
