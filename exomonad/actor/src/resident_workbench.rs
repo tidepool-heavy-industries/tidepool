@@ -21068,6 +21068,18 @@ pub(crate) mod request_tests {
             producer.execute_cell_for_test(context.clone(),
                 include_str!("fixtures/world-nominal-private-consumer.hs")).await
                 .expect("a successor cell demands the ordinary value's transitive TYPE closure");
+            producer.access.with_machine(context.clone(), |session, context, _| {
+                let view = session.compile_view_in(context.placement.lexical_scope).unwrap();
+                assert!(view.exact_declaration_context().unwrap().compiler_roles().keys().all(|owner|
+                    owner.module != "RetainedNominal" && owner.module != "RetainedNominalLeaf"),
+                    "ordinary checked-value reuse must keep its nominal TYPE support out of primary");
+                assert!(session.current_decl_heads_in(context.placement.lexical_scope).is_empty(),
+                    "the ordinary-value control runs before any declaration can supply its nominal TYPE rows");
+                Ok(())
+            }).await.unwrap();
+            producer.execute_cell_for_test(context.clone(),
+                include_str!("fixtures/world-nominal-captured-declaration.hs")).await
+                .expect("a later declaration captures the already validated ordinary nominal value");
             let private_binding = producer.access.with_machine(context.clone(), |session, context, _| {
                 Ok(session.current_binding_in(context.placement.lexical_scope, "nominal").unwrap().0)
             }).await.unwrap();
