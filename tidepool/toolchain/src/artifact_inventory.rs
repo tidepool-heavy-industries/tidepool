@@ -936,7 +936,7 @@ pub(crate) struct ArtifactAdmission {
 }
 
 impl ArtifactAdmission {
-    pub(crate) fn producer_entries(&self) -> impl Iterator<Item = &Arc<ArtifactEntry>> {
+    pub(crate) fn supplied_entries(&self) -> impl Iterator<Item = &Arc<ArtifactEntry>> {
         self.supplied.values().map(|outcome| &outcome.entry)
     }
 
@@ -21912,6 +21912,18 @@ mod tests {
             retained_product.original_native(),
         ));
         drop(admission);
+        let mut competing = selection.clone();
+        assert!(matches!(
+            crate::declaration_context::CapturedCompilerStage::issue(
+                &mut competing,
+                &baseline,
+                vec![Arc::clone(&incoming), Arc::clone(&previous)],
+                &mut validation,
+            ),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                    if artifact == incoming.descriptor.id)
+        ));
         let stage = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &baseline,

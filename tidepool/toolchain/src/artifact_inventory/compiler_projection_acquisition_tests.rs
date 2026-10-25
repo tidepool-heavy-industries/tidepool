@@ -1192,8 +1192,7 @@ fn assert_current_producer_excludes_historical_original(
         ArtifactEntry::canonical_artifact_id(product.module_interface())
     };
     assert_eq!(canonical(current), canonical(historical));
-    let projection =
-        CompilerInputProjection::from_issued_entries(&[Arc::clone(current)]).unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&[Arc::clone(current)]).unwrap();
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let mut pending =
         crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
@@ -1231,8 +1230,20 @@ fn assert_current_producer_excludes_historical_original(
         .completed_compiler_output_offer(&current.descriptor.owner)
         .unwrap()
         .unwrap();
-    assert!(receipt.original_acquisition().same_issuing_authority(current));
+    assert!(receipt
+        .original_acquisition()
+        .same_issuing_authority(current));
     assert_eq!(receipt.original(), current.descriptor.id);
+    assert_eq!(
+        captured
+            .compiler_inputs()
+            .compiler_roles()
+            .original_acquisition(&current.descriptor.owner)
+            .unwrap()
+            .descriptor
+            .id,
+        current.descriptor.id
+    );
 }
 
 fn assert_fresh_world_original_selection(

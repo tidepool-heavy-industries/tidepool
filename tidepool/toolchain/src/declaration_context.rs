@@ -1171,11 +1171,6 @@ impl CapturedCompilerStage {
             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             Some(selection),
         )?;
-        let producer_certificates = admission
-            .producer_entries()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into();
         let physical = admission.artifacts.clone();
         let projection = selection
             .compiler_projection(&physical)
@@ -1193,6 +1188,16 @@ impl CapturedCompilerStage {
         selection
             .finish_new_product_availability(&issued)
             .map_err(compiler_evidence_failure)?;
+        // Supplied custody includes historical Originals. Only the completed
+        // cohort identifies this stage's actual Original producers.
+        let mut producer_certificates = admission
+            .supplied_entries()
+            .filter(|entry| !matches!(entry.payload, ArtifactPayload::Original(_)))
+            .cloned()
+            .collect::<Vec<_>>();
+        for &original in issued.completed.keys() {
+            producer_certificates.push(Arc::clone(admission.producer_entry(original)?));
+        }
         selection.capture_compiler_rows(&admission, &projection)?;
         timing.advance("carry_completed_availability");
         let inputs = Arc::new(OriginalCompilerInputs::normalize_selection(
@@ -1208,7 +1213,7 @@ impl CapturedCompilerStage {
         };
         timing.finish(true);
         Ok(Self {
-            producer_certificates,
+            producer_certificates: producer_certificates.into(),
             physical_artifacts: physical,
             output,
             operation: Arc::clone(&validation.inventory),
