@@ -7262,8 +7262,8 @@ candidateDeferredMemoHome :: IO ()
 candidateDeferredMemoHome = withTiming $ withScratch $ \work -> do
   let target = work </> "MemoReuseTarget.hs"
       dependency = mkModuleName "MemoReuseDependency"
-      frontend diagnostics = any (\line -> line == "tidepool-canonical-frontend module=MemoReuseDependency"
-        || line == "tidepool-checked module=MemoReuseDependency fresh=true") (lines diagnostics)
+      frontend diagnostics = any (\line -> all (`isInfixOf` line)
+        ["\"stage\":\"source_frontend\"", "\"decision\":\"work\"", "\"module\":\"MemoReuseDependency\""]) (lines diagnostics)
   forM_ ["OptionalAnchor.hs", "MemoReuseDependency.hs", "MemoReuseTarget.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
   original <- runPipelineSelected (PreparedProducts Nothing) target [work]
@@ -7273,11 +7273,11 @@ candidateDeferredMemoHome = withTiming $ withScratch $ \work -> do
   candidate <- case candidates of
     [value] | candidateModule value == "OptionalAnchor" -> pure value
     _ -> fail "deferred memo fixture requires one genuine candidate leaf"
-  withResidentPipelineSelected [work] $ \compile -> do
-    let prepare = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+  withResidentCompilerScopes [work] $ \runScope -> do
+    let prepare scope = scopedCompile scope (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
           Nothing target [work] Nothing
-        completed label reused = do
-          (prepared,diagnostics) <- captureDiagnostics prepare
+        completed label reused scope = do
+          (prepared,diagnostics) <- captureDiagnostics (prepare scope)
           unless (map candidateOriginalIdentity (pprAcceptedCandidates prepared)
               == [candidateOriginalIdentity candidate]
               && counterValues "candidate_executable_required" diagnostics == [0]
@@ -7292,8 +7292,8 @@ candidateDeferredMemoHome = withTiming $ withScratch $ \work -> do
               && "MemoReuseDependency" `elem` preparedNames prepared
               && fmap renderType (prResultType (pprPipelineResult prepared)) == Just "Int") $
             fail (label ++ ": deferred importer HOME or native preparation was incomplete")
-    completed "cold candidate importer" 0
-    completed "warm candidate importer" 1
+    runScope (pure ()) (completed "cold candidate importer" 0)
+    runScope (pure ()) (completed "warm candidate importer" 1)
 
 -- Observe actual GHC finder operations, without timing thresholds or compiler
 -- authority fixtures. A missing package key must never consult an ancestor
