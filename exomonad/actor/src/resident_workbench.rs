@@ -21065,8 +21065,14 @@ pub(crate) mod request_tests {
             producer.execute_cell_for_test(context.clone(),
                 include_str!("fixtures/world-nominal-producer.hs")).await
                 .expect("ordinary checked values are issued from the captured nominal source");
-            producer.execute_cell_for_test(context.clone(),
-                include_str!("fixtures/world-nominal-private-consumer.hs")).await
+            producer.execute_cell_for_test_observing(context.clone(),
+                include_str!("fixtures/world-nominal-private-consumer.hs"), |prepared| {
+                    assert!(prepared.items.iter().any(|item| item.ready.item.world_selected_runtime_inputs()
+                        .inputs().iter().any(|input| input.occurrence() == "nominal"
+                            && input.checked_row().is_some_and(|row| row.certified_interface().requirements()
+                                .iter().any(|owner| owner.module == "RetainedNominal")))),
+                        "the real later stage selects the issued nominal value and its nominal TYPE requirement");
+                }).await
                 .expect("a successor cell demands the ordinary value's transitive TYPE closure");
             producer.access.with_machine(context.clone(), |session, context, _| {
                 let view = session.compile_view_in(context.placement.lexical_scope).unwrap();
@@ -21151,6 +21157,12 @@ pub(crate) mod request_tests {
                 )
                 .await
                 .expect("the same operand crosses parser END into native preparation");
+            assert!(prepared.items.iter().any(|item| item.ready.item.world_selected_runtime_inputs()
+                .inputs().iter().any(|input| matches!(input.origin(),
+                    tidepool_toolchain::compiler_world::WorldCellRuntimeInputOrigin::CellOperand)
+                    && input.checked_row().is_some_and(|row| row.certified_interface().requirements()
+                        .iter().any(|owner| owner.module == "Data.Aeson.Types.Internal")))),
+                "native preparation selects the actual operand with its issued nominal JSON TYPE requirement");
             let PreparedCell {
                 mut items,
                 dependencies,
@@ -23382,6 +23394,15 @@ pub(crate) mod request_tests {
             context: crate::ActorSessionContext,
             source: &str,
         ) -> Result<(), ResidentActorWorkbenchError> {
+            self.execute_cell_for_test_observing(context, source, |_| {}).await
+        }
+
+        async fn execute_cell_for_test_observing(
+            &self,
+            context: crate::ActorSessionContext,
+            source: &str,
+            inspect: impl FnOnce(&PreparedCell),
+        ) -> Result<(), ResidentActorWorkbenchError> {
             let (checked, prepared) = self
                 .prepare_cell(context.clone(), source.into())
                 .await
@@ -23389,6 +23410,7 @@ pub(crate) mod request_tests {
                     tracing::debug!(stage = "prepare", %error, "test cell execution failed");
                     error
                 })?;
+            inspect(&prepared);
             let PreparedCell {
                 items,
                 dependencies,
