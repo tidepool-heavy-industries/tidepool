@@ -7483,11 +7483,11 @@ mod tests {
         let catalog = NativeDependencyCatalog::from_source(source)?;
         let artifacts = projection.admit_interfaces_with_native_offers(
             &source.artifacts,
-            entries,
+            entries.clone(),
             &source.native_offers,
             &catalog,
         )?;
-        source.rebuild(projection, artifacts, source.native_offers.iter().cloned())
+        source.append_produced_interfaces(projection, artifacts, entries)
     }
 
     #[test]
