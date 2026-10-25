@@ -2301,7 +2301,7 @@ readWorldSelectedBindingInputs owner env facts tokens dependencies selected = do
         let ScopeInterfaceInput (_,path,sha) _ = case entry of WorldTypeClosureEntry _ _ input _ _ _ -> input
         packages <- capturedRequestInputToken tokens path sha
         pure (worldTypeEntryVerifiedInterface entry,packages)
-      pure (Right (captured,Map.withoutKeys entries leafOwners))
+      pure (Right (captured,entries))
 
 -- A sealed operand is one selected checked row, not an additional World or an
 -- executable grant. This tuple has no profile field: the request owner must
@@ -2357,8 +2357,8 @@ readWorldCellOperandWithOwner owner@(ExactInputOwner _ state) env facts path exp
       (rows,custody,_) <- admitWorldRows state (worldInputsProducer facts) acquisition (offered:map snd dependencies)
       dependencyRows <- indexWorldDependencies (map fst dependencies) (drop 1 rows)
       eligible <- worldVisibleSemantic <$> worldRowsByOwner (take 1 rows)
-      (binding,_,_) <- readChangedWorldBinding frontier eligible reference
-      _ <- establishWorldDependencies dependencyRows (Map.singleton cid (worldBindingRow binding,BS.empty,0,1))
+      (binding,semantic,rowBytes) <- readChangedWorldBinding frontier eligible reference
+      _ <- establishWorldDependencies dependencyRows (Map.singleton cid (worldBindingRow binding,semantic,rowBytes,1))
       inputs <- readWorldSelectedBindingInputs owner env facts custody (`Map.lookup` dependencyRows) [binding]
       case inputs of
         Left reason -> worldCorrupt reason
