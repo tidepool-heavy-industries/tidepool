@@ -246,7 +246,7 @@ import Tidepool.ImportAdmission
   , compilationExactImports, sourceImportsSnapshot, sourceImportsHomeRoles, writeCheckedExactCompilation )
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
-  , scopeLexical, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
+  , scopeLexical, scopeSourceSelectedOwners, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
   , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..)
   , scopeValueInterfaces, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, readScopedInterfaceClosure, validateExactScopeEnvironment
   , ExactScopeRequestFailure(..)

@@ -326,7 +326,7 @@ import Tidepool.ExactHydration
   , generatedTypedSegmentRecipeWithImportRendering, generatedCheckingTemplateRecipeWithImportRendering
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, projectExactLexicalGraph )
 import Tidepool.TurnSource (importRenderingSource, ImportOrigin(..))
-import Tidepool.ImportAdmission (ExactCompilation, compilationExactImports, IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles, writeCheckedExactCompilation)
+import Tidepool.ImportAdmission (ExactCompilation, compilationScope, compilationExactImports, IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles, writeCheckedExactCompilation)
 import Tidepool.ImportAdmission.Internal
   ( ExactCompilation(..), CapturedImportAdmission(..), ImportAdmissionContext(..)
   , ImportAttempt(..), ScopedImportAdmission(..), ResolvedImportAdmission(..), MatchedImportDriver(..), ImportDriverOccurrence(..)
