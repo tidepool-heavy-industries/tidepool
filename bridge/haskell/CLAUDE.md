@@ -223,8 +223,8 @@ value permission. The private `TPCWSOURCE3` receipt carries the same closed stag
 identity and the completion's ordered materialized root aliases as transport
 DATA. Their positions map back to the captured source domain;
 they neither identify logical worlds nor authorize later filesystem reads.
-The matched `TPCWORLD` version 5 carrier exports three compiler roots:
-selected primary rows, occurrences and lexical surface. Its `TPCWREST` version 5
+The matched `TPCWORLD` version 6 carrier exports three compiler roots:
+selected primary rows, occurrences and lexical surface. Its `TPCWREST` version 6
 commitment binds these roots, the captured source seal, producer, profile and
 runtime query scope to an opaque full runtime Context CID. Rust derives the
 selected-primary map from one actual acquired role owner, checking exact scoped
@@ -244,9 +244,16 @@ Cold and successor readers reject older private wire formats together. Genuine
 source-publication fixtures still use the existing OriginalProductsProducer
 completion with explicit `TPSOURCEBOOTPUBLISHED1` intent; test DATA does not issue
 compiler or runtime authority.
-`TPCWORLD` custody keeps base and unmerged
-value rows separate and names each owned image explicitly. Custody does not
-select compiler Originals or native groups. Cold block admission verifies the
+`TPCWORLD` custody keeps base, visible value and binding-keyed dependency
+rows separate and names each owned image explicitly. Each checked value row
+commits its leaf binding and exact transitive TYPE manifest. Dependency counts
+belong to distinct live row-fact CIDs, so aliases neither acquire another count
+nor release shared custody. Successors check net CID transitions against exact
+zero/positive dependency edits before publishing; operands borrow their own
+manifest-selected custody. Compare exact bindings and semantic rows across
+selected leaves and dependencies before collapsing by module owner. Dependency
+custody does not populate the visible namespace, select compiler Originals or
+native groups, or widen primary-only readers. Cold block admission verifies the
 fixed CIDv1/DAG-CBOR/Blake2b-256 family with declared crypton, every body digest
 and root-reachable child membership. A SHA transfer seal cannot replace CID
 verification. Integrity controls consume actual Rust Materializer blocks, not
