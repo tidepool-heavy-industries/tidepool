@@ -5319,6 +5319,8 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .mint_scope(resident.public_source.scope())
         .unwrap();
     let public_source = resident.adopt_initial_notebook_scope(public).unwrap();
+    resident.public_source = public_source;
+    assert_eq!(resident.public_source.scope(), public);
     let durable = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/private-source-input").unwrap(),
         1,
@@ -5335,7 +5337,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         ..resident.public_context()
     };
     resident.set_run_context(public_context).unwrap();
-    resident.bootstrap_world_in(&recipe, &public_source);
+    resident.bootstrap_world(&recipe);
     let before = resident.public_visibility_snapshot_in(public).unwrap();
     let before_binding_ids = resident
         .state
@@ -5374,6 +5376,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
             .begin_durable_private_execution(&durable, public)
             .unwrap()
     }));
+    assert!(Arc::ptr_eq(
+        &producer_execution.original_source().unwrap(),
+        resident.public_source.original_source()
+    ));
     let producer_scope = producer_execution.private_scope();
     resident
         .set_run_context(SessionRunContext {
