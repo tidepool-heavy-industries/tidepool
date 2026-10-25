@@ -388,46 +388,68 @@ async fn resident_captured_source_retains_the_parked_job_for_a_later_cell() {
     // The shared cell's final command argument is the keyed backend marker.
     let markers = ["1"];
     let mut fixture = ConcurrentResident::new(193, &markers).await;
-    let mut parked = fixture.spawn_cell(
-        markers[0],
-        include_str!("resident_local_actor/command_retain_binding_cell.hs").into(),
-    );
-    let execution = fixture.wait_started(markers[0], &mut parked).await;
-    fixture.release(markers[0]);
-    let settled = ConcurrentResident::settle(parked)
-        .await
-        .expect("the parked cell retains its Job before publication");
-    assert_eq!(committed_execution(&settled), execution);
-    let installed = settled["items"][0]["installedBindings"]
-        .as_array()
-        .expect("the committed cell installs its result and retained Job");
-    let job = installed
-        .last()
-        .and_then(serde_json::Value::as_str)
-        .expect("the retained Job binding");
-    assert!(
-        installed
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .any(|binding| binding.starts_with("observation")),
-        "the retained Job is distinct from the automatic result observation: {settled:?}"
-    );
-    let later = fixture
-        .read(
-            "captured-job-later",
-            &format!("_ <- Cmd.await {job}\npure (42 :: Int)"),
-        )
-        .await;
-    assert_eq!(later["items"][0]["output"], "42", "{later:?}");
-    assert_eq!(
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        let mut parked = fixture.spawn_cell(
+            markers[0],
+            include_str!("resident_local_actor/command_retain_binding_cell.hs").into(),
+        );
+        let execution = fixture.wait_started(markers[0], &mut parked).await;
+        fixture.release(markers[0]);
+        let settled = ConcurrentResident::settle(parked)
+            .await
+            .expect("the parked cell retains its Job before publication");
+        assert_eq!(committed_execution(&settled), execution);
+        let installed = settled["items"][0]["installedBindings"]
+            .as_array()
+            .expect("the committed cell installs its result and retained Job");
+        let job = installed
+            .last()
+            .and_then(serde_json::Value::as_str)
+            .expect("the retained Job binding");
+        assert!(
+            installed
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|binding| binding.starts_with("observation")),
+            "the retained Job is distinct from the automatic result observation: {settled:?}"
+        );
+        let later = fixture
+            .read(
+                "captured-job-later",
+                &format!("_ <- Cmd.await {job}\npure (42 :: Int)"),
+            )
+            .await;
+        assert_eq!(
+            later["items"][0]["operations"][0]["effect"], "command wait",
+            "{later:?}"
+        );
+        assert_eq!(
+            later["items"][0]["operations"][0]["disposition"], "committed",
+            "{later:?}"
+        );
+        let observation = later["items"][1]["installedBindings"][0]
+            .as_str()
+            .expect("the later expression returns its installed observation binding");
         fixture
-            .backend
-            .completion_count
-            .load(std::sync::atomic::Ordering::Acquire),
-        1,
-        "the later captured-source cell observes the retained Job without replay"
-    );
+            .check_value(
+                "captured-job-value",
+                &format!("{observation} == (42 :: Int)"),
+            )
+            .await;
+        assert_eq!(
+            fixture
+                .backend
+                .completion_count
+                .load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "the later captured-source cell observes the retained Job without replay"
+        );
+    }))
+    .await;
     fixture.shutdown(&markers).await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]
