@@ -21851,7 +21851,7 @@ mod tests {
             .unwrap();
         let projection =
             CompilerInputProjection::from_issued_entries(&[Arc::clone(&incoming)]).unwrap();
-        let mut validation = PackageInterfaceValidation::default();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
