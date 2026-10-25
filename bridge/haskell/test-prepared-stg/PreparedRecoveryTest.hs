@@ -1058,7 +1058,7 @@ auxiliaryAnswerEvidence = withRootProjectionFixture $ \_ prepared context -> do
       ("polymorphic answer was interned beside a concrete root: " ++ show roots)
 
 withRootProjectionFixture :: (HscEnv -> PreparedModule -> ProjectionContext -> IO a) -> IO a
-withRootProjectionFixture action = bracket scratch removePathForcibly $ \directory -> do
+withRootProjectionFixture action = bracket newDirectory removePathForcibly $ \directory -> do
   let source = directory </> "ProjectionRootIsolation.hs"
   copyFile "test-prepared-stg/ProjectionRootIsolation.hs" source
   libdir <- getLibdir
@@ -1093,6 +1093,13 @@ withRootProjectionFixture action = bracket scratch removePathForcibly $ \directo
           , projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing
           , projectionJsonAuthority = Nothing, projectionTextUnit = Nothing }
     liftIO (action environment prepared context)
+  where
+    newDirectory = do
+      (path,handle) <- openTempFile "/tmp" "tidepool-root-projection"
+      hClose handle
+      removeFile path
+      createDirectoryIfMissing True path
+      pure path
 
 scenario :: IO ()
 scenario = do
