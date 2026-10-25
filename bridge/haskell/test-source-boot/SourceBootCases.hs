@@ -1159,6 +1159,24 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
       then "held dependency drift refused and recovered"
       else "unretained dependency remained fresh after drift")
 
+-- The current-source refusal must consume a genuinely parsed authored import;
+-- an ordinary exact import reuses its already admitted lexical owner.
+authoredCurrentImportPurpose :: FilePath -> String -> String -> IO CompilePurpose
+authoredCurrentImportPurpose target moduleName imported = do
+  flags <- defaultParserDynFlags
+  source <- readFile target
+  template <- either fail pure (replaceTemplateMarker imported preambleImportMarker source)
+  plan <- analyzeCellWithFlags flags template (imported ++ "\n") >>= either (fail . show) pure
+  rendering <- either fail pure $ replaceImportRendering preambleImportMarker
+    (appendImportRendering (locatedImportsRendering (prologueImports (cellPlanPrologue plan)))
+      (literalImportRendering preambleImportMarker)) (literalImportRendering template)
+  mapped <- either fail pure
+    (captureProtectedTemplateImports flags template >>= renderProtectedTemplateImports 0)
+  recipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
+    mapped template rendering target moduleName >>= either fail pure
+  writeFile target (importRenderingSource rendering)
+  pure (GeneratedScaffoldCompile recipe GeneralCompile)
+
 -- A genuine compiler cohort contains both the original target's orphan and an
 -- unrelated sibling. Interface presence and graph reachability cannot replace
 -- the canonical target's original orphan visibility census.
@@ -1184,7 +1202,8 @@ activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
       (Map.lookup owner byOwner)
     pure (CheckedTemplateInterface (fst owner) (snd owner) (exactSha256 interface) imports)
   unless (all (`Map.member` byOwner) [originalTarget,sibling]
-      && sibling `elem` map fst (scopeLexical admitted))
+      && all (`elem` map fst (scopeLexical admitted))
+        [sibling,("main","ExecutionClass")])
     (fail "original orphan control did not retain its genuine graph-present sibling")
   let environment = prHscEnv (pprPipelineResult original)
   root <- case lookupHpt (hsc_HPT environment) (mkModuleName (snd originalTarget)) of
@@ -1223,9 +1242,13 @@ activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
     unless (hasIntResultLiteral 99 (prBinds (pprPipelineResult ownOrphan)))
       (fail "preview original target lost the orphan it defines itself")
     writeFile target protected
+    captured <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [] Nothing
+    requireExactProviderImport "Expr" "ExecutionClass" captured
+    authoredPurpose <- authoredCurrentImportPurpose target "Expr" "import ExecutionClass (C(..))"
     requireOriginalSourceRejection "authored import after scoped preview"
       (ExecutionSourceUnavailable ("main","ExecutionClass")) $
-      compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [] Nothing
+      compile CheckedEnvironment Set.empty authoredPurpose (Just scope) target [] Nothing
+    writeFile target protected
     ordinary <- generatedScaffoldRecipe parserFlags
       (CheckedTemplateImports [("main","ExecutionClass")] graph)
       protected protected target "Expr" >>= either fail pure
@@ -1760,6 +1783,8 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
       helperKey = ("main", "MetadataQuoteSupport")
       witnessKey = ("main", "MetadataRetainedWitness")
       proofs = scopeModuleInterfaceProofs exact
+  unless (helperKey `elem` map fst (scopeLexical exact)) $
+    fail "retained helper is not an admitted lexical owner"
   helperProof <- maybe (fail "captured helper lacks its canonical proof") pure (Map.lookup helperKey proofs)
   witnessProof <- maybe (fail "captured compiler dependency lacks its canonical proof") pure (Map.lookup witnessKey proofs)
   core <- maybe (fail "captured helper lacks its executable Core") pure (canonicalCoreArtifact helperProof)
@@ -1841,11 +1866,18 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
       (captured,diagnostics) <- captureDiagnostics $
         compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
       requireRetainedCompilerResult captured diagnostics
-      -- This is a real authored current-source demand, separate from capture.
-      -- This fixture has no checked include authority and must refuse before
-      -- considering changed current source; it does not qualify drift checks.
-      refused <- try (void (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-        (work </> "MetadataCurrentSourceTarget.hs") [work] Nothing)) :: IO (Either InputRejection ())
+      let currentTarget = work </> "MetadataCurrentSourceTarget.hs"
+      ordinary <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+        currentTarget [work] Nothing
+      requireExactProviderImport "MetadataCurrentSourceTarget" (snd helperKey) ordinary
+      unless (maybe False (isNothing . compilationSourceSelection) (preparedExactCompilation ordinary)) $
+        fail "ordinary retained import acquired a current-source selection"
+      -- This fixture lacks checked include authority. A genuine authored
+      -- import must refuse before source drift validation can be attempted.
+      authoredPurpose <- authoredCurrentImportPurpose currentTarget "MetadataCurrentSourceTarget"
+        "import MetadataQuoteSupport (answerValue)"
+      refused <- try (void (compile CheckedEnvironment Set.empty authoredPurpose (Just scope)
+        currentTarget [work] Nothing)) :: IO (Either InputRejection ())
       case refused of
         Left (OriginalSourceSelectionRejected (ExecutionSourceUnavailable key)) | key == helperKey -> pure ()
         Left reason -> fail ("current import had another authority refusal: " ++ show reason)
@@ -1917,6 +1949,9 @@ exactReexportQuoter = withTiming $ withScratch $ \work -> do
     Nothing (work </> "ExecutionReexportFacade.hs") [work] Nothing
   originalFixture <- capturePreparedFixture work original
   scopePath <- writeExecutionScope work originalFixture ["ExecutionReexportFacade"]
+  exact <- readExactScope scopePath >>= either fail pure
+  unless (("main","MetadataQuoteSupport") `elem` map fst (scopeLexical exact)) $
+    fail "reexport helper is not an admitted lexical owner"
   let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
   withResidentPipelineSelected [work] $ \compile -> do
     (result,diagnostics) <- captureDiagnostics (compile (PreparedProducts Nothing) Set.empty GeneralCompile
@@ -1943,8 +1978,16 @@ exactReexportQuoter = withTiming $ withScratch $ \work -> do
       (work </> "ExecutionReexportTarget.hs") [work] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult changed))) $
       fail "captured reexport changed meaning with its former helper source"
-    currentRefusal <- try (void (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
-      (work </> "MetadataCurrentSourceTarget.hs") [work] Nothing)) :: IO (Either InputRejection ())
+    let currentTarget = work </> "MetadataCurrentSourceTarget.hs"
+    ordinary <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope)
+      currentTarget [work] Nothing
+    requireExactProviderImport "MetadataCurrentSourceTarget" "MetadataQuoteSupport" ordinary
+    unless (maybe False (isNothing . compilationSourceSelection) (preparedExactCompilation ordinary)) $
+      fail "ordinary reexport helper import acquired a current-source selection"
+    authoredPurpose <- authoredCurrentImportPurpose currentTarget "MetadataCurrentSourceTarget"
+      "import MetadataQuoteSupport (answerValue)"
+    currentRefusal <- try (void (compile CheckedEnvironment Set.empty authoredPurpose (Just scope)
+      currentTarget [work] Nothing)) :: IO (Either InputRejection ())
     case currentRefusal of
       Left (OriginalSourceSelectionRejected (ExecutionSourceUnavailable ("main","MetadataQuoteSupport"))) -> pure ()
       Left reason -> fail ("current-source demand had another authority refusal: " ++ show reason)
