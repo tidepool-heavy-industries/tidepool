@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
+module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, worldValueTypeHistories, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
 
 import Tidepool.RequestCompletion (finishCompletion, captureCompletion, completionResult, completionFailures, completionAsync, BodyOutcome(..), CleanupStage(CompilerScopeRestore), cleanupStage, cleanupException)
 import Tidepool.WorkerServer (runWorkerLoop, WorkerResponse(..), requireNativeDemandOwner)
@@ -109,6 +109,8 @@ import Tidepool.ExactScope
   , worldInputsSources, worldSourceDomainSha256
   , worldSourceRoots, worldSourceFiles, worldOriginalReferenceFor
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
+  , readWorldBindingInputs, worldBindingRow, worldBindingRowFactCID
+  , readWorldCellOperandWithOwner, worldCellOperandTypes
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readPackageInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation
@@ -159,7 +161,7 @@ import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..),
 import Tidepool.Test.GenuineCandidate (FixtureCompilerInput(..), writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext, writeGenuineMetadataScopeWithContext, writeGenuinePublishedScopeWithContext)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
-import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
+import Tidepool.Test.FixturePacket (PacketProducer(..), completedPacketOutput, newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
 import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming, TaskAttempt(..), newTimingRequestIdentity)
 import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasksWithAttempt)
 import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse, retainTypeInterfaceCaptures
@@ -718,6 +720,168 @@ capturedCanonicalPromotionRefusesReadableMissingInputs = withScratch $ \work -> 
 -- Raw transfer controls consume actual acquired rows and all three Materializer
 -- roots from one genuine issuer completion. Only physical arena endpoints are
 -- adapted into this test's existing sealed-byte owner; semantic facts are kept.
+-- The Rust fixture compiles and certifies actual values before publishing its
+-- packets. Full cold reads independently check each incremental publication.
+worldValueTypeHistories :: IO ()
+worldValueTypeHistories = withTiming $ withScratch $ \work ->
+  bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
+    packet <- newPacketDirectory work "world-value-type-fixture"
+    BS.writeFile (packet </> "request.cbor") (encode (TList [TString "TPSOURCEBOOTVALUETYPE1"]))
+    completion <- runPacketProducer WorldValueTypeProducer packet
+    bytes <- completedPacketOutput completion (packet </> "world-value-types.cbor")
+    (initial,steps,operand) <- worldFixtureTerm bytes >>= \term -> case term of
+      TList [TString "TPCWVALUETYPEFIXTURE1",initial,TList steps,operand] -> pure (initial,steps,operand)
+      _ -> fail "World value fixture omitted its matched transport history"
+    let writeDescriptor label term = do
+          sealed <- sealWorldValueDescriptor handles term
+          let path = work </> (label ++ ".cbor")
+              body = encode sealed
+          BS.writeFile path body
+          pure (path,SHA.hash body)
+        readCold label term = do
+          (path,_) <- writeDescriptor label term
+          owner <- newExactInputOwner
+          readWorldInputsWithOwner owner path
+        readNext label before term = do
+          (path,_) <- writeDescriptor label term
+          owner <- newExactInputOwner
+          readWorldSuccessorWithOwner owner before path
+        refuse label action = do
+          outcome <- try action
+          case outcome of
+            Left (WorldInputsFailure WorldInputsCorrupt _) -> pure ()
+            Left failure -> throwIO failure
+            Right _ -> fail ("World value receiver accepted " ++ label)
+        summary facts = (worldInputsIdentityBytes facts,worldInputsCompilerIdentity facts
+          ,worldInputsRetainedCharge facts
+          ,Map.map (worldBindingRowFactCID . worldBindingRow) (worldInputsBindings facts))
+    original <- readCold "value-initial" initial
+    (aliases,counts,_) <- worldValueColdCensus initial
+    unless (Map.size aliases == 2 && Set.size (Set.fromList (Map.elems aliases)) == 1
+        && not (Map.null counts) && all (== 1) (Map.elems counts))
+      (fail "value lifecycle fixture lacks same-CID aliases and nonempty TYPE dependencies")
+    let missingDependency (TList fields) = case splitAt 6 fields of
+          (prefix,TList [base,visible,TList (_:rest)]:suffix) ->
+            TList (prefix ++ [TList [base,visible,TList rest]] ++ suffix)
+          _ -> error "value closure refusal needs a genuine dependency row"
+        missingDependency _ = error "value closure refusal needs its cold carrier"
+    refuse "a missing cold manifest dependency" (readCold "value-missing-dependency" (missingDependency initial))
+    (final,history) <- foldM (\(before,observed) step -> case step of
+      TList [TString label,successor,cold] -> do
+        let name = T.unpack label
+        (_,beforeCounts,_) <- worldValueColdCensus (if null observed then initial else head observed)
+        (_,afterCounts,_) <- worldValueColdCensus cold
+        let required = Map.union
+              (Map.map (const True) (Map.difference afterCounts beforeCounts))
+              (Map.map (const False) (Map.difference beforeCounts afterCounts))
+        edits <- case successor of
+          TList [TString "TPCWSUCC6",_,_,_,_,TList edits,_] -> forM edits $ \edit -> case edit of
+            TList [binding,row] -> pure (encode binding,row /= TNull)
+            _ -> fail "value history has an invalid dependency edit"
+          _ -> fail "value history omitted its v6 successor"
+        unless (Map.fromList edits == required && length edits == Map.size required)
+          (fail ("writer dependency transitions differ from independent live-CID census: " ++ name))
+        next <- worldSuccessorFacts <$> readNext ("value-next-" ++ name) before successor
+        independent <- readCold ("value-cold-" ++ name) cold
+        unless (summary next == summary independent)
+          (fail ("incremental receiver differs from full cold admission: " ++ name))
+        unless (Map.null required) $ do
+          let omitted = case successor of
+                TList [tag,receipt,blocks,primary,visible,TList (_:rest),acquisition] ->
+                  TList [tag,receipt,blocks,primary,visible,TList rest,acquisition]
+                _ -> error "required transition control lost its genuine edit"
+          refuse ("a missing dependency transition at " ++ name)
+            (readNext ("value-missing-edit-" ++ name) before omitted)
+          retry <- worldSuccessorFacts <$> readNext ("value-retry-" ++ name) before successor
+          unless (summary retry == summary independent)
+            (fail "refused value transition changed its held predecessor")
+        pure (next,cold:observed)
+      _ -> fail "World value fixture history has an invalid step") (original,[]) steps
+    unless (length history == 7 && Map.null (worldInputsBindings final))
+      (fail "World value lifecycle did not reach its last-reference removal")
+    withRootedCompilerEnvironment work $
+      withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
+        environment <- getSession
+        owner <- liftIO newExactInputOwner
+        -- TYPE custody is demanded by a value manifest, never by a new primary
+        -- module association or a newly visible value occurrence.
+        (_,_,dependencyOwners) <- liftIO (worldValueColdCensus initial)
+        selected <- liftIO (readWorldBindingInputs owner environment original (Map.keys aliases))
+          >>= either (liftIO . fail) pure
+        let (_,captured,types) = selected
+        liftIO $ unless (not (null captured) && Map.keysSet types == dependencyOwners)
+          (fail "manifest demand lost its exact retained TYPE closure")
+        primary <- liftIO (readWorldTypeInputs owner environment original (Set.toList dependencyOwners))
+        liftIO $ case primary of
+          Left _ -> pure ()
+          Right _ -> fail "dependency-only TYPE custody became primary selection"
+        liftIO $ unless (Map.keysSet (worldInputsBindings original) == Map.keysSet aliases)
+          (fail "dependency-only value rows entered the visible namespace")
+        (operandPath,seal) <- liftIO (writeDescriptor "value-operand" operand)
+        admitted <- liftIO (readWorldCellOperandWithOwner owner environment final operandPath seal)
+        liftIO $ unless (not (Map.null (worldCellOperandTypes admitted)))
+          (fail "operand lost its independently owned TYPE dependencies after World retirement")
+        let withoutDependencies = case operand of
+              TList [tag,exposure,reference,blocks,leaf,_,acquisition] ->
+                TList [tag,exposure,reference,blocks,leaf,TList [],acquisition]
+              _ -> error "operand closure control needs its v2 carrier"
+        liftIO $ refuse "an operand without its required TYPE closure" $ do
+          (path,sha) <- writeDescriptor "value-operand-missing-dependencies" withoutDependencies
+          readWorldCellOperandWithOwner owner environment final path sha
+
+-- Recompute references from distinct raw row-fact CIDs, independently of the
+-- receiver's retained counts and successor implementation.
+worldValueColdCensus :: Term -> IO (Map.Map String BS.ByteString,Map.Map BS.ByteString Int,Set.Set (String,String))
+worldValueColdCensus (TList [TString "TPCWORLD",TInt 6,_,_,_,_,TList [_,_,TList dependencies],_,TBytes visibility,_,TList blocks]) = do
+  pairs <- forM blocks $ \entry -> case entry of
+    TList [TBytes cid,TBytes body] -> pure (cid,body)
+    _ -> fail "value census needs genuine CID/body blocks"
+  root <- worldFixtureTerm visibility >>= \term -> case term of
+    TList [TString "TPCWBIND4",_,TBytes cid] -> pure cid
+    _ -> fail "value census needs the exact occurrence root"
+  rows <- worldFixtureHamtRows pairs root
+  aliases <- forM rows $ \entry -> case entry of
+    (TString name,TList [_,_,_,_,reference]) -> (,) (T.unpack name) <$> worldFixtureLink reference
+    _ -> fail "value census needs exact occurrence/row-CID facts"
+  manifests <- forM (Set.toList (Set.fromList (map snd aliases))) $ \cid ->
+    worldFixtureBlock pairs cid >>= \term -> case term of
+      TList [_,_,_,_,TList manifest] -> forM manifest $ \entry -> case entry of
+        TList [binding,_] -> pure (encode binding)
+        _ -> fail "value census needs exact dependency associations"
+      _ -> fail "value census needs the current coupled row fact"
+  supplied <- forM dependencies $ \entry -> case entry of
+    TList [binding,TList [TList [TString unit,TString name,_,_,_,_,_,_],_]] ->
+      pure (encode binding,(T.unpack unit,T.unpack name))
+    _ -> fail "value census needs binding-keyed dependency transport"
+  let counts = Map.fromListWith (+) [(binding,1 :: Int) | binding <- concat manifests]
+  unless (Map.keysSet counts == Set.fromList (map fst supplied) && length supplied == Map.size counts)
+    (fail "producer cold dependency transport differs from independent live-CID manifests")
+  pure (Map.fromList aliases,counts,Set.fromList (map snd supplied))
+worldValueColdCensus _ = fail "value census needs a complete v6 cold World"
+
+sealWorldValueDescriptor :: IORef [Handle] -> Term -> IO Term
+sealWorldValueDescriptor handles (TList fields) = do
+  index <- case fields of
+    TString "TPCWORLD":_ -> pure 7
+    TString "TPCWSUCC6":_ -> pure 6
+    TString "TPCWCELLOPERAND2":_ -> pure 6
+    _ -> fail "value fixture has an unsupported descriptor"
+  case splitAt index fields of
+    (prefix,TList [TString "TPCWORLDFIXTUREBYTES2",TList arenas,images]:rest) -> do
+      endpoints <- forM arenas $ \entry -> case entry of
+        TList [TString path,extent] -> do
+          bytes <- BS.readFile (T.unpack path)
+          unless (extent == TInt (BS.length bytes) || extent == TInteger (toInteger (BS.length bytes)))
+            (fail "value fixture arena extent differs from its retained bytes")
+          mask $ \_ -> do
+            (handle,endpoint) <- acquireSealedInputBytes bytes
+            modifyIORef' handles (handle:)
+            pure (TList [TString (T.pack endpoint),extent])
+        _ -> fail "value fixture omitted its durable arena DATA"
+      pure (TList (prefix ++ [TList [TString "continue-originals",TList endpoints,images]] ++ rest))
+    _ -> fail "value fixture omitted its explicit DATA acquisition"
+sealWorldValueDescriptor _ _ = fail "value fixture descriptor is not an array"
+
 semanticWorldBindingControls :: IORef [Handle] -> FilePath -> FilePath -> BS.ByteString -> IO ()
 semanticWorldBindingControls = semanticWorldInputControls Nothing
 
