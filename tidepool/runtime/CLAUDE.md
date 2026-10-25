@@ -15,6 +15,14 @@ the production installer. Engine fixtures may bootstrap a self-contained
 issued closure. Site evidence belongs to the defining group or installed engine,
 not necessarily the entry program.
 
+Generic apply support has an engine-owned pin and is projected from issued
+compiler helpers. Validate every acquired dependency's PACKAGE grant and selected
+children; equal code identities do not equate acquisitions. Intrinsic `Static`
+constructor reply rows carry type facts, while site-dependent replies carry a
+separate authority obligation. The support must retain no user turn or source
+custody. Fresh host-built data can be ownerless: its still-pinned installation
+carrier supplies binding identity, and handle adoption checks liveness.
+
 Session state has one mutable owner at a time. `SessionRegistry` controls
 checkout admission; `PersistentSession` owns the resident execution contract;
 frontends choose whether admission waits or fails immediately. JIT resource
