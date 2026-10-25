@@ -211,7 +211,16 @@ fn run_request_constructors(turn: &CompiledTurn) -> IssuedFixtureConstructors {
 
 impl InputFixture {
     fn compile(source: &str, opaque: bool, session: SessionId) -> Self {
-        let (root, recipe) = Self::source_recipe(opaque);
+        Self::compile_with_imports(source, opaque, session, &[])
+    }
+
+    fn compile_with_imports(
+        source: &str,
+        opaque: bool,
+        session: SessionId,
+        imports: &[&str],
+    ) -> Self {
+        let (root, recipe) = Self::source_recipe_with_imports(opaque, imports);
         let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
             .unwrap()
             .with_validation_include(recipe.include.clone());
@@ -229,6 +238,13 @@ impl InputFixture {
     }
 
     fn source_recipe(opaque: bool) -> (tempfile::TempDir, Arc<InputRecipe>) {
+        Self::source_recipe_with_imports(opaque, &[])
+    }
+
+    fn source_recipe_with_imports(
+        opaque: bool,
+        imports: &[&str],
+    ) -> (tempfile::TempDir, Arc<InputRecipe>) {
         tidepool_testing::eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(&[
             tidepool_mcp::agent_tools_decl(),
@@ -256,7 +272,10 @@ impl InputFixture {
             "qualified Tidepool.Agent.Ref.Internal as Ref",
             "qualified Tidepool.Actors.Internal.Agent as Agents",
             "qualified Tidepool.Effects.Core as Core",
-        ] {
+        ]
+        .into_iter()
+        .chain(imports.iter().copied())
+        {
             preamble = insert_preamble_imports(&preamble, import);
         }
         if opaque {
@@ -7229,12 +7248,13 @@ fn compile_activation_preview(
 
 #[test]
 fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirement() {
-    let fixture = InputFixture::compile(
+    let fixture = InputFixture::compile_with_imports(
         include_str!("fixtures/owned-result-callable.hs"),
         false,
         SessionId(1750),
+        &["qualified Tidepool.Agent.Reply.Internal"],
     );
-    let mut protocol_original = fixture.protocol_original_from("Tidepool.Agent.Reply");
+    let mut protocol_original = fixture.protocol_original_from("Tidepool.Agent.Reply.Internal");
     protocol_original.response_result = Some(issued_fixture_constructors(
         &fixture.producer,
         "Tidepool.Agent.Reply.Internal",
