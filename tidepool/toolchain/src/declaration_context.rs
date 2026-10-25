@@ -1040,6 +1040,10 @@ impl<'a> PhysicalCohortInputs<'a> {
             .lock()
             .expect("physical group issuance lock");
         let (_, selected) = view.selected_native_binding_rows();
+        validation
+            .inventory
+            .reserve::<(crate::artifact_inventory::NativeGroupBinding, [usize; 4])>(selected.len())
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
         let mut offered = self
             .compiler_inputs()
             .native_availability()

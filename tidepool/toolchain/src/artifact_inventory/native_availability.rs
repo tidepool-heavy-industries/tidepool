@@ -2299,15 +2299,21 @@ impl std::ops::Deref for NativeOfferFacts {
 }
 
 impl UnissuedNativeOffer {
-    fn bindings(&self) -> BTreeSet<NativeGroupBinding> {
-        self.custody
-            .reachable
-            .iter()
-            .filter_map(|node| match node {
-                ArtifactBindingNode::Group(group) => Some(*group),
-                _ => None,
-            })
-            .collect()
+    fn bindings(
+        &self,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<BTreeSet<NativeGroupBinding>, CompileError> {
+        let mut bindings = BTreeSet::new();
+        for node in &self.custody.reachable {
+            crate::host_work::checkpoint()?;
+            if let ArtifactBindingNode::Group(group) = node {
+                operation
+                    .reserve::<(NativeGroupBinding, [usize; 4])>(1)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                bindings.insert(*group);
+            }
+        }
+        Ok(bindings)
     }
 
     fn certify_rows(
@@ -2316,7 +2322,7 @@ impl UnissuedNativeOffer {
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<crate::certified_products::SelectedScopeCertification, CompileError> {
         let view = ArtifactView::from_custody(Arc::clone(&self.custody.lease));
-        let bindings = self.bindings();
+        let bindings = self.bindings(&validation.inventory)?;
         let scope = crate::artifact_inventory::SelectedOriginalGroupScope::acquired(
             &view,
             &bindings,
@@ -2450,7 +2456,7 @@ impl CheckedNativeAvailability {
         .map_err(evidence)?;
         let mut offers = Vec::with_capacity(self.offers.len());
         for offer in self.offers {
-            selection.seed_native_group_rows(&offer.bindings(), validation)?;
+            selection.seed_native_group_rows(&offer.bindings(&operation)?, validation)?;
             let rows = offer.certify_rows(&mut inventory, validation)?;
             offers.push(offer.seal(rows));
         }
