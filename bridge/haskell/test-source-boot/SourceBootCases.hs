@@ -1161,8 +1161,10 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
 
 -- The current-source refusal must consume a genuinely parsed authored import;
 -- an ordinary exact import reuses its already admitted lexical owner.
-authoredCurrentImportPurpose :: FilePath -> String -> String -> IO CompilePurpose
-authoredCurrentImportPurpose target moduleName imported = do
+data AuthoredImportTemplate = NativeImportTemplate | CheckingImportTemplate
+
+authoredCurrentImportPurpose :: AuthoredImportTemplate -> FilePath -> String -> String -> IO CompilePurpose
+authoredCurrentImportPurpose kind target moduleName imported = do
   flags <- defaultParserDynFlags
   source <- readFile target
   template <- either fail pure (replaceTemplateMarker imported preambleImportMarker source)
@@ -1172,7 +1174,10 @@ authoredCurrentImportPurpose target moduleName imported = do
       (literalImportRendering preambleImportMarker)) (literalImportRendering template)
   mapped <- either fail pure
     (captureProtectedTemplateImports flags template >>= renderProtectedTemplateImports 0)
-  recipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
+  let buildRecipe = case kind of
+        NativeImportTemplate -> generatedScaffoldRecipeWithImportRendering
+        CheckingImportTemplate -> generatedCheckingTemplateRecipeWithImportRendering
+  recipe <- buildRecipe flags (CheckedTemplateImports [] [])
     mapped template rendering target moduleName >>= either fail pure
   writeFile target (importRenderingSource rendering)
   pure (GeneratedScaffoldCompile recipe GeneralCompile)
@@ -1248,7 +1253,7 @@ activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
     requireExactProviderImport "Expr" "ExecutionClass" captured
     unless (maybe False (isNothing . compilationSourceSelection) (preparedExactCompilation captured)) $
       fail "ordinary class import acquired a current-source selection"
-    authoredPurpose <- authoredCurrentImportPurpose target "Expr" "import ExecutionClass (C(..))"
+    authoredPurpose <- authoredCurrentImportPurpose NativeImportTemplate target "Expr" "import ExecutionClass (C(..))"
     requireOriginalSourceRejection "authored import after scoped preview"
       (ExecutionSourceUnavailable ("main","ExecutionClass")) $
       compile CheckedEnvironment Set.empty authoredPurpose (Just scope) target [] Nothing
@@ -1878,7 +1883,7 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
         fail "ordinary retained import acquired a current-source selection"
       -- This fixture lacks checked include authority. A genuine authored
       -- import must refuse before source drift validation can be attempted.
-      authoredPurpose <- authoredCurrentImportPurpose currentTarget "MetadataCurrentSourceTarget"
+      authoredPurpose <- authoredCurrentImportPurpose CheckingImportTemplate currentTarget "MetadataCurrentSourceTarget"
         "import MetadataQuoteSupport (answerValue)"
       refused <- try (void (compile CheckedEnvironment Set.empty authoredPurpose (Just scope)
         currentTarget [work] Nothing)) :: IO (Either InputRejection ())
@@ -1988,7 +1993,7 @@ exactReexportQuoter = withTiming $ withScratch $ \work -> do
     requireExactProviderImport "MetadataCurrentSourceTarget" "MetadataQuoteSupport" ordinary
     unless (maybe False (isNothing . compilationSourceSelection) (preparedExactCompilation ordinary)) $
       fail "ordinary reexport helper import acquired a current-source selection"
-    authoredPurpose <- authoredCurrentImportPurpose currentTarget "MetadataCurrentSourceTarget"
+    authoredPurpose <- authoredCurrentImportPurpose CheckingImportTemplate currentTarget "MetadataCurrentSourceTarget"
       "import MetadataQuoteSupport (answerValue)"
     currentRefusal <- try (void (compile CheckedEnvironment Set.empty authoredPurpose (Just scope)
       currentTarget [work] Nothing)) :: IO (Either InputRejection ())
