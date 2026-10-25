@@ -1696,6 +1696,10 @@ impl NativeGroupChoiceIdentity {
 }
 
 impl ChosenNativeGroupSupport {
+    pub(crate) fn issued_group(&self) -> Result<&Arc<IssuedSelectedNativeGroup>, CompileError> {
+        self.contribution.issued_group(self.binding)
+    }
+
     pub(crate) fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
         self.binding
     }
@@ -6679,6 +6683,7 @@ impl RecoveredArtifactInventory {
                 snapshot.recorded_rows(),
                 &snapshot.offers,
                 &snapshot.native_availability,
+                validation,
             )?;
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             source_scope: SourceLexicalScope::default(),

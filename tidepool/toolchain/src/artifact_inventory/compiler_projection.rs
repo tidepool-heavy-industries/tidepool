@@ -4143,6 +4143,7 @@ impl CompilerSourceSupport {
     fn from_selected_issuance(
         projection: CompilerInputProjection,
         artifacts: ArtifactView,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         projection.validate(&artifacts)?;
         if projection
@@ -4188,7 +4189,7 @@ impl CompilerSourceSupport {
                     row: &selected[owner],
                     artifacts: &artifacts,
                 });
-                let offer = IssuedNativeOffer::issue(input, proof)?;
+                let offer = IssuedNativeOffer::issue(input, proof, validation)?;
                 let row = selected.remove(owner).expect("issued compiler row");
                 selected.insert(
                     owner.clone(),
@@ -4251,13 +4252,14 @@ impl CompilerSourceSupport {
         &self,
         owner: &ExactModuleIdentity,
         proof: Option<NativeOriginalRequirement>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<IssuedNativeOffer, CompileError> {
         let input = self.compiler_primary_input(owner)?.ok_or_else(|| {
             admission_failure(ArtifactInventoryFailure::MissingOriginal {
                 owner: owner.clone(),
             })
         })?;
-        IssuedNativeOffer::issue(input, proof)
+        IssuedNativeOffer::issue(input, proof, validation)
     }
 
     pub(crate) fn compiler_primary_inputs(
@@ -5055,11 +5057,12 @@ impl CompilerSourceSupport {
 
     pub(crate) fn from_recovered_selection(
         selection: crate::declaration_context::RecoveredCompilerSelection,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         let (artifacts, projection, issuance) = selection.into_parts();
         match issuance {
             crate::declaration_context::RecoveredCompilerIssuance::CheckedInput => {
-                let support = Self::from_selected_issuance(projection, artifacts)?;
+                let support = Self::from_selected_issuance(projection, artifacts, validation)?;
                 let mut draft = support.reopen();
                 draft.input_decisions = RecordedInputNativeDecisions::default()
                     .with_recorded_facts(draft.input_decisions.facts.clone());
@@ -5082,6 +5085,7 @@ impl CompilerSourceSupport {
             ArtifactId,
             crate::declaration_context::NativeAvailabilitySnapshotFacts,
         >,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         let mut projection = CompilerInputProjection::default();
         let mut births = BTreeMap::new();
@@ -5138,6 +5142,7 @@ impl CompilerSourceSupport {
                         &birth.native_facts.roles,
                         &birth.native_facts.offers,
                         &birth.native_facts.native_availability,
+                        validation,
                     )?;
                     let acquired = Arc::new(acquired);
                     births.insert(owner.clone(), Arc::clone(&acquired));
@@ -5178,7 +5183,7 @@ impl CompilerSourceSupport {
             None,
             Default::default(),
         )?;
-        acquired.restore_native_maps(rows, offers, availability)
+        acquired.restore_native_maps(rows, offers, availability, validation)
     }
 
     pub(crate) fn restore_snapshot_evidence(
@@ -5201,6 +5206,7 @@ impl CompilerSourceSupport {
             ArtifactId,
             crate::declaration_context::NativeAvailabilitySnapshotFacts,
         >,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         if self.projection.roles.len() != roles.len() {
             return Err(failure(
@@ -5238,7 +5244,7 @@ impl CompilerSourceSupport {
                 if *key != fact.identity()? {
                     return Err(failure("native offer key differs from its issued facts"));
                 }
-                fact.restore(&self.artifacts)
+                fact.restore(&self.artifacts, validation)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let proof_map = offers

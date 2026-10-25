@@ -1841,8 +1841,9 @@ impl NativeOfferSnapshotFacts {
     pub(crate) fn restore(
         &self,
         source: &crate::artifact_inventory::ArtifactView,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<crate::artifact_inventory::IssuedNativeOffer, crate::CompileError> {
-        crate::artifact_inventory::IssuedNativeOffer::restore_snapshot(self, source)
+        crate::artifact_inventory::IssuedNativeOffer::restore_snapshot(self, source, validation)
     }
 }
 #[derive(Serialize, Deserialize)]
