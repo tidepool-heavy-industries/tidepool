@@ -2431,10 +2431,6 @@ worldTypeEntryInterfaceBody (WorldTypeClosureEntry _ _ _ _ _ body) = body
 -- Decode each selected sidecar once. Its immutable token authenticates the
 -- offered seal; the collective package owner checks installed bytes and the
 -- current compiler selection before these facts become available to callers.
-readWorldPackageInputs :: HscEnv -> WorldInputFacts -> Map.Map InterfaceOwner InterfaceRow
-  -> IO (Either String (Map.Map InterfaceOwner PackageImportEvidence))
-readWorldPackageInputs env facts = readWorldPackageInputsWithCustody env (worldInputsCustody facts)
-
 readWorldPackageInputsWithCustody :: HscEnv -> RequestOriginalInputs -> Map.Map InterfaceOwner InterfaceRow
   -> IO (Either String (Map.Map InterfaceOwner PackageImportEvidence))
 readWorldPackageInputsWithCustody env custody rows = do
