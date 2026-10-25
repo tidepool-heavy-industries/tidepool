@@ -8168,8 +8168,10 @@ sourceEvidenceGraph (Just scope) graph = sourceEvidenceGraphFor exactOwners sour
   where
     exactOwners = Map.fromList [(mkModuleName (exactModule iface),exactUnit iface)
       | iface <- [value | (value,_,_) <- scopeInterfaces scope] ++ scopeValueInterfaces scope]
+    checkedOwners = Set.fromList [(exactUnit iface,exactModule iface) | iface <- scopeValueInterfaces scope]
     sourceOwners = Map.fromList [(mkModuleName (exactModule iface),exactUnit iface)
       | (iface,_,_) <- scopeInterfaces scope
+      , (exactUnit iface,exactModule iface) `Set.notMember` checkedOwners
       , Map.lookup (exactUnit iface,exactModule iface) (scopeInterfaceEvidence scope)
           /= Just CheckedValueEvidence]
 
