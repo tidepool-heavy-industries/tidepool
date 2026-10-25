@@ -20897,6 +20897,14 @@ pub(crate) mod request_tests {
 
     impl RootedWorldInputTest {
         async fn new(client: crate::CompilerPreparationClient, known: i64) -> Self {
+            Self::with_source_files(client, known, &[]).await
+        }
+
+        async fn with_source_files(
+            client: crate::CompilerPreparationClient,
+            known: i64,
+            additional: &[(&str, &str)],
+        ) -> Self {
             let (session, mut public, source, root) = host_mount_fixture_with_effects(
                 |_| {},
                 &[tidepool_mcp::introspection_decl()],
@@ -20905,8 +20913,10 @@ pub(crate) mod request_tests {
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(public.placement.session, Box::new(session));
             let body = format!("module WorldQuestion where\nknown :: Int\nknown = {known}\n");
+            let mut files = vec![("WorldQuestion.hs", body.as_str())];
+            files.extend_from_slice(additional);
             let (captured, source_owner) = world_query_test_source_files_with_support(
-                &[vec![("WorldQuestion.hs", body.as_str())]],
+                &[files],
                 &source.base_include,
             );
             public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
@@ -21031,6 +21041,53 @@ pub(crate) mod request_tests {
                 1
             );
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn world_checked_nominal_values_retain_type_closure_through_private_promotion() {
+        with_test_compiler_owner(|client| async move {
+            let fixture = RootedWorldInputTest::with_source_files(
+                client,
+                7,
+                &[
+                    ("RetainedNominal.hs", include_str!("fixtures/RetainedNominal.hs")),
+                    ("RetainedNominalLeaf.hs", include_str!("fixtures/RetainedNominalLeaf.hs")),
+                ],
+            ).await;
+            fixture.workbench.access.with_machine(fixture.public.clone(), |session, context, _| {
+                let view = session.compile_view_in(context.placement.lexical_scope).unwrap();
+                assert!(view.exact_declaration_context().unwrap().compiler_roles().keys().all(|owner|
+                    owner.module != "RetainedNominal" && owner.module != "RetainedNominalLeaf"),
+                    "captured source availability must not preinstall the nominal TYPE dependencies");
+                Ok(())
+            }).await.unwrap();
+
+            let (producer, context) = fixture.private_with_input(None).await;
+            producer.execute_cell_for_test(context.clone(),
+                include_str!("fixtures/world-nominal-producer.hs")).await
+                .expect("ordinary checked values are issued from the captured nominal source");
+            producer.execute_cell_for_test(context.clone(),
+                include_str!("fixtures/world-nominal-private-consumer.hs")).await
+                .expect("a successor cell demands the ordinary value's transitive TYPE closure");
+            let private_binding = producer.access.with_machine(context.clone(), |session, context, _| {
+                Ok(session.current_binding_in(context.placement.lexical_scope, "nominal").unwrap().0)
+            }).await.unwrap();
+            producer.publish_completed_cell_for_test(context).await
+                .expect("publication promotes the completed checked values before retiring their private scope");
+            drop(producer);
+            fixture.workbench.access.with_machine(fixture.public.clone(), move |session, context, _| {
+                assert_eq!(session.current_binding_in(context.placement.lexical_scope, "nominal").unwrap().0,
+                    private_binding, "promotion preserves the issued runtime value");
+                Ok(())
+            }).await.unwrap();
+
+            let (consumer, context) = fixture.private_with_input(None).await;
+            consumer.execute_cell_for_test(context.clone(),
+                include_str!("fixtures/world-nominal-public-consumer.hs")).await
+                .expect("a fresh invocation consumes the promoted value after producer retirement");
+            consumer.publish_completed_cell_for_test(context).await.unwrap();
+        }).await;
     }
 
     #[tokio::test]
