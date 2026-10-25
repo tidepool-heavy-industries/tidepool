@@ -137,7 +137,7 @@ import Tidepool.GhcPipeline
   , pprCanonicalOriginalInputs, pprAcquiredCanonicalOriginals, pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprOriginalReferences, pprAcceptedCandidates, prHscEnv, prCanonicalInterfaceAdmissions
   , prInjectedSessionInterfaces, prProducedSessionInterfaces, prTargetTcGblEnv, PreparedModuleObserver(..)
   , PreparedModuleCompletionInputs(..), PreparedSourceRoute(..), preparedSourceRoute
-  , acquireWorldSourceOriginal, worldSourceOriginalFinalization, worldSourceOriginalPackages, captureWorldSourceOriginals
+  , acquireWorldSourceOriginal, worldSourceOriginalFinalization, worldSourceOriginalPackages, capturePreparedSourceOriginals
   , preparedFreshDependencies, preparedExactCompilation
   , preparedCandidateOriginal, preparedCandidateProof, preparedCandidateRoots
   , revalidatePreparedCandidateInputs )
@@ -1497,12 +1497,9 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
       symbolUnit identity `seq` symbolModule identity `seq` symbolNamespace identity `seq`
         symbolOccurrence identity `seq` maybe () (\parent -> parent `seq` ()) (symbolRecordParent identity))
       () nativeNames)
-    sourceOriginals <- case preparedExactCompilation prepared of
-      Nothing -> do
-        let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
-        captureWorldSourceOriginals originalInterfaces prepared
-          (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
-      Just _ -> pure Map.empty
+    let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
+    sourceOriginals <- capturePreparedSourceOriginals originalInterfaces prepared
+      (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
     let previousCaptures = case preparedPriorOriginalProducts =<< productContext of
           Just (StagedOriginalProducts previous _ _ _ _) -> certifiedSourceCaptures previous
           Nothing -> Map.empty

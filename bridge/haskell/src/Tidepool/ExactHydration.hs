@@ -16,7 +16,7 @@ module Tidepool.ExactHydration
   , RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, readCapturedExactIfaceArtifacts
   , readCapturedExactIfaceClosureWithCheckedValues
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
-  , HydratedInterfaceClosure, emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, selectHydratedInterfaceInputs, hydratedInterfaceProducts, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior, admitCheckedValueInterface
+  , HydratedInterfaceClosure, emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, selectHydratedInterfaceInputs, hydratedInterfaceProducts, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior, admitCheckedValueInterface, admitCheckedValueInputs, closureSelectionInputs
   , HydratedExactInterfaces, hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct
   , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
@@ -500,6 +500,21 @@ admitCheckedValueInterface packages (VerifiedExactInterface artifact product' bo
     DecodedCheckedValueInterface _ iface existingPackages -> do
       unless (existingPackages == packages) (Left "checked value interface has conflicting package evidence")
       pure (VerifiedExactInterface artifact (DecodedCheckedValueInterface selected iface packages) body issuer)
+
+-- The caller supplies the admitted checked-value row's captured package token.
+-- Replacing its compiler product must retain every already-verified alias.
+admitCheckedValueInputs :: CapturedInterfaceInputs -> [(ExactIfaceArtifact,ArtifactBytes)]
+  -> Either String CapturedInterfaceInputs
+admitCheckedValueInputs = foldM admit
+  where
+    admit (CapturedInterfaceInputs captured) (artifact,packages) = do
+      let key = (exactUnit artifact,exactModule artifact)
+      (verified,aliases) <- maybe (Left "checked value lacks its captured interface") Right
+        (Map.lookup key captured)
+      unless (sameExactInterfaceIdentity artifact (fst (verifiedExactInterface verified)))
+        (Left "checked value differs from its admitted interface identity")
+      owned <- admitCheckedValueInterface packages verified
+      pure (CapturedInterfaceInputs (Map.insert key (owned,aliases) captured))
 
 data VerifiedExactInterface = VerifiedExactInterface !ExactIfaceArtifact CapturedCompilerInterface !ArtifactBytes
   !(Char,MVar OrigNameCache)

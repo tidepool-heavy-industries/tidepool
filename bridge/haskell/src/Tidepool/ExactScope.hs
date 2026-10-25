@@ -91,7 +91,7 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, CapturedInterfaceInputs, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, verifiedExactInterfaceBody, capturedInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, admitCheckedValueInterface, HydratedInterfaceClosure, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, CapturedInterfaceInputs, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, verifiedExactInterfaceBody, capturedInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, admitCheckedValueInterface, admitCheckedValueInputs, HydratedInterfaceClosure, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
 import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, withCapturedRequestInputTokens, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies, editDirectRequestInputBodies)
@@ -1124,7 +1124,27 @@ readScopedInterfaceClosure :: HscEnv -> ExactScope -> [ExactIfaceArtifact] -> [E
   -> IO (Either String CapturedInterfaceInputs)
 readScopedInterfaceClosure env scope originals values = do
   decoder <- scopeIfaceDecoder scope
-  readCapturedExactIfaceClosureWithCheckedValues decoder (scopeInterfaceToken scope) env originals values
+  decoded <- readCapturedExactIfaceClosureWithCheckedValues decoder (scopeInterfaceToken scope) env originals values
+  case decoded of
+    Left reason -> pure (Left reason)
+    Right captured -> do
+      let AdmittedScopeInputs _ rows roots _ _ = scopeInputs scope
+          requested = Set.fromList [(exactUnit artifact,exactModule artifact) | artifact <- originals ++ values]
+          -- Purpose aliases can omit advisory requirements. Promote the
+          -- captured primary only against its complete admitted row, retaining
+          -- the aliases whose byte/closure association the reader checked.
+          checked = [(selected,path,sha)
+            | (key,ScopeInterfaceInput (selected,path,sha) CheckedValueEvidence) <- Map.toAscList rows
+            , key `Set.member` requested]
+      valid <- if null checked then pure (Right ()) else validateAdmittedPackageSelection env roots
+      case valid of
+        Left reason -> pure (Left reason)
+        Right () -> do
+          custody <- maybe (fail "checked scope lacks its captured input owner") pure (scopeCapturedInputs scope)
+          packages <- forM checked $ \(artifact,path,sha) -> do
+            body <- capturedRequestInputToken custody path sha
+            pure (artifact,body)
+          pure (admitCheckedValueInputs captured packages)
 
 validateExactScopeEnvironment :: HscEnv -> ExactScope -> IO (Either String ())
 validateExactScopeEnvironment env scope = do

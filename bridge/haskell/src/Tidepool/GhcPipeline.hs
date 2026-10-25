@@ -23,7 +23,7 @@ module Tidepool.GhcPipeline
   , prTargetRdrEnv, prTargetTcGblEnv
   , generatedScaffoldRecipe
   , FinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
-  , WorldSourceOriginal, acquireWorldSourceOriginal, worldSourceOriginalFinalization, worldSourceOriginalPackages, captureWorldSourceOriginals
+  , WorldSourceOriginal, acquireWorldSourceOriginal, worldSourceOriginalFinalization, worldSourceOriginalPackages, capturePreparedSourceOriginals
   , FinalizedExecutionFailure(..)
   , RetainedCompilerArtifact, retainedCompilerInterface, retainedCompilerArtifactClosure
     -- * Bound-value type analysis
@@ -312,7 +312,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , renderDependencyQualifier, sourceEvidenceWithFingerprint, selectedFreshHomeRequirements, revalidateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, HydratedInterfaceClosure, emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, hydratedInterfaceProducts, selectHydratedInterfaceInputs, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, retainInstalledInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, HydratedInterfaceClosure, emptyHydratedInterfaceClosure, hydratedClosureAsCapturedInputs, closureSelectionInputs, hydratedInterfaceProducts, selectHydratedInterfaceInputs, mergeHydratedInterfaceClosures, hydrateInterfaceInputsWithPrior, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
@@ -622,24 +622,28 @@ acquireWorldSourceOriginal prepared owner proof = case ownedPprDependencies prep
 -- Source capture shares the exact issuer with checked compilation. Required
 -- interface seals come from the actual original-interface owner, never names
 -- reconstructed as source/native authority.
-captureWorldSourceOriginals :: OriginalInterfaceArtifacts -> PreparedPipelineResult
+capturePreparedSourceOriginals :: OriginalInterfaceArtifacts -> PreparedPipelineResult
   -> (String,String) -> FinalizedModuleArtifacts -> DependencyEvidence
   -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-captureWorldSourceOriginals originals prepared target finalized evidence = case ownedPprDependencies prepared of
-  WorldScoped _ _ _ _ (WorldSourceCaptureBasis producer imports) -> do
-    let inherited = map interfaceRow (Map.elems (prCanonicalInterfaceAdmissions (pprPipelineResult prepared)))
-        requirements = Map.unions (map localFinalizedRequirements (Map.elems (finalizedLocalAdmissions finalized)))
-    requiredSeals <- fmap Map.fromList $ forM (Map.toAscList requirements) $ \(key@(unit,name),expected) -> do
-      actual <- originalInterfaceSha256 originals (mkModule (stringToUnit unit) (mkModuleName name))
-        >>= maybe (throwIO WorldCellCorrupt) pure
-      unless (actual == expected) (throwIO WorldCellCorrupt)
-      pure (key,actual)
-    let ownSeals = Map.fromList [((Text.unpack unit,Text.unpack name),Text.unpack sha)
-          | ((unit,name),sha) <- finalizedInterfaceSeals finalized]
-    captureSourceOriginals producer inherited [] (Map.union requiredSeals ownSeals)
-      imports target finalized evidence
+capturePreparedSourceOriginals originals prepared target finalized evidence = case ownedPprDependencies prepared of
+  WorldScoped _ _ _ _ (WorldSourceCaptureBasis producer imports) ->
+    capture producer (map interfaceRow (Map.elems (prCanonicalInterfaceAdmissions (pprPipelineResult prepared)))) imports
+  ExactScoped _ compilation _ ->
+    let scope = compilationScope compilation
+    in capture (scopeProducerSha256 scope) (scopeInterfaces scope) (compilationExactImports compilation)
   _ -> pure Map.empty
   where
+    capture producer inherited imports = do
+      let requirements = Map.unions (map localFinalizedRequirements (Map.elems (finalizedLocalAdmissions finalized)))
+      requiredSeals <- fmap Map.fromList $ forM (Map.toAscList requirements) $ \(key@(unit,name),expected) -> do
+        actual <- originalInterfaceSha256 originals (mkModule (stringToUnit unit) (mkModuleName name))
+          >>= maybe (throwIO WorldCellCorrupt) pure
+        unless (actual == expected) (throwIO WorldCellCorrupt)
+        pure (key,actual)
+      let ownSeals = Map.fromList [((Text.unpack unit,Text.unpack name),Text.unpack sha)
+            | ((unit,name),sha) <- finalizedInterfaceSeals finalized]
+      captureSourceOriginals producer inherited [] (Map.union requiredSeals ownSeals)
+        imports target finalized evidence
     interfaceRow (ModuleInterfaceAdmission proof) = canonicalInterfaceInput proof
     interfaceRow (LocalInterfaceAdmission proof) = localFinalizedInterface proof
 
@@ -1318,7 +1322,7 @@ installLexicalInterfaces views hydrated inputs = do
         ExactLexicalInputs _ graph lexical checked scaffold ->
           projectExactLexicalGraph graph lexical checked scaffold environment
         CheckedValueLexicalInputs _ graph artifacts -> do
-          captured <- either (Left . show) Right (hydratedClosureAsCapturedInputs (hydratedExactInputs hydrated))
+          let captured = closureSelectionInputs (hydratedExactInputs hydrated)
           _ <- selectVerifiedValueInterfaces captured artifacts
           pure (environment {hsc_mod_graph=graph},[(artifact,[]) | artifact <- artifacts])
         SourceCompatibilityInputs _ graph artifacts ->
@@ -4185,6 +4189,7 @@ capturedImportIntents whole = do
     | (located,occurrence) <- zip declarations occurrences,let declaration = unLoc located]
 
 matchedImportIntents :: MatchedImportDriver -> [ImportIntent]
+matchedImportIntents (MatchedImportDriver (ScopedImportAdmission OrdinaryImportCapture{} _ _) _ _ _) = []
 matchedImportIntents (MatchedImportDriver _ _ selected _) =
   [case origin of
     AuthoredCurrent -> AuthoredSourceImport requested raw
@@ -9714,11 +9719,11 @@ installPreparedInterface name hmi = do
 -- from the pre-optimization Core reference closure.
 normalVariant :: CompilePurpose -> IO PipelineVariant
 normalVariant purpose = do
-  captureRoute <- importCaptureRoute purpose
   let effectivePurpose = originalPurpose purpose
   case effectivePurpose of
     HostActivationPreviewCompile {} -> fail "activation preview requires its sealed session admission"
     _ -> pure ()
+  captureRoute <- importCaptureRoute purpose
   pure PipelineVariant
    { pvLabel = "runPipeline"
    , pvPurpose = purpose
@@ -10011,7 +10016,9 @@ selectCurrentSourceOriginals admitted resolved recipe sourceGraph = do
       reloadInspection = case scopePurpose admitted of
         ExactReloadInspectionPurpose{} -> True
         _ -> False
-      publishedOwners = if reloadInspection then Set.empty else scopeCompletedSourceOriginals admitted
+      publishedOwners = if reloadInspection then Set.empty else
+        (scopeCompletedSourceOriginals admitted `Set.intersection` lexicalOwners)
+          `Set.difference` scopeSourceSelectedOwners admitted
       checkedOwners = Set.fromList [(exactUnit artifact,exactModule artifact)
         | artifact <- scopeValueInterfaces admitted]
       sourceSummaries = [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph]
@@ -10535,7 +10542,6 @@ planExactExecutionLoad directory admitted interfaces checkedInterfaces targetNam
 
 sessionVariant :: CompilePurpose -> SessionScope -> IO PipelineVariant
 sessionVariant purpose scope = do
-  captureRoute <- importCaptureRoute purpose
   let effectivePurpose = originalPurpose purpose
   exact <- case purposeExactScope purpose of
     Just admitted -> do
@@ -10553,6 +10559,7 @@ sessionVariant purpose scope = do
       previewAdmission = previewInputSignature <$> (exact >>= scopeActivationPreview)
   unless (previewPurpose == previewAdmission)
     (fail "activation preview has another compiler purpose")
+  captureRoute <- importCaptureRoute purpose
   -- The injected source-less @Val.G<g>@ modules: excluded from the
   -- downsweep (no source to summarise) — a deferred module's @import@ of
   -- them resolves from the HPT entry 'cpBeforeModule' registers immediately
