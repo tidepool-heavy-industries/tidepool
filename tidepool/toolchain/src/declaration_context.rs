@@ -6686,10 +6686,12 @@ impl RecoveredArtifactInventory {
         selection: &ArtifactGraphSelection,
         roles: &[CompilerInputRole],
         lexical: Vec<ExactLexicalNode>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ExactDeclarationContext, CompileError> {
         let compiler_support =
             crate::artifact_inventory::CompilerSourceSupport::from_recovered_selection(
                 self.authenticate_graph_selection(selection, roles)?,
+                validation,
             )?;
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             source_scope: SourceLexicalScope::default(),
@@ -7050,6 +7052,7 @@ impl RecoveredArtifactInventory {
         groups: &[NativeGroupKey],
         roles: &[CompilerInputRole],
         lexical: Vec<ExactLexicalNode>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ExactDeclarationContext, CompileError> {
         if roles
             .iter()
@@ -7063,7 +7066,7 @@ impl RecoveredArtifactInventory {
         if selected.len() != groups.len() {
             return Err(failure("duplicate recovered native group selection"));
         }
-        self.context_with_selection(ids, Some(&selected), Some(roles), lexical)
+        self.context_with_selection(ids, Some(&selected), Some(roles), lexical, validation)
     }
 
     /// Parser fixtures explicitly request every authenticated original group.
@@ -7073,8 +7076,9 @@ impl RecoveredArtifactInventory {
         &self,
         ids: &[crate::artifact_inventory::ArtifactId],
         lexical: Vec<ExactLexicalNode>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ExactDeclarationContext, CompileError> {
-        self.context_with_selection(ids, None, None, lexical)
+        self.context_with_selection(ids, None, None, lexical, validation)
     }
 
     #[cfg(test)]
@@ -7164,10 +7168,12 @@ impl RecoveredArtifactInventory {
         groups: Option<&BTreeSet<crate::artifact_inventory::NativeGroupKey>>,
         roles: Option<&[CompilerInputRole]>,
         lexical: Vec<ExactLexicalNode>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ExactDeclarationContext, CompileError> {
         let compiler_support =
             crate::artifact_inventory::CompilerSourceSupport::from_recovered_selection(
                 self.authenticate_unbound_selection(ids, groups, roles)?,
+                validation,
             )?;
         let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             source_scope: SourceLexicalScope::default(),
@@ -14769,6 +14775,11 @@ impl ExactDeclarationContext {
         values: &[RecoveryValueInterfaceRef],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = RecoveredArtifactInventory::capture_inputs(
             root,
             products,
@@ -14781,6 +14792,7 @@ impl ExactDeclarationContext {
         inventory.context_all_groups(
             &inventory.entries.keys().copied().collect::<Vec<_>>(),
             lexical,
+            &mut offer_validation,
         )
     }
 
@@ -18906,6 +18918,13 @@ mod tests {
             index: usize,
             selection: &ArtifactGraphSelection,
         ) -> Result<ExactDeclarationContext, RecoveryInventoryError> {
+            let offer_operation = std::sync::Arc::new(
+                tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            );
+            let mut offer_validation =
+                crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+                    offer_operation,
+                );
             let inputs = self.inputs(index);
             let mut stage = acquisition.stage_inputs(&[], &inputs.references, &[], &[])?;
             let captured = stage.capture_bound(
@@ -18925,7 +18944,12 @@ mod tests {
                     interface: binding.artifact,
                 })
                 .collect::<Vec<_>>();
-            let context = captured.context_with_graph_selection(selection, &roles, vec![])?;
+            let context = captured.context_with_graph_selection(
+                selection,
+                &roles,
+                vec![],
+                &mut offer_validation,
+            )?;
             acquisition.append(stage)?;
             Ok(context)
         }
@@ -18933,6 +18957,13 @@ mod tests {
             &self,
             selection: &ArtifactGraphSelection,
         ) -> Result<ExactDeclarationContext, CompileError> {
+            let offer_operation = std::sync::Arc::new(
+                tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            );
+            let mut offer_validation =
+                crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+                    offer_operation,
+                );
             let roles = selection
                 .namespace
                 .iter()
@@ -18940,13 +18971,22 @@ mod tests {
                     interface: binding.artifact,
                 })
                 .collect::<Vec<_>>();
-            self.recovered
-                .context_with_graph_selection(selection, &roles, vec![])
+            self.recovered.context_with_graph_selection(
+                selection,
+                &roles,
+                vec![],
+                &mut offer_validation,
+            )
         }
     }
 
     #[test]
     fn recovery_payload_acquisition_measures_overlapping_exact_contexts() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let pair = bound_recovery_pair_fixture();
         let capture = |index: usize, work: &mut recovery_artifacts::RecoveryArtifactWork| {
             let inputs = pair.inputs(index);
@@ -18974,22 +19014,25 @@ mod tests {
         let a = capture(0, &mut work_a);
         let mut work_b = recovery_artifacts::RecoveryArtifactWork::default();
         let b = capture(1, &mut work_b);
-        let restore = |inventory: &RecoveredArtifactInventory, index: usize| {
-            let selection = &pair.selections[index];
-            let roles = selection
-                .namespace
-                .iter()
-                .map(|binding| CompilerInputRole::InterfaceOnly {
-                    interface: binding.artifact,
-                })
-                .collect::<Vec<_>>();
-            inventory
-                .context_with_graph_selection(selection, &roles, vec![])
-                .unwrap()
-        };
-        let old = restore(&a, 0);
-        let new = restore(&b, 1);
-        let old_again = restore(&a, 0);
+        let restore =
+            |inventory: &RecoveredArtifactInventory,
+             index: usize,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let selection = &pair.selections[index];
+                let roles = selection
+                    .namespace
+                    .iter()
+                    .map(|binding| CompilerInputRole::InterfaceOnly {
+                        interface: binding.artifact,
+                    })
+                    .collect::<Vec<_>>();
+                inventory
+                    .context_with_graph_selection(selection, &roles, vec![], validation)
+                    .unwrap()
+            };
+        let old = restore(&a, 0, &mut offer_validation);
+        let new = restore(&b, 1, &mut offer_validation);
+        let old_again = restore(&a, 0, &mut offer_validation);
         assert_eq!(
             old.artifact_view().capture_graph_selection(),
             pair.selections[0]
@@ -19015,7 +19058,7 @@ mod tests {
                 .stage_inputs(&[], &inputs.references, &[], &[])
                 .unwrap();
             let captured = inputs.capture(&mut stage).unwrap();
-            let context = restore(&captured, index);
+            let context = restore(&captured, index, &mut offer_validation);
             assert_eq!(
                 context.artifact_view().capture_graph_selection(),
                 *inputs.selection
@@ -19107,6 +19150,11 @@ mod tests {
 
     #[test]
     fn recovery_payload_acquisition_preserves_exact_reference_and_selection_refusals() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let pair = bound_recovery_pair_fixture();
         let mut a = pair.inputs(0);
         let b = pair.inputs(1);
@@ -19148,7 +19196,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(held
-            .context_with_graph_selection(a.selection, &wrong_roles, vec![])
+            .context_with_graph_selection(a.selection, &wrong_roles, vec![], &mut offer_validation)
             .is_err());
         assert_eq!(acquisition.payloads.len(), 3);
 
@@ -19166,6 +19214,11 @@ mod tests {
 
     #[test]
     fn recovery_payload_acquisition_keeps_lexical_requirements_local_to_exact_bindings() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let pair = bound_recovery_pair_fixture();
         let a = pair.inputs(0);
         let bytes = b"retained lexical join".to_vec();
@@ -19236,7 +19289,12 @@ mod tests {
                 )
                 .unwrap();
             let context = held
-                .context_with_graph_selection(&selection, &roles[index], vec![])
+                .context_with_graph_selection(
+                    &selection,
+                    &roles[index],
+                    vec![],
+                    &mut offer_validation,
+                )
                 .unwrap();
             assert_eq!(context.artifact_view().capture_graph_selection(), selection);
             assert_eq!(
@@ -19314,6 +19372,11 @@ mod tests {
 
     #[test]
     fn recovery_payload_acquisition_preserves_distinct_certificates_without_selecting_both() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let (directory, references, views) = recovery_original_certificate_pair_fixture();
         let selections = views
             .iter()
@@ -19369,7 +19432,12 @@ mod tests {
             let projection =
                 CompilerInputProjection::from_issued_entries(&views[index].entries()).unwrap();
             let context = combined
-                .context_with_graph_selection(&selections[index], &projection.roles(), vec![])
+                .context_with_graph_selection(
+                    &selections[index],
+                    &projection.roles(),
+                    vec![],
+                    &mut offer_validation,
+                )
                 .unwrap();
             assert_eq!(context.compiler_input_projection(), &projection);
             assert!(context
@@ -19492,6 +19560,11 @@ mod tests {
                 0..13,
             ),
         ) {
+            let offer_operation = std::sync::Arc::new(
+                tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            );
+            let mut offer_validation =
+                crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
             let (directory, references, views) = recovery_original_certificate_pair_fixture();
             let selections = views.iter().map(ArtifactView::capture_graph_selection).collect::<Vec<_>>();
             let projections = views.iter().map(|view| {
@@ -19565,7 +19638,7 @@ mod tests {
                     proptest::prop_assert!(acquisition.work().read_bytes > before.read_bytes);
                 }
                 for index in indices {
-                    let context = captured.context_with_graph_selection(&selections[index], &projections[index].roles(), vec![]).unwrap();
+                    let context = captured.context_with_graph_selection(&selections[index], &projections[index].roles(), vec![], &mut offer_validation).unwrap();
                     proptest::prop_assert_eq!(context.compiler_input_projection(), &projections[index]);
                     proptest::prop_assert_eq!(context.artifact_view().capture_graph_selection(), selections[index].clone());
                     let selected = context.compiler_input_projection().roles().iter()
@@ -19580,6 +19653,11 @@ mod tests {
 
     #[test]
     fn selected_type_interfaces_preserve_exact_edges_across_warm_and_cold_selection() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::certified_products::tests::original_groups_fixture;
         use crate::certified_products::{fixture_finalized_product, fixture_module_interface};
         let signature = crate::checked_cell::fixture_checked_signature(&{
@@ -19692,6 +19770,7 @@ mod tests {
                     &selection,
                     &types.support.projection().roles(),
                     vec![],
+                    &mut offer_validation,
                 )
                 .unwrap();
             let cold = cold_context
@@ -19738,6 +19817,11 @@ mod tests {
 
     #[test]
     fn bound_recovery_preserves_same_root_payload_with_distinct_child_certificates() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let pair = bound_recovery_pair_fixture();
         let BoundRecoveryPair {
             recovered,
@@ -19758,18 +19842,20 @@ mod tests {
                 .find(|binding| binding.artifact == root_id)
                 .unwrap()
         };
-        let restore = |selection: &ArtifactGraphSelection| {
-            let roles = selection
-                .namespace
-                .iter()
-                .map(|binding| CompilerInputRole::InterfaceOnly {
-                    interface: binding.artifact,
-                })
-                .collect::<Vec<_>>();
-            recovered.context_with_graph_selection(selection, &roles, vec![])
-        };
-        let old = restore(&selections[0]).unwrap();
-        let new = restore(&selections[1]).unwrap();
+        let restore =
+            |selection: &ArtifactGraphSelection,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let roles = selection
+                    .namespace
+                    .iter()
+                    .map(|binding| CompilerInputRole::InterfaceOnly {
+                        interface: binding.artifact,
+                    })
+                    .collect::<Vec<_>>();
+                recovered.context_with_graph_selection(selection, &roles, vec![], validation)
+            };
+        let old = restore(&selections[0], &mut offer_validation).unwrap();
+        let new = restore(&selections[1], &mut offer_validation).unwrap();
         assert!(!old.same_recorded_facts(&new));
         assert!(!old.same_authenticated_context(&new));
         assert!(!old.same_display_observations(&new));
@@ -19786,7 +19872,7 @@ mod tests {
             before_clones
         );
         // Reopening is a new authenticated owner, even for the same wire facts.
-        let reopened = restore(&selections[0]).unwrap();
+        let reopened = restore(&selections[0], &mut offer_validation).unwrap();
         assert_context_observation_wire(&reopened);
         assert_eq!(reopened.semantic_sha256(), old.semantic_sha256());
         assert_eq!(
@@ -19822,18 +19908,18 @@ mod tests {
         missing
             .bindings
             .retain(|binding| binding.artifact != old_id);
-        assert!(restore(&missing).is_err());
+        assert!(restore(&missing, &mut offer_validation).is_err());
         let mut wrong_scope = selections[0].clone();
         wrong_scope.namespace[0] = root_binding(&selections[1]);
-        assert!(restore(&wrong_scope).is_err());
+        assert!(restore(&wrong_scope, &mut offer_validation).is_err());
         let mut missing_witness = selections[0].clone();
         missing_witness.selections.clear();
-        assert!(restore(&missing_witness).is_err());
+        assert!(restore(&missing_witness, &mut offer_validation).is_err());
         let mut altered_witness = selections[0].clone();
         Arc::make_mut(&mut altered_witness.selections[0])
             .dependencies
             .clear();
-        assert!(restore(&altered_witness).is_err());
+        assert!(restore(&altered_witness, &mut offer_validation).is_err());
         let mut missing_binding = bindings.clone();
         missing_binding.pop();
         assert!(RecoveredArtifactInventory::capture_bound(
@@ -19879,15 +19965,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(refused
-            .context_with_graph_selection(&selections[0], &roles, vec![])
+            .context_with_graph_selection(&selections[0], &roles, vec![], &mut offer_validation)
             .is_err());
         assert_eq!(
             old.artifact_view().binding_dependencies(),
             before,
             "refusal cannot mutate an already recovered graph"
         );
-        assert!(restore(&selections[0]).is_ok());
-        assert!(restore(&selections[1]).is_ok());
+        assert!(restore(&selections[0], &mut offer_validation).is_ok());
+        assert!(restore(&selections[1], &mut offer_validation).is_ok());
     }
 
     #[test]
@@ -20101,7 +20187,7 @@ mod tests {
         };
         missing.bindings.retain(|binding| *binding != carrier);
         assert!(recovered
-            .context_with_graph_selection(&missing, &roles, vec![])
+            .context_with_graph_selection(&missing, &roles, vec![], &mut offer_validation)
             .is_err());
         let mut wrong = selection.clone();
         let selected = wrong
@@ -20113,7 +20199,7 @@ mod tests {
         decoded["binding"]["selection"] = serde_json::to_value(carrier.selection).unwrap();
         *selected = serde_json::from_value(decoded).unwrap();
         assert!(recovered
-            .context_with_graph_selection(&wrong, &roles, vec![])
+            .context_with_graph_selection(&wrong, &roles, vec![], &mut offer_validation)
             .is_err());
         let mut altered_edges = edges.clone();
         let edge = altered_edges
@@ -22730,6 +22816,11 @@ mod tests {
     #[test]
     #[ignore = "requires real compiler publication fixture"]
     fn published_original_manifest_binds_native_selection_and_restored_policy() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let fixture =
             crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
         let issued = fixture
@@ -22814,6 +22905,7 @@ mod tests {
                         .collect::<Vec<_>>(),
                     &selection.context().compiler_input_roles(),
                     selection.context().owner.facts.lexical.to_vec(),
+                    &mut offer_validation,
                 )
                 .is_err(),
             "flat custody cannot restore exact publication policy"
@@ -22832,7 +22924,8 @@ mod tests {
                 .context_with_graph_selection(
                     &graph,
                     &changed,
-                    selection.context().owner.facts.lexical.to_vec()
+                    selection.context().owner.facts.lexical.to_vec(),
+                    &mut offer_validation
                 )
                 .is_err(),
             "a valid inventory cannot repair changed publication facts"
@@ -22841,7 +22934,8 @@ mod tests {
             .context_with_graph_selection(
                 &graph,
                 &selection.context().compiler_input_roles(),
-                selection.context().owner.facts.lexical.to_vec()
+                selection.context().owner.facts.lexical.to_vec(),
+                &mut offer_validation
             )
             .is_ok());
     }
@@ -24163,6 +24257,12 @@ mod tests {
             .run(
                 &("[a-z]{1,12}", proptest::collection::vec(0u8..5, 1..24)),
                 |(revision, history)| {
+                    let offer_operation = std::sync::Arc::new(
+                        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    );
+                    let mut offer_validation =
+                        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
+
                     let root = fixture.helper.descriptor.owner.clone();
                     let selection = fixture
                         .entry
@@ -24233,7 +24333,8 @@ mod tests {
                                         &ids,
                                         &groups,
                                         &roles,
-                                        context.owner.facts.lexical.to_vec()
+                                        context.owner.facts.lexical.to_vec(),
+                                        &mut offer_validation
                                     )
                                     .is_err());
                                 use fvm_ipld_blockstore::Blockstore;

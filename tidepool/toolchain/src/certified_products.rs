@@ -15552,6 +15552,11 @@ pub(crate) mod tests {
 
     #[test]
     fn recovery_derives_native_relations_from_roundtripped_original_seals_once() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{ArtifactDependency, ArtifactDescriptor};
         use crate::declaration_join::RecoveredArtifactInventory;
         let root = tempfile::tempdir().unwrap();
@@ -15588,8 +15593,12 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         // The admission owns authenticated bytes; scoped views need no file reread.
         std::fs::remove_file(root.path().join(&original.product_path)).unwrap();
-        let first = inventory.context_all_groups(&ids, vec![]).unwrap();
-        let second = inventory.context_all_groups(&ids, vec![]).unwrap();
+        let first = inventory
+            .context_all_groups(&ids, vec![], &mut offer_validation)
+            .unwrap();
+        let second = inventory
+            .context_all_groups(&ids, vec![], &mut offer_validation)
+            .unwrap();
         let first_entries = first.artifact_view().entries();
         let second_entries = second.artifact_view().entries();
         assert!(first_entries
@@ -15615,7 +15624,9 @@ pub(crate) mod tests {
         assert_eq!(required.len(), 1);
         assert_eq!(required[0].generation, 1);
         assert_eq!(required[0].artifact_id, value.artifact_id);
-        assert!(inventory.context_all_groups(&ids[..1], vec![]).is_err());
+        assert!(inventory
+            .context_all_groups(&ids[..1], vec![], &mut offer_validation)
+            .is_err());
         assert!(RecoveredArtifactInventory::capture(
             root.path(),
             &[original],
@@ -15630,6 +15641,11 @@ pub(crate) mod tests {
 
     #[test]
     fn recovery_refuses_tampered_and_ambiguous_native_dependency_owners() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{ArtifactDependency, ArtifactDescriptor};
         use crate::declaration_join::RecoveredArtifactInventory;
         let root = tempfile::tempdir().unwrap();
@@ -15705,19 +15721,22 @@ pub(crate) mod tests {
         assert!(inventory
             .context_all_groups(
                 &[descriptors[0].id, descriptors[1].id, descriptors[2].id],
-                vec![]
+                vec![],
+                &mut offer_validation
             )
             .is_ok());
         assert!(inventory
             .context_all_groups(
                 &[descriptors[0].id, descriptors[3].id, descriptors[2].id],
-                vec![]
+                vec![],
+                &mut offer_validation
             )
             .is_ok());
         assert!(inventory
             .context_all_groups(
                 &descriptors.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-                vec![]
+                vec![],
+                &mut offer_validation
             )
             .is_err());
         std::fs::write(root.path().join(&original.certification_path), b"tampered").unwrap();

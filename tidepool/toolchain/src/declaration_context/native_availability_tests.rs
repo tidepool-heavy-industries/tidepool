@@ -9618,12 +9618,16 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     let captured = acquire(&initial, &root.path().join("initial"));
     assert!(
         captured
-            .context_all_groups(&[entry.descriptor.id], Vec::new())
+            .context_all_groups(&[entry.descriptor.id], Vec::new(), &mut offer_validation)
             .is_err(),
         "omitting the required canonical artifact cannot restore the recorded closure"
     );
     let issued = captured
-        .context_all_groups(&initial.artifact_view().artifact_ids(), Vec::new())
+        .context_all_groups(
+            &initial.artifact_view().artifact_ids(),
+            Vec::new(),
+            &mut offer_validation,
+        )
         .unwrap();
     assert!(issued.owner.facts.compiler_support.native_offers()[0].is_full());
     assert_eq!(issued.artifact_view().selected_native_groups().len(), 2);

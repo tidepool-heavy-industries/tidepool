@@ -205,6 +205,11 @@ pub(super) fn restored_graph_roles(
     ),
     CompileError,
 > {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let view = context.artifact_view();
     let scratch = tempfile::tempdir().unwrap();
     let references = context.materialize_recovery_artifacts(
@@ -225,7 +230,12 @@ pub(super) fn restored_graph_roles(
         )
         .expect("history recovery: certificate acquisition");
     let authenticated = inventory
-        .context_with_graph_selection(&selection, roles, context.owner.facts.lexical.to_vec())
+        .context_with_graph_selection(
+            &selection,
+            roles,
+            context.owner.facts.lexical.to_vec(),
+            &mut offer_validation,
+        )
         .map_err(|error| {
             eprintln!("history recovery stage=graph-role-authentication error={error:?}");
             error
