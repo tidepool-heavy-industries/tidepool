@@ -9,6 +9,7 @@ import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries)
 import RequestInputsTest (compilerServiceBootBoundaries, worldCanonicalOriginalReuse, worldCarriedImportTypes)
 import RequestInputsTest (bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage)
+import RequestInputsTest (worldValueTypeHistories)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
@@ -44,6 +45,7 @@ tests = testGroup "source-boot"
   , testCase "artifact byte ownership" artifactByteOwnership
   , testCase "request input custody histories" requestInputHistories
   , testCase "owned scope input reuse" ownedScopeInputReuse
+  , testCase "World retained value TYPE closure histories" worldValueTypeHistories
   , testCase "captured canonical promotion refuses readable missing inputs" capturedCanonicalPromotionRefusesReadableMissingInputs
   , testCase "fixture issuer counting histories" fixtureIssuerCountingHistories
   , testCase "retained compilation publication" retainedCompilationPublication
