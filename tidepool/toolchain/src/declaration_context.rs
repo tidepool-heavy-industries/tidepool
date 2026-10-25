@@ -27835,6 +27835,23 @@ mod tests {
             .unwrap();
         let support =
             issue_fixture_compiler_support(projection, view, &mut offer_validation).unwrap();
+        let mut records = support.recorded_rows().clone();
+        for record in records.values_mut() {
+            if let crate::exact_context::RecordedCompilerRow::Original { native_choices, .. } =
+                record
+            {
+                *native_choices = crate::exact_context::RecordedNativeChoices::Unissued;
+            }
+        }
+        let facts = support.native_fact_owner();
+        let support = crate::artifact_inventory::CompilerSourceSupport::authenticate_recorded_rows(
+            support.artifacts().clone(),
+            &records,
+            &facts.offers,
+            &facts.native_availability,
+            &mut offer_validation,
+        )
+        .unwrap();
         let context = Arc::new(ExactDeclarationContext::from_facts(
             DeclarationContextFacts {
                 source_scope: SourceLexicalScope::default(),
