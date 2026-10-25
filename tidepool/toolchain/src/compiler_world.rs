@@ -13,10 +13,12 @@ use tidepool_extract_cmd::{
     CompilerResponseRejection, InspectionNamespace, InspectionScope, StructuredInspection,
 };
 
-use crate::artifact_inventory::CanonicalProducerIdentity;
+use crate::artifact_inventory::{ArtifactBinding, CanonicalProducerIdentity};
 use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
-use crate::declaration_context::ExactDeclarationContext;
+use crate::declaration_context::{
+    CheckedValueDependencyRow, CheckedValueTypeProduct, ExactDeclarationContext,
+};
 use crate::exact_context::{
     DecodedContext, MaterializedMap, Materializer, ReachableBlocks, SemanticRoots,
 };
@@ -609,26 +611,19 @@ impl CompilerWorldCellOperand {
             arenas: Default::default(),
             diagnostics: None,
         };
-        let (entry, parts) = artifact.world_type_parts()?;
         let mut remaining = capture_allowance()?;
-        remaining = remaining
-            .checked_sub(binding_row_metadata_bound(
-                &entry.descriptor.owner.unit,
-                &entry.descriptor.owner.module,
-                &entry.requirements,
-            )?)
-            .ok_or_else(source_size_failure)?;
-        for part in &parts {
-            remaining = remaining
-                .checked_sub(part.bytes)
-                .ok_or_else(source_size_failure)?;
-        }
-        let (offered, _) = rows.row(&entry, parts)?;
-        let row_fact = world_array(vec![
-            world_semantic_row(&offered, &producer)?,
-            world_blob(artifact.certified_interface().artifact_id().0),
-            world_blob(artifact.world_issuer().1),
-        ]);
+        let mut dependencies = BTreeMap::new();
+        let (offered, row_fact) = encode_checked_value_row(
+            &artifact,
+            &mut rows,
+            &WorldDependencyRows::new(),
+            &mut dependencies,
+            &mut remaining,
+        )?;
+        let offered_dependencies = dependencies
+            .into_iter()
+            .map(|(binding, row)| dependency_edit(binding, row.offered))
+            .collect::<Result<Vec<_>, _>>()?;
         let store = fvm_ipld_blockstore::MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
         let row_fact_cid = materializer
@@ -646,7 +641,7 @@ impl CompilerWorldCellOperand {
             .arenas
             .acquisition(rows.images.into_values().collect())?;
         let descriptor = world_array(vec![
-            world_text("TPCWCELLOPERAND1"),
+            world_text("TPCWCELLOPERAND2"),
             match exposure {
                 WorldCellOperandExposure::Input => 0u64,
                 WorldCellOperandExposure::SessionInput => 1,
@@ -667,6 +662,7 @@ impl CompilerWorldCellOperand {
             ]),
             world_array(blocks),
             offered,
+            world_array(offered_dependencies),
             acquisition,
         ]);
         let bytes = world_bytes(&descriptor)?;
@@ -1416,6 +1412,7 @@ pub struct CompilerWorldRestoration {
     primary_inputs: crate::declaration_context::WorldPrimaryInputs,
     bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
     binding_rows: imbl::OrdMap<String, cid::Cid>,
+    dependency_rows: WorldDependencyRows,
     lexical_root: cid::Cid,
     producer: [u8; 32],
     profile: [u8; 32],
@@ -1520,8 +1517,15 @@ impl CompilerWorldRestoration {
             .as_array()
             .ok_or_else(|| source_failure("observation descriptor is not an array"))?;
         let (kind, product, acquisition) = match fields.first().and_then(Value::as_text) {
-            Some("TPCWORLD") if fields.len() == 11 => ("cold", &fields[2], &fields[7]),
-            Some("TPCWSUCC5") if fields.len() == 6 => ("successor", &fields[1], &fields[5]),
+            Some("TPCWORLD")
+                if fields.len() == 11
+                    && fields[1]
+                        .as_integer()
+                        .is_some_and(|version| version == 6u64.into()) =>
+            {
+                ("cold", &fields[2], &fields[7])
+            }
+            Some("TPCWSUCC6") if fields.len() == 7 => ("successor", &fields[1], &fields[6]),
             _ => return Err(source_failure("observation descriptor format")),
         };
         let product = product
@@ -2697,10 +2701,11 @@ impl CompilerWorld {
         std::fs::write(
             &descriptor,
             world_bytes(&world_array(vec![
-                world_text("TPCWSUCC5"),
+                world_text("TPCWSUCC6"),
                 world_blob(&product),
                 world_array(changed_blocks),
                 world_array(primary_changes),
+                world_array(Vec::new()),
                 world_array(Vec::new()),
                 acquisition,
             ]))?,
@@ -2717,6 +2722,7 @@ impl CompilerWorld {
             primary_inputs: advance.primary,
             bindings: prior.bindings.clone(),
             binding_rows: prior.binding_rows.clone(),
+            dependency_rows: prior.dependency_rows.clone(),
             lexical_root,
             producer: prior.producer,
             profile: prior.profile,
@@ -2768,6 +2774,9 @@ impl CompilerWorld {
         let mut facts = prior.bindings.facts().clone();
         let mut row_roots = prior.binding_rows.clone();
         let mut visible_changes = BTreeMap::new();
+        let mut staged_dependencies = BTreeMap::new();
+        let mut row_changes = BTreeMap::new();
+        let mut remaining_rows = capture_allowance()?;
         let mut rows = WorldColdRows {
             producer: prior.producer,
             files: BTreeMap::new(),
@@ -2844,18 +2853,25 @@ impl CompilerWorld {
                     }
                     continue;
                 }
-                let (entry, parts) = artifact.world_type_parts()?;
-                let transport = rows.row(&entry, parts)?.0;
-                let semantic = world_semantic_row(&transport, &prior.producer)?;
-                let (_, receipt) = artifact.world_issuer();
+                let (transport, row_fact) = encode_checked_value_row(
+                    artifact,
+                    &mut rows,
+                    &prior.dependency_rows,
+                    &mut staged_dependencies,
+                    &mut remaining_rows,
+                )?;
                 let root = materializer
-                    .materialize_value(&world_array(vec![
-                        semantic,
-                        world_blob(artifact.certified_interface().artifact_id().0),
-                        world_blob(receipt),
-                    ]))
+                    .materialize_value(&row_fact)
                     .map_err(|error| source_failure(error.to_string()))?;
+                if let Some(old) = previous {
+                    let old_root = *row_roots
+                        .get(&owner)
+                        .ok_or_else(|| source_failure("predecessor row lacks its semantic root"))?;
+                    record_row_change(&mut row_changes, old_root, -1, old.type_product())?;
+                }
+                record_row_change(&mut row_changes, root, 1, artifact.type_product())?;
                 row_roots.insert(owner, root);
+                let entry = artifact.type_product().leaf_entry();
                 visible_changes.insert(
                     (
                         entry.descriptor.owner.unit.clone(),
@@ -2864,7 +2880,10 @@ impl CompilerWorld {
                     transport,
                 );
             } else if let Some(old) = previous {
-                row_roots.remove(&owner);
+                let old_root = row_roots
+                    .remove(&owner)
+                    .ok_or_else(|| source_failure("predecessor row lacks its semantic root"))?;
+                record_row_change(&mut row_changes, old_root, -1, old.type_product())?;
                 let interface = old.certified_interface().interface();
                 visible_changes.insert(
                     (interface.unit().to_owned(), interface.module().to_owned()),
@@ -2872,6 +2891,8 @@ impl CompilerWorld {
                 );
             }
         }
+        let (dependency_rows, dependency_changes) =
+            settle_dependency_rows(&prior.dependency_rows, row_changes, staged_dependencies)?;
         for occurrence in delta.occurrences {
             let Some(fact) = inputs.bindings.entries.get(&occurrence) else {
                 facts.remove(&occurrence);
@@ -2944,7 +2965,7 @@ impl CompilerWorld {
         std::fs::write(
             &descriptor,
             world_bytes(&world_array(vec![
-                world_text("TPCWSUCC5"),
+                world_text("TPCWSUCC6"),
                 world_blob(&product),
                 world_array(changed_blocks),
                 world_array(primary_changes),
@@ -2956,6 +2977,7 @@ impl CompilerWorld {
                         })
                         .collect(),
                 ),
+                world_array(dependency_changes),
                 acquisition,
             ]))?,
         )?;
@@ -2974,6 +2996,7 @@ impl CompilerWorld {
             primary_inputs,
             bindings,
             binding_rows: row_roots,
+            dependency_rows,
             lexical_root,
             producer: prior.producer,
             profile: prior.profile,
@@ -3264,7 +3287,7 @@ fn world_restoration_product(
 ) -> Result<Vec<u8>, CompileError> {
     world_bytes(&world_array(vec![
         world_text("TPCWREST"),
-        5u64.into(),
+        6u64.into(),
         world_blob(roots.primary.to_bytes()),
         world_blob(source_seal),
         world_blob(producer),
@@ -3343,7 +3366,7 @@ fn binding_row_metadata_bound(
     module: &str,
     requires: &[crate::declaration_join::ExactModuleIdentity],
 ) -> Result<u64, CompileError> {
-    // rowFact[semanticRow[unit,module,producer,image,role,requires],artifact,receipt]
+    // Complete row facts also reserve the binding and dependency manifest below.
     let fixed = 2 * 9 + 2 * 9 + 4 * (9 + 32) + (9 + 32) + 9;
     requires.iter().try_fold(
         fixed + unit.len() as u64 + module.len() as u64,
@@ -3369,6 +3392,226 @@ fn primary_association_metadata_bound(
     binding_row_metadata_bound(unit, module, requires)?
         .checked_add(routing + 5 * 9 + 3 * binding + 9 + 20 + 1)
         .ok_or_else(source_size_failure)
+}
+
+// Dependency custody is indexed independently of visible module owners: different
+// historical bindings may name the same module, but only one exact manifest is
+// selected by a row fact. Counts measure distinct live row CIDs, not occurrences.
+type WorldDependencyRows = imbl::OrdMap<ArtifactBinding, WorldDependencyEntry>;
+#[derive(Clone)]
+struct WorldDependencyEntry {
+    row: CheckedValueDependencyRow,
+    semantic: ciborium::value::Value,
+    references: std::num::NonZeroU64,
+}
+struct StagedWorldDependency {
+    row: CheckedValueDependencyRow,
+    semantic: ciborium::value::Value,
+    offered: ciborium::value::Value,
+}
+type WorldRowChanges = BTreeMap<cid::Cid, (i64, Arc<CheckedValueTypeProduct>)>;
+
+fn world_artifact_binding(
+    binding: ArtifactBinding,
+) -> Result<ciborium::value::Value, CompileError> {
+    ciborium::value::Value::serialized(&binding).map_err(|error| source_failure(error.to_string()))
+}
+fn dependency_edit(
+    binding: ArtifactBinding,
+    offered: ciborium::value::Value,
+) -> Result<ciborium::value::Value, CompileError> {
+    Ok(world_array(vec![world_artifact_binding(binding)?, offered]))
+}
+fn reserve_world_row(
+    entry: &crate::artifact_inventory::ArtifactEntry,
+    remaining: &mut u64,
+) -> Result<(), CompileError> {
+    let bytes = binding_row_metadata_bound(
+        &entry.descriptor.owner.unit,
+        &entry.descriptor.owner.module,
+        &entry.requirements,
+    )?;
+    *remaining = remaining
+        .checked_sub(bytes)
+        .ok_or_else(|| binding_capture_refusal(bytes, *remaining))?;
+    Ok(())
+}
+fn reserve_world_parts(
+    parts: &[crate::declaration_context::original_inputs::OriginalInputPart],
+    remaining: &mut u64,
+) -> Result<(), CompileError> {
+    for part in parts {
+        crate::host_work::checkpoint()?;
+        *remaining = remaining
+            .checked_sub(part.bytes)
+            .ok_or_else(|| binding_capture_refusal(part.bytes, *remaining))?;
+    }
+    Ok(())
+}
+
+// All three transports commit to this complete row fact. Physical aliases enter
+// only the offered rows, never the binding/semantic manifest or its CID.
+fn encode_checked_value_row(
+    artifact: &CheckedValueArtifact,
+    rows: &mut WorldColdRows,
+    prior: &WorldDependencyRows,
+    staged: &mut BTreeMap<ArtifactBinding, StagedWorldDependency>,
+    remaining: &mut u64,
+) -> Result<(ciborium::value::Value, ciborium::value::Value), CompileError> {
+    let product = artifact.type_product();
+    reserve_world_row(product.leaf_entry(), remaining)?;
+    // Include the full binding key, its canonical serde codec and temporary and
+    // retained manifest/index cells before allocating the manifest vector.
+    let binding_bytes = 9 + 2 * (9 + 9 + 32 * 9);
+    let manifest_bytes = u64::try_from(product.dependencies().len())
+        .map_err(|_| source_size_failure())?
+        .checked_mul(3 * binding_bytes + 512)
+        .and_then(|bytes| bytes.checked_add(binding_bytes + 4 * 9))
+        .ok_or_else(source_size_failure)?;
+    *remaining = remaining
+        .checked_sub(manifest_bytes)
+        .ok_or_else(|| binding_capture_refusal(manifest_bytes, *remaining))?;
+    let parts = product.leaf_parts()?;
+    reserve_world_parts(&parts, remaining)?;
+    let offered = rows.row(product.leaf_entry(), parts)?.0;
+    let mut manifest = Vec::with_capacity(product.dependencies().len());
+    for (binding, dependency) in product.dependencies() {
+        crate::host_work::checkpoint()?;
+        reserve_world_row(dependency.entry(), remaining)?;
+        let semantic = if let Some(held) = prior.get(binding) {
+            if held.row.entry().as_ref() != dependency.entry().as_ref() {
+                return Err(source_failure(
+                    "dependency binding has conflicting immutable entry",
+                ));
+            }
+            held.semantic.clone()
+        } else if let Some(held) = staged.get(binding) {
+            if held.row.entry().as_ref() != dependency.entry().as_ref() {
+                return Err(source_failure(
+                    "dependency binding has conflicting staged entry",
+                ));
+            }
+            held.semantic.clone()
+        } else {
+            let parts = dependency.parts()?;
+            reserve_world_parts(&parts, remaining)?;
+            let dependency_offered = rows.row(dependency.entry(), parts)?.0;
+            let semantic = world_semantic_row(&dependency_offered, &rows.producer)?;
+            staged.insert(
+                *binding,
+                StagedWorldDependency {
+                    row: dependency.clone(),
+                    semantic: semantic.clone(),
+                    offered: dependency_offered,
+                },
+            );
+            semantic
+        };
+        manifest.push(world_array(vec![
+            world_artifact_binding(*binding)?,
+            semantic,
+        ]));
+    }
+    let fact = world_array(vec![
+        world_semantic_row(&offered, &rows.producer)?,
+        world_artifact_binding(product.leaf_binding())?,
+        world_blob(artifact.certified_interface().artifact_id().0),
+        world_blob(artifact.world_issuer().1),
+        world_array(manifest),
+    ]);
+    Ok((offered, fact))
+}
+
+fn record_row_change(
+    changes: &mut WorldRowChanges,
+    cid: cid::Cid,
+    change: i64,
+    product: &Arc<CheckedValueTypeProduct>,
+) -> Result<(), CompileError> {
+    let fact = changes.entry(cid).or_insert_with(|| (0, product.clone()));
+    fact.0 = fact.0.checked_add(change).ok_or_else(source_size_failure)?;
+    Ok(())
+}
+
+fn dependency_count_deltas<I, J>(changes: I) -> Result<BTreeMap<ArtifactBinding, i64>, CompileError>
+where
+    I: IntoIterator<Item = (i64, J)>,
+    J: IntoIterator<Item = ArtifactBinding>,
+{
+    let mut deltas = BTreeMap::<ArtifactBinding, i64>::new();
+    for (change, dependencies) in changes {
+        crate::host_work::checkpoint()?;
+        if !(-1..=1).contains(&change) {
+            return Err(source_failure(
+                "dependency transition repeats a distinct row CID",
+            ));
+        }
+        if change == 0 {
+            continue;
+        }
+        for binding in dependencies {
+            crate::host_work::checkpoint()?;
+            let delta = deltas.entry(binding).or_default();
+            *delta = delta.checked_add(change).ok_or_else(source_size_failure)?;
+        }
+    }
+    deltas.retain(|_, delta| *delta != 0);
+    Ok(deltas)
+}
+
+fn settle_dependency_rows(
+    prior: &WorldDependencyRows,
+    changes: WorldRowChanges,
+    mut staged: BTreeMap<ArtifactBinding, StagedWorldDependency>,
+) -> Result<(WorldDependencyRows, Vec<ciborium::value::Value>), CompileError> {
+    let deltas = dependency_count_deltas(
+        changes
+            .values()
+            .map(|(change, product)| (*change, product.dependencies().keys().copied())),
+    )?;
+    let mut next = prior.clone();
+    let mut edits = Vec::new();
+    for (binding, delta) in deltas {
+        crate::host_work::checkpoint()?;
+        let previous = prior.get(&binding);
+        let count = previous.map_or(0, |held| held.references.get());
+        let count = if delta < 0 {
+            count.checked_sub(delta.unsigned_abs())
+        } else {
+            count.checked_add(delta as u64)
+        }
+        .ok_or_else(|| source_failure("dependency reference count overflow or underflow"))?;
+        match (previous, std::num::NonZeroU64::new(count)) {
+            (Some(held), Some(references)) => {
+                let mut held = held.clone();
+                held.references = references;
+                next.insert(binding, held);
+            }
+            (Some(_), None) => {
+                next.remove(&binding);
+                edits.push(dependency_edit(binding, ciborium::value::Value::Null)?);
+            }
+            (None, Some(references)) => {
+                let held = staged
+                    .remove(&binding)
+                    .ok_or_else(|| source_failure("new dependency lacks its coupled transport"))?;
+                edits.push(dependency_edit(binding, held.offered)?);
+                next.insert(
+                    binding,
+                    WorldDependencyEntry {
+                        row: held.row,
+                        semantic: held.semantic,
+                        references,
+                    },
+                );
+            }
+            (None, None) => return Err(source_failure("retired dependency was not retained")),
+        }
+    }
+    if !staged.is_empty() {
+        return Err(source_failure("staged dependency has no live row fact"));
+    }
+    Ok((next, edits))
 }
 
 struct WorldColdRows {
@@ -3846,6 +4089,370 @@ pub(crate) fn world_context_fixture(
     ]))
 }
 
+/// DATA-only fixtures from real checked-value issuers, using the same cold,
+/// successor and operand writers that own production transport. The receiving
+/// fixture harness must reseal the copied arena files before admission.
+#[cfg(test)]
+pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>, CompileError> {
+    use ciborium::value::Value;
+    use std::collections::BTreeSet;
+    let (first, _) = crate::artifacts::test_support::prepare_checked_value_fixture(601);
+    let (second, _) = crate::artifacts::test_support::prepare_checked_value_fixture(602);
+    assert!(
+        !first.type_product().dependencies().is_empty(),
+        "fixture must own genuine TYPE dependencies"
+    );
+    let shared = first
+        .type_product()
+        .dependencies()
+        .keys()
+        .filter(|binding| second.type_product().dependencies().contains_key(binding))
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !shared.is_empty(),
+        "distinct issued rows must share exact dependency bindings"
+    );
+    let symbol = |row: &CheckedValueArtifact| tidepool_repr::execution_schema::SymbolIdentity {
+        unit: "main".into(),
+        module: row.owner().module_name(),
+        namespace: "value".into(),
+        occurrence: "supplied".into(),
+        record_parent: None,
+    };
+    let first_symbol = symbol(&first);
+    let second_symbol = symbol(&second);
+    let input = |name, symbol, row| {
+        CompilerWorldBinding::from_checked_value(
+            name,
+            symbol,
+            tidepool_repr::SessionVarId::from_extract(77),
+            0,
+            row,
+        )
+    };
+    let bindings = VisibleWorldBindings::from_published_bindings(
+        0,
+        [
+            input("left", &first_symbol, first.clone()),
+            input("right", &first_symbol, first.clone()),
+        ],
+    )?;
+    let resources = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+        None,
+        bindings,
+        Arc::new(CapturedCompilerSources::from_captured_roots(
+            Vec::new(),
+            Arc::from([]),
+            Arc::new(()),
+        )?),
+        CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
+    )?;
+    let initial = Arc::new(CompilerWorld {
+        restoration: resources.prepare_for(first.world_issuer().0, [0; 32])?,
+        realization: Arc::new(Mutex::new(None)),
+        position: None,
+    });
+    let assert_census = |world: &Arc<CompilerWorld>| -> Result<(), CompileError> {
+        let restoration = &world.restoration;
+        let mut seen = BTreeSet::new();
+        let mut expected = BTreeMap::<ArtifactBinding, u64>::new();
+        for (occurrence, fact) in &restoration.inputs.bindings.entries {
+            let cid = restoration.bindings.facts().get(occurrence).unwrap().4;
+            if seen.insert(cid) {
+                for binding in fact.row.type_product().dependencies().keys() {
+                    *expected.entry(*binding).or_default() += 1;
+                }
+            }
+        }
+        assert_eq!(
+            restoration
+                .dependency_rows
+                .iter()
+                .map(|(binding, held)| (*binding, held.references.get()))
+                .collect::<BTreeMap<_, _>>(),
+            expected
+        );
+        let cold = restoration.prepare_cold()?;
+        assert_eq!(cold.logical_id, restoration.logical_id);
+        assert_eq!(
+            cold.compiler_input_identity,
+            restoration.compiler_input_identity
+        );
+        assert_eq!(cold.bindings.facts(), restoration.bindings.facts());
+        assert_eq!(
+            cold.dependency_rows
+                .iter()
+                .map(|(binding, held)| (*binding, held.references.get()))
+                .collect::<BTreeMap<_, _>>(),
+            expected
+        );
+        Ok(())
+    };
+    assert_census(&initial)?;
+    let left = initial.restoration.bindings.facts().get("left").unwrap().4;
+    assert_eq!(
+        left,
+        initial.restoration.bindings.facts().get("right").unwrap().4,
+        "alias premise requires identical row CID"
+    );
+    assert!(initial
+        .restoration
+        .dependency_rows
+        .values()
+        .all(|row| row.references.get() == 1));
+    let initial_packet =
+        world_transport_fixture_descriptor(&initial.restoration, &directory.join("initial"))?;
+    let fact = |symbol: &tidepool_repr::execution_schema::SymbolIdentity,
+                row: Arc<CheckedValueArtifact>| WorldBindingFact {
+        symbol: symbol.clone(),
+        session_var: tidepool_repr::SessionVarId::from_extract(77),
+        defining_scope: 0,
+        row,
+    };
+    let mut steps = Vec::new();
+    let mut current = initial.clone();
+    let mut retain_step =
+        |label: &str, next: Arc<CompilerWorld>| -> Result<Arc<CompilerWorld>, CompileError> {
+            assert_census(&next)?;
+            let successor = world_transport_fixture_descriptor(
+                &next.restoration,
+                &directory.join(label).join("successor"),
+            )?;
+            let cold = world_transport_fixture_descriptor(
+                &next.restoration.prepare_cold()?,
+                &directory.join(label).join("cold"),
+            )?;
+            steps.push(world_array(vec![world_text(label), successor, cold]));
+            Ok(next)
+        };
+    let added = current.project_bindings(
+        1,
+        [("second".into(), Some(fact(&second_symbol, second.clone())))],
+        None,
+    )?;
+    assert_ne!(
+        left,
+        added.restoration.bindings.facts().get("second").unwrap().4
+    );
+    for binding in &shared {
+        assert_eq!(
+            added
+                .restoration
+                .dependency_rows
+                .get(binding)
+                .unwrap()
+                .references
+                .get(),
+            2
+        );
+    }
+    current = retain_step("distinct-shared", added)?;
+    let removed_alias = current.project_bindings(2, [("left".into(), None)], None)?;
+    let descriptor = answer_cbor(&std::fs::read(&removed_alias.restoration.descriptor)?)?;
+    assert!(answer_array(&answer_array(&descriptor, 7)?[5], 0)?.is_empty());
+    current = retain_step("remove-alias", removed_alias)?;
+    let removed_first = current.project_bindings(3, [("right".into(), None)], None)?;
+    for binding in &shared {
+        assert_eq!(
+            removed_first
+                .restoration
+                .dependency_rows
+                .get(binding)
+                .unwrap()
+                .references
+                .get(),
+            1
+        );
+    }
+    current = retain_step("remove-row", removed_first)?;
+    let replaced = current.project_bindings(
+        4,
+        [
+            ("second".into(), None),
+            (
+                "replacement".into(),
+                Some(fact(&first_symbol, first.clone())),
+            ),
+        ],
+        None,
+    )?;
+    let descriptor = answer_cbor(&std::fs::read(&replaced.restoration.descriptor)?)?;
+    for edit in answer_array(&answer_array(&descriptor, 7)?[5], 0)? {
+        let edit = answer_array(edit, 2)?;
+        let binding: ArtifactBinding = edit[0]
+            .deserialized()
+            .map_err(|error| source_failure(error.to_string()))?;
+        assert!(
+            !shared.contains(&binding),
+            "positive-to-positive shared dependencies emit no edit"
+        );
+    }
+    current = retain_step("net-replacement", replaced)?;
+    let renamed = current.project_bindings(
+        5,
+        [
+            ("replacement".into(), None),
+            ("renamed".into(), Some(fact(&first_symbol, first.clone()))),
+        ],
+        None,
+    )?;
+    let descriptor = answer_cbor(&std::fs::read(&renamed.restoration.descriptor)?)?;
+    assert!(answer_array(&answer_array(&descriptor, 7)?[5], 0)?.is_empty());
+    assert_eq!(
+        left,
+        renamed
+            .restoration
+            .bindings
+            .facts()
+            .get("renamed")
+            .unwrap()
+            .4
+    );
+    current = retain_step("same-cid-replacement", renamed)?;
+    let lexical = current
+        .restoration
+        .inputs
+        .lexical
+        .clone()
+        .with_observation(Some(Arc::new(WorldObservationScaffold::new(
+            WorldObservationProfile::Workbench,
+            Arc::from("fixtureObservation = ()"),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+        )?)))?;
+    let primary_only = current.with_primary_and_lexical(&[], Some(&lexical))?;
+    let descriptor = answer_cbor(&std::fs::read(&primary_only.restoration.descriptor)?)?;
+    assert!(answer_array(&answer_array(&descriptor, 7)?[5], 0)?.is_empty());
+    current = retain_step("primary-only", primary_only)?;
+    let empty = current.project_bindings(6, [("renamed".into(), None)], None)?;
+    assert!(empty.restoration.dependency_rows.is_empty());
+    let descriptor = answer_cbor(&std::fs::read(&empty.restoration.descriptor)?)?;
+    assert_eq!(
+        answer_array(&answer_array(&descriptor, 7)?[5], 0)?.len(),
+        first.type_product().dependencies().len()
+    );
+    retain_step("last-reference", empty)?;
+    let binder = world_array(vec![
+        world_text("supplied"),
+        77u64.into(),
+        world_text(first.owner().module_name()),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+    ]);
+    let operand = CompilerWorldCellOperand::from_binder(
+        &initial,
+        WorldCellOperandExposure::Input,
+        0,
+        &binder,
+        first,
+    )?;
+    assert_eq!(
+        *operand.row_fact_cid(),
+        left,
+        "operand and World use one complete row fact encoder"
+    );
+    let operand = world_transport_fixture_value(
+        &operand.request.descriptor,
+        &operand.input_files,
+        &directory.join("operand"),
+    )?;
+    world_bytes(&world_array(vec![
+        world_text("TPCWVALUETYPEFIXTURE1"),
+        initial_packet,
+        world_array(steps),
+        operand,
+    ]))
+}
+
+#[cfg(test)]
+fn world_transport_fixture_descriptor(
+    restoration: &CompilerWorldRestoration,
+    directory: &Path,
+) -> Result<ciborium::value::Value, CompileError> {
+    let mut value = world_transport_fixture_value(
+        &restoration.descriptor,
+        &restoration.input_files.iter().cloned().collect::<Vec<_>>(),
+        directory,
+    )?;
+    if let ciborium::value::Value::Array(fields) = &mut value {
+        if fields[0].as_text() == Some("TPCWORLD") {
+            let source = directory.join("sources.bin");
+            std::fs::write(&source, restoration.inputs.sources.encoded())?;
+            fields[3] = world_path(&source)?;
+        }
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+fn world_transport_fixture_value(
+    descriptor: &Path,
+    files: &[Arc<std::fs::File>],
+    directory: &Path,
+) -> Result<ciborium::value::Value, CompileError> {
+    use ciborium::value::Value;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileExt;
+    std::fs::create_dir_all(directory)?;
+    let mut value = answer_cbor(&std::fs::read(descriptor)?)?;
+    let Value::Array(fields) = &mut value else {
+        return Err(source_failure("fixture descriptor is not an array"));
+    };
+    let acquisition = match fields[0].as_text() {
+        Some("TPCWORLD") if fields.len() == 11 => &mut fields[7],
+        Some("TPCWSUCC6" | "TPCWCELLOPERAND2") if fields.len() == 7 => &mut fields[6],
+        _ => return Err(source_failure("fixture transport format")),
+    };
+    let Value::Array(acquisition) = acquisition else {
+        return Err(source_failure("fixture acquisition is not an array"));
+    };
+    acquisition[0] = world_text("TPCWORLDFIXTUREBYTES2");
+    let Value::Array(arenas) = &mut acquisition[1] else {
+        return Err(source_failure("fixture arenas are not an array"));
+    };
+    let mut remaining = capture_allowance()?;
+    for (index, arena) in arenas.iter_mut().enumerate() {
+        let Value::Array(fields) = arena else {
+            return Err(source_failure("fixture arena is not an array"));
+        };
+        let endpoint = answer_text(&fields[0])?;
+        let extent = answer_u64(&fields[1])?;
+        remaining = remaining
+            .checked_sub(extent)
+            .ok_or_else(source_size_failure)?;
+        let file = files
+            .iter()
+            .find(|file| {
+                endpoint == format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd())
+            })
+            .ok_or_else(|| source_failure("fixture arena lacks its owned file"))?;
+        if file.metadata()?.len() != extent {
+            return Err(source_failure("fixture arena extent differs"));
+        }
+        let destination = directory.join(format!("arena-{index}.bin"));
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)?;
+        let mut offset = 0;
+        let mut buffer = [0; 65536];
+        while offset < extent {
+            crate::host_work::checkpoint()?;
+            let count = (extent - offset).min(buffer.len() as u64) as usize;
+            file.read_exact_at(&mut buffer[..count], offset)?;
+            std::io::Write::write_all(&mut output, &buffer[..count])?;
+            offset += count as u64;
+        }
+        fields[0] = world_path(&destination)?;
+    }
+    Ok(value)
+}
+
 impl CompilerWorldOpenInputs {
     fn prepare(
         self,
@@ -3950,39 +4557,32 @@ impl WorldInputResources {
         )?;
         let mut binding_rows = imbl::OrdMap::new();
         let mut visible = Vec::with_capacity(self.bindings.rows.len());
+        let mut staged_dependencies = BTreeMap::new();
+        let mut row_changes = BTreeMap::new();
         for artifact in self.bindings.rows.values() {
             crate::host_work::checkpoint()?;
-            crate::host_work::record_host_work(
-                crate::host_work::HostWorkCounter::ColdWorldBuilderRowVisit,
-                1,
-            );
-            let (entry, parts) = artifact.world_type_parts()?;
-            remaining_raw = remaining_raw
-                .checked_sub(binding_row_metadata_bound(
-                    &entry.descriptor.owner.unit,
-                    &entry.descriptor.owner.module,
-                    &entry.requirements,
-                )?)
-                .ok_or_else(source_size_failure)?;
-            for part in &parts {
-                remaining_raw = remaining_raw
-                    .checked_sub(part.bytes)
-                    .ok_or_else(source_size_failure)?;
-            }
-            let (row, _) = rows.row(&entry, parts)?;
-            let semantic = world_semantic_row(&row, &producer)?;
-            let (_, receipt) = artifact.world_issuer();
-            let row_fact = world_array(vec![
-                semantic.clone(),
-                world_blob(artifact.certified_interface().artifact_id().0),
-                world_blob(receipt),
-            ]);
+            let (row, row_fact) = encode_checked_value_row(
+                artifact,
+                &mut rows,
+                &WorldDependencyRows::new(),
+                &mut staged_dependencies,
+                &mut remaining_raw,
+            )?;
             let row_root = binding_materializer
                 .materialize_value(&row_fact)
                 .map_err(|error| source_failure(error.to_string()))?;
             binding_rows.insert(artifact.owner().module_name(), row_root);
+            // Alias multiplicity never changes a distinct row fact's dependency count.
+            row_changes
+                .entry(row_root)
+                .or_insert((1, artifact.type_product().clone()));
             visible.push(row);
         }
+        let (dependency_rows, dependency_changes) = settle_dependency_rows(
+            &WorldDependencyRows::new(),
+            row_changes,
+            staged_dependencies,
+        )?;
         if let Some(capture) = &rows.diagnostics {
             if let Err(error) = capture.finish_original_parts() {
                 tracing::warn!(%error,"compiler world input diagnostic manifest is incomplete");
@@ -4058,12 +4658,16 @@ impl WorldInputResources {
         let descriptor = self.directory.path().join("world.cbor");
         let encoded = world_bytes(&world_array(vec![
             world_text("TPCWORLD"),
-            5u64.into(),
+            6u64.into(),
             world_blob(&product),
             world_path(&source_path)?,
             world_blob(producer),
             world_blob(profile),
-            world_array(vec![world_array(base), world_array(visible)]),
+            world_array(vec![
+                world_array(base),
+                world_array(visible),
+                world_array(dependency_changes),
+            ]),
             acquisition,
             world_blob(&visibility),
             world_blob(primary_associations.root().cid().to_bytes()),
@@ -4082,6 +4686,7 @@ impl WorldInputResources {
             primary_inputs,
             bindings,
             binding_rows,
+            dependency_rows,
             lexical_root,
             producer,
             profile,
@@ -8555,6 +9160,17 @@ mod answer_tests {
                 .is_err()
         );
     }
+    #[test]
+    #[ignore = "requires declared compiler; genuine World TYPE transport fixture issuer owns it"]
+    fn genuine_world_type_transport_matches_cold_dependency_census() {
+        let directory = tempfile::tempdir().unwrap();
+        let encoded = world_value_transport_fixture(directory.path()).unwrap();
+        let packet = answer_cbor(&encoded).unwrap();
+        let fields = answer_array(&packet, 4).unwrap();
+        assert_eq!(answer_text(&fields[0]).unwrap(), "TPCWVALUETYPEFIXTURE1");
+        assert_eq!(answer_array(&fields[2], 0).unwrap().len(), 7);
+    }
+
     #[test]
     fn cold_world_row_seal_binds_roles_requirements_order_and_ignores_aliases() {
         let row = |name: &str, alias: &str, role: &str, required: &str| {
