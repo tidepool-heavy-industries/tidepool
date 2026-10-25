@@ -798,7 +798,12 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
         next <- worldSuccessorFacts <$> readNext ("value-next-" ++ name) before successor
         independent <- readCold ("value-cold-" ++ name) cold
         unless (summary next == summary independent)
-          (fail ("incremental receiver differs from full cold admission: " ++ name))
+          (fail ("incremental receiver differs from full cold admission: " ++ name
+            ++ "; world=" ++ show (worldInputsIdentityBytes next == worldInputsIdentityBytes independent)
+            ++ "; compiler=" ++ show (worldInputsCompilerIdentity next == worldInputsCompilerIdentity independent)
+            ++ "; aliases=" ++ show (Map.map (worldBindingRowFactCID . worldBindingRow) (worldInputsBindings next)
+              == Map.map (worldBindingRowFactCID . worldBindingRow) (worldInputsBindings independent))
+            ++ "; charges=" ++ show (worldInputsRetainedCharge next,worldInputsRetainedCharge independent)))
         unless (Map.null required) $ do
           let omitted = case successor of
                 TList [tag,receipt,blocks,primary,visible,TList (_:rest),acquisition] ->
