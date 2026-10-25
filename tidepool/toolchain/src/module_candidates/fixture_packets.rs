@@ -837,9 +837,25 @@ fn source_boot_world_value_type_packet_producer() {
         .as_array()
         .expect("World value fixture request tuple");
     assert_eq!(fields.len(), 1);
-    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTVALUETYPE1");
-    let bytes = crate::compiler_world::world_value_transport_fixture(&packet.join("world-values"))
-        .expect("production checked-value issuance and World transport");
+    enum WorldValueFixture {
+        Nominal,
+        Captured,
+    }
+    let fixture = match text_field(&fields[0]) {
+        "TPSOURCEBOOTVALUETYPE1" => WorldValueFixture::Nominal,
+        "TPSOURCEBOOTCAPTUREDVALUETYPE1" => WorldValueFixture::Captured,
+        _ => panic!("unsupported World value fixture request"),
+    };
+    let directory = packet.join("world-values");
+    let bytes = match fixture {
+        WorldValueFixture::Nominal => {
+            crate::compiler_world::world_value_transport_fixture(&directory)
+        }
+        WorldValueFixture::Captured => {
+            crate::compiler_world::world_captured_value_transport_fixture(&directory)
+        }
+    }
+    .expect("production checked-value issuance and World transport");
     let output = packet.join("world-value-types.cbor");
     tidepool_atomic_write::write_best_effort(&output, &bytes).unwrap();
     completion.publish(&[output]);

@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, worldValueTypeHistories, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
+module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, worldValueTypeHistories, worldCapturedValueTypeHistories, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
 
 import Tidepool.RequestCompletion (finishCompletion, captureCompletion, completionResult, completionFailures, completionAsync, BodyOutcome(..), CleanupStage(CompilerScopeRestore), cleanupStage, cleanupException)
 import Tidepool.WorkerServer (runWorkerLoop, WorkerResponse(..), requireNativeDemandOwner)
@@ -729,11 +729,22 @@ capturedCanonicalPromotionRefusesReadableMissingInputs = withScratch $ \work -> 
 -- adapted into this test's existing sealed-byte owner; semantic facts are kept.
 -- The Rust fixture compiles and certifies actual values before publishing its
 -- packets. Full cold reads independently check each incremental publication.
+data WorldValueFixture = NominalWorldValue | CapturedWorldValue
+
 worldValueTypeHistories :: IO ()
-worldValueTypeHistories = withTiming $ withScratch $ \work ->
+worldValueTypeHistories = worldValueTypeHistoriesFor NominalWorldValue
+
+worldCapturedValueTypeHistories :: IO ()
+worldCapturedValueTypeHistories = worldValueTypeHistoriesFor CapturedWorldValue
+
+worldValueTypeHistoriesFor :: WorldValueFixture -> IO ()
+worldValueTypeHistoriesFor fixture = withTiming $ withScratch $ \work ->
   bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
     packet <- newPacketDirectory work "world-value-type-fixture"
-    BS.writeFile (packet </> "request.cbor") (encode (TList [TString "TPSOURCEBOOTVALUETYPE1"]))
+    let request = case fixture of
+          NominalWorldValue -> "TPSOURCEBOOTVALUETYPE1"
+          CapturedWorldValue -> "TPSOURCEBOOTCAPTUREDVALUETYPE1"
+    BS.writeFile (packet </> "request.cbor") (encode (TList [TString request]))
     completion <- runPacketProducer WorldValueTypeProducer packet
     bytes <- completedPacketOutput completion (packet </> "world-value-types.cbor")
     (initial,steps,operand) <- worldFixtureTerm bytes >>= \term -> case term of
@@ -899,6 +910,8 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
         liftIO $ unless (not (Set.null operandDependencies)
             && Map.keysSet (worldCellOperandTypes admitted) == Set.insert operandLeaf operandDependencies)
           (fail "operand lost its independently owned TYPE dependencies after World retirement")
+        liftIO $ unless (worldInputsPrimaryIsEmpty original && not (Set.null operandDependencies))
+          (fail "operand-local TYPE control needs an empty World primary and nonempty operand dependencies")
         aliasedOperand <- liftIO (aliasWorldValueOperand work operand)
         (aliasedPath,aliasedSeal) <- liftIO (writeDescriptor "value-operand-physical-alias" aliasedOperand)
         aliased <- liftIO (readWorldCellOperandWithOwner owner environment original aliasedPath aliasedSeal)
