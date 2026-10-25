@@ -4106,7 +4106,7 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
         .type_product()
         .dependencies()
         .keys()
-        .filter(|binding| second.type_product().dependencies().contains_key(binding))
+        .filter(|binding| second.type_product().dependencies().contains_key(*binding))
         .copied()
         .collect::<BTreeSet<_>>();
     assert!(
@@ -4220,7 +4220,7 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
                 &directory.join(label).join("successor"),
             )?;
             let cold = world_transport_fixture_descriptor(
-                &next.restoration.prepare_cold()?,
+                next.restoration.prepare_cold()?.as_ref(),
                 &directory.join(label).join("cold"),
             )?;
             steps.push(world_array(vec![world_text(label), successor, cold]));
@@ -4278,7 +4278,10 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
         None,
     )?;
     let descriptor = answer_cbor(&std::fs::read(&replaced.restoration.descriptor)?)?;
-    for edit in answer_array(&answer_array(&descriptor, 7)?[5], 0)? {
+    for edit in answer_array(&descriptor, 7)?[5]
+        .as_array()
+        .ok_or_else(|| source_failure("fixture dependency edits"))?
+    {
         let edit = answer_array(edit, 2)?;
         let binding: ArtifactBinding = edit[0]
             .deserialized()
@@ -4331,7 +4334,10 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
     assert!(empty.restoration.dependency_rows.is_empty());
     let descriptor = answer_cbor(&std::fs::read(&empty.restoration.descriptor)?)?;
     assert_eq!(
-        answer_array(&answer_array(&descriptor, 7)?[5], 0)?.len(),
+        answer_array(&descriptor, 7)?[5]
+            .as_array()
+            .ok_or_else(|| source_failure("fixture dependency edits"))?
+            .len(),
         first.type_product().dependencies().len()
     );
     retain_step("last-reference", empty)?;
@@ -9168,7 +9174,7 @@ mod answer_tests {
         let packet = answer_cbor(&encoded).unwrap();
         let fields = answer_array(&packet, 4).unwrap();
         assert_eq!(answer_text(&fields[0]).unwrap(), "TPCWVALUETYPEFIXTURE1");
-        assert_eq!(answer_array(&fields[2], 0).unwrap().len(), 7);
+        assert_eq!(answer_array(&fields[2], 7).unwrap().len(), 7);
     }
 
     #[test]
