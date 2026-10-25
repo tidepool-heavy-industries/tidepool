@@ -766,6 +766,13 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
           _ -> error "value closure refusal needs a genuine dependency row"
         missingDependency _ = error "value closure refusal needs its cold carrier"
     refuse "a missing cold manifest dependency" (readCold "value-missing-dependency" (missingDependency initial))
+    crossed <- crossWorldValueManifest initial
+    crossedResult <- try (readCold "value-crossed-manifest" crossed)
+    case crossedResult of
+      Left (WorldInputsFailure WorldInputsCorrupt reason)
+        | "compiler world dependency semantic association differs" `isInfixOf` reason -> pure ()
+      Left failure -> throwIO failure
+      Right _ -> fail "World value receiver accepted a manifest with another semantic association"
     (final,history) <- foldM (\(before,observed) step -> case step of
       TList [TString label,successor,cold] -> do
         let name = T.unpack label
@@ -858,6 +865,39 @@ worldValueColdCensus (TList [TString "TPCWORLD",TInt 6,_,_,_,_,TList [_,_,TList 
     (fail "producer cold dependency transport differs from independent live-CID manifests")
   pure (Map.fromList aliases,counts,Set.fromList (map snd supplied))
 worldValueColdCensus _ = fail "value census needs a complete v6 cold World"
+
+-- Preserve the genuine physical rows and rehash only a deliberately corrupted
+-- row-fact association plus its parents, so CID integrity cannot mask refusal.
+crossWorldValueManifest :: Term -> IO Term
+crossWorldValueManifest original@(TList [tag,version,TBytes restoration,source,producer,profile,rows,acquisition,TBytes visibility,TBytes primary,TList blocks]) = do
+  pairs <- forM blocks $ \entry -> case entry of
+    TList [TBytes cid,TBytes body] -> pure (cid,body)
+    _ -> fail "manifest corruption needs genuine CID/body blocks"
+  (aliases,_,_) <- worldValueColdCensus original
+  cid <- maybe (fail "manifest corruption needs a live row fact") pure (Map.lookupMin aliases >>= Just . snd)
+  row <- worldFixtureBlock pairs cid
+  replacement <- case row of
+    TList [semantic,leaf,certified,receipt,TList (TList [binding,TList [unit,name,TBytes seal,image,role,requires]]:rest)] ->
+      pure (TList [semantic,leaf,certified,receipt,TList
+        (TList [binding,TList [unit,name,TBytes (BS.map (`xor` 1) seal),image,role,requires]]:rest)])
+    _ -> fail "manifest corruption needs a nonempty genuine dependency manifest"
+  (scope,bindingRoot) <- worldFixtureTerm visibility >>= \term -> case term of
+    TList [TString "TPCWBIND4",scope,TBytes root] -> pure (scope,root)
+    _ -> fail "manifest corruption needs its actual occurrence root"
+  receipt <- worldFixtureTerm restoration
+  lexical <- case receipt of
+    TList [_,_,_,_,_,_,_,_,_,TBytes root] -> pure root
+    _ -> fail "manifest corruption needs its semantic restoration"
+  (roots,changed) <- rewriteWorldFixtureBlock cid replacement [primary,bindingRoot,lexical] pairs
+  case (roots,receipt) of
+    ([selected,bindings,surface],TList fields) | selected == primary && surface == lexical -> do
+      let changedReceipt = TList (take 8 fields ++ [TBytes bindings] ++ drop 9 fields)
+          changedVisibility = TList [TString "TPCWBIND4",scope,TBytes bindings]
+      pure (TList [tag,version,TBytes (encode changedReceipt),source,producer,profile,rows,acquisition
+        ,TBytes (encode changedVisibility),TBytes primary
+        ,TList [TList [TBytes key,TBytes body] | (key,body) <- changed]])
+    _ -> fail "manifest corruption changed another compiler root"
+crossWorldValueManifest _ = fail "manifest corruption needs its complete cold carrier"
 
 sealWorldValueDescriptor :: IORef [Handle] -> Term -> IO Term
 sealWorldValueDescriptor handles (TList fields) = do
