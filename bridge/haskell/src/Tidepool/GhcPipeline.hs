@@ -5832,9 +5832,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 -- Strip the same exact imports this completion recorded,
                 -- including source-less carried interfaces. Their absence
                 -- from source lookup is not a package-resolution witness.
-                (ordinary,_) = sourceEvidenceGraphFor
-                  (Map.fromList [(mkModuleName name,unit)
-                    | (_,edges) <- imports,(_,name,_,unit) <- edges]) modGraphRaw
+                exactOwners = Map.fromList [(mkModuleName name,unit)
+                  | (_,edges) <- imports,(_,name,_,unit) <- edges]
+                (ordinary,_) = sourceEvidenceGraphFor exactOwners exactOwners modGraphRaw
                 fresh (ModuleNode _ summary) =
                   (unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary)) `Set.notMember` owners
                 fresh _ = True
@@ -5843,13 +5843,15 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         -- Fresh completion evidence cannot replace an admitted exact owner.
         sourceCaptureGraph = if isJust worldSources then freshGraph else modGraphRaw
     let home = moduleUnit targetOwner
-        homeNodes = Set.fromList [ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
+        homeNodes = Set.fromList [ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' freshGraph
           , moduleUnit (ms_mod summary) == home]
         homeQualifier NoPkgQual = True
         homeQualifier (ThisPkg unit) = unitString unit == unitString home
         homeQualifier _ = False
         freshHome = [(renderDependencyQualifier (dependencyQualifier qualifier),moduleNameString (unLoc name),boot,unitString home)
-          | (boot,imports) <- [(False,ms_textual_imps targetSummary),(True,ms_srcimps targetSummary)]
+          | ModuleNode _ summary <- mgModSummaries' freshGraph
+          , ms_mod summary == targetOwner, ms_hsc_src summary /= HsBootFile
+          , (boot,imports) <- [(False,ms_textual_imps summary),(True,ms_srcimps summary)]
           , (qualifier,name) <- imports, homeQualifier qualifier, unLoc name `Set.member` homeNodes]
         exactHome = [(renderDependencyQualifier qualifier,name,boot,unit)
           | ((unit',name',False),edges) <- exactImports
@@ -8162,18 +8164,26 @@ sourceEvidenceGraph
   :: Maybe ExactScope -> ModuleGraph
   -> (ModuleGraph, [((String, String, Bool), [(DependencyQualifier, String, Bool, String)])])
 sourceEvidenceGraph Nothing graph = (graph, [])
-sourceEvidenceGraph (Just scope) graph = sourceEvidenceGraphFor
-  (Map.fromList [(mkModuleName (exactModule iface),exactUnit iface) | (iface,_,_) <- scopeInterfaces scope]) graph
+sourceEvidenceGraph (Just scope) graph = sourceEvidenceGraphFor exactOwners sourceOwners graph
+  where
+    exactOwners = Map.fromList [(mkModuleName (exactModule iface),exactUnit iface)
+      | iface <- [value | (value,_,_) <- scopeInterfaces scope] ++ scopeValueInterfaces scope]
+    sourceOwners = Map.fromList [(mkModuleName (exactModule iface),exactUnit iface)
+      | (iface,_,_) <- scopeInterfaces scope
+      , Map.lookup (exactUnit iface,exactModule iface) (scopeInterfaceEvidence scope)
+          /= Just CheckedValueEvidence]
 
-sourceEvidenceGraphFor :: Map.Map ModuleName String -> ModuleGraph
+-- Checked values are exact inputs too, so they leave no fresh source lookup
+-- witness. Only SOURCE-role owners enter the completed source import receipt.
+sourceEvidenceGraphFor :: Map.Map ModuleName String -> Map.Map ModuleName String -> ModuleGraph
   -> (ModuleGraph,[((String,String,Bool),[(DependencyQualifier,String,Bool,String)])])
-sourceEvidenceGraphFor exactOwners graph =
+sourceEvidenceGraphFor exactOwners sourceOwners graph =
   (mkModuleGraph (map strip nodes), map importsFor summaries)
   where
     nodes = mgModSummaries' graph
     summaries = [summary | ModuleNode _ summary <- nodes]
-    selected qualifier imported = do
-      unit <- Map.lookup (unLoc imported) exactOwners
+    selected owners qualifier imported = do
+      unit <- Map.lookup (unLoc imported) owners
       case qualifier of
         NoPkgQual -> Just unit
         ThisPkg requested | unitString requested == unit -> Just unit
@@ -8185,8 +8195,8 @@ sourceEvidenceGraphFor exactOwners graph =
          [(dependencyQualifier qualifier, moduleNameString (unLoc imported), boot, unit)
          | (boot, edges) <- [(False, ms_textual_imps summary), (True, ms_srcimps summary)]
          , (qualifier, imported) <- edges
-         , Just unit <- [selected qualifier imported]])
-    ordinary (qualifier, imported) = isNothing (selected qualifier imported)
+         , Just unit <- [selected sourceOwners qualifier imported]])
+    ordinary (qualifier, imported) = isNothing (selected exactOwners qualifier imported)
     strip (ModuleNode edges summary) = ModuleNode edges (summary
       { ms_textual_imps = filter ordinary (ms_textual_imps summary)
       , ms_srcimps = filter ordinary (ms_srcimps summary) })
@@ -10169,7 +10179,7 @@ captureHeldWorldSourceSelection owner facts accumulated imported (WorldPrefixLex
       ("selected primary owners lack admitted source associations (first 16): " ++ show (take 16 unsupported))
     throwIO WorldCellUnsupported
   carriedOwners <- liftIO (mergeWorldLexicalOwners [importedOwners,prefixOwners])
-  if Set.null demanded then pure (WorldSourceSelection Nothing (snd (sourceEvidenceGraphFor carriedOwners graph)) [] Map.empty Nothing) else do
+  if Set.null demanded then pure (WorldSourceSelection Nothing (snd (sourceEvidenceGraphFor carriedOwners carriedOwners graph)) [] Map.empty Nothing) else do
     initial <- getSession
     captured <- liftIO (readWorldSourceInputs owner initial facts (Set.toAscList demanded))
     (entries,typeEntries) <- case captured of
@@ -10192,7 +10202,7 @@ captureHeldWorldSourceSelection owner facts accumulated imported (WorldPrefixLex
           , (dependencyModuleUnit node,dependencyModuleName node) `Set.member` selectedKeys]
     exactOwners <- liftIO $ mergeWorldLexicalOwners (carriedOwners :
       [Map.singleton (mkModuleName name) unit | (unit,name) <- Set.toAscList selectedKeys])
-    let (_,allImports) = sourceEvidenceGraphFor exactOwners graph
+    let (_,allImports) = sourceEvidenceGraphFor exactOwners exactOwners graph
         imports = filter (\((unit,name,_),_) -> Set.notMember (unit,name) selectedKeys) allImports
         relevantImports = Set.fromList [(dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)
           | node <- modules,edge <- dependencyModuleImports node]
