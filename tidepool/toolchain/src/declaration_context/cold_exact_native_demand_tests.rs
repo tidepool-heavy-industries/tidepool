@@ -61,6 +61,7 @@ impl History {
                 let issuer = issue_fixture_compiler_support(
                     CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
                     view.clone(),
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let offer = issuer
@@ -80,6 +81,11 @@ impl History {
     }
 
     fn inputs(&self, selected: Option<usize>, reverse: bool) -> Arc<RequestCompilerInputs> {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let (projection, view) = match selected {
             Some(index) => (
                 CompilerInputProjection::from_issued_entries(&[self.entries[index].clone()])
@@ -99,7 +105,8 @@ impl History {
             self.offers.clone()
         };
         let support = if selected.is_some() {
-            fixture_support_with_issued_offers(projection, view, offers).unwrap()
+            fixture_support_with_issued_offers(projection, view, offers, &mut offer_validation)
+                .unwrap()
         } else {
             // Each Full is checked in its own issuing view. Retention combines
             // those issued rows; it must not requalify competing new Fulls.
@@ -112,6 +119,7 @@ impl History {
                         projection.clone(),
                         view.clone(),
                         [offer.clone()],
+                        &mut offer_validation,
                     )
                     .unwrap();
                     RequestNativeAvailability::issue_checked(
@@ -124,7 +132,7 @@ impl History {
                 })
                 .collect::<Vec<_>>();
             let rows = rows[0].merge(&rows[1]).unwrap().into_rows();
-            recover_fixture_compiler_support(projection, view, offers)
+            recover_fixture_compiler_support(projection, view, offers, &mut offer_validation)
                 .unwrap()
                 .retain_normalized_availability(&rows)
                 .unwrap()
@@ -376,6 +384,11 @@ fn selected_original_packet_keeps_exact_old_group_and_refuses_foreign_acquisitio
 
 #[test]
 fn original_pair_membership_cannot_expand_explicit_empty_group_permission() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let product = product("ColdEmptyPermission", 203);
     let context = native_context(&product);
     let entry =
@@ -389,7 +402,7 @@ fn original_pair_membership_cannot_expand_explicit_empty_group_permission() {
         )
         .unwrap();
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-    let support = issue_fixture_compiler_support(projection, view).unwrap();
+    let support = issue_fixture_compiler_support(projection, view, &mut offer_validation).unwrap();
     let cold = inputs_with_support(&context, support);
     let row = cold.native_availability(entry.descriptor.id).unwrap();
     assert!(row.issued_ordinals().is_empty());
@@ -475,6 +488,7 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
         CompilerInputProjection::from_issued_entries(&[history.entries[0].clone(), parent.clone()])
             .unwrap(),
         parent_view.clone(),
+        &mut offer_validation,
     )
     .unwrap();
     let parent_offer = issuer
@@ -507,6 +521,7 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
         projection.clone(),
         parent_view.clone(),
         old_offers.iter().cloned(),
+        &mut offer_validation,
     )
     .unwrap();
     let old_rows = RequestNativeAvailability::issue_checked(
@@ -522,6 +537,7 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
         child_projection,
         history.views[1].clone(),
         [history.offers[1].clone()],
+        &mut offer_validation,
     )
     .unwrap();
     let new_rows = RequestNativeAvailability::issue_checked(
@@ -540,6 +556,7 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
             history.offers[0].clone(),
             history.offers[1].clone(),
         ],
+        &mut offer_validation,
     )
     .unwrap()
     .retain_normalized_availability(&rows)

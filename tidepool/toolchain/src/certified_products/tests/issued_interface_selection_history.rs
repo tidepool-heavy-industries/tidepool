@@ -122,6 +122,11 @@ fn available_inputs(
 
 #[test]
 fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let root = tempfile::tempdir().unwrap();
     let (view, entries) = available_inputs(root.path());
     for chosen in 1..=2 {
@@ -134,6 +139,7 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
             projection,
             view.clone(),
             [],
+            &mut offer_validation,
         )
         .unwrap();
         let private = OriginalCompilerInputs::from_issued_support(&issued);
@@ -196,6 +202,11 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
 
 #[test]
 fn omission_of_an_issued_interface_only_role_is_refused() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let root = tempfile::tempdir().unwrap();
     let (view, entries) = available_inputs(root.path());
     let projection =
@@ -209,8 +220,13 @@ fn omission_of_an_issued_interface_only_role_is_refused() {
         .artifacts
         .contains_key(&entries[1].descriptor.id));
     assert!(
-        crate::declaration_context::recover_fixture_compiler_support(projection, without_side, [])
-            .is_err(),
+        crate::declaration_context::recover_fixture_compiler_support(
+            projection,
+            without_side,
+            [],
+            &mut offer_validation
+        )
+        .is_err(),
         "omitted issued Side interface must not be reconstructed from other custody"
     );
 }

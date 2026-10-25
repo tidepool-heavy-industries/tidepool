@@ -1762,6 +1762,7 @@ fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
         let issuer = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[root.clone()]).unwrap(),
             view.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let offer = issuer

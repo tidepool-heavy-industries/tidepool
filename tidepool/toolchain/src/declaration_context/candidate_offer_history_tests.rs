@@ -56,6 +56,7 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
     let issuer = issue_fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[a.clone()]).unwrap(),
         historical.clone(),
+        &mut offer_validation,
     )
     .unwrap();
     let offer = issuer
@@ -78,6 +79,7 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
                 projection.clone(),
                 view.clone(),
                 offers,
+                &mut offer_validation,
             )
             .unwrap(),
             lexical: Default::default(),
@@ -216,6 +218,7 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
         compiler_support: issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[a.clone()]).unwrap(),
             historical,
+            &mut offer_validation,
         )
         .unwrap(),
         lexical: Default::default(),

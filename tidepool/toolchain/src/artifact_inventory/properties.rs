@@ -533,6 +533,11 @@ fn run_history(
     operations: &[Op],
     coverage: &mut Coverage,
 ) -> Result<(), TestCaseError> {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let inventories = [ArtifactInventory::default(), ArtifactInventory::default()];
     let mut views: [Option<ArtifactView>; SLOTS] = Default::default();
     let mut model = Model::default();
@@ -684,6 +689,7 @@ fn run_history(
                         projection,
                         issued,
                         [],
+                        &mut offer_validation,
                     )
                     .unwrap();
                     // Authenticate the role selection through recovery, then retain

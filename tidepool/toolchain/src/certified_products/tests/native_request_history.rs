@@ -391,7 +391,8 @@ fn replay_native_transport_history(
             entries[index + 1].clone(),
         ])
         .unwrap();
-        issue_fixture_compiler_support(projection, sources[index].clone()).unwrap()
+        issue_fixture_compiler_support(projection, sources[index].clone(), &mut offer_validation)
+            .unwrap()
     });
     let proofs = std::array::from_fn::<_, 2, _>(|index| {
         let canonical = ArtifactEntry::canonical(products[index + 1].module_interface().clone());
@@ -555,7 +556,9 @@ fn replay_native_transport_history(
             .merge_fixture_compiler_inputs(&CompilerInputProjection::default(), view, &interfaces)
             .unwrap()
             .0;
-        let support = issue_fixture_compiler_support(interfaces.clone(), view).unwrap();
+        let support =
+            issue_fixture_compiler_support(interfaces.clone(), view, &mut offer_validation)
+                .unwrap();
         Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
@@ -592,7 +595,9 @@ fn replay_native_transport_history(
         for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
             assert_eq!(binding(&selected, id), binding(&sources[index], id));
         }
-        let support = issue_fixture_compiler_support(root_projection, selected).unwrap();
+        let support =
+            issue_fixture_compiler_support(root_projection, selected, &mut offer_validation)
+                .unwrap();
         for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
             assert_eq!(
                 binding(support.artifacts(), id),

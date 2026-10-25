@@ -7724,9 +7724,12 @@ mod tests {
         let full = inventory
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
-        let full_source =
-            crate::declaration_context::issue_fixture_compiler_support(projection.clone(), full)
-                .unwrap();
+        let full_source = crate::declaration_context::issue_fixture_compiler_support(
+            projection.clone(),
+            full,
+            &mut offer_validation,
+        )
+        .unwrap();
         let full_proof = NativeOriginalRequirement::from_selected_view(
             entry.descriptor.id,
             full_source.artifacts(),
@@ -7749,6 +7752,7 @@ mod tests {
             let source = crate::declaration_context::issue_fixture_compiler_support(
                 projection.clone(),
                 chosen,
+                &mut offer_validation,
             )
             .unwrap()
             .retain_offers(full_offers.iter().cloned())
@@ -8291,6 +8295,7 @@ mod tests {
             let historical_source = crate::declaration_context::issue_fixture_compiler_support(
                 historical_projection.clone(),
                 view.clone(),
+                &mut offer_validation,
             )
             .unwrap();
             let proof = NativeOriginalRequirement::from_selected_view(
@@ -8305,6 +8310,7 @@ mod tests {
                 projection,
                 view,
                 [offer],
+                &mut offer_validation,
             )
             .unwrap();
             assert!(

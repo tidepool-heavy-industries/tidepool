@@ -1132,6 +1132,11 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
 
 #[test]
 fn late_private_native_literals_and_graphs_survive_detached_capture() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::certified_products::PendingImportOwner;
     use tidepool_repr::execution_schema::{Group, HeapRhs};
     let source = tempfile::tempdir().unwrap();
@@ -1259,7 +1264,8 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let support = issue_fixture_compiler_support(projection, artifacts).unwrap();
+        let support =
+            issue_fixture_compiler_support(projection, artifacts, &mut offer_validation).unwrap();
         let private = OriginalCompilerInputs::from_issued_support(&support);
 
         let inputs = ProtectedScaffoldRequirements::default()

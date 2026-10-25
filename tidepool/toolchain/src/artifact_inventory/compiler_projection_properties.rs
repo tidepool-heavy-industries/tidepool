@@ -584,9 +584,13 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
         .with_compiler_projection(&type_projection)
         .map(std::borrow::Cow::into_owned)
         .unwrap();
-    let support =
-        crate::declaration_context::recover_fixture_compiler_support(type_projection, issued, [])
-            .unwrap();
+    let support = crate::declaration_context::recover_fixture_compiler_support(
+        type_projection,
+        issued,
+        [],
+        &mut offer_validation,
+    )
+    .unwrap();
     let types = support
         .selected_interfaces()
         .unwrap()

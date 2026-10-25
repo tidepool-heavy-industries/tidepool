@@ -16975,6 +16975,11 @@ pub(crate) mod tests {
         retained: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         selected: &crate::recovery_artifacts::CertifiedRecoveryProduct,
     ) -> crate::artifact_inventory::CompilerSourceSupport {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = retained
             .iter()
             .map(|product| {
@@ -17000,7 +17005,12 @@ pub(crate) mod tests {
                 selected_entry,
             ])
             .unwrap();
-        crate::declaration_context::issue_fixture_compiler_support(projection, view).unwrap()
+        crate::declaration_context::issue_fixture_compiler_support(
+            projection,
+            view,
+            &mut offer_validation,
+        )
+        .unwrap()
     }
 
     fn world_stage_availability(
@@ -17026,6 +17036,11 @@ pub(crate) mod tests {
 
     #[test]
     fn world_stage_fixture_roles_follow_issued_carrier_without_owner_census() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CompilerInputRole, NativeGroupKey,
         };
@@ -17134,6 +17149,7 @@ pub(crate) mod tests {
             support_a.projection().interface_only(),
             support_a.artifacts().clone(),
             support_a.native_offers().iter().cloned(),
+            &mut offer_validation,
         )
         .unwrap();
         let (interface_roles, interface_availability) =
@@ -17203,6 +17219,7 @@ pub(crate) mod tests {
             ])
             .unwrap(),
             partial_view,
+            &mut offer_validation,
         )
         .unwrap();
         let (_, partial_availability) = world_stage_availability(&partial, &partial_owner);
@@ -20351,6 +20368,11 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_new_product_request_preserves_input_group_permissions() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
         };
@@ -20460,6 +20482,7 @@ pub(crate) mod tests {
                 let full_support = crate::declaration_context::issue_fixture_compiler_support(
                     projection.clone(),
                     full,
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let selected = ordinals
@@ -20726,6 +20749,11 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_request_keeps_two_input_permissions_separate_from_fresh_outputs() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
             CompilerInputProjection, ExactArtifactSelection, NativeGroupKey,
@@ -20817,6 +20845,7 @@ pub(crate) mod tests {
                             ])
                             .unwrap(),
                             full_baseline,
+                            &mut offer_validation,
                         )
                         .unwrap();
                         let baseline_entries = vec![unused_interface.clone(), entries[1].clone()];
@@ -20834,6 +20863,7 @@ pub(crate) mod tests {
                             CompilerInputProjection::from_issued_entries(&baseline_entries)
                                 .unwrap(),
                             baseline_view,
+                            &mut offer_validation,
                         )
                         .unwrap()
                         .retain_offers(
@@ -20857,6 +20887,7 @@ pub(crate) mod tests {
                         let full_required = issue_fixture_compiler_support(
                             required_projection.clone(),
                             full_required,
+                            &mut offer_validation,
                         )
                         .unwrap();
                         let selected_groups = selected
@@ -20896,13 +20927,14 @@ pub(crate) mod tests {
                                     &ExactArtifactSelection::from_recovered_graph_selection(graph),
                                 )
                                 .unwrap();
-                            let support =
-                                issue_fixture_compiler_support(required_projection.clone(), chosen)
-                                    .unwrap()
-                                    .retain_normalized_availability(
-                                        full_required.native_availability(),
-                                    )
-                                    .unwrap();
+                            let support = issue_fixture_compiler_support(
+                                required_projection.clone(),
+                                chosen,
+                                &mut offer_validation,
+                            )
+                            .unwrap()
+                            .retain_normalized_availability(full_required.native_availability())
+                            .unwrap();
                             if selected.is_none() {
                                 support.for_source_owners(&BTreeSet::new()).unwrap()
                             } else {
@@ -20916,7 +20948,12 @@ pub(crate) mod tests {
                                     &selected_groups,
                                 )
                                 .unwrap();
-                            issue_fixture_compiler_support(required_projection, chosen).unwrap()
+                            issue_fixture_compiler_support(
+                                required_projection,
+                                chosen,
+                                &mut offer_validation,
+                            )
+                            .unwrap()
                         } else {
                             full_required
                                 .selected_interfaces()
@@ -21260,8 +21297,12 @@ pub(crate) mod tests {
                     NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &view)
                         .unwrap()
                         .expect("the actual issuer selected native groups");
-                let issuer =
-                    issue_fixture_compiler_support(projection.clone(), view.clone()).unwrap();
+                let issuer = issue_fixture_compiler_support(
+                    projection.clone(),
+                    view.clone(),
+                    &mut offer_validation,
+                )
+                .unwrap();
                 let offer = issuer
                     .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
                     .unwrap();
@@ -21328,10 +21369,14 @@ pub(crate) mod tests {
                 .product;
             let parent_entry =
                 Arc::new(ArtifactEntry::original(producer.sha256(), parent).unwrap());
-            let support = issue_fixture_compiler_support(projection.clone(), left.clone())
-                .unwrap()
-                .retain_offers([a.clone()])
-                .unwrap();
+            let support = issue_fixture_compiler_support(
+                projection.clone(),
+                left.clone(),
+                &mut offer_validation,
+            )
+            .unwrap()
+            .retain_offers([a.clone()])
+            .unwrap();
             let parent_context = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
@@ -21411,8 +21456,12 @@ pub(crate) mod tests {
                 .unwrap()
                 .contains(&historical_edge));
             assert!(!b_groups.contains(&historical_child));
-            let support =
-                issue_fixture_compiler_support(projection.clone(), right.clone()).unwrap();
+            let support = issue_fixture_compiler_support(
+                projection.clone(),
+                right.clone(),
+                &mut offer_validation,
+            )
+            .unwrap();
             let original_graph = support.artifacts().capture_graph_selection();
             let assert_retained_offer =
                 |stage: &str,
@@ -21597,8 +21646,12 @@ pub(crate) mod tests {
                 !input_b.same_issuance(&b),
                 "recovery checked the same B proof through its own input issuer"
             );
-            let left_support =
-                issue_fixture_compiler_support(projection.clone(), left.clone()).unwrap();
+            let left_support = issue_fixture_compiler_support(
+                projection.clone(),
+                left.clone(),
+                &mut offer_validation,
+            )
+            .unwrap();
             let joined = left_support.merge(&support);
             if shared_carrier {
                 assert!(matches!(joined, Err(CompileError::ArtifactInventory(error))
@@ -21634,7 +21687,9 @@ pub(crate) mod tests {
                 ])
             );
             let selected_fragment = |view: ArtifactView| {
-                let issued = issue_fixture_compiler_support(projection.clone(), view).unwrap();
+                let issued =
+                    issue_fixture_compiler_support(projection.clone(), view, &mut offer_validation)
+                        .unwrap();
                 let context = ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
                     .extend_issued_compiler_support(&issued)
@@ -21781,6 +21836,7 @@ pub(crate) mod tests {
         let support = issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&interfaces).unwrap(),
             view,
+            &mut offer_validation,
         )
         .unwrap();
         let context = Arc::new(
@@ -21930,8 +21986,12 @@ pub(crate) mod tests {
             carriers.first()
         );
         assert!(selected_input.selected_native_groups().is_empty());
-        let input_owner =
-            issue_fixture_compiler_support(input_roles.clone(), selected_input.clone()).unwrap();
+        let input_owner = issue_fixture_compiler_support(
+            input_roles.clone(),
+            selected_input.clone(),
+            &mut offer_validation,
+        )
+        .unwrap();
         let partial = selected_input
             .inventory()
             .admit_recovery_selection(
@@ -22003,12 +22063,17 @@ pub(crate) mod tests {
                     &ExactArtifactSelection::from_recovered_graph_selection(graph),
                 )
                 .unwrap();
-            let support = recover_fixture_compiler_support(input_roles.clone(), view, [offer])
-                .unwrap()
-                .retain_normalized_availability(&availability)
-                .unwrap()
-                .for_source_owners(&BTreeSet::new())
-                .unwrap();
+            let support = recover_fixture_compiler_support(
+                input_roles.clone(),
+                view,
+                [offer],
+                &mut offer_validation,
+            )
+            .unwrap()
+            .retain_normalized_availability(&availability)
+            .unwrap()
+            .for_source_owners(&BTreeSet::new())
+            .unwrap();
             assert!(support
                 .projection()
                 .roles()
@@ -22198,6 +22263,7 @@ pub(crate) mod tests {
             let type_only = issue_fixture_compiler_support(
                 CompilerInputProjection::from_issued_entries(&[canonical_support.clone()]).unwrap(),
                 interface_view,
+                &mut offer_validation,
             )
             .unwrap();
             assert!(type_only.native_offers().is_empty());
@@ -22221,8 +22287,12 @@ pub(crate) mod tests {
                 .unwrap();
             let support_projection =
                 CompilerInputProjection::from_issued_entries(&[support_entry.clone()]).unwrap();
-            let support_source =
-                issue_fixture_compiler_support(support_projection, support_view).unwrap();
+            let support_source = issue_fixture_compiler_support(
+                support_projection,
+                support_view,
+                &mut offer_validation,
+            )
+            .unwrap();
             let support_output = OriginalCompilerInputs::from_issued_support(&support_source);
             let issued_view = support_output.issued_artifacts();
             let issued_graph = issued_view.capture_graph_selection();
@@ -22240,6 +22310,7 @@ pub(crate) mod tests {
                 support_output.role_projection().clone(),
                 issued_view.clone(),
                 [empty_offer],
+                &mut offer_validation,
             )
             .unwrap()
             .retain_normalized_availability(&empty_rows)
@@ -22772,6 +22843,11 @@ pub(crate) mod tests {
         siblings: usize,
         grant_full: bool,
     ) -> BTreeSet<u32> {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
             CompilerInputProjection, NativeGroupKey,
@@ -22838,9 +22914,12 @@ pub(crate) mod tests {
         let full = inventory
             .admit_shared(&inventory.empty_view(), entries.clone())
             .unwrap();
-        let full_support =
-            crate::declaration_context::issue_fixture_compiler_support(projection.clone(), full)
-                .unwrap();
+        let full_support = crate::declaration_context::issue_fixture_compiler_support(
+            projection.clone(),
+            full,
+            &mut offer_validation,
+        )
+        .unwrap();
         let selected = inherited
             .iter()
             .map(|ordinal| NativeGroupKey {
@@ -22891,11 +22970,14 @@ pub(crate) mod tests {
                 .admit_recovery_selection(&inventory.empty_view(), entries, &selected)
                 .unwrap()
         };
-        let mut support =
-            crate::declaration_context::issue_fixture_compiler_support(projection, chosen)
-                .unwrap()
-                .retain_offers(full_support.native_offers().iter().cloned())
-                .unwrap();
+        let mut support = crate::declaration_context::issue_fixture_compiler_support(
+            projection,
+            chosen,
+            &mut offer_validation,
+        )
+        .unwrap()
+        .retain_offers(full_support.native_offers().iter().cloned())
+        .unwrap();
         if grant_full {
             support = support
                 .retain_normalized_availability(full_support.native_availability())
@@ -24861,6 +24943,11 @@ pub(crate) mod tests {
 
     #[test]
     fn request_native_availability_survives_private_input_handoff() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
             NativeArtifactDemand, NativeGroupKey,
@@ -24898,6 +24985,7 @@ pub(crate) mod tests {
                     projection.clone(),
                     complete.clone(),
                     [],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let no_offer_narrowed = no_offer
@@ -25920,6 +26008,11 @@ pub(crate) mod tests {
 
     #[test]
     fn current_dependency_without_root_choice_refuses_two_issued_scopes() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode as InventoryNodeKey, ArtifactEntry, ArtifactInventory,
             ArtifactInventoryFailure, ArtifactPayload, CanonicalProducerIdentity,
@@ -26024,9 +26117,12 @@ pub(crate) mod tests {
                 &issued_selection,
             )
             .unwrap();
-        let support =
-            crate::declaration_context::issue_fixture_compiler_support(projection, selected)
-                .unwrap();
+        let support = crate::declaration_context::issue_fixture_compiler_support(
+            projection,
+            selected,
+            &mut offer_validation,
+        )
+        .unwrap();
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
@@ -31522,6 +31618,11 @@ pub(crate) mod tests {
 
     #[test]
     fn exact_cached_closure_without_cached_modules_does_not_walk_inventory() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let root = tempfile::tempdir().unwrap();
         let (_, mut receipt, current, original_a, original_b) = cached_closure_pair(root.path());
         let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
@@ -31549,8 +31650,12 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
-                    .unwrap()
+                crate::declaration_context::issue_fixture_compiler_support(
+                    projection,
+                    physical,
+                    &mut offer_validation,
+                )
+                .unwrap()
             })
             .unwrap();
         for module in &mut receipt.modules {
@@ -31635,6 +31740,11 @@ pub(crate) mod tests {
 
     #[test]
     fn exact_cached_closure_preserves_zero_group_custody_and_refuses_inherited_substitute() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let root = tempfile::tempdir().unwrap();
         let (candidates, mut receipt, current, a, b) = cached_closure_pair(root.path());
         let empty =
@@ -31664,8 +31774,12 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
-                    .unwrap()
+                crate::declaration_context::issue_fixture_compiler_support(
+                    projection,
+                    physical,
+                    &mut offer_validation,
+                )
+                .unwrap()
             })
             .unwrap();
         assert!(overlapping.recovery_products()[0].product_bytes().len() > 0);
@@ -31706,8 +31820,12 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
-                    .unwrap()
+                crate::declaration_context::issue_fixture_compiler_support(
+                    projection,
+                    physical,
+                    &mut offer_validation,
+                )
+                .unwrap()
             })
             .unwrap();
         receipt.modules.pop();
@@ -31784,6 +31902,11 @@ pub(crate) mod tests {
 
     #[test]
     fn exact_cached_closure_admits_checked_original_across_receipts() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let root = tempfile::tempdir().unwrap();
         let (mut candidates, mut receipt, mut current, _, b) = cached_closure_pair(root.path());
         let a_key = ("main".into(), "A".into());
@@ -31839,8 +31962,12 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
-                    .unwrap()
+                crate::declaration_context::issue_fixture_compiler_support(
+                    projection,
+                    physical,
+                    &mut offer_validation,
+                )
+                .unwrap()
             })
             .unwrap();
         assert!(context.lexical_graph().is_empty());
@@ -32741,6 +32868,11 @@ pub(crate) mod tests {
 
     #[test]
     fn repeated_retained_core_promotion_preserves_exact_original_membership() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::CanonicalProducerIdentity;
         use crate::declaration_context::ExactDeclarationContext;
         use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
@@ -33361,6 +33493,7 @@ None,
                 projection,
                 selected,
                 emitted.native_offers().iter().cloned(),
+                &mut offer_validation,
             )
             .unwrap()
             .retain_normalized_availability(emitted.native_availability())

@@ -4971,6 +4971,11 @@ mod normalized_dependency_tests {
         crate::certified_products::CertifiedSourceSelection,
         NativeGroupBinding,
     ) {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let product = fixture_finalized_product(
             original_groups_fixture_with_interface(
@@ -5003,6 +5008,7 @@ mod normalized_dependency_tests {
         let birth = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
             artifacts.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let mut projection = CompilerInputProjection::default();

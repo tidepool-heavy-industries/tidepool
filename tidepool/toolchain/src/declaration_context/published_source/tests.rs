@@ -494,6 +494,11 @@ fn check_interface_adapter(
     original: ArtifactId,
     child: ArtifactId,
 ) {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         ArtifactBindingNode, ArtifactDependency, ExactArtifactSelection,
     };
@@ -591,7 +596,7 @@ fn check_interface_adapter(
         assert!(narrowed.bindings.contains(&canonical_binding));
         assert!(
             matches!(crate::declaration_context::recover_fixture_compiler_support(
-                types.projection().clone(), original_only, [],
+                types.projection().clone(), original_only, [], &mut offer_validation,
             ), Err(CompileError::ExtractFailed(detail))
                 if detail == "exact declaration context: bound recovery namespace differs from recorded compiler roles"),
             "recorded type roles must refuse a namespace that omits their selected canonical attachment"
@@ -806,6 +811,7 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
                     ])
                     .unwrap(),
                     views[1 - selected].clone(),
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let old = historical
@@ -815,6 +821,7 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
                     projection.clone(),
                     views[selected].clone(),
                     [old.clone(), old],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let issued = ExactDeclarationContext::retained_execution_fixture(
@@ -918,6 +925,11 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
 #[test]
 #[ignore = "requires the declared rooted compiler service"]
 fn authored_certifier_preserves_published_policy_with_complete_demand() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let fixture = compiled_publication_fixture();
     let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
         &fixture.producer_bytes,
@@ -1120,6 +1132,7 @@ fn authored_certifier_preserves_published_policy_with_complete_demand() {
                     &crate::declaration_context::issue_fixture_compiler_support(
                         fresh_projection,
                         fresh_view,
+                        &mut offer_validation,
                     )
                     .unwrap(),
                 )

@@ -6391,6 +6391,7 @@ mod tests {
         let full_issuer = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&entries).unwrap(),
             full.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let full_offer = full_issuer
@@ -6432,6 +6433,7 @@ mod tests {
         let sparse_issuer = crate::declaration_context::issue_fixture_compiler_support(
             full_issuer.projection().clone(),
             sparse.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let sparse_offer = sparse_issuer
@@ -6529,6 +6531,7 @@ mod tests {
                 CompilerInputProjection::default(),
                 context.artifact_view().clone(),
                 [offer],
+                &mut offer_validation,
             )
             .unwrap();
             let retained = context
@@ -6855,6 +6858,7 @@ mod tests {
                     ])
                     .unwrap(),
                     views[1 - selected].clone(),
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let old = historical
@@ -6864,6 +6868,7 @@ mod tests {
                     projection.clone(),
                     views[selected].clone(),
                     [old.clone(), old],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let original = ExactDeclarationContext::new(&[], &[], vec![])
@@ -6924,6 +6929,7 @@ mod tests {
                         competing,
                         views[1 - selected].clone(),
                         [],
+                        &mut offer_validation,
                     )
                     .unwrap();
                     assert!(
@@ -7183,7 +7189,9 @@ mod tests {
                     .unwrap()
                     .extend_issued_compiler_support(
                         &crate::declaration_context::issue_fixture_compiler_support(
-                            projection, view,
+                            projection,
+                            view,
+                            &mut offer_validation,
                         )
                         .unwrap(),
                     )
@@ -7304,6 +7312,7 @@ mod tests {
                 let issuer = crate::declaration_context::issue_fixture_compiler_support(
                     projection.clone(),
                     available.clone(),
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let offers = requirements
