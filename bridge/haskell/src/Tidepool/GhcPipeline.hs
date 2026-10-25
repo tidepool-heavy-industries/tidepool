@@ -353,7 +353,7 @@ import Tidepool.ExactScope
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , WorldCellOperandInputs, readWorldCellOperandWithOwner, worldCellOperandExposure, WorldCellOperandExposure(..)
   , worldCellOperandBinding, worldCellOperandInterface, worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes, worldCellOperandCapturedInputs
-  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryEvidence, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryInterfaceBody, worldTypeCanonicalInterfaceAdmission, VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
+  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntriesAgree, worldTypeEntryArtifact, worldTypeEntryEvidence, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryInterfaceBody, worldTypeCanonicalInterfaceAdmission, VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeIncludePaths
@@ -3833,7 +3833,10 @@ resolveWorldCellInputs owner facts accumulated path consumer sourceOwners enviro
       prior = [value | (_,WorldPriorBinding value) <- inputs]
       operands = [value | (_,WorldOperandBinding value) <- inputs]
       typeContributions = typeInputs:[worldCellOperandTypes value | WorldCellOperandProjection value _ _ _ <- operands]
-      allTypes = Map.unions typeContributions
+  allTypes <- foldM (\rows contribution -> foldM (\selected (key,entry) -> do
+    forM_ (Map.lookup key selected) $ \held -> unless (worldTypeEntriesAgree held entry)
+      (reject "world and operand TYPE contributions select conflicting exact bindings")
+    pure (Map.insertWith (\_ held -> held) key entry selected)) rows (Map.toAscList contribution)) Map.empty typeContributions
   unless (all (\(WorldStagedValue producer _ _ _ _ _ _) -> producer < fromIntegral consumer) prior)
     (reject "prior value is not before the consuming stage")
   -- Value owners must never be source summaries: adding their retained policy

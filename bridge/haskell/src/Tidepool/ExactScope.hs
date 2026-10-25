@@ -32,7 +32,7 @@ module Tidepool.ExactScope
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
   , WorldSourceClosureEntry(..)
-  , WorldTypeClosureEntry, readWorldTypeInputs
+  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntriesAgree
   , worldTypeEntryArtifact, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryEvidence, worldTypeEntryInterfaceBody, worldTypeCanonicalInterfaceAdmission
   , VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs
   , verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, verifiedWorldDeclarationTypeInputs
@@ -2124,6 +2124,7 @@ data WorldInputFacts = WorldInputFacts
   , worldInputsSources :: !(CapturedWorldSources)
   , worldInputsBaseRows :: !(Map.Map InterfaceOwner WorldAdmittedRow)
   , worldInputsVisibleRows :: !(Map.Map InterfaceOwner WorldAdmittedRow)
+  , worldInputsDependencyRows :: !(Map.Map WorldArtifactBinding WorldDependencyEntry)
   , worldInputsVisibleSemantic :: !(Map.Map BS.ByteString ScopeInterfaceInput)
   , worldInputsCustody :: !(RequestOriginalInputs)
   , worldInputsCustodyUsers :: !(Map.Map FilePath Int)
@@ -2154,6 +2155,8 @@ worldSuccessorFacts (WorldSuccessorInputs facts _) = facts
 
 worldSuccessorChangedAliases :: WorldSuccessorInputs -> Set.Set String
 worldSuccessorChangedAliases (WorldSuccessorInputs _ aliases) = aliases
+
+data WorldDependencyEntry = WorldDependencyEntry !WorldAdmittedRow !Int
 
 data WorldAdmittedRow = WorldAdmittedRow !OfferedWorldRow !ScopeInterfaceInput !BS.ByteString !(Integer,Int)
 
@@ -2246,6 +2249,9 @@ data WorldBinding = WorldBinding
 -- compiler receipt or a native/runtime permission in this receiver.
 data WorldBindingRow = WorldBindingRow
   { worldBindingRowInterface :: InterfaceRow
+  , worldBindingSemanticRow :: BS.ByteString
+  , worldBindingLeafBinding :: WorldArtifactBinding
+  , worldBindingDependencyManifest :: Map.Map WorldArtifactBinding BS.ByteString
   , worldBindingCertifiedArtifact :: BS.ByteString
   , worldBindingCompilerReceipt :: BS.ByteString
   , worldBindingRowFactCID :: BS.ByteString
@@ -2267,48 +2273,35 @@ readWorldBindingInputs owner env facts occurrences = do
   if length selected /= length occurrences
     then pure (Left "world value demand contains an unbound occurrence")
     else fmap (\(captured,types) -> (selected,captured,types)) <$>
-      readWorldSelectedBindingInputs owner env facts (worldInputsCustody facts) (map snd selected)
+      readWorldSelectedBindingInputs owner env facts (worldInputsCustody facts) (\key -> case Map.lookup key (worldInputsDependencyRows facts) of
+        Just (WorldDependencyEntry row _) -> Just row
+        Nothing -> Nothing) (map snd selected)
 
 -- Selected operands and namespace demands use the same checked-row reader. The
--- held primary facts alone supply TYPE closure; incoming custody cannot add it.
-readWorldSelectedBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> RequestOriginalInputs -> [WorldBinding]
+-- row manifest selects its TYPE closure from the corresponding owned custody.
+readWorldSelectedBindingInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> RequestOriginalInputs -> (WorldArtifactBinding -> Maybe WorldAdmittedRow) -> [WorldBinding]
   -> IO (Either String ([(VerifiedExactInterface,ArtifactBytes)],Map.Map InterfaceOwner WorldTypeClosureEntry))
-readWorldSelectedBindingInputs owner env facts tokens selected = do
-  let rows = [worldBindingRowInterface (worldBindingRow value) | value <- selected]
-      key (artifact,_,_) = (exactUnit artifact,exactModule artifact)
-      distinct = Map.fromList [(key row,row) | row <- rows]
-  if any (\row -> Map.lookup (key row) distinct /= Just row) rows
-    then pure (Left "world value aliases select conflicting captured interface versions")
-    else do
-      typeInputs <- readWorldTypeInputs owner env facts
-        (concatMap (\(artifact,_,_) -> exactRequirements artifact) (Map.elems distinct))
-      case typeInputs of
-        Left reason -> pure (Left reason)
-        Right types -> do
-          packages <- readWorldPackageInputsWithCustody env tokens distinct
-          case packages of
-            Left reason -> pure (Left reason)
-            Right _ -> do
-              let ExactInputOwner _ retained = owner
-              RetainedOriginalInputs _ decoder _ _ <- readMVar retained
-              captured <- forM (Map.elems distinct) $ \(artifact,path,sha) -> do
-                body <- capturedRequestInputToken tokens (exactPath artifact) (exactSha256 artifact)
-                packageBody <- capturedRequestInputToken tokens path sha
-                let dependencies = map worldTypeEntryArtifact (Map.elems types)
-                    readBody requested
-                      | requested == artifact = pure body
-                      | otherwise = case Map.lookup (exactUnit requested,exactModule requested) types of
-                          Just entry | worldTypeEntryArtifact entry == requested -> pure (worldTypeEntryInterfaceBody entry)
-                          _ -> worldCorrupt "checked value TYPE input lacks its captured owner"
-                closure <- readCapturedExactIfaceClosureWithCheckedValues decoder readBody env dependencies [artifact]
-                  >>= either worldCorrupt pure
-                verified <- either worldCorrupt pure (selectVerifiedExactInterfaceProducts closure [artifact])
-                case verified of
-                  [value] -> do
-                    admitted <- either worldCorrupt pure (admitCheckedValueInterface packageBody value)
-                    pure (admitted,packageBody)
-                  _ -> worldCorrupt "checked value lost its selected decoded interface"
-              pure (Right (captured,types))
+readWorldSelectedBindingInputs owner env facts tokens dependencies selected = do
+  let selectedRows = map worldBindingRow selected
+      leafOwners = Set.fromList [rowOwner (worldBindingRowInterface row) | row <- selectedRows]
+      leaves = [(worldBindingLeafBinding row,worldBindingSemanticRow row,
+          ScopeInterfaceInput (worldBindingRowInterface row) CheckedValueEvidence) | row <- selectedRows]
+      manifests = Map.unionsWith (++) [Map.map pure (worldBindingDependencyManifest row) | row <- selectedRows]
+  demanded <- forM (Map.toAscList manifests) $ \(binding,semantics) -> do
+    WorldAdmittedRow _ row semantic _ <- maybe (worldCorrupt "world value dependency lacks its admitted owner") pure
+      (dependencies binding)
+    unless (all (== semantic) semantics) (worldCorrupt "world value dependency differs from its manifest")
+    pure (binding,semantic,row)
+  allInputs <- readManifestWorldTypeInputs owner env facts tokens (leaves ++ demanded)
+  case allInputs of
+    Left reason -> pure (Left reason)
+    Right entries -> do
+      captured <- forM (Set.toAscList leafOwners) $ \key -> do
+        entry <- maybe (worldCorrupt "world value lost its selected checked interface") pure (Map.lookup key entries)
+        let ScopeInterfaceInput (_,path,sha) _ = case entry of WorldTypeClosureEntry _ _ input _ _ _ -> input
+        packages <- capturedRequestInputToken tokens path sha
+        pure (worldTypeEntryVerifiedInterface entry,packages)
+      pure (Right (captured,Map.withoutKeys entries leafOwners))
 
 -- A sealed operand is one selected checked row, not an additional World or an
 -- executable grant. This tuple has no profile field: the request owner must
@@ -2351,7 +2344,7 @@ readWorldCellOperandWithOwner owner@(ExactInputOwner _ state) env facts path exp
         (worldCorrupt "world operand requires an absolute descriptor and SHA256 seal")
       limit <- requestCaptureByteLimit
       let bound = fromInteger (min limit (toInteger (maxBound :: Int)-1))
-      ((exposure,reference@(_,_,_,_,cid),blocks,offered,acquisition),_) <-
+      ((exposure,reference@(_,_,_,_,cid),blocks,offered,dependencies,acquisition),_) <-
         captureRequestInputTokens Nothing $ \readToken -> do
           descriptor <- readToken path bound
           either worldCorrupt pure (checkArtifactSeal (hexBytes expectedSHA) descriptor)
@@ -2361,10 +2354,12 @@ readWorldCellOperandWithOwner owner@(ExactInputOwner _ state) env facts path exp
         ((_,ParsedValueEvidence),_) -> pure ()
         _ -> worldCorrupt "world operand requires a checked value row"
       frontier <- verifyWorldBlocks [cid] blocks
-      (rows,custody,_) <- admitWorldRows state (worldInputsProducer facts) acquisition [offered]
-      eligible <- worldVisibleSemantic <$> worldRowsByOwner rows
+      (rows,custody,_) <- admitWorldRows state (worldInputsProducer facts) acquisition (offered:map snd dependencies)
+      dependencyRows <- indexWorldDependencies (map fst dependencies) (drop 1 rows)
+      eligible <- worldVisibleSemantic <$> worldRowsByOwner (take 1 rows)
       (binding,_,_) <- readChangedWorldBinding frontier eligible reference
-      inputs <- readWorldSelectedBindingInputs owner env facts custody [binding]
+      _ <- establishWorldDependencies dependencyRows (Map.singleton cid (worldBindingRow binding,BS.empty,0,1))
+      inputs <- readWorldSelectedBindingInputs owner env facts custody (`Map.lookup` dependencyRows) [binding]
       case inputs of
         Left reason -> worldCorrupt reason
         Right ([(verified,packages)],types)
@@ -2375,11 +2370,11 @@ readWorldCellOperandWithOwner owner@(ExactInputOwner _ state) env facts path exp
         Right _ -> worldCorrupt "world operand lost its one selected checked interface"
 
 decodeWorldCellOperand :: Int -> Decoder s (WorldCellOperandExposure,
-    (SymbolIdentity,Word64,Word64,Word64,BS.ByteString),[(BS.ByteString,BS.ByteString)],OfferedWorldRow,InputAcquisition)
+    (SymbolIdentity,Word64,Word64,Word64,BS.ByteString),[(BS.ByteString,BS.ByteString)],OfferedWorldRow,[(WorldArtifactBinding,OfferedWorldRow)],InputAcquisition)
 decodeWorldCellOperand bytes = do
-  worldArray 6
+  worldArray 7
   magic <- decodeStringCanonical
-  unless (magic == "TPCWCELLOPERAND1") (fail "unsupported compiler world operand")
+  unless (magic == "TPCWCELLOPERAND2") (fail "unsupported compiler world operand")
   exposure <- decodeWordCanonical >>= \case
     0 -> pure WorldInputOperand
     1 -> pure WorldSessionInputOperand
@@ -2387,30 +2382,35 @@ decodeWorldCellOperand bytes = do
   reference <- decodeWorldBindingValueWith worldRawCID
   blocks <- worldFactList bytes (worldArray 2 >> ((,) <$> decodeBytesCanonical <*> decodeBytesCanonical))
   offered <- worldArray 2 >> ((,) <$> decodeInterfaceRow <*> rawWorldDigestCanonical)
+  dependencies <- decodeWorldDependencyRows bytes
   acquisition <- decodeInputAcquisition
-  pure (exposure,reference,blocks,offered,acquisition)
+  pure (exposure,reference,blocks,offered,dependencies,acquisition)
 
 -- Artifact, decoded compiler identity, admitted role and package facts travel
 -- together. This is type availability, never source or native execution rights.
-data WorldTypeClosureEntry = WorldTypeClosureEntry ScopeInterfaceInput VerifiedExactInterface PackageImportEvidence ArtifactBytes
+data WorldTypeClosureEntry = WorldTypeClosureEntry WorldArtifactBinding BS.ByteString ScopeInterfaceInput VerifiedExactInterface PackageImportEvidence ArtifactBytes
+
+worldTypeEntriesAgree :: WorldTypeClosureEntry -> WorldTypeClosureEntry -> Bool
+worldTypeEntriesAgree (WorldTypeClosureEntry binding semantic _ _ _ _) (WorldTypeClosureEntry other expected _ _ _ _) =
+  binding == other && semantic == expected
 
 worldTypeEntryArtifact :: WorldTypeClosureEntry -> ExactIfaceArtifact
-worldTypeEntryArtifact (WorldTypeClosureEntry (ScopeInterfaceInput (artifact,_,_) _) _ _ _) = artifact
+worldTypeEntryArtifact (WorldTypeClosureEntry _ _ (ScopeInterfaceInput (artifact,_,_) _) _ _ _) = artifact
 
 worldTypeEntryInterface :: WorldTypeClosureEntry -> ModIface
 worldTypeEntryInterface = snd . verifiedExactInterface . worldTypeEntryVerifiedInterface
 
 worldTypeEntryVerifiedInterface :: WorldTypeClosureEntry -> VerifiedExactInterface
-worldTypeEntryVerifiedInterface (WorldTypeClosureEntry _ iface _ _) = iface
+worldTypeEntryVerifiedInterface (WorldTypeClosureEntry _ _ _ iface _ _) = iface
 
 worldTypeEntryPackages :: WorldTypeClosureEntry -> PackageImportEvidence
-worldTypeEntryPackages (WorldTypeClosureEntry _ _ packages _) = packages
+worldTypeEntryPackages (WorldTypeClosureEntry _ _ _ _ packages _) = packages
 
 worldTypeEntryEvidence :: WorldTypeClosureEntry -> ExactInterfaceEvidence
-worldTypeEntryEvidence (WorldTypeClosureEntry (ScopeInterfaceInput _ evidence) _ _ _) = evidence
+worldTypeEntryEvidence (WorldTypeClosureEntry _ _ (ScopeInterfaceInput _ evidence) _ _ _) = evidence
 
 worldTypeEntryInterfaceBody :: WorldTypeClosureEntry -> ArtifactBytes
-worldTypeEntryInterfaceBody (WorldTypeClosureEntry _ _ _ body) = body
+worldTypeEntryInterfaceBody (WorldTypeClosureEntry _ _ _ _ _ body) = body
 
 -- Decode each selected sidecar once. Its immutable token authenticates the
 -- offered seal; the collective package owner checks installed bytes and the
@@ -2442,10 +2442,35 @@ readWorldPackageInputsWithCustody env custody rows = do
 -- Passive custody and other world versions cannot widen this lexical closure.
 readWorldTypeInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> [InterfaceOwner]
   -> IO (Either String (Map.Map InterfaceOwner WorldTypeClosureEntry))
-readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.empty roots >>= validate of
+readWorldTypeInputs owner env facts roots = case walk Map.empty roots of
   Left reason -> pure (Left reason)
-  Right rows -> do
-    packages <- readWorldPackageInputs env facts
+  Right rows -> readManifestWorldTypeInputs owner env facts (worldInputsCustody facts) (Map.elems rows)
+  where
+    walk selected [] = Right selected
+    walk selected (key:rest) | Map.member key selected = walk selected rest
+    walk selected (key:rest) = do
+      association <- maybe (Left "demanded type lacks its exact Context association") Right
+        (Map.lookup key (worldPrimarySelected (worldInputsPrimary facts)))
+      let row@(ScopeInterfaceInput (artifact,_,_) _) = worldPrimaryRow association
+      unless ((exactUnit artifact,exactModule artifact) == key)
+        (Left "world demanded type has another selected interface owner")
+      let binding = worldPrimaryInterfaceBinding association
+          semantic = case Map.lookup key (worldInputsBaseRows facts) of
+            Just (WorldAdmittedRow _ _ value _) -> value
+            Nothing -> BS.empty
+      walk (Map.insert key (binding,semantic,row) selected) (exactRequirements artifact ++ rest)
+
+
+-- Collapse owners only after comparing the exact binding and semantic facts.
+-- Custody comes from the demanded product, including operand-local transport.
+readManifestWorldTypeInputs :: ExactInputOwner -> HscEnv -> WorldInputFacts -> RequestOriginalInputs
+  -> [(WorldArtifactBinding,BS.ByteString,ScopeInterfaceInput)]
+  -> IO (Either String (Map.Map InterfaceOwner WorldTypeClosureEntry))
+readManifestWorldTypeInputs (ExactInputOwner _ state) env facts custody contributions = case checked >>= validate of
+  Left reason -> pure (Left reason)
+  Right selected -> do
+    let rows = Map.map (\(_,_,row) -> row) selected
+    packages <- readWorldPackageInputsWithCustody env custody
       (Map.map (\(ScopeInterfaceInput row _) -> row) rows)
     case packages of
       Left reason -> pure (Left reason)
@@ -2455,7 +2480,7 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
             originals = [artifact | ScopeInterfaceInput (artifact,_,_) evidence <- Map.elems rows
               , evidence /= CheckedValueEvidence]
             values = [artifact | ScopeInterfaceInput (artifact,_,_) CheckedValueEvidence <- Map.elems rows]
-            readInput artifact = capturedRequestInputToken (worldInputsCustody facts)
+            readInput artifact = capturedRequestInputToken custody
               (exactPath artifact) (exactSha256 artifact)
         bodies <- Map.fromList <$> mapM (\artifact -> do
           body <- readInput artifact
@@ -2463,7 +2488,7 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
         let selectedBody artifact = maybe (fail "world type closure lost its captured interface token") pure
               (Map.lookup (exactPath artifact) bodies)
         packageBodies <- Map.fromList <$> forM (Map.elems rows) (\(ScopeInterfaceInput (_,path,sha) _) -> do
-          body <- capturedRequestInputToken (worldInputsCustody facts) path sha
+          body <- capturedRequestInputToken custody path sha
           pure ((path,sha),body))
         closure <- readCapturedExactIfaceClosureWithCheckedValues decoder selectedBody env originals values
         pure $ do
@@ -2486,9 +2511,11 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
                   (Map.lookup (path,sha) packageBodies)
                 admitCheckedValueInterface packageBody iface
               _ -> Right iface
-            pure (WorldTypeClosureEntry row admitted evidence body)) rows
+            (binding,semantic,_) <- maybe (Left "world TYPE input lost its exact binding") Right (Map.lookup key selected)
+            pure (WorldTypeClosureEntry binding semantic row admitted evidence body)) rows
   where
-    validate rows = do
+    validate selected = do
+      let rows = Map.map (\(_,_,row) -> row) selected
       let seals = Map.map (\(ScopeInterfaceInput (artifact,_,_) _) -> exactSha256 artifact) rows
       forM_ (Map.elems rows) $ \(ScopeInterfaceInput (artifact,_,_) evidence) -> case evidence of
         ModuleInterfaceEvidence proof -> unless (canonicalRequirementsSelected seals artifact proof)
@@ -2501,16 +2528,22 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
         LexicalJoinEvidence -> pure ()
         CheckedValueEvidence -> unless (checkedValueOwner artifact)
           (Left "world checked value type input has another owner")
-      pure rows
-    walk selected [] = Right selected
-    walk selected (key:rest) | Map.member key selected = walk selected rest
-    walk selected (key:rest) = do
-      association <- maybe (Left "demanded type lacks its exact Context association") Right
-        (Map.lookup key (worldPrimarySelected (worldInputsPrimary facts)))
-      let row@(ScopeInterfaceInput (artifact,_,_) _) = worldPrimaryRow association
-      unless ((exactUnit artifact,exactModule artifact) == key)
-        (Left "world demanded type has another selected interface owner")
-      walk (Map.insert key row selected) (exactRequirements artifact ++ rest)
+      pure selected
+
+    checked = foldM insert Map.empty contributions
+    insert rows value@(binding,semantic,ScopeInterfaceInput input _) = do
+      let key = rowOwner input
+      forM_ (Map.lookup key rows) $ \(held,expected,_) ->
+        unless (held == binding && expected == semantic)
+          (Left "world TYPE contributions select conflicting exact bindings")
+      forM_ (Map.lookup key (worldPrimarySelected (worldInputsPrimary facts))) $ \primary -> do
+        unless (worldPrimaryInterfaceBinding primary == binding)
+          (Left "world TYPE dependency conflicts with selected primary binding")
+        case Map.lookup key (worldInputsBaseRows facts) of
+          Just (WorldAdmittedRow _ _ expected _) -> unless (expected == semantic)
+            (Left "world TYPE dependency conflicts with selected primary semantics")
+          Nothing -> Left "world TYPE primary association lost its admitted row"
+      pure (Map.insertWith (\_ held -> held) key value rows)
 
 -- An offered export vector is passive until it has been compared to GHC's
 -- normalized exports from the selected, hydrated exact interface.
@@ -2639,7 +2672,7 @@ data WorldInputsFailure = WorldInputsFailure WorldInputsFailureCause String deri
 instance Exception WorldInputsFailure
 
 data OfferedWorldInputs = OfferedWorldInputs BS.ByteString FilePath BS.ByteString BS.ByteString
-  [OfferedWorldRow] [OfferedWorldRow]
+  [OfferedWorldRow] [OfferedWorldRow] [(WorldArtifactBinding,OfferedWorldRow)]
   InputAcquisition BS.ByteString BS.ByteString [(BS.ByteString,BS.ByteString)]
 
 type OfferedWorldRow = ((InterfaceRow,ParsedInterfaceEvidence),BS.ByteString)
@@ -2664,11 +2697,11 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
       let bound = fromInteger (min limit (toInteger (maxBound :: Int) - 1))
       ((offered,sourceBytes),_envelope) <- captureRequestInputs Nothing $ \readInput -> do
         bytes <- readInput path bound
-        offered@(OfferedWorldInputs _ sourcePath _ _ _ _ _ _ _ _) <-
+        offered@(OfferedWorldInputs _ sourcePath _ _ _ _ _ _ _ _ _) <-
           decodeWorldBytes (decodeWorldInputs (BS.length bytes)) bytes
         sourceBytes <- readInput sourcePath bound
         pure (offered,sourceBytes)
-      let OfferedWorldInputs restoration _sourcePath producer profile baseRows visibleRows acquisition visibility primary blocks = offered
+      let OfferedWorldInputs restoration _sourcePath producer profile baseRows visibleRows dependencyRows acquisition visibility primary blocks = offered
       WorldRestoration expectedPrimary domainSeal expectedProducer expectedProfile expectedScope associationRoot expectedBindings lexicalRoot <-
         decodeWorldBytes decodeWorldRestoration restoration
       (bindingScope,bindingRoot) <- decodeWorldBytes decodeWorldBindingRoot visibility
@@ -2676,31 +2709,33 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
       -- full runtime Context is an opaque commitment, not compiler input.
       frontier <- verifyWorldBlocks [associationRoot,bindingRoot,lexicalRoot] blocks
       sources <- either worldCorrupt pure (decodeWorldSources sourceBytes)
-      let canonicalRestoration = toStrictByteString (E.encodeListLen 10 <> text "TPCWREST" <> E.encodeWord 5
+      let canonicalRestoration = toStrictByteString (E.encodeListLen 10 <> text "TPCWREST" <> E.encodeWord 6
             <> E.encodeBytes expectedPrimary <> E.encodeBytes domainSeal <> E.encodeBytes expectedProducer
             <> E.encodeBytes expectedProfile <> E.encodeWord64 expectedScope
             <> E.encodeBytes associationRoot <> E.encodeBytes expectedBindings <> E.encodeBytes lexicalRoot)
       unless (restoration == canonicalRestoration && primary == associationRoot && producer == expectedProducer && profile == expectedProfile
           && bindingScope == expectedScope && bindingRoot == expectedBindings && worldSourceDomainSha256 sources == domainSeal)
         (worldCorrupt "world restoration differs from captured source, profile, context or roots")
-      (admitted,custody,users) <- admitWorldRows state producer acquisition (baseRows ++ visibleRows)
+      (admitted,custody,users) <- admitWorldRows state producer acquisition (baseRows ++ visibleRows ++ map snd dependencyRows)
       base <- worldRowsByOwner (take (length baseRows) admitted)
-      visible <- worldRowsByOwner (drop (length baseRows) admitted)
+      visible <- worldRowsByOwner (take (length visibleRows) (drop (length baseRows) admitted))
+      dependencies <- indexWorldDependencies (map fst dependencyRows) (drop (length baseRows + length visibleRows) admitted)
       let pairs rows = [(offered,input) | WorldAdmittedRow offered input _ _ <- Map.elems rows]
       primaryFacts <- readWorldPrimary frontier associationRoot producer (pairs base)
       lexical <- readWorldLexicalSurface frontier lexicalRoot primaryFacts
       (bindings,bindingCharge) <- readWorldBindings frontier bindingRoot producer (pairs visible)
       verified <- retainVerifiedWorldFrontier [associationRoot,bindingRoot,lexicalRoot] frontier
       bindingRows <- retainWorldBindingRows frontier producer visible bindings
+      dependencyFacts <- establishWorldDependencies dependencies bindingRows
       rowCharge <- foldM (\charge (WorldAdmittedRow _ _ _ more) -> checkedWorldCharge charge more)
-        (0,0) admitted
+        (64 * toInteger (length dependencyRows),length dependencyRows) admitted
       let identity = SHA.hash restoration
           sourceEntries = toInteger (length (worldSourceRoots sources))
             + sum [toInteger (Map.size files) | WorldSourceRoot files <- worldSourceRoots sources]
       when (sourceEntries > toInteger (maxBound :: Int)) (worldCorrupt "compiler world source count exceeds host range")
       let facts = WorldInputFacts (hexBytes identity) identity
             (worldCompilerIdentity domainSeal producer profile bindingScope associationRoot bindingRoot lexicalRoot) producer profile sources
-            base visible (worldVisibleSemantic visible) custody users verified
+            base visible dependencyFacts (worldVisibleSemantic visible) custody users verified
             (toInteger (BS.length sourceBytes),fromInteger sourceEntries) rowCharge bindingRows
             (Map.fromListWith (+) [(semantic,n) | (_,semantic,_,n) <- Map.elems bindingRows])
             (BS.copy visibility) bindingScope bindings bindingCharge primaryFacts lexical
@@ -2766,6 +2801,128 @@ worldOfferedSeals (((iface,packages,packageSha),evidence),_) =
       ++ [(canonicalCorePath core,canonicalCoreSha256 core) | core <- maybe [] pure (descriptorCore descriptor)]
     _ -> []
 
+decodeWorldDependencyRows :: Int -> Decoder s [(WorldArtifactBinding,OfferedWorldRow)]
+decodeWorldDependencyRows bytes = do
+  rows <- bounded bytes (array 2 >> ((,) <$> decodeWorldBinding <*> (array 2 >> ((,) <$> decodeInterfaceRow <*> rawWorldDigest))))
+  worldStrictlyOrdered "compiler world dependency rows are duplicate or unsorted" (map fst rows)
+  pure rows
+
+decodeWorldDependencyChanges :: Int -> Decoder s [(WorldArtifactBinding,Maybe OfferedWorldRow)]
+decodeWorldDependencyChanges bytes = do
+  rows <- bounded bytes $ do
+    array 2
+    binding <- decodeWorldBinding
+    token <- peekTokenType
+    row <- if token == TypeNull then decodeNull >> pure Nothing
+      else Just <$> (array 2 >> ((,) <$> decodeInterfaceRow <*> rawWorldDigest))
+    pure (binding,row)
+  worldStrictlyOrdered "compiler world dependency edits are duplicate or unsorted" (map fst rows)
+  pure rows
+
+indexWorldDependencies :: [WorldArtifactBinding] -> [WorldAdmittedRow] -> IO (Map.Map WorldArtifactBinding WorldAdmittedRow)
+indexWorldDependencies keys rows = do
+  unless (length keys == length rows && Set.size (Set.fromList keys) == length keys)
+    (worldCorrupt "compiler world dependency binding census differs from admitted rows")
+  pure (Map.fromList (zip keys rows))
+
+-- Each row fact owns one complete TYPE closure. Historical versions may share
+-- an owner across different products; within a product the owner is exact.
+validateWorldBindingManifest :: Map.Map WorldArtifactBinding WorldAdmittedRow -> WorldBindingRow -> IO ()
+validateWorldBindingManifest dependencies = validateWorldBindingManifestWith (`Map.lookup` dependencies)
+
+validateWorldBindingManifestWith :: (WorldArtifactBinding -> Maybe WorldAdmittedRow) -> WorldBindingRow -> IO ()
+validateWorldBindingManifestWith dependency binding = do
+  let manifest = worldBindingDependencyManifest binding
+      leaf = worldBindingLeafBinding binding
+      (artifact,_,_) = worldBindingRowInterface binding
+      leafOwner = (exactUnit artifact,exactModule artifact)
+  selected <- forM (Map.toAscList manifest) $ \(key,semantic) -> do
+    when (key == leaf) (worldCorrupt "compiler world dependency manifest repeats its leaf")
+    row@(WorldAdmittedRow _ (ScopeInterfaceInput input _) expected _) <-
+      maybe (worldCorrupt "compiler world dependency manifest lacks its admitted binding") pure (dependency key)
+    unless (semantic == expected) (worldCorrupt "compiler world dependency semantic association differs")
+    pure (rowOwner input,(key,row))
+  let byOwner = Map.fromList selected
+  unless (Map.size byOwner == length selected && Map.notMember leafOwner byOwner)
+    (worldCorrupt "compiler world dependency manifest repeats an interface owner")
+  let walk seen [] = pure seen
+      walk seen (key:rest)
+        | key `Set.member` seen = walk seen rest
+        | key == leafOwner = walk (Set.insert key seen) (exactRequirements artifact ++ rest)
+        | otherwise = case Map.lookup key byOwner of
+            Nothing -> worldCorrupt "compiler world dependency closure misses a required interface owner"
+            Just (_,WorldAdmittedRow _ (ScopeInterfaceInput (iface,_,_) _) _ _) ->
+              walk (Set.insert key seen) (exactRequirements iface ++ rest)
+  reached <- walk Set.empty [leafOwner]
+  unless (Set.delete leafOwner reached == Map.keysSet byOwner)
+    (worldCorrupt "compiler world dependency manifest contains unreachable interfaces")
+
+establishWorldDependencies :: Map.Map WorldArtifactBinding WorldAdmittedRow
+  -> Map.Map BS.ByteString (WorldBindingRow,BS.ByteString,Integer,Int)
+  -> IO (Map.Map WorldArtifactBinding WorldDependencyEntry)
+establishWorldDependencies dependencies rows = do
+  forM_ (Map.elems rows) $ \(row,_,_,_) -> validateWorldBindingManifest dependencies row
+  counts <- foldM add Map.empty [key | (row,_,_,_) <- Map.elems rows,key <- Map.keys (worldBindingDependencyManifest row)]
+  unless (Map.keysSet counts == Map.keysSet dependencies)
+    (worldCorrupt "compiler world dependency row census differs from live row facts")
+  pure (Map.intersectionWith WorldDependencyEntry dependencies counts)
+  where
+    add counts key = do
+      let count = Map.findWithDefault 0 key counts
+      when (count == maxBound) (worldCorrupt "compiler world dependency references exceed host range")
+      pure (Map.insert key (count+1) counts)
+
+-- The changed alias set identifies net row-CID transitions. Retiring one alias
+-- and adding another of the same CID leaves dependency ownership unchanged.
+advanceWorldDependencies :: Map.Map WorldArtifactBinding WorldDependencyEntry
+  -> Map.Map WorldArtifactBinding WorldAdmittedRow
+  -> [(WorldArtifactBinding,Maybe OfferedWorldRow)]
+  -> Map.Map BS.ByteString (WorldBindingRow,BS.ByteString,Integer,Int)
+  -> Map.Map BS.ByteString (WorldBindingRow,BS.ByteString,Integer,Int)
+  -> Set.Set BS.ByteString
+  -> IO (Map.Map WorldArtifactBinding WorldDependencyEntry,[WorldAdmittedRow],[WorldAdmittedRow])
+advanceWorldDependencies original incoming edits previous next touched = do
+  let retired = Map.difference (Map.restrictKeys previous touched) next
+      inserted = Map.difference (Map.restrictKeys next touched) previous
+      editMap = Map.fromList edits
+      candidate key = case Map.lookup key editMap of
+        Just Nothing -> Nothing
+        Just (Just _) -> Map.lookup key incoming
+        Nothing -> case Map.lookup key original of
+          Just (WorldDependencyEntry row _) -> Just row
+          Nothing -> Nothing
+  forM_ edits $ \(key,replacement) -> case replacement of
+    Nothing -> unless (Map.member key original)
+      (worldCorrupt "compiler world removes an absent dependency binding")
+    Just _ -> do
+      unless (Map.member key incoming) (worldCorrupt "compiler world dependency edit lacks its admitted input")
+      when (Map.member key original) (worldCorrupt "compiler world replaces a live dependency binding")
+  forM_ (Map.elems inserted) $ \(row,_,_,_) -> validateWorldBindingManifestWith candidate row
+  let deltas = Map.fromListWith (+)
+        ([(key,-1 :: Integer) | (row,_,_,_) <- Map.elems retired,key <- Map.keys (worldBindingDependencyManifest row)]
+        ++ [(key,1) | (row,_,_,_) <- Map.elems inserted,key <- Map.keys (worldBindingDependencyManifest row)])
+  (counts,required) <- foldM change (original,Map.empty) (Map.toAscList deltas)
+  unless (Map.fromList [(key,isJust row) | (key,row) <- edits] == required)
+    (worldCorrupt "compiler world dependency edits differ from net live row-CID transitions")
+  let removed = [row | (key,Nothing) <- edits,Just (WorldDependencyEntry row _) <- [Map.lookup key original]]
+      added = [row | (key,Just _) <- edits,Just row <- [Map.lookup key incoming]]
+  pure (counts,removed,added)
+  where
+    change (rows,required) (key,delta) = do
+      let before = maybe 0 (\(WorldDependencyEntry _ count) -> toInteger count) (Map.lookup key original)
+          after = before+delta
+      unless (after >= 0 && after <= toInteger (maxBound :: Int))
+        (worldCorrupt "compiler world dependency reference count exceeds host range")
+      case (before > 0,after > 0) of
+        (False,True) -> do
+          row <- maybe (worldCorrupt "compiler world new dependency lacks transport") pure (Map.lookup key incoming)
+          pure (Map.insert key (WorldDependencyEntry row (fromInteger after)) rows,Map.insert key True required)
+        (True,False) -> pure (Map.delete key rows,Map.insert key False required)
+        (True,True) -> case Map.lookup key rows of
+          Just (WorldDependencyEntry row _) -> pure (Map.insert key (WorldDependencyEntry row (fromInteger after)) rows,required)
+          Nothing -> worldCorrupt "compiler world dependency count lost its owner"
+        (False,False) -> pure (rows,required)
+
 worldRowsByOwner :: [WorldAdmittedRow] -> IO (Map.Map InterfaceOwner WorldAdmittedRow)
 worldRowsByOwner rows = foldM insert Map.empty rows
   where
@@ -2818,7 +2975,7 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
       (offered,_) <- captureRequestInputs Nothing $ \readInput -> do
         bytes <- readInput path bound
         decodeWorldBytes (decodeWorldSuccessor (BS.length bytes)) bytes
-      let OfferedWorldSuccessor restoration blocks primaryChanges visibleChanges acquisition = offered
+      let OfferedWorldSuccessor restoration blocks primaryChanges visibleChanges dependencyChanges acquisition = offered
       WorldRestoration primary domainSeal producer profile scope associations bindings lexicalRoot <-
         decodeWorldBytes decodeWorldRestoration restoration
       let canonical = encodeWorldRestoration primary domainSeal producer profile scope associations bindings lexicalRoot
@@ -2838,17 +2995,12 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
             Just body -> Map.insert cid body allBlocks
             Nothing -> allBlocks) (worldFrontierBodies (worldInputsFrontier previous)) blocks
       (newRows,incoming,_) <- admitWorldRows state producer acquisition
-        [row | (_,Just row) <- primaryChanges ++ visibleChanges]
-      let (primaryAdmitted,visibleAdmitted) = splitAt (length [() | (_,Just _) <- primaryChanges]) newRows
+        ([row | (_,Just row) <- primaryChanges ++ visibleChanges] ++ [row | (_,Just row) <- dependencyChanges])
+      let (primaryAdmitted,otherAdmitted) = splitAt (length [() | (_,Just _) <- primaryChanges]) newRows
+          (visibleAdmitted,dependencyAdmitted) = splitAt (length [() | (_,Just _) <- visibleChanges]) otherAdmitted
+      dependencyIncoming <- indexWorldDependencies [key | (key,Just _) <- dependencyChanges] dependencyAdmitted
       (base,removedBase,addedBase) <- applyWorldRows (worldInputsBaseRows previous) primaryChanges primaryAdmitted
       (visible,removedVisible,addedVisible) <- applyWorldRows (worldInputsVisibleRows previous) visibleChanges visibleAdmitted
-      let removed = removedBase ++ removedVisible
-          added = addedBase ++ addedVisible
-      (custody,users) <- editWorldCustody (worldInputsCustody previous) (worldInputsCustodyUsers previous)
-        incoming removed added
-      rowCharge <- foldM (\cost (WorldAdmittedRow _ _ _ (bytes,count)) -> checkedWorldCharge cost (-bytes,-count))
-        (worldInputsRowCharge previous) removed
-        >>= \cost -> foldM (\next (WorldAdmittedRow _ _ _ charge) -> checkedWorldCharge next charge) cost added
       let semantic = foldl' (\rows (WorldAdmittedRow _ _ key _) -> Map.delete key rows)
             (worldInputsVisibleSemantic previous) removedVisible
           nextSemantic = foldl' (\rows (WorldAdmittedRow _ input key _) -> Map.insert key input rows) semantic addedVisible
@@ -2858,6 +3010,20 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
         (worldInputsBindings previous) (worldInputsBindingRows previous) (worldInputsBindingSemanticUsers previous) (worldInputsBindingCharge previous)
         nodeCharge aliasChanges
       validateChangedVisibleRows nextSemantic (worldInputsBindingRows previous) nextRows semanticUsers removedVisible addedVisible aliasChanges
+      let changedCIDs = Set.fromList [cid | (before,after) <- Map.elems aliasChanges
+            ,(_,_,_,_,cid) <- maybe [] pure before ++ maybe [] pure after]
+      (dependencyFacts,removedDependencies,addedDependencies) <- advanceWorldDependencies
+        (worldInputsDependencyRows previous) dependencyIncoming dependencyChanges
+        (worldInputsBindingRows previous) nextRows changedCIDs
+      let removed = removedBase ++ removedVisible ++ removedDependencies
+          added = addedBase ++ addedVisible ++ addedDependencies
+      (custody,users) <- editWorldCustody (worldInputsCustody previous) (worldInputsCustodyUsers previous)
+        incoming removed added
+      rowCharge <- foldM (\cost (WorldAdmittedRow _ _ _ (bytes,count)) -> checkedWorldCharge cost (-bytes,-count))
+        (worldInputsRowCharge previous) removed
+        >>= \cost -> checkedWorldCharge cost
+          (64 * toInteger (length addedDependencies-length removedDependencies),length addedDependencies-length removedDependencies)
+        >>= \cost -> foldM (\next (WorldAdmittedRow _ _ _ charge) -> checkedWorldCharge next charge) cost added
       primaryFacts <- if associations == oldAssociations
         then do
           unless (null removedBase && null addedBase)
@@ -2876,7 +3042,7 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
             <> E.encodeWord64 scope <> E.encodeBytes bindings)
           facts = WorldInputFacts (hexBytes identity) identity
             (worldCompilerIdentity domainSeal producer profile scope associations bindings lexicalRoot) producer profile (worldInputsSources previous)
-            base visible nextSemantic custody users verified (worldInputsSourceCharge previous) rowCharge nextRows semanticUsers
+            base visible dependencyFacts nextSemantic custody users verified (worldInputsSourceCharge previous) rowCharge nextRows semanticUsers
             visibility scope nextBindings bindingCharge primaryFacts lexical
       validateWorldRetainedCharge facts
       timing <- readTimingEnabled
@@ -2887,7 +3053,7 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
 encodeWorldRestoration :: BS.ByteString -> BS.ByteString -> BS.ByteString -> BS.ByteString
   -> Word64 -> BS.ByteString -> BS.ByteString -> BS.ByteString -> BS.ByteString
 encodeWorldRestoration primary domain producer profile scope associations bindings lexical =
-  toStrictByteString (E.encodeListLen 10 <> E.encodeString "TPCWREST" <> E.encodeWord 5
+  toStrictByteString (E.encodeListLen 10 <> E.encodeString "TPCWREST" <> E.encodeWord 6
     <> E.encodeBytes primary <> E.encodeBytes domain <> E.encodeBytes producer <> E.encodeBytes profile
     <> E.encodeWord64 scope <> E.encodeBytes associations <> E.encodeBytes bindings <> E.encodeBytes lexical)
 
@@ -2901,19 +3067,21 @@ worldCompilerIdentity domain producer profile scope primary bindings lexical =
     <> E.encodeWord64 scope <> E.encodeBytes primary <> E.encodeBytes bindings <> E.encodeBytes lexical))
 
 data OfferedWorldSuccessor = OfferedWorldSuccessor BS.ByteString [(BS.ByteString,BS.ByteString)]
-  [(InterfaceOwner,Maybe OfferedWorldRow)] [(InterfaceOwner,Maybe OfferedWorldRow)] InputAcquisition
+  [(InterfaceOwner,Maybe OfferedWorldRow)] [(InterfaceOwner,Maybe OfferedWorldRow)]
+  [(WorldArtifactBinding,Maybe OfferedWorldRow)] InputAcquisition
 
 decodeWorldSuccessor :: Int -> Decoder s OfferedWorldSuccessor
 decodeWorldSuccessor payloadBytes = do
-  array 6
+  array 7
   magic <- string
-  unless (magic == "TPCWSUCC5") (fail "unsupported compiler world successor")
+  unless (magic == "TPCWSUCC6") (fail "unsupported compiler world successor")
   restoration <- decodeBytes
   blocks <- bounded payloadBytes (array 2 >> ((,) <$> decodeBytes <*> decodeBytes))
   primary <- changes
   visible <- changes
+  dependencies <- decodeWorldDependencyChanges payloadBytes
   acquisition <- decodeInputAcquisition
-  pure (OfferedWorldSuccessor restoration blocks primary visible acquisition)
+  pure (OfferedWorldSuccessor restoration blocks primary visible dependencies acquisition)
   where
     changes = do
       rows <- bounded payloadBytes $ do
@@ -2990,7 +3158,7 @@ applyWorldBindings frontier eligible original retained semanticUsers charge node
         Nothing -> pure (bindings,rows,uses,cost)
         Just (_,_,_,_,cid) -> case Map.lookup cid rows of
           Just (row,semantic,bytes,users) -> do
-            next <- checkedWorldCharge cost (if users == 1 then (-bytes,-2) else (0,-1))
+            next <- checkedWorldCharge cost (if users == 1 then (-bytes,-2-Map.size (worldBindingDependencyManifest row)) else (0,-1))
             let kept = if users == 1 then Map.delete cid rows else Map.insert cid (row,semantic,bytes,users-1) rows
             nextUses <- case Map.lookup semantic uses of
               Just 1 -> pure (Map.delete semantic uses)
@@ -3011,7 +3179,7 @@ applyWorldBindings frontier eligible original retained semanticUsers charge node
         Nothing -> readChangedWorldBinding frontier eligible value
       let users = maybe 0 (\(_,_,_,n) -> n) (Map.lookup cid rows)
       when (users == maxBound) (worldCorrupt "compiler world row references exceed host range")
-      next <- checkedWorldCharge cost (if users == 0 then (bytes,2) else (0,1))
+      next <- checkedWorldCharge cost (if users == 0 then (bytes,2+Map.size (worldBindingDependencyManifest (worldBindingRow binding))) else (0,1))
       let semanticCount = Map.findWithDefault 0 semantic uses
       when (semanticCount == maxBound) (worldCorrupt "compiler world semantic references exceed host range")
       pure (Map.insert alias binding bindings,Map.insert cid (worldBindingRow binding,semantic,bytes,users+1) rows
@@ -3570,13 +3738,17 @@ decodeWorldBindingValueWith rowCID = do
 
 -- Compare one exact canonical semantic row, including role/requirements, with
 -- the existing receiving projection. A byte-image key alone omits those facts.
-decodeWorldBindingRow :: Int -> Decoder s (BS.ByteString,BS.ByteString,BS.ByteString)
+decodeWorldBindingRow :: Int -> Decoder s (BS.ByteString,WorldArtifactBinding,BS.ByteString,BS.ByteString,Map.Map WorldArtifactBinding BS.ByteString)
 decodeWorldBindingRow payloadBytes = do
-  worldArray 3
+  worldArray 5
   semantic <- decodeWorldSemanticRow payloadBytes
+  leaf <- decodeWorldBinding
   certified <- rawWorldDigestCanonical
   receipt <- rawWorldDigestCanonical
-  pure (semantic,certified,receipt)
+  dependencies <- worldFactList payloadBytes (worldArray 2 >> ((,) <$> decodeWorldBinding <*> decodeWorldSemanticRow payloadBytes))
+  worldStrictlyOrdered "compiler world dependency manifest is duplicate or unsorted" (map fst dependencies)
+  unless (fst leaf == certified) (fail "compiler world leaf differs from certified artifact")
+  pure (semantic,leaf,certified,receipt,Map.fromDistinctAscList dependencies)
 
 readWorldBindings :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> BS.ByteString
   -> [(OfferedWorldRow,ScopeInterfaceInput)] -> IO (Map.Map String WorldBinding,(Integer,Int))
@@ -3591,26 +3763,28 @@ readWorldBindings frontier root producer visible = do
   -- Decode each shared row once; aliases retain that same immutable row value.
   decoded <- forM (Set.toAscList referenced) $ \cid -> do
     body <- maybe (worldCorrupt "compiler world binding row is absent") pure (Map.lookup cid frontier)
-    (semantic,certified,receipt) <- decodeWorldBytes (decodeWorldBindingRow (BS.length body)) body
+    (semantic,leaf,certified,receipt,manifest) <- decodeWorldBytes (decodeWorldBindingRow (BS.length body)) body
     input <- maybe (worldCorrupt "compiler world binding row differs from admitted visible value inputs") pure
       (Map.lookup semantic rows)
     checked <- case input of
       ScopeInterfaceInput row CheckedValueEvidence -> pure row
       _ -> worldCorrupt "compiler world binding row lost its checked value evidence"
-    pure (cid,(WorldBindingRow checked certified receipt cid,semantic,toInteger (BS.length body)))
+    pure (cid,(WorldBindingRow checked semantic leaf manifest certified receipt cid,semantic,toInteger (BS.length body)))
   unless (length eligible == length visible && Map.keysSet rows == Set.fromList [semantic | (_,(_,semantic,_)) <- decoded])
     (worldCorrupt "compiler world visible input census differs from occurrence facts")
   let actual = Map.fromDistinctAscList decoded
       bytes = foldl' (\total (_,(_,_,size)) -> total + size) nodeBytes decoded
+        + sum [64 * toInteger (Map.size (worldBindingDependencyManifest row)) | (_,(row,_,_)) <- decoded]
       -- The raw descriptor already charges these encoded bytes once. This
       -- additional conservative basis accounts for the decoded index without
       -- pretending to measure exact heap. Every alias owns a name record;
       -- only its distinct row record/backing is shared.
       entries = toInteger (Map.size selected) + toInteger nodeCount + toInteger (Set.size referenced)
+        + sum [toInteger (Map.size (worldBindingDependencyManifest row)) | (_,(row,_,_)) <- decoded]
   when (entries > toInteger (maxBound :: Int))
     (worldCorrupt "compiler world binding retention count exceeds host range")
   bindings <- forM selected $ \(symbol,variable,scope,generation,cid) -> case Map.lookup cid actual of
-    Just (row@(WorldBindingRow (artifact,_,_) _ _ _),_,_) -> do
+    Just (row@(WorldBindingRow (artifact,_,_) _ _ _ _ _ _),_,_) -> do
       unless (parseSessionModule (exactModule artifact) == Just (SessionModule ValMod (Generation generation))
           && sessionModuleString (SessionModule ValMod (Generation generation)) == exactModule artifact)
         (worldCorrupt "compiler world binding generation differs from its checked value owner")
@@ -3639,7 +3813,7 @@ retainWorldBindingRows frontier _producer visible bindings = foldM retain Map.em
           WorldAdmittedRow _ _ semantic _ <- maybe (worldCorrupt "world binding lost its visible row owner") pure
             (Map.lookup (exactUnit artifact,exactModule artifact) visible)
           body <- maybe (worldCorrupt "world binding row body is absent") pure (Map.lookup cid frontier)
-          pure (Map.insert cid (row,semantic,toInteger (BS.length body),1) indexed)
+          pure (Map.insert cid (row,semantic,worldBindingRetainedBytes row body,1) indexed)
 
 readChangedWorldBinding :: Map.Map BS.ByteString BS.ByteString
   -> Map.Map BS.ByteString ScopeInterfaceInput
@@ -3647,7 +3821,7 @@ readChangedWorldBinding :: Map.Map BS.ByteString BS.ByteString
   -> IO (WorldBinding,BS.ByteString,Integer)
 readChangedWorldBinding frontier eligible (symbol,variable,scope,generation,cid) = do
   body <- maybe (worldCorrupt "compiler world binding row is absent") pure (Map.lookup cid frontier)
-  (semantic,certified,receipt) <- decodeWorldBytes (decodeWorldBindingRow (BS.length body)) body
+  (semantic,leaf,certified,receipt,manifest) <- decodeWorldBytes (decodeWorldBindingRow (BS.length body)) body
   checked <- case Map.lookup semantic eligible of
     Just (ScopeInterfaceInput row CheckedValueEvidence) -> pure row
     _ -> worldCorrupt "compiler world binding row differs from admitted visible value inputs"
@@ -3655,9 +3829,11 @@ readChangedWorldBinding frontier eligible (symbol,variable,scope,generation,cid)
   unless (parseSessionModule (exactModule artifact) == Just (SessionModule ValMod (Generation generation))
       && sessionModuleString (SessionModule ValMod (Generation generation)) == exactModule artifact)
     (worldCorrupt "compiler world binding generation differs from its checked value owner")
-  pure (WorldBinding symbol variable scope generation (WorldBindingRow checked certified receipt cid)
-    ,semantic,toInteger (BS.length body))
+  pure (WorldBinding symbol variable scope generation (WorldBindingRow checked semantic leaf manifest certified receipt cid)
+    ,semantic,worldBindingRetainedBytes (WorldBindingRow checked semantic leaf manifest certified receipt cid) body)
 
+worldBindingRetainedBytes :: WorldBindingRow -> BS.ByteString -> Integer
+worldBindingRetainedBytes row body = toInteger (BS.length body) + 64 * toInteger (Map.size (worldBindingDependencyManifest row))
 
 addWorldCharge :: (Integer,Integer) -> (Integer,Integer) -> (Integer,Integer)
 addWorldCharge (bytes,entries) (more,count) = (bytes+more,entries+count)
@@ -3774,21 +3950,22 @@ decodeWorldInputs payloadBytes = do
   array 11
   magic <- string
   version <- decodeWord
-  unless (magic == "TPCWORLD" && version == 5) (fail "unsupported compiler world descriptor")
+  unless (magic == "TPCWORLD" && version == 6) (fail "unsupported compiler world descriptor")
   restoration <- decodeBytes
   source <- absolute
   producer <- rawWorldDigest
   profile <- rawWorldDigest
-  array 2
+  array 3
   base <- worldRows
   visible <- worldRows
+  dependencies <- decodeWorldDependencyRows payloadBytes
   acquisition <- decodeInputAcquisition
   visibility <- decodeBytes
   primary <- decodeBytes
   blocks <- bounded payloadBytes (array 2 >> ((,) <$> decodeBytes <*> decodeBytes))
   unless (not (BS.null primary) && any ((== primary) . fst) blocks)
     (fail "primary context root block is absent")
-  pure (OfferedWorldInputs restoration source producer profile base visible acquisition visibility primary blocks)
+  pure (OfferedWorldInputs restoration source producer profile base visible dependencies acquisition visibility primary blocks)
   where worldRows = bounded payloadBytes (array 2 >> ((,) <$> decodeInterfaceRow <*> rawWorldDigest))
 
 decodeWorldRestoration :: Decoder s WorldRestoration
@@ -3796,7 +3973,7 @@ decodeWorldRestoration = do
   worldArray 10
   magic <- decodeStringCanonical
   version <- decodeWordCanonical
-  unless (magic == "TPCWREST" && version == 5) (fail "unsupported compiler world restoration")
+  unless (magic == "TPCWREST" && version == 6) (fail "unsupported compiler world restoration")
   WorldRestoration <$> worldRawCID <*> rawWorldDigestCanonical <*> rawWorldDigestCanonical <*> rawWorldDigestCanonical
     <*> decodeWord64Canonical <*> worldRawCID <*> worldRawCID <*> worldRawCID
 
