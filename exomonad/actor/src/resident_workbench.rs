@@ -33423,6 +33423,11 @@ pub(crate) mod request_tests {
         );
         let fixture_source = session.mint_notebook_scope_with_lease(None).unwrap();
         context.placement.lexical_scope = fixture_source.scope();
+        assert_ne!(
+            context.placement.lexical_scope,
+            ScopeId::ROOT,
+            "activation bindings belong to the notebook's child scope"
+        );
         context
             .source_dependency()
             .adopt_final_scope(&mut session, fixture_source.scope())
@@ -33783,29 +33788,6 @@ pub(crate) mod request_tests {
             panic!("native receiver must install retained bindings");
         };
         assert_eq!(bound.len(), 2, "receiver and original native Unit reply");
-        for (role, compiled) in [("producer", producer), ("receiver", &receiver)] {
-            for constructor in compiled
-                .table()
-                .iter()
-                .filter(|constructor| constructor.identity.symbol.occurrence == "RunRequest")
-            {
-                eprintln!(
-                    "activation fixture {role} RunRequest table id={:?} identity={:?}",
-                    constructor.id, constructor.identity,
-                );
-            }
-            for constructor in compiled
-                .prepared()
-                .constructors()
-                .iter()
-                .filter(|constructor| constructor.identity.symbol.occurrence == "RunRequest")
-            {
-                eprintln!(
-                    "activation fixture {role} RunRequest prepared id={:?} identity={:?}",
-                    constructor.host_id, constructor.identity,
-                );
-            }
-        }
 
         let receiver_interface = receiver
             .certification()
@@ -33902,10 +33884,18 @@ pub(crate) mod request_tests {
                 .live_payload_handle(submission.cont_id())
                 .unwrap()
                 .unwrap();
+            let receiver_id = session
+                .current_binding_in(context.placement.lexical_scope, "activationReceiver")
+                .expect("the published receiver is visible in its notebook scope")
+                .0;
             let receiver = session
-                .retain_binding_custody("activationReceiver")
+                .retain_binding_custody_in(
+                    context.placement.lexical_scope,
+                    "activationReceiver",
+                    receiver_id,
+                )
                 .unwrap()
-                .unwrap();
+                .expect("the exact visible receiver retains its runtime custody");
             let activation = suspend(
                 fixture_execution(&mut session, &fixture_source, |session, settlement| {
                     session.run_rooted_application(
