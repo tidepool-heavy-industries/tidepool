@@ -25291,6 +25291,13 @@ mod tests {
             cold.resolve_native_demand(first_packet, &[], &mut validation)
                 .unwrap(),
         );
+        let independent = cold
+            .resolve_native_demand(second_packet, &[], &mut validation)
+            .expect("independent demands borrow their shared offer issuance");
+        let mut independent_operation = PackageInterfaceValidation::default();
+        let independent_operation_demand = cold
+            .resolve_native_demand(second_packet, &[], &mut independent_operation)
+            .expect("the immutable offer row survives a distinct demand operation");
         let second = Arc::new(
             cold.resolve_native_demand(
                 second_packet,
@@ -25308,6 +25315,67 @@ mod tests {
             .0;
         let original = &first.groups.rows[&child_binding];
         let repeated = &second.groups.rows[&child_binding];
+        assert!(
+            cold.compiler_source_support()
+                .acquired_native_closures()
+                .is_empty(),
+            "both requests start from an unacquired Full offer"
+        );
+        for demand in [&independent, &independent_operation_demand] {
+            assert!(
+                Arc::ptr_eq(&original.issued, &demand.groups.rows[&child_binding].issued),
+                "the offer owns the row before either independent request acquires it"
+            );
+        }
+        for reverse in [false, true] {
+            let (left, right) = if reverse {
+                (&independent.groups, &first.groups)
+            } else {
+                (&first.groups, &independent.groups)
+            };
+            let joined = left
+                .merge(right)
+                .expect("independent completion order preserves common issuance");
+            assert!(Arc::ptr_eq(
+                &joined.rows[&child_binding].issued,
+                &original.issued
+            ));
+        }
+        let mut restored_validation = PackageInterfaceValidation::default();
+        let restored = cold
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .map(|offer| {
+                offer
+                    .snapshot_facts()
+                    .restore(cold.artifacts(), &mut restored_validation)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let child_owners = restored
+            .iter()
+            .filter_map(|offer| {
+                offer
+                    .contribution_for(&BTreeSet::from([child_binding.binding.artifact()]))
+                    .unwrap()
+                    .filter(|contribution| contribution.contains_group(child_binding))
+                    .map(|contribution| {
+                        Arc::clone(contribution.issued_group(child_binding).unwrap())
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            child_owners.len() >= 2,
+            "parent and child offers genuinely overlap"
+        );
+        assert!(
+            child_owners
+                .iter()
+                .all(|row| Arc::ptr_eq(row, &child_owners[0])),
+            "restored overlapping offers share the canonical physical row"
+        );
+
         assert_eq!(
             original.product(),
             repeated.product(),
@@ -25345,14 +25413,21 @@ mod tests {
         } else {
             packet(&foreign_cold, "DemandChild", 9, &validation)
         };
-        let foreign_input = Arc::new(
+        assert!(
             foreign_cold
                 .resolve_native_demand(&foreign_packet, &[], &mut validation)
+                .is_err(),
+            "equal content from a distinct authenticated issuer cannot seed this operation"
+        );
+        let mut foreign_issuer_validation = PackageInterfaceValidation::default();
+        let foreign_input = Arc::new(
+            foreign_cold
+                .resolve_native_demand(&foreign_packet, &[], &mut foreign_issuer_validation)
                 .unwrap(),
         );
         assert!(Arc::ptr_eq(
             &foreign_input.groups.operation,
-            &validation.inventory
+            &foreign_issuer_validation.inventory
         ));
         assert!(!foreign_input.belongs_to(&cold));
         assert!(
