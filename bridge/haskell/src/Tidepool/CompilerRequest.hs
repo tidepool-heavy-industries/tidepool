@@ -826,11 +826,12 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
         demandPackages entry packageRoots recovered = do
           let target = T.unpack (symbolOccurrence entry)
               roots = Set.toAscList (Set.fromList (map preparedRootIdentity packageRoots))
-              finalContext = (withOriginals (contextFor target))
-                { projectionAuxiliaryRoots = projectionAuxiliaryRoots (contextFor target) ++ roots }
+              context = withOriginals (contextFor target)
+              reachabilityContext = context
+                { projectionAuxiliaryRoots = projectionAuxiliaryRoots context ++ roots }
           requirePreparedRecoveryPublication target recovered
           selected <- timePhase timing "prepared_project" $
-            project (prepareComponentProjectionWithReachability finalContext
+            project (prepareComponentProjectionWithReachability reachabilityContext
               (closureHomeModules recovered) (closureComponentSelections recovered) (closureReachability recovered))
           candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
           let executableGlobals = requireOriginalExecutableGlobals hscEnv admittedOriginalBinders (candidateGlobals candidate)
@@ -878,7 +879,12 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           if null additions then do
             final <- case intent of
               PortableExecutable -> do
-                (program,constructors) <- project (finalizePreparedCandidate candidate)
+                -- Discovery roots select bodies, but only consumer roots issue
+                -- the final executable's auxiliary answer evidence.
+                selectedFinal <- project (prepareComponentProjectionWithReachability context
+                  (closureHomeModules recovered) (closureComponentSelections recovered) (closureReachability recovered))
+                candidateFinal <- project (projectSelectedCandidateWithHostBindings hostBindings selectedFinal)
+                (program,constructors) <- project (finalizePreparedCandidate candidateFinal)
                 pure (PortableFinal program constructors roots)
               NativeOriginals -> do
                 let isHome component = isHomeUnit (hsc_home_unit hscEnv)
@@ -888,7 +894,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                     home = closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents
                 let homeProducts = homeProductGroups
                 paired <- project (projectPreparedPackageTarget hscEnv hostBindings (T.pack target)
-                  finalContext homeProducts candidates reconciledInputs demand originalImports
+                  context homeProducts candidates reconciledInputs demand originalImports
                   (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
                   packageComponents (closureReachability recovered))
                 let groups = packageTargetGroups paired

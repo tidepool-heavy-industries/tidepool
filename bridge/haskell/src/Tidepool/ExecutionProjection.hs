@@ -96,7 +96,7 @@ import GHC.Core.DataCon
   , isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.TyCo.FVs (tyCoVarsOfType)
-import GHC.Core.Type (splitFunTys, splitTyConApp_maybe)
+import GHC.Core.Type (splitForAllTyCoVars, splitFunTys, splitTyConApp_maybe)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCon qualified as GHC
 import GHC.Data.FastString (fsLit, unpackFS)
@@ -931,6 +931,10 @@ projectPreparedPackageGroupsWithIdentities context components reach identities =
     (Left (InvalidPreparedRepresentation "package projection repeats a defining owner"))
   concat <$> traverse projectComponent components
   where
+    -- Shared package definitions cannot borrow the consuming target's answer roots.
+    packageContext = context
+      { projectionEntry = SymbolIdentity "" "" "value" "" Nothing
+      , projectionAuxiliaryRoots = [] }
     owners = map (fatOriginalOwner . preparedComponentVersion) components
     reached binding = any ((`elementOfUniqSet` reachedUniques reach) . varUnique)
       (topBinders binding)
@@ -953,7 +957,7 @@ projectPreparedPackageGroupsWithIdentities context components reach identities =
       let selected = Set.fromList
             [ ordinal | (ordinal, one) <- preparedBindingGroups prepared
             , (binding, _) <- pmBindings one, reached binding ]
-      forM (projectPreparedModuleGroupResultsWithIdentities ExecutableTarget context
+      forM (projectPreparedModuleGroupResultsWithIdentities ExecutableTarget packageContext
           identities (const 0) prepared (Just selected)) $ \(_, _, outcome) -> do
         evidence <- outcome
         let group = projectedGroupWire evidence
@@ -2119,7 +2123,8 @@ validatePreparedEvidence context modules evidence hostConstructors = do
 -- zero-arity root can retain the whole function arrow there.
 --
 -- An auxiliary root's answer type is skipped for evidence interning when
--- it still carries a free type variable after 'splitFunTys' (a genuinely
+-- it still carries a free type variable after stripping leading foralls and
+-- function arguments (a genuinely
 -- polymorphic root like 'Tidepool.Session.preparedApplyEntryTargetName'/
 -- 'Tidepool.Session.preparedApplyValueTargetName', whose settled result is
 -- whatever the applied closure returns, not one concrete turn's type).
@@ -2145,7 +2150,7 @@ auxiliaryRootTypeGraph context prepared = do
         , binder <- topBinders binding
         , Just symbol <- [lookupVarEnv topSymbolMap binder]
         , symbol `Set.member` roots
-        , let answerType = snd (splitFunTys (varType binder))
+        , let answerType = snd (splitFunTys (snd (splitForAllTyCoVars (varType binder))))
         , isEmptyVarSet (tyCoVarsOfType answerType)
         ]
   (graphRoots, builder) <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right
