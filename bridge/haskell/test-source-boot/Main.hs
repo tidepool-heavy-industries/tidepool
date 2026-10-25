@@ -125,6 +125,7 @@ tests = testGroup "source-boot"
   , testCase "lazy SOURCE backedge follows the current target after END" lazySourceBackedge
   , testCase "candidate deferral preserves selected source memo HOME" candidateDeferredMemoHome
   , testCase "candidate deferral reties selected SOURCE memo backedge" candidateDeferredSourceBackedge
+  , testCase "candidate deferral reties acyclic transitive SOURCE memo backedges" candidateDeferredAcyclicSourceBackedge
   , testCase "lazy original home package instances survive context forks" lazyHomePackageInstances
   , testCase "exact transaction candidate reuse" $ exactTransactionCandidateReuse
   , testCase "exact legacy value isolation" $ exactLegacyValueIsolation

@@ -7298,16 +7298,29 @@ candidateDeferredMemoHome = withTiming $ withScratch $ \work -> do
 -- A candidate can defer an entire SOURCE component. Its reused importer's
 -- details must still refer to the current target representation across END.
 candidateDeferredSourceBackedge :: IO ()
-candidateDeferredSourceBackedge = withTiming $ withScratch $ \work -> do
-  let target = work </> "LazyBackedgeTarget.hs"
+candidateDeferredSourceBackedge = candidateDeferredSourceBackedgeAt True
+
+candidateDeferredAcyclicSourceBackedge :: IO ()
+candidateDeferredAcyclicSourceBackedge = candidateDeferredSourceBackedgeAt False
+
+candidateDeferredSourceBackedgeAt :: Bool -> IO ()
+candidateDeferredSourceBackedgeAt cyclic = withTiming $ withScratch $ \work -> do
+  let provider = work </> "LazyBackedgeTarget.hs"
+      target = if cyclic then provider else work </> "LazyBackedgeRequest.hs"
       dependency = mkModuleName "LazyBackedgeDependency"
       fixture name = "test-source-boot/fixtures" </> name
-      install name = copyFile (fixture name) target
+      install name = copyFile (fixture name) provider
       home prepared = maybe (fail "candidate SOURCE backedge lost its completed dependency") pure
         (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult prepared))) dependency)
+      homes prepared = do
+        sourceHome <- home prepared
+        if cyclic then pure [sourceHome] else do
+          relay <- maybe (fail "candidate SOURCE backedge lost its transitive importer HOME") pure
+            (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult prepared))) (mkModuleName "LazyBackedgeRelay"))
+          pure [sourceHome,relay]
       field label expected retained = do
         identifier <- case [value | value <- typeEnvIds (md_types (hm_details retained))
-            , getOccString value == "observeToken"] of
+            , getOccString value `elem` ["observeToken","relayToken"]] of
           [value] -> pure value
           _ -> fail (label ++ ": candidate SOURCE dependency lost its exported Id")
         actual <- case splitFunTys (idType identifier) of
@@ -7320,8 +7333,10 @@ candidateDeferredSourceBackedge = withTiming $ withScratch $ \work -> do
   forM_ ["OptionalAnchor.hs","LazyBackedgeTarget.hs-boot"] $ \name ->
     copyFile (fixture name) (work </> name)
   copyFile (fixture "LazyBackedgeCandidateDependency.hs") (work </> "LazyBackedgeDependency.hs")
-  install "LazyBackedgeTarget.hs"
-  withResidentCompilerScopes [work] $ \runScope -> do
+  unless cyclic $ forM_ ["LazyBackedgeRelay.hs","LazyBackedgeRequest.hs"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  install (if cyclic then "LazyBackedgeTarget.hs" else "LazyBackedgeIndependentTarget.hs")
+  candidate <- withResidentCompilerScopes [work] $ \runScope -> do
     retained <- runScope (pure ()) $ \scope -> do
       (prepared,diagnostics) <- captureDiagnostics $
         scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
@@ -7329,32 +7344,45 @@ candidateDeferredSourceBackedge = withTiming $ withScratch $ \work -> do
         fail ("candidate SOURCE seed unexpectedly reused a memo: " ++ diagnostics)
       captured <- capturePreparedFixture work prepared
       writeManifestFor ["OptionalAnchor"] work captured
-      home prepared
-    field "original retained" intTy retained
+      homes prepared
+    mapM_ (field "original retained" intTy) retained
     candidates <- readModuleCandidates (manifest work) >>= either fail pure
     candidate <- case candidates of
       [value] | candidateModule value == "OptionalAnchor" -> pure value
       _ -> fail "candidate SOURCE fixture requires one genuine candidate leaf"
-    let completed label expected = runScope (pure ()) $ \scope -> do
+    let completed label expected reused = runScope (pure ()) $ \scope -> do
           (prepared,diagnostics) <- captureDiagnostics $
             scopedCompile scope (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
               Nothing target [work] Nothing
           unless (map candidateOriginalIdentity (pprAcceptedCandidates prepared)
               == [candidateOriginalIdentity candidate]
               && counterValues "candidate_executable_required" diagnostics == [0]
-              && counterValues "transaction_reused_source_products" diagnostics == [1]) $
+              && counterValues "transaction_reused_source_products" diagnostics == [reused]) $
             fail (label ++ ": candidate SOURCE memo/deferral premise failed: " ++ diagnostics)
-          home prepared >>= field label expected
-    completed "unchanged candidate SOURCE backedge" intTy
-    install "LazyBackedgeTargetChanged.hs"
-    completed "changed candidate SOURCE backedge" boolTy
-    field "original retained after candidate target change" intTy retained
+          homes prepared >>= mapM_ (field label expected)
+    completed "unchanged candidate SOURCE backedge" intTy (if cyclic then 1 else 3)
+    install (if cyclic then "LazyBackedgeTargetChanged.hs" else "LazyBackedgeIndependentTargetChanged.hs")
+    completed "changed candidate SOURCE backedge" boolTy (if cyclic then 1 else 2)
+    mapM_ (field "original retained after candidate target change" intTy) retained
+    pure candidate
+  -- Cold candidate preparation must preserve the same SOURCE load boundary,
+  -- independently of whether any completed source memo has been retained.
+  withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope -> do
+    (prepared,diagnostics) <- captureDiagnostics $
+      scopedCompile scope (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+        Nothing target [work] Nothing
+    unless (map candidateOriginalIdentity (pprAcceptedCandidates prepared)
+        == [candidateOriginalIdentity candidate]
+        && counterValues "candidate_executable_required" diagnostics == [0]
+        && counterValues "transaction_reused_source_products" diagnostics == [0]) $
+      fail ("cold candidate SOURCE preparation missed its fresh/candidate premises: " ++ diagnostics)
+    homes prepared >>= mapM_ (field "independent cold candidate SOURCE" boolTy)
   withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope -> do
     (prepared,diagnostics) <- captureDiagnostics $
       scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
     unless (counterValues "transaction_reused_source_products" diagnostics == [0]) $
       fail ("independent candidate SOURCE oracle unexpectedly reused a memo: " ++ diagnostics)
-    home prepared >>= field "independent cold candidate SOURCE oracle" boolTy
+    homes prepared >>= mapM_ (field "independent cold candidate SOURCE oracle" boolTy)
 
 -- Observe actual GHC finder operations, without timing thresholds or compiler
 -- authority fixtures. A missing package key must never consult an ancestor
