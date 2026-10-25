@@ -43,19 +43,21 @@ issueCodecFixturePacket work output request = do
   _ <- completedPacketOutput completion path
   pure path
 
-data PacketProducer = OriginalProductsProducer | AuthoredDeclarationProducer | CodecProducer
+data PacketProducer = OriginalProductsProducer | AuthoredDeclarationProducer | WorldValueTypeProducer | CodecProducer
   deriving (Eq, Show)
 
 producerLabel :: PacketProducer -> T.Text
 producerLabel producer = case producer of
   OriginalProductsProducer -> "original-products"
   AuthoredDeclarationProducer -> "authored-declaration"
+  WorldValueTypeProducer -> "world-value-type"
   CodecProducer -> "codec"
 
 packetProducerTest :: PacketProducer -> String
 packetProducerTest producer = "module_candidates::fixture_packets::" ++ case producer of
   OriginalProductsProducer -> "source_boot_candidate_packet_producer"
   AuthoredDeclarationProducer -> "source_boot_authored_declaration_packet_producer"
+  WorldValueTypeProducer -> "source_boot_world_value_type_packet_producer"
   CodecProducer -> "codec::source_boot_codec_packet_producer"
 
 -- Only successful request-bound issuance constructs this captured result. A
@@ -88,7 +90,7 @@ runPacketProducer producer packet = do
     (maybe (unsetEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET") (setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")) $ \_ -> do
       setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET" packet
       (status, output, errors) <- case producer of
-        AuthoredDeclarationProducer -> do
+        producer | producer `elem` [AuthoredDeclarationProducer,WorldValueTypeProducer] -> do
           runner <- lookupEnv "TIDEPOOL_AUTHORED_FIXTURE_RUNNER" >>= maybe
             (fail "authored fixture requires the declared owned libtest runner") pure
           python <- lookupEnv "TIDEPOOL_TEST_PYTHON" >>= maybe

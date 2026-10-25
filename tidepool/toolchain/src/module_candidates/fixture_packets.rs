@@ -14,6 +14,7 @@ use crate::declaration_join::ExactModuleIdentity;
 enum PacketProducer {
     OriginalProducts,
     AuthoredDeclaration,
+    WorldValueType,
     Codec,
 }
 
@@ -22,6 +23,7 @@ impl PacketProducer {
         match self {
             Self::OriginalProducts => "original-products",
             Self::AuthoredDeclaration => "authored-declaration",
+            Self::WorldValueType => "world-value-type",
             Self::Codec => "codec",
         }
     }
@@ -819,6 +821,26 @@ fn source_boot_authored_declaration_packet_producer() {
     write_fixture_scope_output(&packet, &scope.manifest);
     completion.publish(&[scope.manifest.clone(), packet.join("delivery.cbor")]);
     println!("genuine authored fixture: reserved declaration certification, origin-preserving type-only projection and production scope delivery passed");
+}
+
+#[test]
+#[ignore = "requires the declared matched World value compiler fixture"]
+fn source_boot_world_value_type_packet_producer() {
+    let packet = PathBuf::from(
+        std::env::var_os("TIDEPOOL_CANDIDATE_FIXTURE_PACKET").expect("World value fixture packet"),
+    );
+    assert!(packet.is_absolute());
+    let request = fs::read(packet.join("request.cbor")).unwrap();
+    let completion = PacketCompletion::new(&packet, PacketProducer::WorldValueType, &request);
+    let fields: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
+    let fields = fields.as_array().expect("World value fixture request tuple");
+    assert_eq!(fields.len(), 1);
+    assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTVALUETYPE1");
+    let bytes = crate::compiler_world::world_value_transport_fixture(&packet.join("world-values"))
+        .expect("production checked-value issuance and World transport");
+    let output = packet.join("world-value-types.cbor");
+    tidepool_atomic_write::write_best_effort(&output, &bytes).unwrap();
+    completion.publish(&[output]);
 }
 
 #[test]
