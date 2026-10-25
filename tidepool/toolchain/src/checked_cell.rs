@@ -6877,13 +6877,50 @@ mod tests {
                 let old = historical
                     .issue_native_offer(&native.descriptor.owner, None, &mut offer_validation)
                     .unwrap();
-                let support = crate::declaration_context::recover_fixture_compiler_support(
+                let current_issuer = crate::declaration_context::issue_fixture_compiler_support(
                     projection.clone(),
                     views[selected].clone(),
-                    [old.clone(), old],
                     &mut offer_validation,
                 )
                 .unwrap();
+                let current_proof =
+                    NativeOriginalRequirement::for_projection(&projection, &views[selected], &[])
+                        .unwrap()
+                        .into_iter()
+                        .find(|proof| proof.original == native.descriptor.id)
+                        .unwrap();
+                let current = current_issuer
+                    .issue_native_offer(
+                        &native.descriptor.owner,
+                        Some(current_proof),
+                        &mut offer_validation,
+                    )
+                    .unwrap();
+                assert!(!current.same_issuance(&old));
+                assert!(
+                    old.issued_group_carriers().unwrap().is_empty(),
+                    "historical custody has explicitly empty executable availability"
+                );
+                assert!(
+                    !current.issued_group_carriers().unwrap().is_empty(),
+                    "materializing the selected Original requires its actual issued native proof"
+                );
+                let support = crate::declaration_context::recover_fixture_compiler_support(
+                    projection.clone(),
+                    views[selected].clone(),
+                    [current.clone(), old.clone(), old.clone()],
+                    &mut offer_validation,
+                )
+                .unwrap();
+                for offer in [&current, &old] {
+                    assert!(
+                        support
+                            .native_offers()
+                            .iter()
+                            .any(|retained| retained.same_issuance(offer)),
+                        "recovery retains each exact current and historical offer owner"
+                    );
+                }
                 let original = ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
                     .extend_issued_compiler_support(&support)
