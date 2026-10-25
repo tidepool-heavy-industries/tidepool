@@ -5392,6 +5392,11 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .capture_activation_input(&activation, realm, site)
         .unwrap();
     resident.set_run_context(public_context).unwrap();
+    let foreign_execution = Arc::new(source_action(&mut resident, |resident, _| {
+        resident
+            .begin_durable_private_execution(&durable, public)
+            .unwrap()
+    }));
     let activation_execution = Arc::new(source_action(&mut resident, |resident, _| {
         resident
             .begin_durable_private_execution(&durable, public)
@@ -5433,6 +5438,20 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .unwrap()
         .with_scoped_injection();
     let preview = resident.admit_activation_preview(mounted, view).unwrap();
+    assert_eq!(preview.mounted_scope(), activation_scope);
+    assert_ne!(preview.source_lease().scope(), preview.mounted_scope());
+    assert!(resident
+        .state
+        .scope_tree()
+        .is_live(preview.source_lease().scope()));
+    assert!(matches!(
+        resident.snapshot_activation_publication(&foreign_execution, &preview),
+        Err(ResidentError::ActivationPreviewRefused { binding })
+            if binding == published_binding
+    ));
+    assert!(foreign_execution.final_intent.get().is_none());
+    resident.retire_scope(foreign_execution.private_scope());
+    drop(foreign_execution);
     let recipient_sources = resident
         .public_visibility_snapshot_in(activation_scope)
         .unwrap()
@@ -7960,6 +7979,7 @@ fn frozen_activation_replays_same_input_and_refuses_second_private_input() {
     }
     let second = captured.pop().unwrap();
     let first = captured.pop().unwrap();
+    let foreign_execution = begin_fixture_execution(&mut resident);
     let execution = begin_fixture_execution(&mut resident);
     resident
         .set_run_context(SessionRunContext {
@@ -7991,6 +8011,20 @@ fn frozen_activation_replays_same_input_and_refuses_second_private_input() {
         .unwrap()
         .with_scoped_injection();
     let preview = resident.admit_activation_preview(mounted, view).unwrap();
+    assert_eq!(preview.mounted_scope(), execution.private_scope());
+    assert_ne!(preview.source_lease().scope(), preview.mounted_scope());
+    assert!(resident
+        .state
+        .scope_tree()
+        .is_live(preview.source_lease().scope()));
+    assert!(matches!(
+        resident.snapshot_activation_publication(&foreign_execution, &preview),
+        Err(ResidentError::ActivationPreviewRefused { binding })
+            if binding == first_binding
+    ));
+    assert!(foreign_execution.final_intent.get().is_none());
+    resident.retire_scope(foreign_execution.private_scope());
+    drop(foreign_execution);
     let preparation = source_action(&mut resident, |resident, _| {
         resident.prepare_private_execution(execution.clone(), None)
     })
@@ -8037,4 +8071,18 @@ fn frozen_activation_replays_same_input_and_refuses_second_private_input() {
         tidepool_toolchain::artifacts::host_binding_interface_request_count(),
         interface_requests
     );
+    let detached_scope = preview.source_lease().scope();
+    resident.retire_scope(detached_scope);
+    assert!(!resident.state.scope_tree().is_live(detached_scope));
+    assert!(resident
+        .state
+        .scope_tree()
+        .is_live(execution.private_scope()));
+    assert!(matches!(
+        resident.snapshot_activation_publication(&execution, &preview),
+        Err(ResidentError::Session(SessionError::TransitionRefused(
+            crate::session::SessionTransitionReason::ScopeRevoked
+        )))
+    ));
+    assert!(Arc::ptr_eq(execution.final_intent.get().unwrap(), &intent));
 }

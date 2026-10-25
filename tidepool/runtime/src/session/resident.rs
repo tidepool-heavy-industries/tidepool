@@ -1897,6 +1897,9 @@ impl RuntimeActivationPreviewAdmission {
     pub fn source_lease(&self) -> Arc<super::RuntimeLexicalScopeLease> {
         self.scope_lease.clone()
     }
+    pub(super) fn mounted_scope(&self) -> ScopeId {
+        self.mounted.scope
+    }
     pub(super) fn is_consumed(&self) -> bool {
         self.phase.load(Ordering::Acquire) == PREVIEW_CONSUMED
     }
@@ -4955,7 +4958,7 @@ where
     ) -> Result<super::PublicManifestBase, ResidentError> {
         self.settle_dropped_custody();
         self.validate_mounted_activation_input(&input.mounted)?;
-        if input.mounted.scope != execution.private_scope()
+        if input.mounted_scope() != execution.private_scope()
             || !Arc::ptr_eq(&input.owner, self.state.admission_owner())
             || input.owner_epoch != self.state.admission_owner().epoch()
             || self

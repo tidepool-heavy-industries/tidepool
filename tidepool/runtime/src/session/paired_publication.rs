@@ -638,7 +638,9 @@ impl PersistentSession {
                 (writes, super::BindingPublicationPolicy::ExactPromotion)
             }
             FrozenBindingSelection::ActivationInput(input) => {
-                if input.source_lease().scope() != private_scope {
+                if input.mounted_scope() != private_scope
+                    || !self.scope_tree().is_live(input.source_lease().scope())
+                {
                     return Err(super::SessionTransitionReason::ScopeRevoked.into());
                 }
                 (
