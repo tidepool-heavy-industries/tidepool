@@ -6526,7 +6526,7 @@ where
         if self
             .state
             .require_prepared()?
-            .hosting_program(handle)
+            .owner_of_handle(handle)
             .is_none()
         {
             return Err(invalid());
@@ -7708,7 +7708,7 @@ where
         let engine = self.state.require_prepared()?;
         let located = engine
             .prepared_handle_of(raw)
-            .and_then(|handle| Some((handle, engine.hosting_program(handle)?)));
+            .and_then(|handle| Some((handle, engine.owner_of_handle(handle)?)));
         let Some((handle, program)) = located else {
             return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
                 "compiled binding mount received an unknown or already-consumed handle".into(),

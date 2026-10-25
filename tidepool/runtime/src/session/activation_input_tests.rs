@@ -5285,6 +5285,28 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
             panic!("fresh declaration library must attach recovery: {error:?}")
         });
     let mut resident = InputFixture::fresh_with_library(library, &recipe);
+    let selected_sources =
+        |selection: &tidepool_codegen::prepared_program::SourceDomainSelection| {
+            selection
+                .inherited()
+                .iter()
+                .map(|(binder, lease)| {
+                    (
+                        binder.clone(),
+                        tidepool_codegen::binding_table::SourceLeaseKey {
+                            instance: lease.instance(),
+                            value: lease.value(),
+                        },
+                        lease.handle(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+    let parent_selection = resident
+        .state
+        .bindings()
+        .source_domain_selection_in(resident.state.scope_tree(), resident.public_source.scope())
+        .unwrap();
     assert_eq!(resident.state.lib().scope_tip(ScopeId::ROOT), Generation(0));
     let durable_ceiling = recovery.state().allocation_ceiling;
     assert_eq!(
@@ -5322,7 +5344,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .bindings()
         .source_domain_selection_in(resident.state.scope_tree(), public)
         .unwrap();
-    assert!(before_selection.inherited().is_empty());
+    assert_eq!(
+        selected_sources(&before_selection),
+        selected_sources(&parent_selection)
+    );
     let before_binding_tip = resident.state.bindings().tip_id(public);
 
     let producer_execution = Arc::new(source_action(&mut resident, |resident, _| {
@@ -5356,6 +5381,10 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .owner()
         .clone();
     assert_eq!(private_owner.module, private_declaration);
+    assert!(before_selection
+        .inherited()
+        .values()
+        .all(|lease| lease.owner() != &private_owner));
     assert_eq!(
         before_selection
             .domain_for_owner(before_selection.current(), &private_owner)
@@ -5499,23 +5528,6 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .source_domain_selection_in(resident.state.scope_tree(), public)
         .unwrap();
     assert_eq!(selection.current(), before_selection.current());
-    let selected_sources =
-        |selection: &tidepool_codegen::prepared_program::SourceDomainSelection| {
-            selection
-                .inherited()
-                .iter()
-                .map(|(binder, lease)| {
-                    (
-                        binder.clone(),
-                        tidepool_codegen::binding_table::SourceLeaseKey {
-                            instance: lease.instance(),
-                            value: lease.value(),
-                        },
-                        lease.handle(),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
     assert_eq!(
         selected_sources(&selection),
         selected_sources(&before_selection)
@@ -7966,16 +7978,67 @@ fn frozen_activation_replays_same_input_and_refuses_second_private_input() {
         SessionId(1815),
     );
     let mut resident = fixture.fresh();
+    let caller = resident.run_context();
+    let parked_before = resident
+        .parked_holes()
+        .iter()
+        .map(|hole| hole.to_string())
+        .collect::<Vec<_>>();
+    let producer_scope = resident.mint_scope(caller.lexical_scope).unwrap();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: producer_scope,
+            ..caller
+        })
+        .unwrap();
     let mut captured = Vec::new();
     for request in [1, 2] {
         let reservation = fixture.start(&mut resident);
-        let (_, activation) = fixture.deliver(&mut resident, reservation, request);
+        let (submission, activation) = fixture.deliver(&mut resident, reservation, request);
         let site = parked_site(&mut resident, &activation);
         captured.push(
             resident
                 .capture_activation_input(&activation, RealmId::ROOT, site)
                 .unwrap(),
         );
+        for hole in [submission, activation] {
+            assert!(matches!(
+                resident.abort(hole.cont_id(), "captured producer complete".into()),
+                Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                    _
+                ))))
+            ));
+        }
+    }
+    resident.settle_dropped_custody();
+    assert_eq!(
+        resident
+            .parked_holes()
+            .iter()
+            .map(|hole| hole.to_string())
+            .collect::<Vec<_>>(),
+        parked_before
+    );
+    resident.set_run_context(caller).unwrap();
+    assert_eq!(resident.run_context(), caller);
+    resident.retire_scope(producer_scope);
+    assert!(!resident.state.scope_tree().is_live(producer_scope));
+    assert!(resident.state.scope_tree().is_live(caller.lexical_scope));
+    let engine = resident.state.prepared_mut().unwrap();
+    let captured_owners = captured
+        .iter()
+        .map(|input| {
+            let handle = engine
+                .prepared_handle_of(input.custody.handle.unwrap())
+                .unwrap();
+            (handle, engine.owner_of_handle(handle).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let collections = engine.heap_stats().gc_count;
+    engine.quiesce_and_collect_now().unwrap();
+    assert_eq!(engine.heap_stats().gc_count, collections + 1);
+    for (handle, owner) in captured_owners {
+        assert_eq!(engine.owner_of_handle(handle), Some(owner));
     }
     let second = captured.pop().unwrap();
     let first = captured.pop().unwrap();

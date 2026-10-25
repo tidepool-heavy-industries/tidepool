@@ -3563,6 +3563,12 @@ impl PreparedEngine {
             })
     }
 
+    /// The live installed program whose descriptor owns this handle.
+    pub(crate) fn owner_of_handle(&self, handle: PreparedHandle) -> Option<ProgramId> {
+        let owner = self.machine.owner_of_handle(handle)?;
+        self.programs.contains_key(&owner).then_some(owner)
+    }
+
     /// The program that should host a rooted apply of `handle`: the program
     /// whose descriptor owns the object `handle` refers to, when that
     /// program is still installed and admits both generic apply roots; else
@@ -3576,10 +3582,9 @@ impl PreparedEngine {
         fn admits_apply_roots(facts: &ProgramFacts) -> bool {
             facts.apply_entry.is_some() && facts.apply_value.is_some()
         }
-        if let Some(owner) = self.machine.owner_of_handle(handle) {
-            if self.programs.get(&owner).is_some_and(admits_apply_roots) {
-                return Some(owner);
-            }
+        let owner = self.owner_of_handle(handle)?;
+        if self.programs.get(&owner).is_some_and(admits_apply_roots) {
+            return Some(owner);
         }
         self.programs
             .iter()
