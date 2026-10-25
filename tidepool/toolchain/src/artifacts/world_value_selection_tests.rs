@@ -121,7 +121,10 @@ fn prepare_checked_value_type_pair(
         let (endpoint, world, source) = open_world_with_primary_and_module(
             None,
             include_str!("../../tests/fixtures/world-native/WorldTypeNominal.hs").as_bytes(),
-            None,
+            match kind {
+                ValueTypeFixture::SharedNominal => None,
+                ValueTypeFixture::CapturedNominal => Some(capture_declared_scaffold_sources()?),
+            },
         )?;
         let template = include_str!("../../tests/fixtures/world-native/CellTemplate.hs").replace(
             "{{CELL_IMPORTS}}",
