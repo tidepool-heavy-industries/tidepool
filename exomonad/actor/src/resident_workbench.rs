@@ -18199,13 +18199,17 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn typed_host_mount_carriers_compile_and_bind() {
         with_test_compiler_owner(|preparation_client| async move {
-            let (machines, context, mut source, _root) = actor_registry_fixture();
-            source.workbench_imports.extend_text("qualified Data.Text as TidepoolHostText");
-            let (workbench, context) = ResidentActorWorkbench::new(machines, (source).bind_preparation(preparation_client.clone()), None)
-                .with_json_input(Some(serde_json::json!({
+            let fixture = RootedWorldInputTest::with_source_files(
+                preparation_client,
+                0,
+                &[],
+                &["qualified Data.Text as TidepoolHostText"],
+            ).await;
+            let (workbench, context) = fixture
+                .private_with_input(Some(serde_json::json!({
                     "nested": [true, null, {"long": "x".repeat(16 * 1024)}]
                 })))
-                .admit_private_cell_for_test(context).await.unwrap();
+                .await;
             workbench.execute_cell_for_test(context.clone(),
                 include_str!("fixtures/host-json-nested.hs"))
                 .await.expect("whole-cell execution sees the original nested JSON request input");

@@ -1347,11 +1347,13 @@ fn run_inspection_batch(
         }
         None => match request.exact_context.clone() {
             Some(context) => {
-                tidepool_toolchain::artifacts::ModuleCandidateOffer::select_in_context_with_catalog(
+                tidepool_toolchain::artifacts::ModuleCandidateOffer::select_inspection_with_catalog(
                     &endpoint,
                     &include,
                     temp.path(),
-                    context,
+                    Some(context),
+                    Vec::new(),
+                    &[],
                     &catalog,
                 )?
             }
