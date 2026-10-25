@@ -1,14 +1,17 @@
 # Coupled retained-value TYPE transport: implementation contract
 
-Status: core implemented; joined verification in progress. Candidate
+Status: core implemented; joined review checkpoint. Candidate
 `5e10df3bef27417b338f292720648b61c06c9925` on
 `integration/g2-domain-runtime-20261023`; baseline code `2e60aa8101`.
 Evidence root: `/srv/swarm/evidence/inanna/g2-value-type-20261024/`.
 Constructor/cache controls pass 24/24. The final production core passes all
 12 compiler corpus cohorts (1,052 programs) and the retained-Job actor regression.
-Captured/historical Haskell selection and remaining actor gates are still running.
-A new operand test reaches a distinct SOURCE-versus-TYPE exact-owner refusal;
-the admission guard remains intact pending review. These results do not qualify G2.
+Haskell lifecycle/selection controls pass 5/5 leaves across their recorded sources.
+Joined actor checks expose constructor correlation, SOURCE-versus-TYPE exact-owner,
+and HOME linked-code identity refusals. The guards remain intact pending review. Exact outcomes and
+open questions are in
+[the integrated review packet](g2-value-type-implementation-review-20261024.md).
+These results do not qualify G2.
 
 This document supersedes the open design questions in the retained-value TYPE
 frontier and review-response documents. Argon's locked specification and the
@@ -110,34 +113,6 @@ Haskell checks row/root correlation and physical TYPE evidence, not ScopeProofV3
 Extend existing row/binding/index/file and capture-budget accounting, including
 manifest entries and binding keys. No arbitrary new retained World limits.
 Use checked arithmetic and budget/cancellation checkpoints before costly work.
-
-## Parallel ownership
-
-P1 Rust product: artifact_inventory.rs, artifact_inventory/compiler_projection.rs,
-declaration_context.rs and an optional new child module, checked_cell.rs,
-compiler_world/native_demand.rs and existing non-World leaf inspection callers.
-Own constructor/cache/graph tests. Do not edit compiler_world.rs or Haskell.
-Send actual API scaffold commit to P2 early; no temporary permissive factories.
-
-P2 Rust transport: compiler_world.rs and its transport/delta tests. Implement
-against the API above, receive P1 scaffold before compiling. Own all World wire
-writers and diagnostic decoders. Share encoder shapes with P3 directly.
-
-P3 Haskell: ExactScope.hs, necessary GhcPipeline joins, and Haskell wire/admission/
-lifecycle controls. Own corresponding existing Haskell fixture writers.
-Do not change Rust, CompilerRequest prepared-product ownership, or runtime.
-
-P4 joined tests: runtime/actor histories and adjacent Haskell source fixtures;
-no product authority factory. Prove premises for cold/successor/restore/operand,
-thin transitive dependency, historical versions, promotion, alias multiplicity.
-Coordinate selectors with root; avoid P2/P3 unit-test ownership.
-
-Root: integration, generators/registration, baseline joined checks, critical code
-review and immediate bounded repairs; no edits to a worker-owned region without
-coordination. Workers use clean isolated existing idle build checkouts with
-recorded branches and retained previous refs. Builds use measured headroom,
-swarm-build, pinned just/dev-shell and mounted scratch. No global cache cleanup.
-Compile production and cfg(test) early; never call zero selection a pass.
 
 ## Acceptance and handoff
 
