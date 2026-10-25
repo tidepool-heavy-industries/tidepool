@@ -257,7 +257,7 @@ import Tidepool.HostBindingAuthority (hostBindingOriginsRequired)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (boundedUtf8, trySynchronous)
 import Tidepool.Logging
-  ( LogLevel(LogTrace, LogWarn), LogValue(..), logEvent, logTrace, loggerEnabled, readLogger )
+  ( LogLevel(LogTrace, LogDebug, LogWarn), LogValue(..), logEvent, logTrace, loggerEnabled, readLogger )
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeInspectionWildcards, withInspectionWork, runWorldInspectionGhc, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..), isCleanModuleLookupMiss)
 import Tidepool.ExtractRequest
@@ -5758,7 +5758,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         -- Observe actual Names on both compilation routes and warm reuse.
         -- This is a bounded census, not an acquisition: even conflicting or
         -- subsequently dead uses must not change admission while tracing.
-        traceNativeUses phase owner bindings = when (loggerEnabled nativeUseLogger LogTrace) $ do
+        traceNativeUses phase owner bindings = when (loggerEnabled nativeUseLogger LogDebug) $ do
           let pairs (NonRec identifier value) = [(identifier,value)]
               pairs (Rec values) = values
               definitions = concatMap pairs bindings
@@ -5767,7 +5767,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 [(idName identifier,identifier)
                 | identifier <- map fst definitions ++ freeIdsOfBinds bindings]
               ownerKey = unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner)
-          logTrace nativeUseLogger "native_uses.census"
+          logEvent nativeUseLogger LogDebug "native_uses.census"
             [("phase",LogText phase),("owner",LogText ownerKey)
             ,("identifier_count",LogInteger (fromIntegral (Map.size identifiers)))
             ,("identifiers_omitted",LogInteger (fromIntegral (max 0 (Map.size identifiers - 64))))
@@ -5776,7 +5776,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 [(unitString (moduleUnit inputOwner),moduleNameString (moduleName inputOwner),reference)
                 | (inputOwner,references) <- Map.toAscList nativeOriginalInputs
                   , reference <- Set.toAscList references])))]
-          forM_ (take 64 (Map.toAscList identifiers)) $ \(name,identifier) -> do
+          when (loggerEnabled nativeUseLogger LogTrace) $ forM_ (take 64 (Map.toAscList identifiers)) $ \(name,identifier) -> do
             let references = Set.toAscList (referencesForName name)
                 selectedSource = case (pvWorldSources variant,nameModule_maybe name) of
                   (Just (WorldSourceInputBasis _ facts _ _ _ _ _),Just definingOwner) ->

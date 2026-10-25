@@ -350,7 +350,9 @@ impl CompilerTraceProfile {
     /// quieter or more specific level without another switch.
     pub fn apply_logging_environment(self, command: &mut std::process::Command) {
         command.envs(self.environment());
-        if std::env::var_os("TIDEPOOL_LOG").is_none() {
+        if std::env::var_os("TIDEPOOL_LOG").is_none()
+            && !command.get_envs().any(|(name, _)| name == "TIDEPOOL_LOG")
+        {
             command.env("TIDEPOOL_LOG", self.default_log_level());
         }
     }
@@ -358,7 +360,7 @@ impl CompilerTraceProfile {
     pub fn default_log_level(self) -> &'static str {
         match self {
             Self::Minimal => "off",
-            Self::Full => "trace",
+            Self::Full => "debug",
         }
     }
 
@@ -5347,8 +5349,30 @@ mod tests {
                 }
             );
             assert_eq!(env[2].1, "1");
+            assert_eq!(
+                selected.default_log_level(),
+                if selected == CompilerTraceProfile::Full {
+                    "debug"
+                } else {
+                    "off"
+                }
+            );
         }
         assert!(CompilerTraceProfile::select(Some("unknown"), None).is_err());
+    }
+
+    #[test]
+    fn compiler_trace_profile_preserves_explicit_worker_log_level() {
+        let mut command = std::process::Command::new("worker");
+        command.env("TIDEPOOL_LOG", "trace");
+        CompilerTraceProfile::Full.apply_logging_environment(&mut command);
+        assert_eq!(
+            command.get_envs().find(|(name, _)| *name == "TIDEPOOL_LOG"),
+            Some((
+                std::ffi::OsStr::new("TIDEPOOL_LOG"),
+                Some(std::ffi::OsStr::new("trace"))
+            ))
+        );
     }
 
     #[test]
