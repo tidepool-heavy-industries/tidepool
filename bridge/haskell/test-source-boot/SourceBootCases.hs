@@ -9,6 +9,7 @@ import Tidepool.CompilerRequest
 import Tidepool.ExtractRequest ( AdmittedWorkerRequest, admitWorkerRequest, WorkerRequest,RequestField(..), workerArgv, workerRequestFromArgv)
 
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256, artifactBytes)
+import Tidepool.RequestInputs (captureRequestInputTokens, transferRequestInputBodies)
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import CandidateExecutionSourcesTest (executionScopeDescriptorChecks)
 
@@ -2890,10 +2891,67 @@ verifyCertifiedGroupingOrder work original = do
       && null (codecCertificateTargets facts) && null (codecCertificatePackages facts)
       && null (codecCertificateOwners facts)) $
     fail "certified module grouping changed nonmonotone order or acquired another inventory"
+  let encode selected = encodeCertifiedProducts env OrdinaryExecutionSource (pprProductInterfaces original)
+        (emptyFinalizedModuleArtifacts env) [selected] Nothing [] [] emptyEvidence BS.empty BS.empty
+  verifyCandidatePackageCustody candidate interfaceBytes packageBytes bytes encode
   let absent = candidate {candidateModule="MissingOriginalInterface"}
   encodeCertifiedProducts env OrdinaryExecutionSource Map.empty (emptyFinalizedModuleArtifacts env) [absent] Nothing [] [] emptyEvidence BS.empty BS.empty >>= \case
     Left _ -> pure ()
     Right _ -> fail "cached original without its exact interface acquired a certificate"
+
+-- The standalone DATA encoder consumes the same captured companion owner as
+-- production admission. Historical aliases cannot replace or invalidate it.
+verifyCandidatePackageCustody :: ModuleCandidate -> BS.ByteString -> BS.ByteString -> BS.ByteString
+  -> (ModuleCandidate -> IO (Either String BS.ByteString)) -> IO ()
+verifyCandidatePackageCustody candidate interfaceBytes packageBytes expected encode = do
+  let interfacePath = candidateInterface candidate
+      packagePath = candidatePackageImports candidate
+      unavailableInterface = "candidate interface is unavailable during package capture"
+      unavailablePackages = "candidate package evidence is unavailable during package capture"
+      requireSame label selected = encode selected >>= \case
+        Right actual | actual == expected -> pure ()
+        outcome -> fail (label ++ ": captured package certification changed: " ++ show outcome)
+      requireRefusal label reason selected = encode selected >>= \case
+        Left actual | actual == reason -> pure ()
+        outcome -> fail (label ++ ": expected " ++ reason ++ ", got " ++ show outcome)
+      restore = BS.writeFile interfacePath interfaceBytes >> BS.writeFile packagePath packageBytes
+  (_,custody) <- captureRequestInputTokens Nothing $ \reader -> do
+    _ <- reader interfacePath (32 * 1024 * 1024)
+    reader packagePath (4 * 1024 * 1024)
+  let owned = candidate {candidateInputCustody=Just custody}
+  (do
+      BS.writeFile interfacePath "changed after capture"
+      removeFile packagePath
+      requireSame "changed interface and missing packages" owned
+      requireRefusal "fresh candidate still needs packages" unavailablePackages candidate
+      BS.writeFile packagePath "changed after capture"
+      removeFile interfacePath
+      requireSame "missing interface and changed packages" owned
+      requireRefusal "fresh candidate still needs interface" unavailableInterface candidate
+    ) `finally` restore
+  requireSame "restored fresh candidate" candidate
+  (_,interfaceOnly) <- captureRequestInputTokens Nothing $ \reader ->
+    reader interfacePath (32 * 1024 * 1024)
+  requireRefusal "missing captured package cannot fall back to readable alias" unavailablePackages
+    candidate {candidateInputCustody=Just interfaceOnly}
+  requireRefusal "captured package seal mismatch"
+    unavailablePackages owned {candidatePackageImportsSha256=replicate 64 '0'}
+  (_,empty) <- captureRequestInputTokens Nothing (const (pure ()))
+  let oversized = captureArtifactBytes (BS.replicate (32 * 1024 * 1024 + 1) 0)
+  largeInterface <- either fail pure (transferRequestInputBodies
+    [(interfacePath,oversized),(packagePath,captureArtifactBytes packageBytes)] empty)
+  requireRefusal "captured interface consumer bound" unavailableInterface candidate
+    {candidateInputCustody=Just largeInterface,candidateInterfaceSha256=artifactSha256 oversized}
+  let oversizedPackages = captureArtifactBytes (BS.replicate (4 * 1024 * 1024 + 1) 0)
+  largePackages <- either fail pure (transferRequestInputBodies
+    [(interfacePath,captureArtifactBytes interfaceBytes),(packagePath,oversizedPackages)] empty)
+  requireRefusal "captured package consumer bound" unavailablePackages candidate
+    {candidateInputCustody=Just largePackages,candidatePackageImportsSha256=artifactSha256 oversizedPackages}
+  (do
+      BS.writeFile packagePath (artifactBytes oversizedPackages)
+      requireRefusal "fresh package consumer bound" unavailablePackages
+        candidate {candidatePackageImportsSha256=artifactSha256 oversizedPackages}
+    ) `finally` restore
 
 -- Synthetic descriptors exercise producer group framing only. This decoder
 -- does not grant them a durable certificate or compiler admission.

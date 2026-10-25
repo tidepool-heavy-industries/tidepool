@@ -84,7 +84,9 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals
   , finalizedLocalAdmissions, localFinalizedPackageEvidence )
 import Tidepool.Timing (readTimingEnabled, emitCount)
-import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, captureArtifactBytes)
+import Tidepool.BoundedRead (readFileAtMost)
+import Tidepool.RequestInputs (capturedRequestInputToken)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, artifactLength, captureArtifactBytes)
 
 data CertifiedProductKind = OrdinaryProductFacts | SegmentOriginalFacts
 
@@ -617,9 +619,15 @@ encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env source
             Map.empty Set.empty Map.empty Map.empty []
   in case packageIndex of
     Left reason -> pure (Left reason)
-    Right issued -> fmap (fmap (\(bytes,versions,context,_) -> (bytes,versions,context))) $
-      encodeCertifiedOriginalProductsWithCapture Nothing Nothing Nothing [] Map.empty issued Map.empty kind retained emittedSeals reconciled env sourceRecipe
-        interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
+    Right issued -> do
+      candidates <- forM cached $ \candidate -> do
+        packages <- captureCandidatePackageEvidence candidate
+        pure ((\roots -> (candidate,roots)) <$> packages)
+      case sequence candidates of
+        Left reason -> pure (Left reason)
+        Right captured -> fmap (fmap (\(bytes,versions,context,_) -> (bytes,versions,context))) $
+          encodeCertifiedOriginalProductsWithCapture Nothing Nothing Nothing [] Map.empty issued Map.empty kind retained emittedSeals reconciled env sourceRecipe
+            interfaces finalized captured exact fresh targets evidence productBytes evidenceBytes
 
 -- Prior facts come from this same issuer's completed stage. They add imported
 -- group coordinates and retained type seals, never newly emitted module rows.
@@ -631,7 +639,7 @@ encodeCertifiedOriginalProductsWithPrior
   -> Map.Map (String,String) CanonicalInterfaceProof
   -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
   -> ReconciledOriginalProducts
-  -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
+  -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [(ModuleCandidate,PackageImportEvidence)] -> Maybe ExactScope
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
@@ -646,12 +654,12 @@ encodeCertifiedOriginalProductsWithCapture
   -> Map.Map (String,String) CanonicalInterfaceProof
   -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
   -> ReconciledOriginalProducts
-  -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
+  -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [(ModuleCandidate,PackageImportEvidence)] -> Maybe ExactScope
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext, [(FilePath,BS.ByteString)]))
-encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces packageProducts capturedPackages packageLinks currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces packageProducts capturedPackages packageLinks currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cachedWithPackages exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolveGlobal, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -659,7 +667,8 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
         Just (path,body) -> pure (Right (PackageImportRoot
           (T.unpack (symbolUnit identity)) (T.unpack (symbolModule identity)) path (artifactSha256 body)))
         Nothing -> fmap (fmap snd) (resolveGlobal identity)
-  let freshEvidenceSha = digest evidenceBytes
+  let cached = map fst cachedWithPackages
+      freshEvidenceSha = digest evidenceBytes
       freshProductSha = digest productBytes
       freshProductResults =
         [ do
@@ -825,11 +834,10 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
         let (iface,path,seal) = canonicalInterfaceInput proof
         body <- canonicalProofOriginalBody proof path seal
         pure (decodeCapturedPackageImports iface (artifactBytes body))
-      candidatePackages <- forM cached captureCandidatePackageEvidence
       let sidecarPackages = map localFinalizedPackageEvidence
             (Map.elems (finalizedLocalAdmissions finalized))
             ++ [packages | Right packages <- retainedPackages]
-            ++ [packages | Right packages <- candidatePackages]
+            ++ map snd cachedWithPackages
           selectedPackages = observedPackages ++
             [(unit,name,path,T.pack (artifactSha256 body))
             | ((unit,name),(path,body)) <- Map.toAscList capturedPackages]
@@ -870,7 +878,6 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
         (sum [fromIntegral (BS.length bytes) | (_,bytes) <- packageInterfaceWrites])
       let failures = either (:[]) (const []) owned
             ++ [reason | Left reason <- retainedPackages]
-            ++ [reason | Left reason <- candidatePackages]
             ++ [errorText | (_, _, Left errorText) <- modules]
             ++ [errorText | (_, Left errorText) <- targetRows]
             ++ ["package interface changed during certification" | not packagesValid]
@@ -1358,21 +1365,28 @@ type PackageWitnessResolver = SymbolIdentity -> IO (Either String PackageImportR
 captureCandidatePackageEvidence :: ModuleCandidate
   -> IO (Either String PackageImportEvidence)
 captureCandidatePackageEvidence candidate = do
-  interfaceRead <- try (BS.readFile (candidateInterface candidate))
-    :: IO (Either IOException BS.ByteString)
-  packageRead <- try (BS.readFile (candidatePackageImports candidate))
-    :: IO (Either IOException BS.ByteString)
+  let readPart path sha bound = do
+        body <- case candidateInputCustody candidate of
+          Just custody -> capturedRequestInputToken custody path sha
+          Nothing -> captureArtifactBytes <$> readFileAtMost path (bound + 1)
+        when (artifactLength body > bound)
+          (fail "candidate package capture exceeds its consumer byte bound")
+        pure body
+  interfaceRead <- try (readPart (candidateInterface candidate)
+    (candidateInterfaceSha256 candidate) (32 * 1024 * 1024))
+    :: IO (Either IOException ArtifactBytes)
+  packageRead <- try (readPart (candidatePackageImports candidate)
+    (candidatePackageImportsSha256 candidate) (4 * 1024 * 1024))
+    :: IO (Either IOException ArtifactBytes)
   pure $ do
-    interfaceBytes <- either
+    interfaceBody <- either
       (const (Left "candidate interface is unavailable during package capture"))
       Right interfaceRead
-    packageBytes <- either
+    packageBody <- either
       (const (Left "candidate package evidence is unavailable during package capture"))
       Right packageRead
-    if artifactSha256 (captureArtifactBytes interfaceBytes)
-          /= candidateInterfaceSha256 candidate
-        || artifactSha256 (captureArtifactBytes packageBytes)
-          /= candidatePackageImportsSha256 candidate
+    if artifactSha256 interfaceBody /= candidateInterfaceSha256 candidate
+        || artifactSha256 packageBody /= candidatePackageImportsSha256 candidate
       then Left "candidate package evidence changed during package capture"
       else decodeCapturedPackageImports
         (ExactIfaceArtifact
@@ -1381,7 +1395,7 @@ captureCandidatePackageEvidence candidate = do
           (candidateInterface candidate)
           (candidateInterfaceSha256 candidate)
           [])
-        packageBytes
+        (artifactBytes packageBody)
 
 data PackageDeclarationCatalog = PackageDeclarationCatalog
   { catalogOwner :: Module
