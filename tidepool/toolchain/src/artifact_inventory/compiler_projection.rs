@@ -6471,6 +6471,15 @@ impl CompilerSourceSupport {
         // Keep the existing topology/custody transition. Only its already
         // authenticated role rows bypass metadata reconstruction afterward.
         let artifacts = self.artifacts.select_compiler_support(&projection)?;
+        // Dependency TYPE rows retain their exact interfaces, but only the
+        // requested source owners remain direct native availability roots.
+        let source_roots = SelectedCompilerRows::from_admitted(
+            selected
+                .iter()
+                .filter(|(owner, _)| owners.contains(*owner))
+                .map(|(owner, row)| (owner.clone(), row.clone()))
+                .collect(),
+        );
         let selected = Arc::new(SelectedCompilerRows::from_admitted(selected));
         let decisions = self.input_decisions.for_exact_roles(&projection);
         let mut native_offer_facts = self.native_offer_facts.clone();
@@ -6478,7 +6487,7 @@ impl CompilerSourceSupport {
             .native_offers
             .iter()
             .filter_map(
-                |offer| match offer.is_relevant_to_support(selected.admitted_roles()) {
+                |offer| match offer.is_relevant_to_support(source_roots.admitted_roles()) {
                     Ok(true) => Some(Ok(offer.clone())),
                     Ok(false) => match offer.snapshot_identity() {
                         Ok(identity) => {
@@ -6495,7 +6504,7 @@ impl CompilerSourceSupport {
         SupportDraft {
             native_availability: self
                 .native_availability
-                .for_compiler_roles(selected.admitted_roles(), &self.artifacts)?,
+                .for_compiler_roles(source_roots.admitted_roles(), &self.artifacts)?,
             projection,
             artifacts,
             native_fact_owner: Some(Arc::clone(&self.native_fact_owner)),

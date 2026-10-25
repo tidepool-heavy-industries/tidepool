@@ -12348,6 +12348,192 @@ pub(super) fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDec
 }
 
 #[test]
+#[ignore = "requires the declared rooted compiler service"]
+fn source_support_demotes_only_standalone_dependency_availability() {
+    let fixture = crate::artifacts::test_support::prepare_source_publication_entry_fixture()
+        .expect("actual completed native publication");
+    let context = fixture
+        .entry
+        .products()
+        .original_execution_context()
+        .unwrap();
+    let root_owner = &fixture.root.descriptor.owner;
+    let helper_owner = &fixture.helper.descriptor.owner;
+    let requested = BTreeSet::from([root_owner.clone()]);
+    let original = context.compiler_source_support();
+    let before_selected = original.artifacts().selected_native_groups();
+    let original_root = original
+        .native_availability()
+        .rows()
+        .find(|row| row.original_artifact_id() == fixture.root.descriptor.id)
+        .unwrap();
+    let operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+        Default::default(),
+    ));
+    let mut expected_helper_groups = BTreeSet::new();
+    for contribution in original_root.contributions.iter() {
+        let scope =
+            crate::artifact_inventory::SelectedOriginalGroupScope::contribution(contribution);
+        let mut seen = BTreeSet::new();
+        let mut pending = contribution
+            .original_groups(fixture.root.descriptor.id)
+            .collect::<Vec<_>>();
+        while let Some(group) = pending.pop() {
+            if !seen.insert(group) {
+                continue;
+            }
+            if group.binding.artifact() == fixture.helper.descriptor.id {
+                expected_helper_groups.insert(group);
+            }
+            pending.extend(scope.children(group, &operation).unwrap());
+        }
+    }
+    let narrowed = original.source_support(&requested).unwrap();
+    assert!(narrowed.projection().snapshot_roles()[helper_owner]
+        .original()
+        .is_none());
+    let helper = narrowed
+        .native_availability()
+        .rows()
+        .find(|row| row.original_owner().module == helper_owner.module)
+        .expect("the actual root body retains its exact native helper");
+    assert_eq!(helper.mode, NativeTransportMode::IssuedGroups);
+    assert!(!helper.issued_ordinals().is_empty());
+    let required = helper
+        .contributions
+        .iter()
+        .flat_map(|contribution| contribution.original_groups(fixture.helper.descriptor.id))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !required.is_empty(),
+        "native dependency evidence must be nonempty"
+    );
+    assert_eq!(required, expected_helper_groups);
+    assert!(narrowed
+        .acquired_native_closures()
+        .same_held_owners(original.acquired_native_closures()));
+    for contribution in helper.contributions.iter() {
+        let scope =
+            crate::artifact_inventory::SelectedOriginalGroupScope::contribution(contribution);
+        for group in contribution.original_groups(fixture.helper.descriptor.id) {
+            assert!(scope.group_payload(group).is_ok());
+            assert!(scope.children(group, &operation).is_ok());
+        }
+    }
+    assert!(narrowed
+        .native_offers()
+        .iter()
+        .all(|offer| offer.original() != fixture.helper.descriptor.id));
+    assert!(narrowed
+        .artifacts()
+        .selected_native_groups()
+        .is_subset(&before_selected));
+    let receiving = ExactDeclarationContext::empty()
+        .extend_issued_compiler_support(&narrowed)
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(Arc::new(receiving))
+        .prepare_compilation(directory.path(), &fixture.producer_bytes)
+        .unwrap();
+    let consumed = request.compiler_inputs().private_native_availability();
+    let retained = consumed
+        .rows()
+        .find(|row| row.original_owner().module == helper_owner.module)
+        .unwrap();
+    assert_eq!(retained.mode, NativeTransportMode::IssuedGroups);
+    let consumed_groups = retained
+        .contributions
+        .iter()
+        .flat_map(|contribution| contribution.original_groups(fixture.helper.descriptor.id))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(consumed_groups, required);
+    assert!(request
+        .compiler_inputs()
+        .artifacts()
+        .selected_native_groups()
+        .is_subset(&before_selected));
+
+    // Keep the same real compile history, replacing code use with a type-family
+    // dependency so the helper's implementation is available but not required.
+    std::fs::write(
+        fixture.includes[0].join("PublicationHelper.hs"),
+        include_str!("../../tests/fixtures/sealed-publication/TypeOnlyPublicationHelper.hs"),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.includes[0].join("SourceOriginalSupport.hs"),
+        include_str!("../../tests/fixtures/sealed-publication/TypeOnlySourceOriginalSupport.hs"),
+    )
+    .unwrap();
+    let frozen = crate::artifacts::FrozenEntrySources::capture(
+        &fixture.includes,
+        &fixture.includes[0].join("PublicationTarget.hs"),
+    )
+    .unwrap();
+    let directory = fixture.includes[0].parent().unwrap();
+    let second = crate::artifacts::test_support::prepare_frozen_production_entry(
+        &frozen,
+        directory,
+        &directory.join("type-only-helper"),
+    )
+    .unwrap();
+    let context = second.products().original_execution_context().unwrap();
+    let support = context.compiler_source_support();
+    assert!(support
+        .native_availability()
+        .rows()
+        .any(|row| row.original_owner().module == helper_owner.module
+            && row.mode == NativeTransportMode::Full));
+    let before_selected = support.artifacts().selected_native_groups();
+    let narrowed = support.source_support(&requested).unwrap();
+    let role = &narrowed.projection().snapshot_roles()[helper_owner];
+    assert!(role.original().is_none());
+    assert!(narrowed
+        .selected_interfaces()
+        .unwrap()
+        .get(helper_owner)
+        .is_some());
+    assert!(
+        !narrowed
+            .native_availability()
+            .rows()
+            .any(|row| row.original_owner().module == helper_owner.module),
+        "an exact TYPE dependency does not retain its standalone native availability"
+    );
+    assert!(narrowed.native_offers().iter().all(|offer| offer
+        .original_acquisition()
+        .descriptor
+        .owner
+        != *helper_owner));
+    assert!(narrowed
+        .native_availability()
+        .rows()
+        .any(|row| row.original_owner().module == root_owner.module
+            && row.mode == NativeTransportMode::Full));
+    assert!(narrowed
+        .artifacts()
+        .selected_native_groups()
+        .is_subset(&before_selected));
+    let receiving = ExactDeclarationContext::empty()
+        .extend_issued_compiler_support(&narrowed)
+        .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(Arc::new(receiving))
+        .prepare_compilation(scratch.path(), &fixture.producer_bytes)
+        .unwrap();
+    assert!(!request
+        .compiler_inputs()
+        .private_native_availability()
+        .rows()
+        .any(|row| row.original_owner().module == helper_owner.module));
+    assert!(request
+        .compiler_inputs()
+        .artifacts()
+        .selected_native_groups()
+        .is_subset(&before_selected));
+}
+
+#[test]
 fn source_support_with_empty_native_permissions_discards_unrelated_parent_custody() {
     let offer_operation = std::sync::Arc::new(
         tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
