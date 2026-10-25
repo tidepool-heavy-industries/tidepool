@@ -27425,6 +27425,58 @@ mod tests {
     }
 
     #[test]
+    fn closed_request_preserves_protected_role_refusals() {
+        let (context, _) = metadata_fixture();
+        let source = context.compiler_source_support();
+        let owner = identity("fixture", "Alpha");
+        let original = source.implementation_entry(&owner).unwrap().clone();
+        let protected = ProtectedScaffoldRequirements {
+            projection: CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap(),
+            native: Vec::new(),
+        };
+        let types = source.for_source_owners(&BTreeSet::new()).unwrap();
+        assert!(
+            types
+                .artifacts()
+                .artifact_ids()
+                .contains(&original.descriptor.id),
+            "historical body custody is available"
+        );
+        assert!(types
+            .compiler_roles()
+            .original_acquisition(&owner)
+            .is_none());
+        assert!(
+            types.close_request(None, &protected).is_err(),
+            "a changed protected requirement cannot acquire an Original role from retained bytes"
+        );
+        assert!(types
+            .compiler_roles()
+            .original_acquisition(&owner)
+            .is_none());
+        let foreign = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                original.descriptor.producer_sha256,
+                "fixture",
+                "Alpha",
+                BTreeMap::new(),
+            ),
+        ));
+        assert_ne!(
+            foreign.descriptor.interface_sha256,
+            original.descriptor.interface_sha256
+        );
+        let conflicting = ProtectedScaffoldRequirements {
+            projection: CompilerInputProjection::from_issued_entries(&[foreign]).unwrap(),
+            native: Vec::new(),
+        };
+        let error = source.close_request(None, &conflicting).unwrap_err();
+        assert!(
+            matches!(error, CompileError::ArtifactInventory(error) if error.failure == ArtifactInventoryFailure::OwnerConflict { owner })
+        );
+    }
+
+    #[test]
     fn checked_value_type_product_refuses_incomplete_and_wrong_physical_rows() {
         let (context, _) = metadata_fixture();
         let entry = context

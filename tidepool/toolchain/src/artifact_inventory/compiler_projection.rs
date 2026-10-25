@@ -5300,6 +5300,11 @@ impl CompilerSourceSupport {
             None => self.clone(),
         };
         let projection = support.projection.merge(protected.role_requirements())?;
+        if projection == support.projection {
+            // The closed owner already holds these exact roles and their physical
+            // cache. Reopening it would put request outputs in a temporary view.
+            return support.resolve_input_policy();
+        }
         // Protected requirements constrain existing admitted rows; they cannot
         // acquire another compiler owner from retained bytes.
         let support = support.project_acquired_rows(

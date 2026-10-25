@@ -5905,26 +5905,20 @@ mod tests {
                 .unwrap(),
         );
         let barrier = std::sync::Barrier::new(2);
-        let values =
-            std::thread::scope(|scope| {
-                let first = scope.spawn(|| {
-                barrier.wait();
-                crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
-                    context.compiler_source_support(),
-                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
-                ).map(|(product, _)| product)
-                .unwrap()
-            });
-                let second = scope.spawn(|| {
-                barrier.wait();
-                crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
-                    context.compiler_source_support(),
-                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
-                ).map(|(product, _)| product)
-                .unwrap()
-            });
-                [first.join().unwrap(), second.join().unwrap()]
-            });
+        let capture = || {
+            barrier.wait();
+            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
+                context.compiler_source_support(),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
+            )
+            .unwrap()
+            .0
+        };
+        let values = std::thread::scope(|scope| {
+            let first = scope.spawn(&capture);
+            let second = scope.spawn(&capture);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
         assert!(Arc::ptr_eq(&values[0], &values[1]));
         assert_eq!(produced.1.promotion_count(), 1);
     }
