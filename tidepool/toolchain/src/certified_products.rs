@@ -21190,6 +21190,11 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_request_preserves_selected_issuer_beside_historical_offer() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure, ArtifactPayload,
             ArtifactView, CanonicalProducerIdentity, CompilerInputProjection, IssuedNativeOffer,
@@ -21258,7 +21263,7 @@ pub(crate) mod tests {
                 let issuer =
                     issue_fixture_compiler_support(projection.clone(), view.clone()).unwrap();
                 let offer = issuer
-                    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
                     .unwrap();
                 assert!(offer.is_full());
                 (view, offer)
@@ -21702,6 +21707,11 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_request_retained_generation_history_uses_exact_input_permissions() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
             CompilerInputProjection, ExactArtifactSelection, NativeGroupKey,
@@ -21942,12 +21952,13 @@ pub(crate) mod tests {
                         .unwrap()
                         .unwrap(),
                 ),
+                &mut offer_validation,
             )
             .unwrap();
         assert!(!partial_offer.is_full());
         let empty = selected_input.clone();
         let empty_offer = input_owner
-            .issue_native_offer(&original.descriptor.owner, None)
+            .issue_native_offer(&original.descriptor.owner, None, &mut offer_validation)
             .unwrap();
         for (label, view, offer, expected_one, expected_two) in [
             ("full", selected_input, full, Some(1), Some(2)),
@@ -22065,6 +22076,11 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
     fn compiled_new_output_refuses_absent_input_native_permission() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
             CanonicalProducerIdentity, CompilerInputProjection, CompilerInputRole,
@@ -22211,7 +22227,7 @@ pub(crate) mod tests {
             let issued_view = support_output.issued_artifacts();
             let issued_graph = issued_view.capture_graph_selection();
             let empty_offer = support_source
-                .issue_native_offer(&support_entry.descriptor.owner, None)
+                .issue_native_offer(&support_entry.descriptor.owner, None, &mut offer_validation)
                 .unwrap();
             let empty_rows = RequestNativeAvailability::issue_checked(
                 support_source.compiler_roles(),

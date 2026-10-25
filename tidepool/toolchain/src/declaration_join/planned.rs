@@ -807,6 +807,11 @@ mod tests {
 
     #[test]
     fn authored_certification_preserves_historical_canonical_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
@@ -841,7 +846,7 @@ mod tests {
         )
         .unwrap();
         let offer = old_issuer
-            .issue_native_offer(&old_entry.descriptor.owner, None)
+            .issue_native_offer(&old_entry.descriptor.owner, None, &mut offer_validation)
             .unwrap();
         let current_entry = Arc::new(ArtifactEntry::original([1; 32], current.clone()).unwrap());
         let current_view = inventory
@@ -916,7 +921,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 issuer
-                    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
                     .unwrap()
             })
             .collect::<Vec<_>>();

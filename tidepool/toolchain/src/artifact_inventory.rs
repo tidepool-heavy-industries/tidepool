@@ -11574,6 +11574,11 @@ mod tests {
 
     #[test]
     fn graph_packets_project_selected_scope_ancestry_without_dropping_opaque_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = ArtifactInventory::default();
         let native = Arc::new(issued_native_groups(
             "ScopePacketNative",
@@ -11610,7 +11615,7 @@ mod tests {
         )
         .unwrap();
         let offer = issuer
-            .issue_native_offer(&native.descriptor.owner, Some(proof))
+            .issue_native_offer(&native.descriptor.owner, Some(proof), &mut offer_validation)
             .unwrap();
         let held = carrier
             .retain_issued_offer_custody([offer.clone()])
@@ -11695,7 +11700,7 @@ mod tests {
         assert!(!partial.is_full());
         assert!(partial.proof().is_some());
         let empty = issuer
-            .issue_native_offer(&native.descriptor.owner, None)
+            .issue_native_offer(&native.descriptor.owner, None, &mut offer_validation)
             .unwrap();
         for original in [&offer, &partial, &empty] {
             use crate::exact_context::NativeOfferSnapshotBody;
@@ -11715,7 +11720,7 @@ mod tests {
                 "the recorded selection holds extra authenticated availability facts"
             );
             *selection = ExactArtifactSelection::from_snapshot(Arc::new(snapshot));
-            let restored = facts.restore(&widened).unwrap();
+            let restored = facts.restore(&widened, &mut offer_validation).unwrap();
             assert_eq!(restored.snapshot_facts(), facts);
             assert_eq!(restored.is_full(), original.is_full());
             assert_eq!(
@@ -11723,7 +11728,9 @@ mod tests {
                 original.issued_group_carriers().unwrap()
             );
             assert!(
-                facts.restore(&inventory.empty_view()).is_err(),
+                facts
+                    .restore(&inventory.empty_view(), &mut offer_validation)
+                    .is_err(),
                 "missing actual acquisition still refuses"
             );
         }
@@ -15820,6 +15827,11 @@ mod tests {
 
     #[test]
     fn proof_only_custody_keeps_payloads_without_blocking_new_view_initialization() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = ArtifactInventory::default();
         let native = Arc::new(issued_native_groups(
             "ProofOnlyLifetime",
@@ -15874,7 +15886,7 @@ mod tests {
         )
         .unwrap();
         let offer = issuer
-            .issue_native_offer(&native.descriptor.owner, Some(proof))
+            .issue_native_offer(&native.descriptor.owner, Some(proof), &mut offer_validation)
             .unwrap();
         drop(issuer);
         drop(native);

@@ -7253,6 +7253,11 @@ mod tests {
 
     #[test]
     fn compiler_primary_issuer_rejects_crossed_acquisitions_and_canonical_pairs() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let issue = |marker: &str| {
@@ -7271,6 +7276,7 @@ mod tests {
             CompilerSourceSupport::from_selected_issuance(
                 CompilerInputProjection::from_issued_entries(&entries).unwrap(),
                 view,
+                &mut offer_validation,
             )
             .unwrap()
         };
@@ -7695,6 +7701,11 @@ mod tests {
 
     #[test]
     fn fresh_value_append_preserves_native_permissions_and_exact_execution_roots() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let raw = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture(
                 "AppendNative",
@@ -7722,7 +7733,7 @@ mod tests {
         )
         .unwrap();
         let full_offers = [full_source
-            .issue_native_offer(&entry.descriptor.owner, full_proof)
+            .issue_native_offer(&entry.descriptor.owner, full_proof, &mut offer_validation)
             .unwrap()];
         for ordinals in [vec![7, 9001], vec![7], vec![9001], vec![]] {
             let groups = ordinals
@@ -8223,6 +8234,11 @@ mod tests {
 
     #[test]
     fn resolved_selected_reads_do_not_visit_historical_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         for group_count in [1, 4, 16] {
             let inventory = ArtifactInventory::default();
             let selected = Arc::new(crate::artifact_inventory::tests::entry(
@@ -8283,7 +8299,7 @@ mod tests {
             )
             .unwrap();
             let offer = historical_source
-                .issue_native_offer(&historical.descriptor.owner, proof)
+                .issue_native_offer(&historical.descriptor.owner, proof, &mut offer_validation)
                 .unwrap();
             let support = crate::declaration_context::recover_fixture_compiler_support(
                 projection,
@@ -8530,13 +8546,20 @@ mod tests {
 
     #[test]
     fn native_offer_facts_equality_survives_reversed_live_order() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let inventory = ArtifactInventory::default();
         let view = inventory
             .admit_shared(&inventory.empty_view(), entries)
             .unwrap();
-        let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+        let source =
+            CompilerSourceSupport::from_selected_issuance(projection, view, &mut offer_validation)
+                .unwrap();
         assert!(source.native_offers.len() > 1);
         let reversed = source
             .rebuild(
@@ -8572,6 +8595,11 @@ mod tests {
 
     #[test]
     fn completion_equivalent_wrapper_replacement_closes_all_views() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         // A sibling inventory holds equal-by-content but pointer-distinct
         // outer wrappers around the same issued authority.
@@ -8590,8 +8618,12 @@ mod tests {
         let view = inventory
             .admit_shared(&inventory.empty_view(), entries)
             .unwrap();
-        let source =
-            CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
+        let source = CompilerSourceSupport::from_selected_issuance(
+            projection.clone(),
+            view,
+            &mut offer_validation,
+        )
+        .unwrap();
         let sibling = ArtifactInventory::default();
         let sibling_view = sibling
             .admit_shared(&sibling.empty_view(), replacement)
@@ -8651,6 +8683,11 @@ mod tests {
 
     #[test]
     fn ordinary_native_fact_successors_encode_only_changed_facts() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::exact_context::{take_native_fact_work, NativeFactWork};
         for unrelated in [1, 32, 128] {
             let inventory = ArtifactInventory::default();
@@ -8670,7 +8707,12 @@ mod tests {
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
             take_native_fact_work();
-            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let source = CompilerSourceSupport::from_selected_issuance(
+                projection,
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             let cold = take_native_fact_work();
             assert!(
                 cold.changed_entries > 0
@@ -8797,6 +8839,11 @@ mod tests {
 
     #[test]
     fn program_fragment_keeps_selected_acquisitions_across_equal_witness_allocations() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::declaration_context::NativeTransportMode;
 
         for distinct_witness in [false, true] {
@@ -8880,6 +8927,7 @@ mod tests {
                 CompilerSourceSupport::from_selected_issuance(
                     CompilerInputProjection::from_issued_entries(&entries).unwrap(),
                     view,
+                    &mut offer_validation,
                 )
                 .unwrap()
             });
@@ -9036,6 +9084,11 @@ mod tests {
 
     #[test]
     fn program_original_promotion_qualifies_once_and_keeps_issued_dependencies() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let inventory = ArtifactInventory::default();
@@ -9044,6 +9097,7 @@ mod tests {
             inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap(),
+            &mut offer_validation,
         )
         .unwrap();
         let child = ExactModuleIdentity {
@@ -9152,6 +9206,11 @@ mod tests {
 
     #[test]
     fn program_fragment_metadata_matches_cold_multiversion_representatives_and_releases() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         for reverse in [false, true] {
             let (metadata, previous, weak) = {
                 let entries = [1, 2].map(|version| {
@@ -9177,6 +9236,7 @@ mod tests {
                 let first_support = CompilerSourceSupport::from_selected_issuance(
                     CompilerInputProjection::from_issued_entries(&[first]).unwrap(),
                     initial,
+                    &mut offer_validation,
                 )
                 .unwrap()
                 .for_source_owners(&BTreeSet::new())
@@ -9193,6 +9253,7 @@ mod tests {
                 let incoming = CompilerSourceSupport::from_selected_issuance(
                     CompilerInputProjection::from_issued_entries(&[second.clone()]).unwrap(),
                     expanded,
+                    &mut offer_validation,
                 )
                 .unwrap()
                 .for_source_owners(&BTreeSet::new())
@@ -9249,6 +9310,11 @@ mod tests {
 
     #[test]
     fn keyed_type_interfaces_preserve_native_choices_and_bound_role_work() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let mut observed = None;
         for unrelated in [1, 32, 128] {
             let inventory = ArtifactInventory::default();
@@ -9267,7 +9333,12 @@ mod tests {
             let view = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
-            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let source = CompilerSourceSupport::from_selected_issuance(
+                projection,
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             let metadata = source
                 .projection
                 .project_metadata(source.artifacts.metadata_snapshot())
@@ -9396,6 +9467,11 @@ mod tests {
 
     #[test]
     fn keyed_type_interfaces_refuse_conflicting_owner_and_equal_bytes_other_binding() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let canonical = Arc::new(ArtifactEntry::canonical(
             crate::certified_products::fixture_module_interface(
                 [2; 32],
@@ -9466,6 +9542,7 @@ mod tests {
             inventory
                 .admit_shared(&inventory.empty_view(), native_entries)
                 .unwrap(),
+            &mut offer_validation,
         )
         .unwrap();
         assert!(
@@ -9476,6 +9553,11 @@ mod tests {
 
     #[test]
     fn type_projection_and_delta_do_not_rescan_a_broad_incoming_issuer() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let mut semantic_work = None;
         for groups in [1, 32, 128] {
             scope_proof::take_ancestry_edge_visits();
@@ -9516,7 +9598,12 @@ mod tests {
             let view = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
-            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let source = CompilerSourceSupport::from_selected_issuance(
+                projection,
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             let execution = Arc::new(
                 crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                     [2; 32],
@@ -9607,6 +9694,11 @@ mod tests {
 
     #[test]
     fn complete_support_new_and_merge_do_not_materialize_unused_metadata() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         for demand in [
             NativeArtifactDemand::AllGroups,
             NativeArtifactDemand::ScopeInterfaces,
@@ -9617,8 +9709,12 @@ mod tests {
                 .admit_shared_with_demand(&inventory.empty_view(), entries.clone(), demand)
                 .unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-            let issued =
-                CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
+            let issued = CompilerSourceSupport::from_selected_issuance(
+                projection.clone(),
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             assert!(issued.native_availability.rows().next().is_some());
             // A fresh read owner over the exact same issued lease prevents a
             // prior cached full snapshot from hiding eager metadata work.
@@ -9760,6 +9856,7 @@ mod tests {
                 actual.recorded_rows(),
                 &facts.offers,
                 &facts.native_availability,
+                &mut validation,
             )
             .unwrap();
         assert!(matches!(
@@ -9809,6 +9906,11 @@ mod tests {
 
     #[test]
     fn unissued_original_keeps_exact_execution_until_request_policy_issuance() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entry = decision_affinity_entries().remove(0);
         let owner = &entry.descriptor.owner;
         let ArtifactPayload::Original(product) = &entry.payload else {
@@ -9819,7 +9921,9 @@ mod tests {
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-        let issued = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+        let issued =
+            CompilerSourceSupport::from_selected_issuance(projection, view, &mut offer_validation)
+                .unwrap();
         let explicit = |source: &CompilerSourceSupport| {
             source
                 .artifacts
@@ -9848,6 +9952,7 @@ mod tests {
             &records,
             &facts.offers,
             &facts.native_availability,
+            &mut offer_validation,
         )
         .unwrap();
         let canonical = unissued.projection.snapshot_roles()[owner].interface();
@@ -9887,9 +9992,12 @@ mod tests {
                 ],
             )
             .unwrap();
-        let other =
-            CompilerSourceSupport::from_selected_issuance(issued.projection.clone(), other_view)
-                .unwrap();
+        let other = CompilerSourceSupport::from_selected_issuance(
+            issued.projection.clone(),
+            other_view,
+            &mut offer_validation,
+        )
+        .unwrap();
         let rival = explicit(&other);
         assert_ne!(expected, rival);
         assert_ne!(
@@ -9952,15 +10060,26 @@ mod tests {
 
     #[test]
     fn selected_native_acquisitions_follow_the_whole_winning_row() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let view = inventory
             .admit_shared(&inventory.empty_view(), entries[..2].to_vec())
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap();
-        let a = CompilerSourceSupport::from_selected_issuance(projection.clone(), view.clone())
-            .unwrap();
-        let b = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+        let a = CompilerSourceSupport::from_selected_issuance(
+            projection.clone(),
+            view.clone(),
+            &mut offer_validation,
+        )
+        .unwrap();
+        let b =
+            CompilerSourceSupport::from_selected_issuance(projection, view, &mut offer_validation)
+                .unwrap();
         assert!(a.same_recorded_facts(&b));
         let owner = &entries[1].descriptor.owner;
         let group = a.input_decisions.facts[owner].groups[&7];
@@ -9990,6 +10109,7 @@ mod tests {
                 &a.projection.recorded_roles,
                 &facts.offers,
                 &facts.native_availability,
+                &mut offer_validation,
             )
             .unwrap();
         assert!(matches!(
@@ -10022,6 +10142,11 @@ mod tests {
 
     #[test]
     fn source_merge_keeps_native_choices_with_the_selected_exact_issuer() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let foreign_inventory = ArtifactInventory::default();
@@ -10055,6 +10180,7 @@ mod tests {
             CompilerSourceSupport::from_selected_issuance(
                 CompilerInputProjection::from_issued_entries(selected).unwrap(),
                 view,
+                &mut offer_validation,
             )
             .unwrap()
         };
@@ -10237,6 +10363,11 @@ mod tests {
 
     #[test]
     fn source_choice_affinity_does_not_resolve_unselected_ambiguous_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let issue = |marker: &str, with_caller: bool| {
@@ -10256,6 +10387,7 @@ mod tests {
             CompilerSourceSupport::from_selected_issuance(
                 CompilerInputProjection::from_issued_entries(selected).unwrap(),
                 view,
+                &mut offer_validation,
             )
             .unwrap()
         };
@@ -10321,6 +10453,11 @@ mod tests {
 
     #[test]
     fn source_merge_keeps_receiving_choices_for_same_canonical_original_pair() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let base = inventory
@@ -10352,6 +10489,7 @@ mod tests {
             CompilerSourceSupport::from_selected_issuance(
                 CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap(),
                 view,
+                &mut offer_validation,
             )
             .unwrap()
         });
@@ -10455,6 +10593,11 @@ mod tests {
 
     #[test]
     fn custody_only_support_additions_preserve_qualified_rows_and_selected_owners() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let product = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture(
                 "CustodyPermissions",
@@ -10479,8 +10622,12 @@ mod tests {
             let full = incoming_inventory
                 .admit_shared(&incoming_inventory.empty_view(), vec![entry.clone()])
                 .unwrap();
-            let incoming =
-                CompilerSourceSupport::from_selected_issuance(projection.clone(), full).unwrap();
+            let incoming = CompilerSourceSupport::from_selected_issuance(
+                projection.clone(),
+                full,
+                &mut offer_validation,
+            )
+            .unwrap();
             for ordinals in [Some(vec![7, 9001]), Some(vec![7]), Some(vec![]), None] {
                 let selected = ordinals
                     .as_deref()
@@ -10499,7 +10646,12 @@ mod tests {
                     )
                     .unwrap();
                 let support = if ordinals.is_some() {
-                    CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap()
+                    CompilerSourceSupport::from_selected_issuance(
+                        projection.clone(),
+                        view,
+                        &mut offer_validation,
+                    )
+                    .unwrap()
                 } else {
                     CompilerSourceSupport::new(
                         projection.for_source_owners(&BTreeSet::new()),
@@ -10617,6 +10769,11 @@ mod tests {
 
     #[test]
     fn namespace_finalization_reuses_only_an_unchanged_exact_view() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
@@ -10637,8 +10794,12 @@ mod tests {
                     },
                 )
                 .unwrap();
-            let support =
-                CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
+            let support = CompilerSourceSupport::from_selected_issuance(
+                projection.clone(),
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             assert_eq!(support.input_decisions.facts.len(), entries.len());
             for (entry, ordinal) in entries.iter().zip([9, 7, 3]) {
                 let choice = &support.input_decisions.facts[&entry.descriptor.owner];
@@ -10793,6 +10954,11 @@ mod tests {
 
     #[test]
     fn checked_input_issuance_refuses_distinct_group_choices_before_recording_domain() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let product = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture(
                 "InputChoice",
@@ -10835,8 +11001,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(expected.len(), 1);
         let repeated = sources[0].merge_fixture_selections(&sources[0]).unwrap();
-        let admitted =
-            CompilerSourceSupport::from_selected_issuance(projection.clone(), repeated).unwrap();
+        let admitted = CompilerSourceSupport::from_selected_issuance(
+            projection.clone(),
+            repeated,
+            &mut offer_validation,
+        )
+        .unwrap();
         let actual = admitted.input_decisions.facts[&original.descriptor.owner]
             .groups
             .values()
@@ -10867,7 +11037,7 @@ mod tests {
                 "both genuine distinct issuers reach the production ingress"
             );
             assert!(
-                matches!(CompilerSourceSupport::from_selected_issuance(projection.clone(), ambiguous),
+                matches!(CompilerSourceSupport::from_selected_issuance(projection.clone(), ambiguous, &mut offer_validation),
                 Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == original.descriptor.id))
             );
         }

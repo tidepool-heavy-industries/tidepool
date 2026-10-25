@@ -23886,6 +23886,11 @@ mod tests {
 
     #[test]
     fn empty_native_offer_and_later_full_availability_roundtrip_as_retained_data() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::exact_context::NativeOfferSnapshotBody;
         let base = published_original_choice_history_fixture();
         let beta = identity("fixture", "Beta");
@@ -23894,7 +23899,7 @@ mod tests {
             .unwrap();
         let empty = base
             .compiler_source_support()
-            .issue_native_offer(&beta, None)
+            .issue_native_offer(&beta, None, &mut offer_validation)
             .unwrap();
         assert!(matches!(
             empty.snapshot_facts().body,
@@ -35046,6 +35051,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
 
     #[test]
     fn execution_support_keeps_carried_partial_availability_and_instance_origin() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::NativeOriginalRequirement;
         let producer = program_test_producer_sha256();
         let product = crate::certified_products::fixture_finalized_product(
@@ -35072,7 +35082,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .unwrap();
         let issuer = issue_fixture_compiler_support(projection.clone(), artifacts.clone()).unwrap();
         let full = issuer
-            .issue_native_offer(&entry.descriptor.owner, Some(proof.clone()))
+            .issue_native_offer(
+                &entry.descriptor.owner,
+                Some(proof.clone()),
+                &mut offer_validation,
+            )
             .unwrap();
         let partial = full
             .within_assembly(projection.role_view(), &inventory.empty_view())

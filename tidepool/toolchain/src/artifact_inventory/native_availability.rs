@@ -3804,8 +3804,12 @@ mod normalized_dependency_tests {
             let graph = custody
                 .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
                 .unwrap();
-            let graph_only =
-                IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph).unwrap();
+            let graph_only = IssuedNativeOffer::restore_snapshot(
+                &offer.snapshot_facts(),
+                &graph,
+                &mut validation,
+            )
+            .unwrap();
             assert!(
                 matches!(
                     graph_only.0.custody.source_receipt,
@@ -3918,7 +3922,8 @@ mod normalized_dependency_tests {
             .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
             .unwrap();
         let graph_only =
-            IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph).unwrap();
+            IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph, &mut validation)
+                .unwrap();
         assert!(
             matches!(
                 graph_only.source_causes_at(left, child).unwrap().as_ref(),
@@ -4243,7 +4248,7 @@ mod normalized_dependency_tests {
             .compiler_source_support()
             .retain_custody(&broad)
             .unwrap()
-            .issue_native_offer(&entries[0].descriptor.owner, Some(proof))
+            .issue_native_offer(&entries[0].descriptor.owner, Some(proof), &mut validation)
             .unwrap();
         assert!(broad_offer.is_full());
         let mixed = Arc::new(
