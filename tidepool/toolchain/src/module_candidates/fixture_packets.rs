@@ -833,7 +833,9 @@ fn source_boot_world_value_type_packet_producer() {
     let request = fs::read(packet.join("request.cbor")).unwrap();
     let completion = PacketCompletion::new(&packet, PacketProducer::WorldValueType, &request);
     let fields: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
-    let fields = fields.as_array().expect("World value fixture request tuple");
+    let fields = fields
+        .as_array()
+        .expect("World value fixture request tuple");
     assert_eq!(fields.len(), 1);
     assert_eq!(text_field(&fields[0]), "TPSOURCEBOOTVALUETYPE1");
     let bytes = crate::compiler_world::world_value_transport_fixture(&packet.join("world-values"))
