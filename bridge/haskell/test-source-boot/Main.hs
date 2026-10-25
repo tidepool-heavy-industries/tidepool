@@ -123,6 +123,7 @@ tests = testGroup "source-boot"
   , testCase "package finder history isolation" packageFinderHistoryIsolation
   , testCase "compiler boot state survives END without HOME publication" compilerBootStateIsolation
   , testCase "lazy SOURCE backedge follows the current target after END" lazySourceBackedge
+  , testCase "candidate deferral preserves selected source memo HOME" candidateDeferredMemoHome
   , testCase "lazy original home package instances survive context forks" lazyHomePackageInstances
   , testCase "exact transaction candidate reuse" $ exactTransactionCandidateReuse
   , testCase "exact legacy value isolation" $ exactLegacyValueIsolation

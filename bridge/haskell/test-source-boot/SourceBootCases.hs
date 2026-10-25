@@ -7255,6 +7255,46 @@ lazySourceBackedge = withTiming $ withScratch $ \work -> do
   withResidentCompilerScopes [work] $ \runScope ->
     runScope (pure ()) (\scope -> completed "independent cold SOURCE backedge" 0 scope >>= field "independent cold" boolTy)
 
+-- Deferring an accepted candidate also defers its source importers from Make.
+-- A validated importer memo must remain installed when the deferred graph is
+-- empty, so native preparation can consume its actual completed HOME owner.
+candidateDeferredMemoHome :: IO ()
+candidateDeferredMemoHome = withTiming $ withScratch $ \work -> do
+  let target = work </> "MemoReuseTarget.hs"
+      dependency = mkModuleName "MemoReuseDependency"
+      frontend diagnostics = any (\line -> line == "tidepool-canonical-frontend module=MemoReuseDependency"
+        || line == "tidepool-checked module=MemoReuseDependency fresh=true") (lines diagnostics)
+  forM_ ["OptionalAnchor.hs", "MemoReuseDependency.hs", "MemoReuseTarget.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  original <- runPipelineSelected (PreparedProducts Nothing) target [work]
+  originalFixture <- capturePreparedFixture work original
+  writeManifestFor ["OptionalAnchor"] work originalFixture
+  candidates <- readModuleCandidates (manifest work) >>= either fail pure
+  candidate <- case candidates of
+    [value] | candidateModule value == "OptionalAnchor" -> pure value
+    _ -> fail "deferred memo fixture requires one genuine candidate leaf"
+  withResidentPipelineSelected [work] $ \compile -> do
+    let prepare = compile (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+          Nothing target [work] Nothing
+        completed label reused = do
+          (prepared,diagnostics) <- captureDiagnostics prepare
+          unless (map candidateOriginalIdentity (pprAcceptedCandidates prepared)
+              == [candidateOriginalIdentity candidate]
+              && counterValues "candidate_executable_required" diagnostics == [0]
+              && counterValues "transaction_reused_source_products" diagnostics == [reused]) $
+            fail (label ++ ": missing accepted candidate or expected deferred source-memo cut: " ++ diagnostics)
+          unless (frontend diagnostics == (reused == 0)) $
+            fail (label ++ ": unexpected deferred importer frontend: " ++ diagnostics)
+          home <- maybe (fail (label ++ ": deferred importer lost its completed HOME")) pure
+            (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult prepared))) dependency)
+          unless (moduleName (mi_module (hm_iface home)) == dependency
+              && any ((== "answer") . getOccString) (typeEnvIds (md_types (hm_details home)))
+              && "MemoReuseDependency" `elem` preparedNames prepared
+              && fmap renderType (prResultType (pprPipelineResult prepared)) == Just "Int") $
+            fail (label ++ ": deferred importer HOME or native preparation was incomplete")
+    completed "cold candidate importer" 0
+    completed "warm candidate importer" 1
+
 -- Observe actual GHC finder operations, without timing thresholds or compiler
 -- authority fixtures. A missing package key must never consult an ancestor
 -- attempt; package results survive while source choices and file hashes do not.
