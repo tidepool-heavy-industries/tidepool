@@ -4625,7 +4625,7 @@ originalThinInterfaceTest inputFixture = withTiming $ withScratch $ \work -> do
   requireUserError "another bound scope" "host interface manifest differs from bound exact scope"
     (emitUnder otherScope (const (pure ())) (input {hostInterfaceGeneration=79}))
   unless packageOnly $
-    requireUserError "host-builder authority" "checked signature has no authenticated host representation"
+    requireUserError "host-builder authority" "checked signature has no authenticated host representation: not a host type"
       (emit 75 HostBuilt signature)
   when (inputFixture == PackageTextThinInput) $ do
     (built, builtPurpose) <- emit 80 HostBuilt signature

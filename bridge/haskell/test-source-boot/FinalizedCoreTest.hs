@@ -23,7 +23,7 @@ import GHC.Cmm.CLabel (mkInitializerStubLabel)
 import GHC.Data.FastString (fsLit)
 import GHC.Types.ForeignStubs (ForeignStubs(..), CHeader(..), CStub(..))
 import GHC.Utils.Outputable qualified as Outputable
-import GHC.Driver.Session (targetWays_)
+import GHC.Driver.Session (targetWays_, GeneralFlag(Opt_ExternalInterpreter), gopt_unset)
 import GHC.Platform.Ways (Way(WayProf), hasWay, addWay, removeWay)
 import GHC.Driver.Main (loadIfaceByteCode)
 import GHC.Driver.Make (load')
@@ -600,7 +600,7 @@ capturedConsumerChecks libdir work scope artifact coreBytes summary proof = do
     bracket (BS.writeFile (exactPath artifact) (BS.singleton 0) >> BS.writeFile corePath (BS.singleton 0))
       (\_ -> BS.writeFile (exactPath artifact) original >> BS.writeFile corePath coreBytes) $ \_ -> do
         let consume = runGhc (Just libdir) $ do
-              _ <- setSessionDynFlags (ms_hspp_opts summary)
+              _ <- setSessionDynFlags (gopt_unset (ms_hspp_opts summary) Opt_ExternalInterpreter)
                 {backend=noBackend,ghcLink=NoLink,importPaths=[work],hiDir=Just work,objectDir=Just work}
               fresh <- getSession
               loaded <- liftIO (requireRight =<< readScopedInterfaces fresh scope [artifact])
@@ -627,7 +627,7 @@ directBytecodeChecks
   :: FilePath -> FilePath -> ExactIfaceArtifact -> ModSummary
   -> CanonicalInterfaceAdmission -> IO ()
 directBytecodeChecks libdir work artifact summary proof = runGhc (Just libdir) $ do
-  _ <- setSessionDynFlags (ms_hspp_opts summary)
+  _ <- setSessionDynFlags (gopt_unset (ms_hspp_opts summary) Opt_ExternalInterpreter)
     { backend = interpreterBackend, ghcLink = LinkInMemory
     , importPaths = [work], hiDir = Just work, objectDir = Just work }
   fresh <- getSession
@@ -678,7 +678,7 @@ makeViewChecks :: FilePath -> FilePath -> ExactScope -> ExactIfaceArtifact -> BS
   -> ModSummary -> CanonicalInterfaceProof -> IO ()
 makeViewChecks libdir work scope artifact bytes summary proof = runGhc (Just libdir) $ do
   flags <- getSessionDynFlags
-  _ <- setSessionDynFlags (ms_hspp_opts summary)
+  _ <- setSessionDynFlags (gopt_unset (ms_hspp_opts summary) Opt_ExternalInterpreter)
     { importPaths = [work], hiDir = Just work, objectDir = Just work
     , verbosity = verbosity flags }
   fresh <- getSession
@@ -689,7 +689,7 @@ makeViewChecks libdir work scope artifact bytes summary proof = runGhc (Just lib
   let typeDirectory = work </> "type-make-view"
       executableDirectory = work </> "executable-make-view"
       executableSummary = summary {ms_hspp_opts =
-        (ms_hspp_opts summary) {backend = interpreterBackend}}
+        (gopt_unset (ms_hspp_opts summary) Opt_ExternalInterpreter) {backend = interpreterBackend}}
   liftIO $ do
     issuedCore <- BS.readFile corePath
     assert (issuedCore == bytes && hexBytes (SHA256.hash issuedCore) == coreSha)

@@ -16,8 +16,7 @@ import GHC.Core.TyCo.Rep (Type(..))
 import Tidepool.CanonicalTypeShape (captureClosedTypeShape, TypeShapeError(..))
 import GHC.Core.DataCon (dataConName, dataConUserTyVarBinders)
 import GHC.Core.TyCon (tyConDataCons, tyConName)
-import GHC.Types.Id (idType, idName, setIdType)
-import GHC.Stg.Syntax qualified as Stg
+import GHC.Types.Id (idType, idName)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -40,7 +39,6 @@ import Tidepool.GhcPipeline
   , prHscEnv, finalizedHomeModInfo, runPipelineSelected )
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
 import Tidepool.PreparedStg (pmModule, pmIdentityResolver, pmPreparedSites, pmTypeGraph, pmBindings, preparedBindingGroups)
-import Tidepool.PreparedStg.Internal (PreparedModule(preparedBindings))
 import Tidepool.TypePolicy qualified as Policy
 import Tidepool.TypeSyntaxIdentity (encodeTypeSyntaxIdentity)
 
@@ -206,9 +204,8 @@ runTypeEvidenceChecks directory = do
   assert (auxiliary == repeatedAuxiliary)
     "repeating an admitted auxiliary root changed its complete output"
   polymorphicAuxiliary <- requireRight (project context original "unrelated" ["auxiliaryRootPolymorphic"])
-  assert (any (\node -> case node of TypeForAll{} -> True; _ -> False)
-      (IntMap.elems (typeGraphNodes (programTypes polymorphicAuxiliary))))
-    "a closed polymorphic auxiliary answer lost its scoped type evidence"
+  assert (IntMap.null (typeGraphNodes (programTypes polymorphicAuxiliary)))
+    "an open polymorphic auxiliary answer acquired concrete evidence"
   polymorphicBinder <- case [binder | value <- pprModules original,
       (binding, _) <- pmBindings value, binder <- topBinders binding,
       occNameString (nameOccName (idName binder)) == "auxiliaryRootPolymorphic"] of
@@ -219,25 +216,14 @@ runTypeEvidenceChecks directory = do
   assert (case runStateT (Policy.internType openAnswer) Policy.emptyTypeGraphBuilder of
       Left Policy.TypeGraphFreeVariable -> True; _ -> False)
     "open auxiliary control does not contain a free answer variable"
-  -- Change raw projection input, without reissuing a completed compiler result.
-  -- A closed forall is representable; its open body must take the skip path.
-  let openBinder binder
-        | idName binder == idName polymorphicBinder = setIdType binder openType
-        | otherwise = binder
-      openTop (Stg.StgTopLifted (Stg.StgNonRec binder rhs)) =
-        Stg.StgTopLifted (Stg.StgNonRec (openBinder binder) rhs)
-      openTop (Stg.StgTopLifted (Stg.StgRec pairs)) =
-        Stg.StgTopLifted (Stg.StgRec [(openBinder binder, rhs) | (binder, rhs) <- pairs])
-      openTop binding = binding
-      openModule value = value { preparedBindings =
-        [(openTop binding, dependencies) | (binding, dependencies) <- pmBindings value] }
-      openContext = context
-        { projectionEntry = (projectionEntry context) { symbolOccurrence = "unrelated" }
-        , projectionAuxiliaryRoots = [(projectionEntry context)
-            { symbolOccurrence = "auxiliaryRootPolymorphic" }] }
-  openAuxiliary <- requireRight (projectPreparedTarget openContext (map openModule (pprModules original)))
-  assert (IntMap.null (typeGraphNodes (programTypes openAuxiliary)))
-    "an open auxiliary answer acquired concrete evidence"
+  -- The complete binder type is closed even though its settled answer is
+  -- open. The graph owner must still represent the binder's genuine forall.
+  (_,closedBuilder) <- requireRight (runStateT
+    (Policy.internType (idType polymorphicBinder)) Policy.emptyTypeGraphBuilder)
+  closedGraph <- requireRight (Policy.finishTypeGraph closedBuilder)
+  assert (any (\node -> case node of TypeForAll{} -> True; _ -> False)
+      (IntMap.elems (Policy.tgNodes closedGraph)))
+    "a closed forall lost its scoped type graph binder"
   prepared <- case [value | value <- pprModules original,
       moduleNameString (moduleName (pmModule value)) == "TypeEvidence"] of
     [value] -> pure value
