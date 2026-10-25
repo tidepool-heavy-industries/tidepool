@@ -1241,9 +1241,13 @@ activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
       (GeneratedScaffoldCompile ownOrphanRecipe GeneralCompile) (Just scope) target [] Nothing
     unless (hasIntResultLiteral 99 (prBinds (pprPipelineResult ownOrphan)))
       (fail "preview original target lost the orphan it defines itself")
-    writeFile target protected
+    let ordinarySource = T.unpack (T.replace "fromInteger (c (0 :: Int))" "(0 :: Int)" (T.pack protected))
+    unless (ordinarySource /= protected) (fail "ordinary import control retained its orphan instance demand")
+    writeFile target ordinarySource
     captured <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [] Nothing
     requireExactProviderImport "Expr" "ExecutionClass" captured
+    unless (maybe False (isNothing . compilationSourceSelection) (preparedExactCompilation captured)) $
+      fail "ordinary class import acquired a current-source selection"
     authoredPurpose <- authoredCurrentImportPurpose target "Expr" "import ExecutionClass (C(..))"
     requireOriginalSourceRejection "authored import after scoped preview"
       (ExecutionSourceUnavailable ("main","ExecutionClass")) $
