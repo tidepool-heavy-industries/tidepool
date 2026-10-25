@@ -343,12 +343,9 @@ impl AdmittedDeclarationSurface {
         &mut self,
         support: &crate::artifact_inventory::CompilerSourceSupport,
         rows: &[ExactLexicalNode],
+        originals: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<(), CompileError> {
-        for owner in rows
-            .iter()
-            .map(|node| &node.owner)
-            .chain(&self.source_originals)
-        {
+        for owner in rows.iter().map(|node| &node.owner).chain(originals) {
             let row = support
                 .world_primary_type_row(owner)
                 .ok_or_else(|| contract("publication source lacks its issued binding"))?;
@@ -829,24 +826,29 @@ impl CertifiedAuthoredDeclaration {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        let admitted_originals = self
+            .compiler_support
+            .projection()
+            .snapshot_roles()
+            .iter()
+            .filter(|(owner, role)| role.original().is_some() && self.source_scope.admits(owner))
+            .map(|(owner, _)| owner.clone())
+            .collect::<BTreeSet<_>>();
         let mut source_originals = prior.source_originals.clone();
-        source_originals.extend(
-            self.compiler_support
-                .projection()
-                .snapshot_roles()
-                .iter()
-                .filter(|(owner, role)| {
-                    role.original().is_some() && self.source_scope.admits(owner)
-                })
-                .map(|(owner, _)| owner.clone()),
-        );
+        source_originals.extend(admitted_originals.iter().cloned());
         let mut surface = AdmittedDeclarationSurface {
             roots,
             lexical,
             source_originals,
             source_bindings: prior.source_bindings.clone(),
         };
-        surface.retain_source_bindings(&self.compiler_support, self.source_scope.rows())?;
+        // Unrelated prior owners keep their existing issuer; this branch
+        // authenticates only its own admitted contribution, including overlap.
+        surface.retain_source_bindings(
+            &self.compiler_support,
+            self.source_scope.rows(),
+            &admitted_originals,
+        )?;
         Ok(surface)
     }
 
@@ -1607,7 +1609,12 @@ pub fn certify_publication_join(
             source_surface.roots = vec![owner];
             source_surface.lexical = context.lexical_graph().to_vec();
             let lexical = source_surface.lexical_graph().to_vec();
-            source_surface.retain_source_bindings(context.compiler_source_support(), &lexical)?;
+            let originals = source_surface.source_originals.clone();
+            source_surface.retain_source_bindings(
+                context.compiler_source_support(),
+                &lexical,
+                &originals,
+            )?;
             Ok(CertifiedPublicationJoin::Accepted(PublicationComposition {
                 join,
                 context: Arc::new(context),
@@ -2727,6 +2734,136 @@ mod authored_tests {
     use super::*;
     use crate::recovery_artifacts::PackageInterfaceValidation;
     use tidepool_repr::Generation;
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    fn authored_surface_restaging_preserves_other_branch_bindings_and_checks_overlap() {
+        let root = crate::artifacts::test_support::compiler_input_directory().unwrap();
+        let selected_path = root.path().join("PrefixSelectedSupport.hs");
+        let selected_source =
+            include_str!("../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs");
+        std::fs::write(&selected_path, selected_source).unwrap();
+        std::fs::write(
+            root.path().join("PrefixFreshSupport.hs"),
+            include_str!("../tests/fixtures/checked-prefix-publication/PrefixFreshSupport.hs"),
+        )
+        .unwrap();
+        let certify = |generation, imported: &str| {
+            let module = SessionModule::lib(Generation(generation));
+            let source = format!(
+                "module {} where\nimport {imported} ()\n",
+                module.module_name()
+            );
+            let path = root.path().join(module.relative_hs_path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &source).unwrap();
+            Arc::new(
+                crate::artifacts::test_support::certify_authored_declaration(
+                    module,
+                    &path,
+                    &source,
+                    &[root.path().to_path_buf()],
+                    root.path(),
+                )
+                .unwrap(),
+            )
+        };
+        let earlier = certify(1, "PrefixSelectedSupport");
+        let branch = certify(2, "PrefixFreshSupport");
+        let owner = |module: &str| ExactModuleIdentity {
+            unit: "main".into(),
+            module: module.into(),
+        };
+        let earlier_owner = owner("PrefixSelectedSupport");
+        let branch_owner = owner("PrefixFreshSupport");
+        let prior = earlier
+            .extend_source_surface(&AdmittedDeclarationSurface::default())
+            .unwrap();
+        let incoming = branch
+            .extend_source_surface(&AdmittedDeclarationSurface::default())
+            .unwrap();
+        assert!(prior.source_originals.contains(&earlier_owner));
+        assert!(incoming.source_originals.contains(&branch_owner));
+        assert!(
+            branch
+                .compiler_support
+                .world_primary_type_row(&earlier_owner)
+                .is_none(),
+            "the sibling's issuer must be absent from the authored branch"
+        );
+        assert!(earlier
+            .compiler_support
+            .world_primary_type_row(&branch_owner)
+            .is_none());
+        let prior_bindings = prior.source_bindings.clone();
+        let merged = branch.extend_source_surface(&prior).expect(
+            "restaging keeps earlier source bindings without reacquiring them from the branch",
+        );
+        for (owner, binding) in &prior_bindings {
+            assert_eq!(merged.source_bindings.get(owner), Some(binding));
+        }
+        let expected = prior
+            .source_originals
+            .union(&incoming.source_originals)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(merged.source_originals, expected);
+        assert_eq!(
+            branch.extend_source_surface(&merged).unwrap(),
+            merged,
+            "repeated admission of the same exact overlapping bindings is idempotent"
+        );
+        let complete = ExactDeclarationContext::empty()
+            .admit_authored_publication(&[earlier.clone(), branch.clone()], &merged)
+            .expect("the complete joined issuer validates the complete merged surface");
+        merged
+            .validate_source_bindings(complete.compiler_source_support())
+            .unwrap();
+        assert!(
+            merged
+                .validate_source_bindings(&branch.compiler_support)
+                .is_err(),
+            "full surface validation still requires the prior issuer at publication"
+        );
+
+        std::fs::write(
+            &selected_path,
+            selected_source.replace("selected = 42", "selected = 43"),
+        )
+        .unwrap();
+        let revised = certify(1, "PrefixSelectedSupport");
+        let revised_binding = revised
+            .compiler_support
+            .world_primary_type_row(&earlier_owner)
+            .unwrap();
+        let original_binding = earlier
+            .compiler_support
+            .world_primary_type_row(&earlier_owner)
+            .unwrap();
+        assert_ne!(
+            revised_binding.original_binding, original_binding.original_binding,
+            "the conflicting owner must have an actually different compiler-issued Original"
+        );
+        let error = revised.extend_source_surface(&prior).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("publication surface substitutes its exact source binding"));
+        let mut outside_lexical = prior.clone();
+        let error = outside_lexical
+            .retain_source_bindings(
+                &revised.compiler_support,
+                &[],
+                &BTreeSet::from([earlier_owner]),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("publication surface substitutes its exact source binding"),
+            "Original owners outside lexical rows retain the same exact conflict check"
+        );
+        assert_eq!(prior.source_bindings, prior_bindings);
+    }
 
     #[test]
     fn declaration_inventory_refuses_paths_outside_the_retained_directory_before_binding() {

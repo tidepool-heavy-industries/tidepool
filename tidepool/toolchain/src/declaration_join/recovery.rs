@@ -283,7 +283,12 @@ pub fn certify_recovered_declaration_tip_in_context(
             );
         }
     }
-    source_surface.retain_source_bindings(context.compiler_source_support(), &lexical)?;
+    let originals = source_surface.source_originals.clone();
+    source_surface.retain_source_bindings(
+        context.compiler_source_support(),
+        &lexical,
+        &originals,
+    )?;
     Ok(RecoveredDeclarationTip {
         origin,
         context,
