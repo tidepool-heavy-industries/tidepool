@@ -5318,6 +5318,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         .resident
         .mint_scope(resident.public_source.scope())
         .unwrap();
+    let public_source = resident.adopt_initial_notebook_scope(public).unwrap();
     let durable = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/private-source-input").unwrap(),
         1,
@@ -5334,6 +5335,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         ..resident.public_context()
     };
     resident.set_run_context(public_context).unwrap();
+    resident.bootstrap_world_in(&recipe, &public_source);
     let before = resident.public_visibility_snapshot_in(public).unwrap();
     let before_binding_ids = resident
         .state
