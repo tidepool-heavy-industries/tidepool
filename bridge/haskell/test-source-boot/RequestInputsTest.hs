@@ -840,7 +840,16 @@ worldValueTypeHistories = withTiming $ withScratch $ \work ->
           (fail "dependency-only value rows entered the visible namespace")
         (operandPath,seal) <- liftIO (writeDescriptor "value-operand" operand)
         admitted <- liftIO (readWorldCellOperandWithOwner owner environment final operandPath seal)
-        liftIO $ unless (not (Map.null (worldCellOperandTypes admitted)))
+        (operandLeaf,operandDependencies) <- liftIO $ case operand of
+          TList [TString "TPCWCELLOPERAND2",_,_,_,leaf,TList dependencies,_] -> do
+            root <- worldValueTransportOwner leaf
+            owners <- forM dependencies $ \entry -> case entry of
+              TList [_,row] -> worldValueTransportOwner row
+              _ -> fail "operand census needs binding-keyed dependency rows"
+            pure (root,Set.fromList owners)
+          _ -> fail "operand census needs its complete v2 carrier"
+        liftIO $ unless (not (Set.null operandDependencies)
+            && Map.keysSet (worldCellOperandTypes admitted) == Set.insert operandLeaf operandDependencies)
           (fail "operand lost its independently owned TYPE dependencies after World retirement")
         let withoutDependencies = case operand of
               TList [tag,exposure,reference,blocks,leaf,_,acquisition] ->
@@ -879,6 +888,11 @@ worldValueColdCensus (TList [TString "TPCWORLD",TInt 6,_,_,_,_,TList [_,_,TList 
     (fail "producer cold dependency transport differs from independent live-CID manifests")
   pure (Map.fromList aliases,counts,Set.fromList (map snd supplied))
 worldValueColdCensus _ = fail "value census needs a complete v6 cold World"
+
+worldValueTransportOwner :: Term -> IO (String,String)
+worldValueTransportOwner (TList [TList [TString unit,TString name,_,_,_,_,_,_],_]) =
+  pure (T.unpack unit,T.unpack name)
+worldValueTransportOwner _ = fail "value census needs an exact offered interface row"
 
 -- Preserve the genuine physical rows and rehash only a deliberately corrupted
 -- row-fact association plus its parents, so CID integrity cannot mask refusal.
