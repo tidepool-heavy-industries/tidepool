@@ -6883,19 +6883,10 @@ mod tests {
                     &mut offer_validation,
                 )
                 .unwrap();
-                let current_proof =
-                    NativeOriginalRequirement::for_projection(&projection, &views[selected], &[])
-                        .unwrap()
-                        .into_iter()
-                        .find(|proof| proof.original == native.descriptor.id)
-                        .unwrap();
-                let current = current_issuer
-                    .issue_native_offer(
-                        &native.descriptor.owner,
-                        Some(current_proof),
-                        &mut offer_validation,
-                    )
-                    .unwrap();
+                let [current] = current_issuer.native_offers() else {
+                    panic!("one actual selected Original issuer")
+                };
+                let current = current.clone();
                 assert!(!current.same_issuance(&old));
                 assert!(
                     old.issued_group_carriers().unwrap().is_empty(),
@@ -6911,6 +6902,8 @@ mod tests {
                     [current.clone(), old.clone(), old.clone()],
                     &mut offer_validation,
                 )
+                .unwrap()
+                .retain_normalized_availability(current_issuer.native_availability())
                 .unwrap();
                 for offer in [&current, &old] {
                     assert!(
