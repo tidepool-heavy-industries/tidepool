@@ -4140,6 +4140,7 @@ def declare_haskell_components():
         "test-source-boot/fixtures/InstanceConsumer.hs": "test-source-boot/fixtures/InstanceConsumer.hs",
         "test-source-boot/fixtures/InstanceOwner.hs": "test-source-boot/fixtures/InstanceOwner.hs",
         "test-source-boot/fixtures/InstanceRelay.hs": "test-source-boot/fixtures/InstanceRelay.hs",
+        "test-source-boot/fixtures/LazyBackedgeCandidateDependency.hs": "test-source-boot/fixtures/LazyBackedgeCandidateDependency.hs",
         "test-source-boot/fixtures/LazyBackedgeDependency.hs": "test-source-boot/fixtures/LazyBackedgeDependency.hs",
         "test-source-boot/fixtures/LazyBackedgeTarget.hs": "test-source-boot/fixtures/LazyBackedgeTarget.hs",
         "test-source-boot/fixtures/LazyBackedgeTarget.hs-boot": "test-source-boot/fixtures/LazyBackedgeTarget.hs-boot",
