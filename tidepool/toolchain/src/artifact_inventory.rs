@@ -21875,6 +21875,10 @@ mod tests {
         assert!(producer.same_issued_facts(retained));
         assert!(producer.same_issuing_authority(&incoming));
         assert!(!producer.same_issuing_authority(&previous));
+        assert!(
+            !incoming.same_issued_facts(retained),
+            "the actual incoming producer must undergo fact-owner reconciliation"
+        );
         let ArtifactPayload::Original(producer_product) = &producer.payload else {
             unreachable!()
         };
@@ -21898,6 +21902,15 @@ mod tests {
             .completed_compiler_output_offer(&incoming.descriptor.owner)
             .unwrap()
             .unwrap();
+        let producer = stage
+            .producer_certificates()
+            .iter()
+            .find(|entry| entry.descriptor.id == incoming.descriptor.id)
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(producer, offer.original_acquisition()),
+            "the physical cohort retains its reconciled incoming producer"
+        );
         assert!(offer
             .original_acquisition()
             .same_issuing_authority(&incoming));

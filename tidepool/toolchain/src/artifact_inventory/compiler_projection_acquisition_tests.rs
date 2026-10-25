@@ -7,8 +7,6 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
     let offer_operation = std::sync::Arc::new(
         tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
     );
-    let mut offer_validation =
-        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let fixture = crate::artifacts::test_support::prepare_source_publication_entry_fixture()
         .expect("the actual compiler issues the first completed source observation");
     let frozen = crate::artifacts::FrozenEntrySources::capture(
@@ -65,6 +63,13 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
         "independent completed observations must exercise different actual owners"
     );
     assert!(!acquisitions[0].same_issuing_authority(acquisitions[1]));
+    let native_witnesses = acquisitions.map(|entry| {
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            unreachable!()
+        };
+        product.original_native()
+    });
+    assert!(!Arc::ptr_eq(native_witnesses[0], native_witnesses[1]));
     assert_eq!(
         supports[0].selected[owner].interface().0,
         supports[1].selected[owner].interface().0,
@@ -92,6 +97,10 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
         ]
         .map(|demand| {
             let inventory = ArtifactInventory::default();
+            let mut offer_validation =
+                crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+                    Arc::clone(&offer_operation),
+                );
             let entries = vec![Arc::clone(entry)];
             CompilerSourceSupport::from_selected_issuance(
                 CompilerInputProjection::from_issued_entries(&entries).unwrap(),
@@ -103,6 +112,17 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
             .unwrap()
         })
     });
+    assert_eq!(
+        checked_inputs[0][1]
+            .artifacts()
+            .selected_native_binding_rows()
+            .1,
+        checked_inputs[1][1]
+            .artifacts()
+            .selected_native_binding_rows()
+            .1,
+        "equal graph bindings can carry independently allocated native witnesses"
+    );
     for issued in &checked_inputs {
         for (nonempty, support) in issued.iter().enumerate() {
             let expected = support
@@ -147,6 +167,10 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
     }
     let shared_inputs = acquisitions.map(|entry| {
         let inventory = ArtifactInventory::default();
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+                Arc::clone(&offer_operation),
+            );
         let entries = vec![Arc::clone(entry)];
         let base = inventory
             .admit_shared_with_demand(
