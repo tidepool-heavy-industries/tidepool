@@ -1154,10 +1154,6 @@ impl CapturedCompilerStage {
                 ));
             }
         }
-        let producer_ids = entries
-            .iter()
-            .map(|entry| entry.descriptor.id)
-            .collect::<Vec<_>>();
         let mut original_value_facts = BTreeMap::new();
         for entry in &entries {
             if entry.descriptor.kind != crate::artifact_inventory::ArtifactKind::ValueInterface {
@@ -1175,10 +1171,10 @@ impl CapturedCompilerStage {
             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
             Some(selection),
         )?;
-        let producer_certificates = producer_ids
-            .into_iter()
-            .map(|id| admission.producer_entry(id).map(Arc::clone))
-            .collect::<Result<Vec<_>, _>>()?
+        let producer_certificates = admission
+            .producer_entries()
+            .cloned()
+            .collect::<Vec<_>>()
             .into();
         let physical = admission.artifacts.clone();
         let projection = selection

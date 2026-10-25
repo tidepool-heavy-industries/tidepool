@@ -936,6 +936,10 @@ pub(crate) struct ArtifactAdmission {
 }
 
 impl ArtifactAdmission {
+    pub(crate) fn producer_entries(&self) -> impl Iterator<Item = &Arc<ArtifactEntry>> {
+        self.supplied.values().map(|outcome| &outcome.entry)
+    }
+
     pub(crate) fn producer_entry(
         &self,
         id: ArtifactId,
@@ -15049,6 +15053,7 @@ mod tests {
             let inventory = ArtifactInventory::default();
             let resident = Arc::new(entry("CapturedCanonical", &[]));
             let incoming = Arc::new(entry("CapturedCanonical", &[]));
+            let excluded = Arc::new(entry("ExcludedCanonical", &[]));
             assert_eq!(resident, incoming);
             assert!(
                 !resident.same_issued_facts(&incoming),
@@ -15066,12 +15071,20 @@ mod tests {
             let captured = inventory
                 .bind_segment(
                     &parent,
-                    vec![incoming.clone()],
+                    vec![incoming.clone(), excluded.clone()],
                     &selection,
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
                 .unwrap();
             let stage = captured.captured_stage();
+            assert!(stage
+                .producer_certificates()
+                .iter()
+                .all(|entry| entry.descriptor.id != excluded.descriptor.id));
+            assert!(stage
+                .issued_artifacts()
+                .observed_payload(&excluded.descriptor.id)
+                .is_none());
             let selected = stage
                 .compiler_inputs()
                 .compiler_source_support()
