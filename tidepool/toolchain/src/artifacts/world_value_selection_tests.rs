@@ -83,6 +83,40 @@ pub(crate) fn prepare_checked_value_dependency_pair_fixture(
     Arc<crate::checked_cell::CheckedValueArtifact>,
     Arc<crate::checked_cell::CheckedValueArtifact>,
 ) {
+    prepare_checked_value_type_pair(
+        first_generation,
+        second_generation,
+        ValueTypeFixture::SharedNominal,
+    )
+}
+
+pub(crate) fn prepare_checked_value_captured_type_pair_fixture(
+    first_generation: u64,
+    second_generation: u64,
+) -> (
+    Arc<crate::checked_cell::CheckedValueArtifact>,
+    Arc<crate::checked_cell::CheckedValueArtifact>,
+) {
+    prepare_checked_value_type_pair(
+        first_generation,
+        second_generation,
+        ValueTypeFixture::CapturedNominal,
+    )
+}
+
+enum ValueTypeFixture {
+    SharedNominal,
+    CapturedNominal,
+}
+
+fn prepare_checked_value_type_pair(
+    first_generation: u64,
+    second_generation: u64,
+    kind: ValueTypeFixture,
+) -> (
+    Arc<crate::checked_cell::CheckedValueArtifact>,
+    Arc<crate::checked_cell::CheckedValueArtifact>,
+) {
     let ((endpoint, world, source, prepared), admission) = settle(|| {
         let (endpoint, world, source) = open_world_with_primary_and_module(
             None,
@@ -130,24 +164,143 @@ pub(crate) fn prepare_checked_value_dependency_pair_fixture(
     )
     .expect("nominal operand from its checked execution");
     let (prepared, admission) = settle(|| {
-        let checked = prepare_checked(
-            &endpoint,
-            &world,
-            &source,
-            "let supplied = input",
-            Some(operand),
-            &[(second_generation, "supplied")],
-        )?;
+        let checked = match kind {
+            ValueTypeFixture::SharedNominal => prepare_checked(
+                &endpoint,
+                &world,
+                &source,
+                "let supplied = input",
+                Some(operand),
+                &[(second_generation, "supplied")],
+            )?,
+            ValueTypeFixture::CapturedNominal => {
+                let template =
+                    include_str!("../../tests/fixtures/world-native/SelectionTemplate.hs")
+                        .replace("{{OPERAND_MODULE}}", &operand.symbol().module)
+                        .replace("{{OPERAND_BINDER}}", &operand.symbol().occurrence)
+                        .replace(
+                            "{{CELL_IMPORTS}}",
+                            "import qualified Module as Nominal\n{{CELL_IMPORTS}}",
+                        );
+                let plan = crate::compiler_world::plan_cell(
+                    &endpoint,
+                    &world,
+                    Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+                        source: include_str!(
+                            "../../tests/fixtures/world-native/WorldTypeCaptured.hs"
+                        )
+                        .into(),
+                        template,
+                        turn_templates: Vec::new(),
+                    }),
+                    Some(operand),
+                )?;
+                let origin =
+                    CompilerTransactionOrigin::current().expect("actual compiler transaction");
+                let subject = WorldCellAdmissionSubject::for_source_transaction(
+                    &origin,
+                    [17; 16],
+                    0,
+                    1,
+                    1,
+                    [b"captured declaration TYPE fixture".to_vec()],
+                )?;
+                let mut declarations = 0;
+                let requests = plan
+                    .items()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        Ok(match item.kind() {
+                            crate::cell_plan::ParsedCellPlanKind::Declaration => {
+                                declarations += 1;
+                                crate::cell_plan::WorldCellReservationRequest::Declaration {
+                                    declaration: second_generation + 10 + index as u64,
+                                }
+                            }
+                            crate::cell_plan::ParsedCellPlanKind::Bind => {
+                                crate::cell_plan::WorldCellReservationRequest::Bind {
+                                    value: second_generation,
+                                    bindings: vec![(
+                                        "supplied".into(),
+                                        tidepool_repr::SessionVarId::from_extract(
+                                            tidepool_codegen::prepared_program::session_var_id(
+                                                &tidepool_repr::SessionModule::val(
+                                                    tidepool_repr::Generation(second_generation),
+                                                )
+                                                .module_name(),
+                                                "supplied",
+                                            ),
+                                        ),
+                                    )],
+                                }
+                            }
+                            _ => {
+                                return Err(CompileError::ExtractFailed(
+                                    "captured TYPE fixture has unexpected parser item".into(),
+                                ))
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, CompileError>>()?;
+                assert!(
+                    declarations > 0,
+                    "fixture must issue a real authored declaration"
+                );
+                let reservation = plan.reserve(plan.issue_admission_token(subject, requests)?)?;
+                crate::compiler_world::admit_world_cell_program(
+                    &endpoint,
+                    reservation,
+                    source.clone(),
+                    source.clone(),
+                    &origin,
+                )?
+                .map_err(|refusal| {
+                    CompileError::ExtractFailed(format!(
+                        "actual captured TYPE fixture refused: {refusal:?}"
+                    ))
+                })?
+            }
+        };
         prepare_world_cell_program(checked)
     });
     let second = prepared
         .seal(&admission)
         .expect("actual dependent value compiler END");
-    let second = second.items()[0]
+    let second = second
+        .items()
+        .last()
+        .expect("actual dependent checked item")
         .native()
         .expect("actual dependent value execution")
         .value_interface_certificate()
         .expect("actual dependent checked value");
+    if matches!(kind, ValueTypeFixture::CapturedNominal) {
+        assert!(
+            second
+                .type_product()
+                .dependencies()
+                .contains_key(&row.type_product().leaf_binding()),
+            "captured nominal declaration must retain the exact input value binding"
+        );
+        let first_owner = crate::declaration_join::ExactModuleIdentity {
+            unit: "main".into(),
+            module: row.owner().module_name(),
+        };
+        assert!(
+            second
+                .type_product()
+                .dependencies()
+                .values()
+                .any(|dependency| {
+                    matches!(
+                        dependency.entry().payload,
+                        crate::artifact_inventory::ArtifactPayload::Canonical(_)
+                    ) && dependency.entry().requirements.contains(&first_owner)
+                }),
+            "a genuine canonical declaration must require the input value interface"
+        );
+    }
     (row, second)
 }
 

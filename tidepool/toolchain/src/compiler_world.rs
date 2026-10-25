@@ -4135,10 +4135,28 @@ pub(crate) fn world_context_fixture(
 /// fixture harness must reseal the copied arena files before admission.
 #[cfg(test)]
 pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>, CompileError> {
-    use ciborium::value::Value;
-    use std::collections::BTreeSet;
     let (first, second) =
         crate::artifacts::test_support::prepare_checked_value_dependency_pair_fixture(601, 602);
+    world_value_transport_fixture_rows(directory, first, second)
+}
+
+#[cfg(test)]
+pub(crate) fn world_captured_value_transport_fixture(
+    directory: &Path,
+) -> Result<Vec<u8>, CompileError> {
+    let (first, second) =
+        crate::artifacts::test_support::prepare_checked_value_captured_type_pair_fixture(601, 602);
+    world_value_transport_fixture_rows(directory, first, second)
+}
+
+#[cfg(test)]
+fn world_value_transport_fixture_rows(
+    directory: &Path,
+    first: Arc<CheckedValueArtifact>,
+    second: Arc<CheckedValueArtifact>,
+) -> Result<Vec<u8>, CompileError> {
+    use ciborium::value::Value;
+    use std::collections::BTreeSet;
     assert!(
         !first.type_product().dependencies().is_empty(),
         "fixture must own genuine TYPE dependencies"
@@ -9240,8 +9258,14 @@ mod answer_tests {
         });
         let original_descriptor = std::fs::read(&predecessor.restoration.descriptor).unwrap();
         let next = predecessor.project_bindings(1, [], None).unwrap();
-        assert_eq!(std::fs::read(&predecessor.restoration.descriptor).unwrap(), original_descriptor);
-        assert_ne!(predecessor.restoration.descriptor, next.restoration.descriptor);
+        assert_eq!(
+            std::fs::read(&predecessor.restoration.descriptor).unwrap(),
+            original_descriptor
+        );
+        assert_ne!(
+            predecessor.restoration.descriptor,
+            next.restoration.descriptor
+        );
         assert!(next.restoration.successor.is_none());
         assert_eq!(predecessor.restoration.inputs.bindings.query_scope, 0);
         assert_eq!(next.restoration.inputs.bindings.query_scope, 1);
@@ -9376,6 +9400,19 @@ mod answer_tests {
             proptest::prop_assert!(dependency_count_deltas([(-2, manifests[0].clone())]).is_err());
             proptest::prop_assert!(dependency_count_deltas([(-1, manifests[0].clone()), (1, manifests[0].clone())]).unwrap().is_empty());
         }
+    }
+
+    #[test]
+    #[ignore = "requires declared compiler; genuine captured TYPE fixture issuer owns it"]
+    fn genuine_captured_type_transport_retains_visible_dependency_leaf() {
+        let directory = tempfile::tempdir().unwrap();
+        let encoded = world_captured_value_transport_fixture(directory.path()).unwrap();
+        assert_eq!(
+            answer_array(&answer_cbor(&encoded).unwrap(), 4)
+                .unwrap()
+                .len(),
+            4
+        );
     }
 
     #[test]
