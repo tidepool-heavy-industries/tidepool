@@ -1103,6 +1103,13 @@ pub struct PreparedProgram {
 }
 
 impl PreparedProgram {
+    /// Keep only this entry owner's compiler-emitted resume and generic apply
+    /// helpers. The result carries code and exact package-reference identities,
+    /// without the original program's user metadata or linking authority.
+    pub fn extract_apply_support(&self) -> Result<Option<Self>, ParseError> {
+        apply_support::extract(self)
+    }
+
     pub fn definitions(&self) -> DefinitionsView<'_> {
         DefinitionsView::from(self.wire.as_ref())
     }
@@ -2069,6 +2076,7 @@ pub fn encode_type_graph_value(graph: &TypeGraph) -> ciborium::value::Value {
 mod budget;
 use budget::OperationBudget;
 
+mod apply_support;
 mod codec;
 mod decode;
 mod link;
