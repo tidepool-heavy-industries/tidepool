@@ -157,18 +157,20 @@ struct InputFixture {
 #[derive(Clone)]
 struct ProtocolOriginal {
     selection: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
-    constructors: BTreeSet<(
-        tidepool_repr::execution_schema::ConstructorIdentity,
-        tidepool_repr::DataConId,
-    )>,
+    constructors: IssuedFixtureConstructors,
+    response_result: Option<IssuedFixtureConstructors>,
 }
 
-fn run_request_constructors(
-    turn: &CompiledTurn,
-) -> BTreeSet<(
+type IssuedFixtureConstructors = BTreeSet<(
     tidepool_repr::execution_schema::ConstructorIdentity,
     tidepool_repr::DataConId,
-)> {
+)>;
+
+fn issued_fixture_constructors(
+    turn: &CompiledTurn,
+    module: &str,
+    occurrence: &str,
+) -> IssuedFixtureConstructors {
     let constructors = turn
         .certification
         .as_ref()
@@ -188,15 +190,23 @@ fn run_request_constructors(
                     decl.identity.symbol.unit == "main"
                         && decl.identity.symbol.namespace == "constructor"
                         && decl.identity.symbol.record_parent.is_none()
-                        && decl.identity.symbol.module == "Tidepool.Agent.Ref.Internal"
-                        && decl.identity.symbol.occurrence == "RunRequest"
+                        && decl.identity.symbol.module == module
+                        && decl.identity.symbol.occurrence == occurrence
                 })
                 .map(|decl| (decl.identity.clone(), decl.host_id))
                 .collect::<Vec<_>>()
         })
         .collect::<BTreeSet<_>>();
-    assert_eq!(constructors.len(), 1, "one issued RunRequest constructor");
+    assert_eq!(
+        constructors.len(),
+        1,
+        "one issued {module}.{occurrence} constructor"
+    );
     constructors
+}
+
+fn run_request_constructors(turn: &CompiledTurn) -> IssuedFixtureConstructors {
+    issued_fixture_constructors(turn, "Tidepool.Agent.Ref.Internal", "RunRequest")
 }
 
 impl InputFixture {
@@ -293,6 +303,10 @@ impl InputFixture {
     }
 
     fn protocol_original(&self) -> ProtocolOriginal {
+        self.protocol_original_from("Tidepool.Agent.Ref.Internal")
+    }
+
+    fn protocol_original_from(&self, module: &str) -> ProtocolOriginal {
         let selection = self
             .producer
             .published_source_original_selection(
@@ -302,13 +316,14 @@ impl InputFixture {
                     .original_input_identity(),
                 &tidepool_toolchain::declaration_join::ExactModuleIdentity {
                     unit: "main".into(),
-                    module: "Tidepool.Agent.Ref.Internal".into(),
+                    module: module.into(),
                 },
             )
-            .expect("producer issues its actual RunRequest source selection");
+            .expect("producer issues its actual protocol source selection");
         ProtocolOriginal {
             selection,
             constructors: run_request_constructors(&self.producer),
+            response_result: None,
         }
     }
 
@@ -430,6 +445,17 @@ impl InputFixture {
                 assert_eq!(received, expected);
             }
             assert_eq!(run_request_constructors(&receiver), original.constructors);
+            if let Some(expected) = &original.response_result {
+                assert_eq!(
+                    &issued_fixture_constructors(
+                        &receiver,
+                        "Tidepool.Agent.Reply.Internal",
+                        "ResponseResult",
+                    ),
+                    expected,
+                    "receiver consumes the producer's exact ResponseResult family"
+                );
+            }
         }
         assert_eq!(
             bound.len(),
@@ -7208,7 +7234,12 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         false,
         SessionId(1750),
     );
-    let protocol_original = fixture.protocol_original();
+    let mut protocol_original = fixture.protocol_original_from("Tidepool.Agent.Reply");
+    protocol_original.response_result = Some(issued_fixture_constructors(
+        &fixture.producer,
+        "Tidepool.Agent.Reply.Internal",
+        "ResponseResult",
+    ));
     let mut source = InputFixture::fresh_with_selected_receiver(
         SessionLib::open(
             fixture.session,
