@@ -3845,7 +3845,7 @@ resolveWorldCellInputs owner facts accumulated path consumer sourceOwners enviro
         in (Text.unpack (symbolUnit symbol),Text.unpack (symbolModule symbol)) `Set.notMember` sourceOwners) inputs)
     (reject "selected value owner is also a source module")
   primaryTypes <- either throwIO pure (capturedInterfaceInputs
-    ([worldTypeEntryVerifiedInterface entry | contribution <- typeContributions,entry <- Map.elems contribution] ++ map fst bodies))
+    ([worldTypeEntryVerifiedInterface entry | entry <- Map.elems allTypes] ++ map fst bodies))
   let privateRequirements = Set.toAscList (Set.fromList (concatMap (exactRequirements . worldDemandArtifact . snd) inputs))
       knownPrimary = Set.fromList [(exactUnit artifact,exactModule artifact)
         | entry <- Map.elems allTypes,let artifact = worldTypeEntryArtifact entry]
