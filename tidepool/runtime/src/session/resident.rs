@@ -7643,7 +7643,9 @@ where
                 let engine = self.state.require_prepared()?;
                 build(engine, realm, &table)?
             };
-            self.mount_host_handle_prepared(scope, binder, gen, handle, install, settlement)
+            self.mount_host_handle_prepared(
+                program, scope, binder, gen, handle, install, settlement,
+            )
         })();
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
@@ -7656,9 +7658,11 @@ where
 
     /// Install a just-built host handle. Unlike externally supplied custody,
     /// this method owns the handle outright, so each failure releases it in
-    /// this same checkout instead of relying on deferred custody cleanup.
+    /// this same checkout instead of relying on deferred custody cleanup. The
+    /// pinned carrier supplies the entry unit; host-built values can be ownerless.
     fn mount_host_handle_prepared(
         &mut self,
+        program: ProgramId,
         scope: ScopeId,
         binder: &BoundBinder,
         gen: Generation,
@@ -7666,13 +7670,6 @@ where
         install: Option<HostBindingInstall<'_>>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
-        let engine = self.state.require_prepared()?;
-        let Some(program) = engine.hosting_program(handle) else {
-            engine.release(handle);
-            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                "host binding mount produced a handle with no hosting program".into(),
-            ))));
-        };
         self.bind_prepared(
             program,
             scope,
