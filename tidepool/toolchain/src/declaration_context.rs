@@ -1177,7 +1177,7 @@ impl CapturedCompilerStage {
         timing.advance("issue_current_cohort");
         let validated = physical
             .inventory()
-            .issue_current_cohort_availability(&physical, selection, validation)?;
+            .issue_current_cohort_availability(&admission, selection, validation)?;
         let issued = RequestNativeAvailability::from_current_cohort(
             &physical,
             validated,

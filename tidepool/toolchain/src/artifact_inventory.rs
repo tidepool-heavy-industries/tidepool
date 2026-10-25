@@ -4555,10 +4555,11 @@ impl ArtifactInventory {
     }
     pub(crate) fn issue_current_cohort_availability(
         &self,
-        physical: &ArtifactView,
+        admission: &ArtifactAdmission,
         selection: &crate::certified_products::CertifiedSourceSelection,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
+        let physical = &admission.artifacts;
         let classified = native_availability::ClassifiedNativeCohort::classify(
             physical,
             selection,
@@ -4569,9 +4570,23 @@ impl ArtifactInventory {
             .iter()
             .map(|entry| entry.descriptor.id)
             .collect::<Vec<_>>();
+        let entries = classified
+            .entries()
+            .iter()
+            .map(|entry| {
+                let incoming = admission
+                    .supplied
+                    .get(&entry.descriptor.id)
+                    .ok_or_else(|| failure("current cohort lacks its admitted producer outcome"))?;
+                if incoming.entry.as_ref() != entry.as_ref() {
+                    return Err(metadata_conflict::refusal(entry.descriptor.id));
+                }
+                Ok(Arc::clone(&incoming.entry))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
         let custody = self.issue_selected_custody(
             physical,
-            classified.entries().to_vec(),
+            entries,
             classified.available().clone(),
             false,
             ArtifactRootIntent::CurrentCohort {
@@ -21817,6 +21832,91 @@ mod tests {
             }
             drop(views); proptest::prop_assert_eq!(inventory.node_count(), 0);
         }
+    }
+
+    #[test]
+    fn current_cohort_preserves_incoming_original_beside_equal_prior_authority() {
+        let (_fixture, cold, fresh) = issued_source_admission_pair();
+        let incoming = Arc::new(fresh);
+        let previous = Arc::new(cold);
+        assert_eq!(incoming, previous);
+        assert!(!incoming.same_issuing_authority(&previous));
+        let inventory = ArtifactInventory::default();
+        let baseline = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::clone(&previous)],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[Arc::clone(&incoming)]).unwrap();
+        let mut validation = PackageInterfaceValidation::default();
+        let mut selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &baseline.metadata_snapshot(),
+                &validation.inventory,
+            )
+            .unwrap();
+        let admission = inventory
+            .admit_product_artifacts(
+                &baseline,
+                vec![Arc::clone(&incoming)],
+                NativeArtifactDemand::ScopeInterfaces,
+                Some(&selection),
+            )
+            .unwrap();
+        let producer = &admission.supplied[&incoming.descriptor.id].entry;
+        let retained = admission
+            .artifacts
+            .observed_payload(&incoming.descriptor.id)
+            .unwrap();
+        assert!(producer.same_issued_facts(retained));
+        assert!(producer.same_issuing_authority(&incoming));
+        assert!(!producer.same_issuing_authority(&previous));
+        let ArtifactPayload::Original(producer_product) = &producer.payload else {
+            unreachable!()
+        };
+        let ArtifactPayload::Original(retained_product) = &retained.payload else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(
+            producer_product.original_native(),
+            retained_product.original_native(),
+        ));
+        drop(admission);
+        let stage = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            &baseline,
+            vec![Arc::clone(&incoming)],
+            &mut validation,
+        )
+        .unwrap();
+        let offer = stage
+            .source_selection()
+            .completed_compiler_output_offer(&incoming.descriptor.owner)
+            .unwrap()
+            .unwrap();
+        assert!(offer
+            .original_acquisition()
+            .same_issuing_authority(&incoming));
+        assert!(!offer
+            .original_acquisition()
+            .same_issuing_authority(&previous));
+        assert!(offer.original_acquisition().same_issued_facts(
+            stage
+                .issued_artifacts()
+                .observed_payload(&incoming.descriptor.id)
+                .unwrap()
+        ));
+        assert!(stage
+            .compiler_inputs()
+            .compiler_source_support()
+            .compiler_roles()
+            .original_acquisition(&incoming.descriptor.owner)
+            .unwrap()
+            .same_issuing_authority(&incoming));
     }
 
     #[test]
