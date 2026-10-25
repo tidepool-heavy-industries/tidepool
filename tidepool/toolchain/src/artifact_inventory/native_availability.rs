@@ -1794,7 +1794,6 @@ impl NativeOfferCustody {
             materialization_sources: Default::default(),
             materialization: MaterializationSource {
                 cache: Arc::new(Mutex::new(BTreeMap::new())),
-                type_products: Default::default(),
                 parents: Arc::from([]),
                 fixed: physical.into_iter().collect(),
             },

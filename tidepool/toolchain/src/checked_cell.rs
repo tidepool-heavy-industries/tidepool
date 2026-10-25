@@ -1679,8 +1679,8 @@ impl HostBindingInterfaceOffer {
             .prototype
             .type_interfaces
             .with_host_value_interfaces(std::slice::from_ref(&certificate))?;
-        let row =
-            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
+        let (row, type_interfaces) =
+            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value_with_interfaces(
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Fresh(&certificate),
             )?;
@@ -1698,8 +1698,11 @@ impl HostBindingInterfaceOffer {
             },
             authority: (self.prototype.producer, Sha256::digest(receipt).into()),
             certified_interface: certificate.clone(),
-            type_interfaces: crate::declaration_context::SelectedTypeInterfaces::issue_checked_value(
-                &compiler_support, &certificate)?,
+            type_interfaces:
+                crate::declaration_context::SelectedTypeInterfaces::issue_checked_value(
+                    &compiler_support,
+                    &certificate,
+                )?,
             compiler_support,
             source_lexical: Vec::new(),
             template_imports: None,
@@ -2170,8 +2173,8 @@ impl CheckedValueInputs {
         }
         // Promote into the completed issuer before its existing physical
         // projection chooses the value's independently retained support.
-        let row =
-            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
+        let (row, type_interfaces) =
+            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value_with_interfaces(
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&output.row),
             )?;
@@ -2195,8 +2198,11 @@ impl CheckedValueInputs {
             interface: input,
             authority: (cell.producer, cell.receipt_digest),
             certified_interface: certificate.clone(),
-            type_interfaces: crate::declaration_context::SelectedTypeInterfaces::issue_checked_value(
-                &compiler_support, &certificate)?,
+            type_interfaces:
+                crate::declaration_context::SelectedTypeInterfaces::issue_checked_value(
+                    &compiler_support,
+                    &certificate,
+                )?,
             compiler_support,
             source_lexical,
             template_imports,
@@ -2212,7 +2218,9 @@ impl CheckedValueArtifact {
     pub(crate) fn type_product(&self) -> &Arc<crate::declaration_context::CheckedValueTypeProduct> {
         &self.row
     }
-    pub(crate) fn type_interfaces(&self) -> &Arc<crate::declaration_context::SelectedTypeInterfaces> {
+    pub(crate) fn type_interfaces(
+        &self,
+    ) -> &Arc<crate::declaration_context::SelectedTypeInterfaces> {
         &self.type_interfaces
     }
 

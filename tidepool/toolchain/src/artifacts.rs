@@ -8235,7 +8235,9 @@ mod module_product_tests {
                 Arc::ptr_eq(&value, &native.value_interface_certificate().unwrap()),
                 "type projection preserves the actual compiled value owner"
             );
-            value.type_product().leaf_parts()
+            value
+                .type_product()
+                .leaf_parts()
                 .expect("the original value retains its actual row input owners");
             program
                 .validate_typed_entries()

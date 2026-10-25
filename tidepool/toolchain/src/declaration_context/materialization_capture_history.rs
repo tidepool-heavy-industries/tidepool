@@ -443,6 +443,7 @@ fn demanded_rows_match_full_postorder_and_preserve_exported_file_leases() {
     // neither a certificate nor compiler/native selection authority.
     let overlay = |parents, rows| {
         Arc::new(RetainedArtifactMaterialization {
+            checked_value_product: None,
             kind: MaterializationKind::Issued,
             _directory: None,
             _parents: parents,
@@ -954,6 +955,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
         use crate::host_work::{HostWorkCounter, HostWorkObservation};
         let overlay = |parents, paths| {
             Arc::new(RetainedArtifactMaterialization {
+            checked_value_product: None,
                 kind: MaterializationKind::Issued,
                 _directory: None,
                 _parents: parents,

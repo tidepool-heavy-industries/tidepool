@@ -2494,6 +2494,30 @@ pub(crate) struct SelectedCompilerInterfaces<'a> {
     selected: &'a SelectedCompilerRows,
 }
 
+/// Issued only by the selected namespace's authenticated Interface-edge walk.
+/// Raw entry inventories cannot stand in for this complete expected closure.
+pub(crate) struct ExpectedCheckedValueClosure {
+    leaf: ArtifactBinding,
+    entries: imbl::OrdMap<ArtifactBinding, Arc<ArtifactEntry>>,
+    support: CompilerSourceSupport,
+    producer: [u8; 32],
+}
+
+impl ExpectedCheckedValueClosure {
+    pub(crate) fn leaf_binding(&self) -> ArtifactBinding {
+        self.leaf
+    }
+    pub(crate) fn entries(&self) -> &imbl::OrdMap<ArtifactBinding, Arc<ArtifactEntry>> {
+        &self.entries
+    }
+    pub(crate) fn support(&self) -> &CompilerSourceSupport {
+        &self.support
+    }
+    pub(crate) fn producer(&self) -> [u8; 32] {
+        self.producer
+    }
+}
+
 enum InterfaceProjectionPurpose {
     PreserveCustody,
     TypeNames,
@@ -2504,18 +2528,23 @@ impl SelectedCompilerInterfaces<'_> {
     pub(crate) fn checked_value_type_closure(
         &self,
         value: &crate::recovery_artifacts::CertifiedValueInterface,
-    ) -> Result<(ArtifactBinding, imbl::OrdMap<ArtifactBinding, Arc<ArtifactEntry>>, CompilerSourceSupport), CompileError> {
+    ) -> Result<ExpectedCheckedValueClosure, CompileError> {
         let owner = ExactModuleIdentity {
             unit: value.interface().unit().to_owned(),
             module: value.interface().module().to_owned(),
         };
-        let root = self.selected.get(&owner)
-            .ok_or_else(|| failure("checked value has no selected row"))?.interface();
+        let root = self
+            .selected
+            .get(&owner)
+            .ok_or_else(|| failure("checked value has no selected row"))?
+            .interface();
         if root.1.descriptor.id != value.artifact_id()
             || root.1.requirements != value.requirements()
             || !matches!(&root.1.payload, ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) if interface == value.interface())
         {
-            return Err(failure("checked value differs from its selected certificate"));
+            return Err(failure(
+                "checked value differs from its selected certificate",
+            ));
         }
         let producer = value.interface().toolchain_identity_sha256();
         if producer == [0; 32] {
@@ -2525,51 +2554,117 @@ impl SelectedCompilerInterfaces<'_> {
         let mut pending = vec![root.0];
         while let Some(binding) = pending.pop() {
             crate::host_work::checkpoint()?;
-            if rows.contains_key(&binding) { continue; }
-            if self.artifacts.lease.selection.namespace.get(&binding.artifact) != Some(&binding) {
-                return Err(failure("checked value TYPE dependency has another selected binding"));
+            if rows.contains_key(&binding) {
+                continue;
             }
-            let entry = self.artifacts.lease.payloads.get(&binding.artifact)
-                .ok_or_else(|| failure("checked value TYPE dependency lacks custody"))?;
-            let selected = self.selected.get(&entry.descriptor.owner)
-                .ok_or_else(|| failure("checked value TYPE dependency lacks a selected row"))?.interface();
-            if selected.0 != binding || !selected.1.same_issued_facts(entry)
-                || entry.descriptor.producer_sha256 != producer
-                || !matches!(&entry.payload, ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface | JoinedInterfaceRole::LexicalJoin))
+            if self
+                .artifacts
+                .lease
+                .selection
+                .namespace
+                .get(&binding.artifact)
+                != Some(&binding)
             {
-                return Err(failure("checked value TYPE dependency differs from its selected interface"));
+                return Err(failure(
+                    "checked value TYPE dependency has another selected binding",
+                ));
+            }
+            let entry = self
+                .artifacts
+                .lease
+                .payloads
+                .get(&binding.artifact)
+                .ok_or_else(|| failure("checked value TYPE dependency lacks custody"))?;
+            let selected = self
+                .selected
+                .get(&entry.descriptor.owner)
+                .ok_or_else(|| failure("checked value TYPE dependency lacks a selected row"))?
+                .interface();
+            if selected.0 != binding
+                || !selected.1.same_issued_facts(entry)
+                || entry.descriptor.producer_sha256 != producer
+                || !matches!(
+                    &entry.payload,
+                    ArtifactPayload::Canonical(_)
+                        | ArtifactPayload::Interface(
+                            _,
+                            JoinedInterfaceRole::ValueInterface | JoinedInterfaceRole::LexicalJoin
+                        )
+                )
+            {
+                return Err(failure(
+                    "checked value TYPE dependency differs from its selected interface",
+                ));
             }
             rows.insert(binding, entry.clone());
             let node = InventoryNodeKey::Artifact(binding);
-            let proof = self.artifacts.lease.selection.scopes.get(&binding.selection)
-                .ok_or_else(|| failure("checked value TYPE dependency lacks its issuing scope"))?.proof();
+            let proof = self
+                .artifacts
+                .lease
+                .selection
+                .scopes
+                .get(&binding.selection)
+                .ok_or_else(|| failure("checked value TYPE dependency lacks its issuing scope"))?
+                .proof();
             if proof.nodes.binary_search(&node).is_err() {
-                return Err(failure("checked value TYPE dependency is outside its issuing scope"));
+                return Err(failure(
+                    "checked value TYPE dependency is outside its issuing scope",
+                ));
             }
-            let start = proof.dependencies.partition_point(|(source, _, _)| *source < node);
+            let start = proof
+                .dependencies
+                .partition_point(|(source, _, _)| *source < node);
             let mut required = BTreeMap::new();
-            for (_, target, label) in proof.dependencies[start..].iter().take_while(|(source, _, _)| *source == node) {
-                if !matches!(label, ArtifactDependency::Interface) { continue; }
+            for (_, target, label) in proof.dependencies[start..]
+                .iter()
+                .take_while(|(source, _, _)| *source == node)
+            {
+                if !matches!(label, ArtifactDependency::Interface) {
+                    continue;
+                }
                 let InventoryNodeKey::Artifact(child) = target else {
                     return Err(failure("checked value TYPE edge targets a native group"));
                 };
-                let child_entry = self.artifacts.lease.payloads.get(&child.artifact)
+                let child_entry = self
+                    .artifacts
+                    .lease
+                    .payloads
+                    .get(&child.artifact)
                     .ok_or_else(|| failure("checked value TYPE edge lacks custody"))?;
-                if required.insert(child_entry.descriptor.owner.clone(), *child).is_some() {
+                if required
+                    .insert(child_entry.descriptor.owner.clone(), *child)
+                    .is_some()
+                {
                     return Err(failure("checked value TYPE edge repeats an owner"));
                 }
-                if entry.interface_seals.get(&child_entry.descriptor.owner)
-                    .is_some_and(|seal| *seal != child_entry.descriptor.interface_sha256) {
-                    return Err(failure("checked value TYPE edge has another interface seal"));
+                if entry
+                    .interface_seals
+                    .get(&child_entry.descriptor.owner)
+                    .is_some_and(|seal| *seal != child_entry.descriptor.interface_sha256)
+                {
+                    return Err(failure(
+                        "checked value TYPE edge has another interface seal",
+                    ));
                 }
                 pending.push(*child);
             }
             if required.keys().ne(entry.requirements.iter()) {
-                return Err(failure("checked value TYPE edges differ from its exact requirements"));
+                return Err(failure(
+                    "checked value TYPE edges differ from its exact requirements",
+                ));
             }
         }
-        let support = self.type_interfaces_for_owners(rows.values().map(|entry| entry.descriptor.owner.clone()).collect())?;
-        Ok((root.0, rows, support))
+        let support = self.type_interfaces_for_owners(
+            rows.values()
+                .map(|entry| entry.descriptor.owner.clone())
+                .collect(),
+        )?;
+        Ok(ExpectedCheckedValueClosure {
+            leaf: root.0,
+            entries: rows,
+            support,
+            producer,
+        })
     }
 
     pub(crate) fn get(&self, owner: &ExactModuleIdentity) -> Option<&Arc<ArtifactEntry>> {
@@ -2850,7 +2945,6 @@ impl ArtifactView {
             materialization_sources,
             materialization: MaterializationSource {
                 cache: Arc::new(Mutex::new(BTreeMap::new())),
-                type_products: Default::default(),
                 parents: materialization_parents.into_iter().collect(),
                 fixed: Default::default(),
             },
