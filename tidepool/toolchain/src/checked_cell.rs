@@ -6896,15 +6896,19 @@ mod tests {
                     !current.issued_group_carriers().unwrap().is_empty(),
                     "materializing the selected Original requires its actual issued native proof"
                 );
-                let support = crate::declaration_context::recover_fixture_compiler_support(
-                    projection.clone(),
-                    views[selected].clone(),
-                    [current.clone(), old.clone(), old.clone()],
-                    &mut offer_validation,
-                )
-                .unwrap()
-                .retain_normalized_availability(current_issuer.native_availability())
-                .unwrap();
+                let support = current_issuer
+                    .retain_offers([current.clone(), old.clone(), old.clone()])
+                    .unwrap();
+                assert!(
+                    support.same_selected_acquisitions(&current_issuer),
+                    "historical custody preserves the actual checked compiler input choices"
+                );
+                assert!(
+                    support
+                        .native_availability()
+                        .same_acquisition(current_issuer.native_availability()),
+                    "historical custody preserves the actual normalized permission owner"
+                );
                 for offer in [&current, &old] {
                     assert!(
                         support
