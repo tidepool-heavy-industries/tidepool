@@ -15020,6 +15020,60 @@ mod tests {
     }
 
     #[test]
+    fn captured_canonical_producer_rows_share_acquired_fact_owner() {
+        for inherit in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let resident = Arc::new(entry("CapturedCanonical", &[]));
+            let incoming = Arc::new(entry("CapturedCanonical", &[]));
+            assert_eq!(resident, incoming);
+            assert!(
+                !resident.same_issued_facts(&incoming),
+                "the independent equal allocation must exist before admission"
+            );
+            let available = inventory
+                .admit_shared(&inventory.empty_view(), vec![resident.clone()])
+                .unwrap();
+            let parent = if inherit {
+                available.clone()
+            } else {
+                inventory.empty_view()
+            };
+            let selection = bound_selection_for_entries(&available, &[incoming.clone()]);
+            let captured = inventory
+                .bind_segment(
+                    &parent,
+                    vec![incoming.clone()],
+                    &selection,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
+                .unwrap();
+            let stage = captured.captured_stage();
+            let selected = stage
+                .compiler_inputs()
+                .compiler_source_support()
+                .selected_interfaces()
+                .unwrap()
+                .get(&incoming.descriptor.owner)
+                .unwrap()
+                .clone();
+            let acquired = stage
+                .issued_artifacts()
+                .observed_payload(&incoming.descriptor.id)
+                .unwrap();
+            assert!(selected.same_issued_facts(acquired), "actual captured compiler rows and acquired payloads must share their immutable facts");
+            assert!(selected.same_issued_facts(&resident));
+            let graph = available.capture_graph_selection();
+            let mut conflicting = (*incoming).clone();
+            conflicting.requirements.push(module("UnissuedDependency"));
+            assert!(
+                matches!(inventory.admit_product_artifacts(&available, vec![Arc::new(conflicting)], NativeArtifactDemand::ScopeInterfaces, None),
+                Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { .. }))
+            );
+            assert_eq!(available.capture_graph_selection(), graph);
+        }
+    }
+
+    #[test]
     fn original_companion_adopts_existing_canonical_owner_once() {
         let inventory = ArtifactInventory::default();
         let first = issued_native_groups("Original", vec![(0, Vec::new())], &[], &BTreeMap::new());
@@ -15109,6 +15163,22 @@ mod tests {
             .unwrap()
             .facts
             .same_owner(&resident.facts));
+        let selected_row = fixed
+            .captured_stage()
+            .compiler_inputs()
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap()
+            .get(&captured.descriptor.owner)
+            .unwrap()
+            .clone();
+        assert!(selected_row.same_issued_facts(
+            fixed
+                .captured_stage()
+                .issued_artifacts()
+                .observed_payload(&captured.descriptor.id)
+                .unwrap()
+        ));
         let before = inventory.metrics();
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let (prepared, accepted) = source_target_data(&[]);
@@ -21774,6 +21844,23 @@ mod tests {
             let old = inventory
                 .admit(&inventory.empty_view(), vec![existing.clone()])
                 .unwrap();
+            let admission = inventory
+                .admit_product_artifacts(
+                    &old,
+                    vec![Arc::new(incoming.clone())],
+                    NativeArtifactDemand::ScopeInterfaces,
+                    None,
+                )
+                .unwrap();
+            let producer = &admission.supplied[&incoming.descriptor.id].entry;
+            let retained = admission
+                .artifacts
+                .observed_payload(&incoming.descriptor.id)
+                .unwrap();
+            assert!(producer.same_issued_facts(retained));
+            assert!(producer.same_issuing_authority(incoming));
+            assert!(!producer.same_issuing_authority(existing), "interning facts cannot replace this producer's independent admission/transport authority");
+            assert!(retained.same_issuing_authority(existing), "the receiving payload keeps its own authority independently of the producer facade");
             let unrelated = inventory
                 .admit(&inventory.empty_view(), vec![incoming.clone()])
                 .unwrap();

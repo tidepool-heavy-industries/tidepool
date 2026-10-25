@@ -4177,17 +4177,17 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         let mut selected = self.selected.as_ref().clone();
         for entry in interfaces {
-            let owner = &entry.descriptor.owner;
+            let owner = entry.descriptor.owner.clone();
             let role = projection
                 .roles
-                .get(owner)
+                .get(&owner)
                 .ok_or_else(|| failure("produced interface lacks its selected role"))?;
             if role.interface() != entry.descriptor.id {
                 return Err(failure(
                     "produced interface differs from selected compiler role",
                 ));
             }
-            if selected.rows.contains_key(owner) {
+            if selected.rows.contains_key(&owner) {
                 continue;
             }
             if role.original().is_some() {
@@ -4199,6 +4199,19 @@ impl CompilerSourceSupport {
                 .namespace
                 .get(&entry.descriptor.id)
                 .ok_or_else(|| failure("produced interface lacks its exact binding"))?;
+            let acquired = artifacts
+                .lease
+                .payloads
+                .get(&entry.descriptor.id)
+                .ok_or_else(|| failure("produced interface lacks its acquired payload"))?;
+            if entry != *acquired {
+                return Err(metadata_conflict::refusal(acquired, &entry));
+            }
+            let entry = if entry.has_fact_owner(acquired.fact_owner()) {
+                entry
+            } else {
+                Arc::new(entry.adopt_facts(acquired.fact_owner().clone()))
+            };
             selected.changed_owners.insert(owner.clone());
             selected.rows.insert(
                 owner.clone(),
@@ -8218,6 +8231,67 @@ mod tests {
             matches!(inventory.prepare_value_interface_append(&source, vec![Arc::new(sealed)]), Err(CompileError::ArtifactInventory(error))
             if matches!(error.failure, ArtifactInventoryFailure::InterfaceSealMismatch { .. }))
         );
+    }
+
+    #[test]
+    fn general_value_admission_preserves_canonicalized_issuer_facts() {
+        let inventory = ArtifactInventory::default();
+        let certificate = value_certificate("CanonicalizedValue", vec![]);
+        let resident = Arc::new(ArtifactEntry::interface(
+            certificate.interface().clone(),
+            JoinedInterfaceRole::ValueInterface,
+            vec![],
+        ));
+        let independent = Arc::new(ArtifactEntry::interface(
+            certificate.interface().clone(),
+            JoinedInterfaceRole::ValueInterface,
+            vec![],
+        ));
+        assert_eq!(resident, independent);
+        assert!(!resident.same_issued_facts(&independent));
+        let available = inventory
+            .admit_shared(&inventory.empty_view(), vec![resident.clone()])
+            .unwrap();
+        let source = CompilerSourceSupport::new(
+            CompilerInputProjection::default(),
+            available,
+            [],
+            Default::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            inventory
+                .prepare_value_interface_append(&source, vec![independent])
+                .unwrap(),
+            ValueInterfaceAdmission::General {
+                reason: ValueInterfaceGeneralAdmission::UnselectedRepeat(_),
+                ..
+            }
+        ));
+        let selected = source
+            .admit_value_interfaces(&[certificate.clone()])
+            .unwrap();
+        let row = selected
+            .selected_interfaces()
+            .unwrap()
+            .get(&resident.descriptor.owner)
+            .unwrap()
+            .clone();
+        let acquired = selected
+            .artifacts()
+            .observed_payload(&resident.descriptor.id)
+            .unwrap();
+        assert!(
+            row.same_issued_facts(acquired),
+            "the general production consumer must keep its selected row aligned to acquired facts"
+        );
+        assert!(row.same_issued_facts(&resident));
+        let closure = selected
+            .selected_interfaces()
+            .unwrap()
+            .checked_value_type_closure(&certificate)
+            .unwrap();
+        assert_eq!(closure.entries().len(), 1);
     }
 
     #[test]
