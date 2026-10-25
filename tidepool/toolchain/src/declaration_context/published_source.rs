@@ -214,7 +214,10 @@ impl ExactDeclarationContext {
             if selected.insert(owner.clone()) {
                 let node = graph
                     .get(&owner)
-                    .ok_or_else(|| failure("published original loses its exact lexical closure"))?;
+                    .ok_or_else(|| failure(format!(
+                        "published original loses its exact lexical closure: missing {}:{} from root {}:{}",
+                        owner.unit, owner.module, root.unit, root.module,
+                    )))?;
                 pending.extend(node.imports.iter().cloned());
             }
         }

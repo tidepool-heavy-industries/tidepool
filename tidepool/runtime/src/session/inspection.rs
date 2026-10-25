@@ -1346,7 +1346,7 @@ fn run_inspection_batch(
             )?
         }
         None => match request.exact_context.clone() {
-            Some(context) => {
+            Some(context) if request.inject_modules.is_empty() => {
                 tidepool_toolchain::artifacts::ModuleCandidateOffer::select_inspection_with_catalog(
                     &endpoint,
                     &include,
@@ -1354,6 +1354,15 @@ fn run_inspection_batch(
                     Some(context),
                     Vec::new(),
                     &[],
+                    &catalog,
+                )?
+            }
+            Some(context) => {
+                tidepool_toolchain::artifacts::ModuleCandidateOffer::select_in_context_with_catalog(
+                    &endpoint,
+                    &include,
+                    temp.path(),
+                    context,
                     &catalog,
                 )?
             }
