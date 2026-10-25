@@ -2487,6 +2487,7 @@ tidepool_buildscript_run(
                 ("toolchain_world_value_selection_test", "artifacts::world_value_selection_tests::real_world_value_selection_preserves_physical_owner_and_item_prefix"),
                 ("toolchain_world_value_type_history_test", "compiler_world::answer_tests::genuine_world_type_transport_matches_cold_dependency_census"),
                 ("toolchain_world_captured_type_history_test", "compiler_world::answer_tests::genuine_captured_type_transport_retains_visible_dependency_leaf"),
+                ("toolchain_world_historical_type_history_test", "compiler_world::answer_tests::genuine_historical_type_versions_remain_passive_custody"),
                 ("toolchain_world_produced_value_prefix_test", "artifacts::world_value_selection_tests::real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand"),
                 ("toolchain_world_reference_history_test", "artifacts::world_value_selection_tests::real_world_reference_history_restores_same_owner_and_rejects_crossed_ready"),
                 ("toolchain_staged_world_first_demands_test", "artifacts::world_value_selection_tests::prior_source_home_links_bind_first_packagefree_and_packageful_targets"),
