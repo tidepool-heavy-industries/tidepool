@@ -2769,6 +2769,8 @@ impl CompilerWorld {
                 inputs.lexical = lexical.clone();
             }
         }
+        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
+        inputs.directory = directory.clone();
         let delta = prior.inputs.bindings.advance(query_scope, changes)?;
         inputs.bindings = delta.bindings;
         if query_scope != prior.inputs.bindings.query_scope {
@@ -2779,8 +2781,6 @@ impl CompilerWorld {
                 position,
             }));
         }
-        let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
-        inputs.directory = directory.clone();
         let mut facts = prior.bindings.facts().clone();
         let mut row_roots = prior.binding_rows.clone();
         let mut visible_changes = BTreeMap::new();
@@ -9238,7 +9238,10 @@ mod answer_tests {
             realization: Arc::new(Mutex::new(None)),
             position: None,
         });
+        let original_descriptor = std::fs::read(&predecessor.restoration.descriptor).unwrap();
         let next = predecessor.project_bindings(1, [], None).unwrap();
+        assert_eq!(std::fs::read(&predecessor.restoration.descriptor).unwrap(), original_descriptor);
+        assert_ne!(predecessor.restoration.descriptor, next.restoration.descriptor);
         assert!(next.restoration.successor.is_none());
         assert_eq!(predecessor.restoration.inputs.bindings.query_scope, 0);
         assert_eq!(next.restoration.inputs.bindings.query_scope, 1);
