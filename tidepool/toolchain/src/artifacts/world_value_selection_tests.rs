@@ -1906,6 +1906,33 @@ fn assert_physical_selection(
     let segment = pending.segment();
     let input = operand.map(|operand| {
         let artifact = operand.checked_row().certified_interface().artifact_id();
+        let types = operand.checked_row().type_product();
+        for entry in std::iter::once(types.leaf_entry())
+            .chain(types.dependencies().values().map(|row| row.entry()))
+        {
+            assert!(
+                checked
+                    .primary_inputs()
+                    .inputs()
+                    .compiler_source_support()
+                    .compiler_roles()
+                    .get(&entry.descriptor.owner)
+                    .is_none(),
+                "operand TYPE custody must remain borrowed by the stage"
+            );
+            assert_eq!(
+                segment
+                    .originals
+                    .captured_stage()
+                    .compiler_inputs()
+                    .role_projection()
+                    .snapshot_roles()
+                    .get(&entry.descriptor.owner)
+                    .map(|role| role.interface()),
+                Some(entry.descriptor.id),
+                "the stage borrows the operand's complete TYPE closure"
+            );
+        }
         let owner = crate::declaration_join::ExactModuleIdentity {
             unit: operand.symbol().unit.clone(),
             module: operand.symbol().module.clone(),
