@@ -61,6 +61,7 @@ TOOLCHAIN_COMPILER_FREE_TESTS = [
     "artifact_inventory::compiler_projection::tests::checked_value_type_product_borrows_shared_dependency_physical_rows",
     "artifact_inventory::compiler_projection::tests::checked_value_type_closure_refuses_crossed_selected_dependency_scope",
     "declaration_context::tests::checked_value_type_product_refuses_incomplete_and_wrong_physical_rows",
+    "declaration_context::tests::closed_request_preserves_protected_role_refusals",
     "compiler_world::answer_tests::complete_value_row_fact_binds_exact_dependency_associations",
     "compiler_world::answer_tests::dependency_deltas_match_full_distinct_row_census",
     "compiler_world::answer_tests::scope_change_rebuilds_cold_world_instead_of_emitting_foreign_successor",
