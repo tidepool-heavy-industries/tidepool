@@ -38,6 +38,7 @@
     "exomonad/actor/src/fixtures/world-declaration-invoke-after-failure.hs",
     "exomonad/actor/src/fixtures/world-declaration-invoke-captured-input.hs",
     "exomonad/actor/src/fixtures/world-declaration-type-failure.hs",
+    "exomonad/actor/src/fixtures/world-nominal-captured-declaration.hs",
     "exomonad/actor/src/fixtures/world-nominal-private-consumer.hs",
     "exomonad/actor/src/fixtures/world-nominal-producer.hs",
     "exomonad/actor/src/fixtures/world-nominal-public-consumer.hs",
