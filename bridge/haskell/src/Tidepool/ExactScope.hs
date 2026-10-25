@@ -2471,9 +2471,9 @@ readWorldTypeInputs owner env facts roots = case walk Map.empty roots of
       unless ((exactUnit artifact,exactModule artifact) == key)
         (Left "world demanded type has another selected interface owner")
       let binding = worldPrimaryInterfaceBinding association
-          semantic = case Map.lookup key (worldInputsBaseRows facts) of
-            Just (WorldAdmittedRow _ _ value _) -> value
-            Nothing -> BS.empty
+      semantic <- case Map.lookup key (worldInputsBaseRows facts) of
+        Just (WorldAdmittedRow _ _ value _) -> Right value
+        Nothing -> Left "world TYPE primary association lost its admitted row"
       walk (Map.insert key (binding,semantic,row) selected) (exactRequirements artifact ++ rest)
 
 
