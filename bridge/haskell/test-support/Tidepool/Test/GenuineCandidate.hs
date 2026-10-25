@@ -226,7 +226,10 @@ writePacket delivery input selection = do
         <> text producer <> names (fixtureLexicalRoots selection) <> optional capture
   BS.writeFile (packet </> "request.cbor") (toStrictByteString
     intent)
-  completion <- runPacketProducer OriginalProductsProducer packet
+  let issuer = case delivery of
+        PublishedContextDelivery {} -> PublishedOriginalProductsProducer
+        _ -> OriginalProductsProducer
+  completion <- runPacketProducer issuer packet
   case delivery of
     ScopeDelivery _ -> readScopeOutput packet completion
     CandidateDelivery _ -> CandidateManifestOutput <$> completedPacketOutput completion (packet </> "module-candidates.cbor")
