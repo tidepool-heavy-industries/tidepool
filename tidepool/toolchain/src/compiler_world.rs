@@ -4260,7 +4260,7 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
             Ok(next)
         };
     let added = current.project_bindings(
-        1,
+        0,
         [("second".into(), Some(fact(&second_symbol, second.clone())))],
         None,
     )?;
@@ -4281,11 +4281,11 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
         );
     }
     current = retain_step("distinct-shared", added)?;
-    let removed_alias = current.project_bindings(2, [("left".into(), None)], None)?;
+    let removed_alias = current.project_bindings(0, [("left".into(), None)], None)?;
     let descriptor = answer_cbor(&std::fs::read(&removed_alias.restoration.descriptor)?)?;
     assert!(answer_array(&answer_array(&descriptor, 7)?[5], 0)?.is_empty());
     current = retain_step("remove-alias", removed_alias)?;
-    let removed_first = current.project_bindings(3, [("right".into(), None)], None)?;
+    let removed_first = current.project_bindings(0, [("right".into(), None)], None)?;
     for binding in &shared {
         assert_eq!(
             removed_first
@@ -4300,7 +4300,7 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
     }
     current = retain_step("remove-row", removed_first)?;
     let replaced = current.project_bindings(
-        4,
+        0,
         [
             ("second".into(), None),
             (
@@ -4326,7 +4326,7 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
     }
     current = retain_step("net-replacement", replaced)?;
     let renamed = current.project_bindings(
-        5,
+        0,
         [
             ("replacement".into(), None),
             ("renamed".into(), Some(fact(&first_symbol, first.clone()))),
@@ -4363,7 +4363,7 @@ pub(crate) fn world_value_transport_fixture(directory: &Path) -> Result<Vec<u8>,
     let descriptor = answer_cbor(&std::fs::read(&primary_only.restoration.descriptor)?)?;
     assert!(answer_array(&answer_array(&descriptor, 7)?[5], 0)?.is_empty());
     current = retain_step("primary-only", primary_only)?;
-    let empty = current.project_bindings(6, [("renamed".into(), None)], None)?;
+    let empty = current.project_bindings(0, [("renamed".into(), None)], None)?;
     assert!(empty.restoration.dependency_rows.is_empty());
     let descriptor = answer_cbor(&std::fs::read(&empty.restoration.descriptor)?)?;
     assert_eq!(
