@@ -2223,6 +2223,9 @@ tidepool_buildscript_run(
                     ("actor_world_declaration_publication_test", [
                         "resident_workbench::request_tests::world_declaration_publication_retains_operand_after_failed_later_cell",
                     ]),
+                    ("actor_world_value_type_history_test", [
+                        "resident_workbench::request_tests::world_checked_nominal_values_retain_type_closure_through_private_promotion",
+                    ]),
                     ("actor_world_durable_generation_history_test", [
                         "resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement",
                     ]),
