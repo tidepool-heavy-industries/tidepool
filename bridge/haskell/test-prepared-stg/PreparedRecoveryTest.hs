@@ -83,7 +83,7 @@ import Tidepool.ExecutionEncode (projectedGroupEncodingInput, projectedGroupEnco
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
   , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), ConstructorIdentity(..), TypeIdentity(..), TypeVersion(..), TargetDescriptor(..)
-  , TopBinding(..), WireProgram(..), ProjectedGroup(..) )
+  , TopBinding(..), WireProgram(..), ProjectedGroup(..), ConstructorDecl(..) )
 import Tidepool.FatIface
   ( newFatIfaceCache, newOwnerInterfaceCache, lookupFatIfaceComponents
   , FatIfaceComponentLookup(..), fatSelectionComponents
@@ -123,6 +123,8 @@ tests = testGroup "test-prepared-stg"
   , testCase "declaration ABI identities survive source edits and retained interfaces" declarationAbiIdentityRegression
   , testCase "prepared identity resolver stays with acquisition across a later compile" preparedIdentityResolverCaptureRegression
   , testCase "homonymous real compiler units preserve closure and refuse host alias" homonymousUnitProperty
+  , testCase "standalone package groups ignore consuming entry and auxiliary roots" packageGroupContextIsolation
+  , testCase "auxiliary answer evidence distinguishes polymorphic results and concrete roots" auxiliaryAnswerEvidence
   , testCase "compiled original recovery and reachability closure" scenario
   ]
 
@@ -984,6 +986,113 @@ verifyContextHistories owner first second = do
       QC.cover 20 (any (\case InstallContext _ 1 -> True; _ -> False) operations) "changed issuer" $
       QC.counterexample (show operations) (QC.ioProperty (history False operations)))
   unless (QC.isSuccess result) (fail "retained declaring-context histories diverged")
+
+-- Each comparison reuses one real defining component and one reached group
+-- census. Only the consuming target's roots change; package ownership does not.
+packageGroupContextIsolation :: IO ()
+packageGroupContextIsolation = withRootProjectionFixture $ \environment _ context -> do
+  let owner = mkModule (stringToUnit "ghc-internal") (mkModuleName "GHC.Internal.Show")
+      root = SymbolIdentity "ghc-internal" "GHC.Internal.Show" "value" "itos" Nothing
+      concrete = (projectionEntry context) { symbolOccurrence = "concreteAnswer" }
+      transitive = context { projectionAuxiliaryRoots = [concrete] }
+      direct = context { projectionEntry = root, projectionAuxiliaryRoots = [root,concrete] }
+      entryOnly = direct { projectionAuxiliaryRoots = [concrete] }
+  (identifier,_) <- resolvePackageGlobal environment root >>= either fail pure
+  cache <- newFatIfaceCache
+  owners <- newOwnerInterfaceCache
+  bodies <- newPreparedBodyCache
+  selection <- lookupFatIfaceComponents environment cache owner [varName identifier] >>= \case
+    FatIfaceComponents selected -> pure selected
+    _ -> fail "monomorphic package root lacks its genuine defining component"
+  acquire <- newPreparedComponentUnitsPreparer environment owners bodies
+  task <- acquire Nothing selection >>= either (fail . show) pure
+  completed <- runPreparedComponentTask task >>= either (fail . show) pure
+  let modules = preparedComponentModules completed
+      seeds = nonDetEltsUniqSet (preparedSeedUniques direct modules)
+      reached = admitReachFacts seeds (map (preparedModuleReachFacts direct) modules)
+        emptyPreparedReachability
+      products selected = do
+        rows <- either (fail . show) pure (projectPreparedPackageGroups selected [completed] reached)
+        let exact = [(projectedBinders group,(projectedPackageDefiningVersion product,
+                    projectedPackageInterfaceSha256 product,projectedGroupEncodingBytes encoding))
+              | product <- rows,let encoding = projectedPackageEncoding product
+              ,let group = projectedGroupEncodingInput encoding]
+        assert (not (null exact) && length exact == Map.size (Map.fromList exact)
+            && any (elem root . fst) exact)
+          "standalone package control lost its actual monomorphic root"
+        pure (Map.fromList exact)
+      bodyHashes = Map.map (\(_,_,bytes) -> shaHex bytes)
+  assert (not (null seeds)) "monomorphic package control selected zero roots"
+  transitiveProducts <- products transitive
+  directProducts <- products direct
+  entryProducts <- products entryOnly
+  assert (transitiveProducts == directProducts && transitiveProducts == entryProducts)
+    ("consuming roots changed standalone package bytes: transitive=" ++ show (bodyHashes transitiveProducts)
+      ++ "; direct=" ++ show (bodyHashes directProducts) ++ "; entry=" ++ show (bodyHashes entryProducts))
+  assert (bodyHashes transitiveProducts == bodyHashes directProducts
+      && bodyHashes transitiveProducts == bodyHashes entryProducts)
+    "consuming roots changed standalone package hashes"
+  putStrLn ("standalone package products: " ++ show (Map.size transitiveProducts)
+    ++ "; hashes=" ++ show (bodyHashes transitiveProducts))
+
+auxiliaryAnswerEvidence :: IO ()
+auxiliaryAnswerEvidence = withRootProjectionFixture $ \_ prepared context -> do
+  let symbol name = (projectionEntry context) { symbolOccurrence = name }
+      project roots = either (fail . show) pure (projectPreparedTarget
+        (context { projectionAuxiliaryRoots = map symbol roots }) [prepared])
+      names = Set.fromList . map (symbolOccurrence . constructorSymbol . constructorIdentity)
+        . programConstructors
+      concreteNames = Set.fromList ["ConcreteLeft","ConcreteRight"]
+  baseline <- project []
+  assert (Set.null (Set.intersection concreteNames (names baseline)))
+    "concrete answer fixture already constructs its auxiliary-only result"
+  polymorphic <- project ["polymorphicAnswer"]
+  assert (programTypes polymorphic == programTypes baseline && names polymorphic == names baseline)
+    "polymorphic auxiliary answer leaked type or constructor evidence"
+  forM_ [["concreteAnswer"],["concretePolymorphicArgument"],
+      ["polymorphicAnswer","concreteAnswer"],["concreteAnswer","polymorphicAnswer"]] $ \roots -> do
+    concrete <- project roots
+    assert (concreteNames `Set.isSubsetOf` names concrete)
+      ("concrete auxiliary answer lost its constructors: " ++ show roots)
+    assert ("PolymorphicAnswer" `Set.notMember` names concrete)
+      ("polymorphic answer was interned beside a concrete root: " ++ show roots)
+
+withRootProjectionFixture :: (HscEnv -> PreparedModule -> ProjectionContext -> IO a) -> IO a
+withRootProjectionFixture action = bracket scratch removePathForcibly $ \directory -> do
+  let source = directory </> "ProjectionRootIsolation.hs"
+  copyFile "test-prepared-stg/ProjectionRootIsolation.hs" source
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags (updOptLevel 0 flags)
+      { importPaths = [directory], backend = noBackend, ghcLink = NoLink }
+    target <- guessTarget source Nothing Nothing
+    setTargets [target]
+    load LoadAllTargets >>= \case
+      Failed -> fail "projection root isolation fixture failed to compile"
+      Succeeded -> pure ()
+    environment <- getSession
+    summary <- getModSummary (mkModuleName "ProjectionRootIsolation")
+    parsed <- parseModule summary
+    typed <- typecheckModule parsed
+    desugared <- desugarModule typed
+    (guts,_) <- liftIO (hscTidy environment (coreModule desugared))
+    home <- maybe (fail "projection root isolation lacks its completed interface") pure
+      (lookupHpt (hsc_HPT environment) (ms_mod_name summary))
+    prepared <- liftIO (newFinalizedModule environment home guts
+      >>= prepareModule environment (ms_location summary) mempty)
+    let entry = case [identity | identity <- either (error . show) id (preparedTopIdentities [prepared])
+          , symbolOccurrence identity == "plainEntry"] of
+            [identity] -> identity
+            _ -> error "projection root isolation lacks its exact entry"
+        context = ProjectionContext
+          { projectionProfile = "root-projection-isolation", projectionToolchain = "ghc-9.12.2"
+          , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
+          , projectionRetainedGenerations = mempty, projectionCurrentOriginals = mempty
+          , projectionEntry = entry, projectionAuxiliaryRoots = []
+          , projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing
+          , projectionJsonAuthority = Nothing, projectionTextUnit = Nothing }
+    liftIO (action environment prepared context)
 
 scenario :: IO ()
 scenario = do
