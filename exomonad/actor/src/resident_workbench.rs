@@ -21296,7 +21296,7 @@ pub(crate) mod request_tests {
             let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
             let binding = input.mounted_input().binder.name.clone();
             let target = execution.retained_lexical_scope();
-            let _fence = target.source_admission().fence().unwrap();
+            let fence = target.source_admission().fence().unwrap();
             drop(input);
             let checked_execution = execution.clone();
             frontend
@@ -21329,6 +21329,15 @@ pub(crate) mod request_tests {
                     Ok(())
                 })
                 .await
+                .unwrap();
+            // Private scope retirement preserves the shared source gate. Reopen
+            // this test's fence before the public-state check admits fresh work.
+            fence
+                .reopen_with(&execution.original_source().unwrap(), |reopen| {
+                    reopen.commit();
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
                 .unwrap();
             fixture.assert_public_unchanged().await;
         })
@@ -23419,7 +23428,8 @@ pub(crate) mod request_tests {
             context: crate::ActorSessionContext,
             source: &str,
         ) -> Result<(), ResidentActorWorkbenchError> {
-            self.execute_cell_for_test_observing(context, source, |_| {}).await
+            self.execute_cell_for_test_observing(context, source, |_| {})
+                .await
         }
 
         async fn execute_cell_for_test_observing(
