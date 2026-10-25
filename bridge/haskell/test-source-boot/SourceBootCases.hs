@@ -7357,12 +7357,18 @@ candidateDeferredSourceBackedgeAt cyclic = withTiming $ withScratch $ \work -> d
           unless (map candidateOriginalIdentity (pprAcceptedCandidates prepared)
               == [candidateOriginalIdentity candidate]
               && counterValues "candidate_executable_required" diagnostics == [0]
-              && counterValues "transaction_reused_source_products" diagnostics == [reused]) $
+              && counterValues "transaction_reused_source_products" diagnostics == [reused]
+              && all (\name -> any (\line -> all (`isInfixOf` line)
+                  ["\"stage\":\"source_frontend\"", "\"decision\":\"hit\"", "\"module\":\"" ++ name ++ "\""])
+                    (lines diagnostics))
+                  (if cyclic then ["LazyBackedgeDependency"] else ["LazyBackedgeDependency","LazyBackedgeRelay"])) $
             fail (label ++ ": candidate SOURCE memo/deferral premise failed: " ++ diagnostics)
           homes prepared >>= mapM_ (field label expected)
     completed "unchanged candidate SOURCE backedge" intTy (if cyclic then 1 else 3)
     install (if cyclic then "LazyBackedgeTargetChanged.hs" else "LazyBackedgeIndependentTargetChanged.hs")
-    completed "changed candidate SOURCE backedge" boolTy (if cyclic then 1 else 2)
+    -- A changed ordinary provider makes GHC recheck its acyclic importers.
+    -- Their selected memo hits are distinct from products surviving Make.
+    completed "changed candidate SOURCE backedge" boolTy (if cyclic then 1 else 0)
     mapM_ (field "original retained after candidate target change" intTy) retained
     pure candidate
   -- Cold candidate preparation must preserve the same SOURCE load boundary,
