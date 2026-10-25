@@ -1,11 +1,14 @@
 # Coupled retained-value TYPE transport: implementation contract
 
-Status: implementing. Baseline code `2e60aa8101` on
-`integration/g2-domain-runtime-20261023`. Prior offer work through
-`f32c6a1e67` is merged; input HOME contracts `88be0d8d0e` are integrated.
-Their component evidence is under `g2-offer-issuance-20261024/{a,b}`;
-joined acceptance is pending. RootChoiceMissing(9001) remains unclassified.
-New evidence root: `/srv/swarm/evidence/inanna/g2-value-type-20261024/`.
+Status: core implemented; joined verification in progress. Candidate
+`5e10df3bef27417b338f292720648b61c06c9925` on
+`integration/g2-domain-runtime-20261023`; baseline code `2e60aa8101`.
+Evidence root: `/srv/swarm/evidence/inanna/g2-value-type-20261024/`.
+Constructor/cache controls pass 24/24. The final production core passes all
+12 compiler corpus cohorts (1,052 programs) and the retained-Job actor regression.
+Captured/historical Haskell selection and remaining actor gates are still running.
+A new operand test reaches a distinct SOURCE-versus-TYPE exact-owner refusal;
+the admission guard remains intact pending review. These results do not qualify G2.
 
 This document supersedes the open design questions in the retained-value TYPE
 frontier and review-response documents. Argon's locked specification and the
