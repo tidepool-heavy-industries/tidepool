@@ -2173,6 +2173,12 @@ impl CertifiedRetainedCoreProducts {
 }
 
 impl PendingCertifiedGroup {
+    fn same_authenticated_group(&self, original: &AuthenticatedOriginalGroup) -> bool {
+        self.origin == original.origin
+            && self.owner == original.owner
+            && Arc::ptr_eq(&self.group, &original.group)
+    }
+
     pub(crate) fn same_issuance(&self, other: &Self) -> bool {
         self.origin == other.origin
             && self.owner == other.owner
@@ -5659,6 +5665,26 @@ impl NativeGroupCandidates {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn seed_native_group_rows(
+        &self,
+        bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<(), crate::CompileError> {
+        self.compiler_rows
+            .seed_native_group_rows(bindings, validation)?;
+        self.private_native
+            .seed_native_group_rows(bindings, validation)?;
+        if let CertifiedInputOrigin::Continuation(source) = &self.input_origin {
+            source.seed_native_group_rows(bindings, validation)?;
+        }
+        for product in self.prior_program_products.iter() {
+            product
+                .own_offer()
+                .seed_native_group_rows(bindings, validation)?;
+        }
+        Ok(())
+    }
+
     fn prior_program_product(
         &self,
         unit: &str,
@@ -11470,19 +11496,7 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
     available: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
-    validate_owned_originals_with_validation(
-        products,
-        current_groups,
-        available,
-        validation,
-        OriginalNativeUse::SelectedGroups,
-    )
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OriginalNativeUse {
-    SelectedGroups,
-    Availability,
+    validate_owned_originals_with_validation(products, current_groups, available, validation)
 }
 
 pub(crate) fn validate_available_originals_with_validation(
@@ -11587,7 +11601,6 @@ fn validate_owned_originals_with_validation(
     current_groups: &[PendingCertifiedGroup],
     available: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
-    native_use: OriginalNativeUse,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
     if products.is_empty() {
         return Ok(Vec::new());
@@ -11742,9 +11755,7 @@ fn validate_owned_originals_with_validation(
                 }
             }
         }
-        if native_use == OriginalNativeUse::SelectedGroups
-            && !shared.contains(&(witness.owner.unit.clone(), witness.owner.module.clone()))
-        {
+        if !shared.contains(&(witness.owner.unit.clone(), witness.owner.module.clone())) {
             result.extend(
                 witness
                     .groups
@@ -11851,6 +11862,10 @@ impl AcquiredHomeCodeGrant {
     pub(crate) fn product(&self) -> &Arc<PendingCertifiedGroup> {
         self.row.product()
     }
+    pub(crate) fn issued_row(&self) -> &Arc<IssuedSelectedNativeGroup> {
+        &self.row
+    }
+
     pub(crate) fn imports(&self) -> &[SelectedNativeImport] {
         self.row.imports()
     }
@@ -11893,6 +11908,101 @@ impl std::ops::Deref for IssuedSelectedNativeGroup {
 pub(crate) struct SelectedScopeCertification {
     pub(crate) rows:
         BTreeMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
+}
+
+/// Operation-local proof reuse. A scope must authenticate its own membership
+/// and ordered destinations before it can retain one of these immutable rows.
+#[derive(Default)]
+pub(crate) struct NativeGroupRowAssembly {
+    rows:
+        imbl::OrdMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
+}
+
+impl NativeGroupRowAssembly {
+    pub(crate) fn retain_issued(
+        &mut self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        row: &Arc<IssuedSelectedNativeGroup>,
+        operation: &InventoryOperation,
+    ) -> CertResult<()> {
+        operation.charge(1)?;
+        if let Some(prior) = self.rows.get(&binding) {
+            if !prior.same_selected_issuance(row) {
+                return Err(CertificationError::Mismatch(
+                    "native row has competing selected issuers",
+                ));
+            }
+        } else {
+            operation.reserve::<(
+                crate::artifact_inventory::NativeGroupBinding,
+                Arc<IssuedSelectedNativeGroup>,
+            )>(1)?;
+            self.rows.insert(binding, Arc::clone(row));
+        }
+        Ok(())
+    }
+
+    fn checked_row(
+        &mut self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        original: &AuthenticatedOriginalGroup,
+        imports: CheckedSelectedImports,
+        current: Option<&PendingCertifiedGroup>,
+        issued: Option<&Arc<IssuedSelectedNativeGroup>>,
+        operation: &InventoryOperation,
+    ) -> CertResult<Arc<IssuedSelectedNativeGroup>> {
+        let check = |row: &IssuedSelectedNativeGroup| {
+            if !row.product().same_authenticated_group(original)
+                || row.product().imports() != imports.pending.as_ref()
+                || row.imports() != imports.selected.as_ref()
+            {
+                return Err(CertificationError::Mismatch(
+                    "native row differs from authenticated scope",
+                ));
+            }
+            if current.is_some_and(|product| !product.same_issuance(row.product())) {
+                return Err(CertificationError::Mismatch(
+                    "native row changed its physical product issuer",
+                ));
+            }
+            Ok(())
+        };
+        if let Some(row) = self.rows.get(&binding) {
+            check(row)?;
+            if issued.is_some_and(|incoming| !row.same_selected_issuance(incoming)) {
+                return Err(CertificationError::Mismatch(
+                    "native row has competing selected issuers",
+                ));
+            }
+            return Ok(Arc::clone(row));
+        }
+        operation.reserve::<(
+            crate::artifact_inventory::NativeGroupBinding,
+            Arc<IssuedSelectedNativeGroup>,
+        )>(1)?;
+        let row = match issued {
+            Some(row) => Arc::clone(row),
+            None => {
+                operation.reserve::<IssuedSelectedNativeGroup>(1)?;
+                let product = match current {
+                    Some(group) => group.clone(),
+                    None => PendingCertifiedGroup {
+                        origin: original.origin,
+                        owner: original.owner.clone(),
+                        group: Arc::clone(&original.group),
+                        imports: Arc::clone(&imports.pending),
+                    },
+                };
+                Arc::new(IssuedSelectedNativeGroup {
+                    product: Arc::new(product),
+                    imports: Arc::clone(&imports.selected),
+                })
+            }
+        };
+        check(&row)?;
+        self.rows.insert(binding, Arc::clone(&row));
+        Ok(row)
+    }
 }
 
 struct CheckedSelectedImports {
@@ -12043,43 +12153,6 @@ impl<'a> OriginalValidationInventory<'a> {
             >,
         >,
     ) -> CertResult<SelectedScopeCertification> {
-        self.selected_scope(
-            scope,
-            current,
-            OriginalNativeUse::SelectedGroups,
-            validation,
-            issued,
-        )
-    }
-
-    pub(crate) fn validate_selected_scope(
-        &mut self,
-        scope: SelectedOriginalGroupScope<'_>,
-        validation: &mut PackageInterfaceValidation,
-    ) -> CertResult<()> {
-        self.selected_scope(
-            scope,
-            &BTreeMap::new(),
-            OriginalNativeUse::Availability,
-            validation,
-            None,
-        )
-        .map(|_| ())
-    }
-
-    fn selected_scope(
-        &mut self,
-        scope: SelectedOriginalGroupScope<'_>,
-        current: &BTreeMap<crate::artifact_inventory::NativeGroupBinding, &PendingCertifiedGroup>,
-        native_use: OriginalNativeUse,
-        validation: &mut PackageInterfaceValidation,
-        issued: Option<
-            &BTreeMap<
-                crate::artifact_inventory::NativeGroupBinding,
-                Arc<IssuedSelectedNativeGroup>,
-            >,
-        >,
-    ) -> CertResult<SelectedScopeCertification> {
         let operation = Arc::clone(&validation.inventory);
         let bindings = scope
             .bindings(&operation)
@@ -12142,41 +12215,25 @@ impl<'a> OriginalValidationInventory<'a> {
                     return Err(CertificationError::Mismatch("shared original home groups"));
                 }
             }
-            if native_use == OriginalNativeUse::SelectedGroups {
-                if let Some(row) = issued.and_then(|rows| rows.get(&binding)) {
-                    if current
-                        .get(&binding)
-                        .is_none_or(|product| !product.same_issuance(row.product()))
-                        || row.imports() != imports.selected.as_ref()
-                    {
-                        return Err(CertificationError::Mismatch(
-                            "physical cohort changed its issued native row",
-                        ));
-                    }
-                    rows.insert(binding, Arc::clone(row));
-                    continue;
+            if let Some(row) = issued.and_then(|rows| rows.get(&binding)) {
+                if current
+                    .get(&binding)
+                    .is_none_or(|product| !product.same_issuance(row.product()))
+                {
+                    return Err(CertificationError::Mismatch(
+                        "physical cohort changed its issued native row",
+                    ));
                 }
-                operation.reserve::<(
-                    crate::artifact_inventory::NativeGroupBinding,
-                    IssuedSelectedNativeGroup,
-                )>(1)?;
-                let product = match current.get(&binding) {
-                    Some(group) => (*group).clone(),
-                    None => PendingCertifiedGroup {
-                        origin: original.origin,
-                        owner: original.owner.clone(),
-                        group: Arc::clone(&original.group),
-                        imports: Arc::clone(&imports.pending),
-                    },
-                };
-                rows.insert(
-                    binding,
-                    Arc::new(IssuedSelectedNativeGroup {
-                        product: Arc::new(product),
-                        imports: imports.selected,
-                    }),
-                );
             }
+            let row = validation.native_group_rows.checked_row(
+                binding,
+                original,
+                imports,
+                current.get(&binding).copied(),
+                issued.and_then(|rows| rows.get(&binding)),
+                &operation,
+            )?;
+            rows.insert(binding, row);
         }
         Ok(SelectedScopeCertification { rows })
     }
@@ -15480,6 +15537,11 @@ pub(crate) mod tests {
 
     #[test]
     fn recovery_derives_native_relations_from_roundtripped_original_seals_once() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{ArtifactDependency, ArtifactDescriptor};
         use crate::declaration_join::RecoveredArtifactInventory;
         let root = tempfile::tempdir().unwrap();
@@ -15516,8 +15578,12 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         // The admission owns authenticated bytes; scoped views need no file reread.
         std::fs::remove_file(root.path().join(&original.product_path)).unwrap();
-        let first = inventory.context_all_groups(&ids, vec![]).unwrap();
-        let second = inventory.context_all_groups(&ids, vec![]).unwrap();
+        let first = inventory
+            .context_all_groups(&ids, vec![], &mut offer_validation)
+            .unwrap();
+        let second = inventory
+            .context_all_groups(&ids, vec![], &mut offer_validation)
+            .unwrap();
         let first_entries = first.artifact_view().entries();
         let second_entries = second.artifact_view().entries();
         assert!(first_entries
@@ -15543,7 +15609,9 @@ pub(crate) mod tests {
         assert_eq!(required.len(), 1);
         assert_eq!(required[0].generation, 1);
         assert_eq!(required[0].artifact_id, value.artifact_id);
-        assert!(inventory.context_all_groups(&ids[..1], vec![]).is_err());
+        assert!(inventory
+            .context_all_groups(&ids[..1], vec![], &mut offer_validation)
+            .is_err());
         assert!(RecoveredArtifactInventory::capture(
             root.path(),
             &[original],
@@ -15558,6 +15626,11 @@ pub(crate) mod tests {
 
     #[test]
     fn recovery_refuses_tampered_and_ambiguous_native_dependency_owners() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{ArtifactDependency, ArtifactDescriptor};
         use crate::declaration_join::RecoveredArtifactInventory;
         let root = tempfile::tempdir().unwrap();
@@ -15633,19 +15706,22 @@ pub(crate) mod tests {
         assert!(inventory
             .context_all_groups(
                 &[descriptors[0].id, descriptors[1].id, descriptors[2].id],
-                vec![]
+                vec![],
+                &mut offer_validation
             )
             .is_ok());
         assert!(inventory
             .context_all_groups(
                 &[descriptors[0].id, descriptors[3].id, descriptors[2].id],
-                vec![]
+                vec![],
+                &mut offer_validation
             )
             .is_ok());
         assert!(inventory
             .context_all_groups(
                 &descriptors.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-                vec![]
+                vec![],
+                &mut offer_validation
             )
             .is_err());
         std::fs::write(root.path().join(&original.certification_path), b"tampered").unwrap();
@@ -16903,6 +16979,11 @@ pub(crate) mod tests {
         retained: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         selected: &crate::recovery_artifacts::CertifiedRecoveryProduct,
     ) -> crate::artifact_inventory::CompilerSourceSupport {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = retained
             .iter()
             .map(|product| {
@@ -16928,7 +17009,12 @@ pub(crate) mod tests {
                 selected_entry,
             ])
             .unwrap();
-        crate::declaration_context::issue_fixture_compiler_support(projection, view).unwrap()
+        crate::declaration_context::issue_fixture_compiler_support(
+            projection,
+            view,
+            &mut offer_validation,
+        )
+        .unwrap()
     }
 
     fn world_stage_availability(
@@ -16954,6 +17040,11 @@ pub(crate) mod tests {
 
     #[test]
     fn world_stage_fixture_roles_follow_issued_carrier_without_owner_census() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CompilerInputRole, NativeGroupKey,
         };
@@ -17062,6 +17153,7 @@ pub(crate) mod tests {
             support_a.projection().interface_only(),
             support_a.artifacts().clone(),
             support_a.native_offers().iter().cloned(),
+            &mut offer_validation,
         )
         .unwrap();
         let (interface_roles, interface_availability) =
@@ -17131,6 +17223,7 @@ pub(crate) mod tests {
             ])
             .unwrap(),
             partial_view,
+            &mut offer_validation,
         )
         .unwrap();
         let (_, partial_availability) = world_stage_availability(&partial, &partial_owner);
@@ -18350,6 +18443,92 @@ pub(crate) mod tests {
             assert!(weak.upgrade().is_none());
             eprintln!("original_membership_history owners=2 groups={} overlay_calls={overlay_calls} recovered=2", ordinals.len());
         }
+    }
+
+    #[test]
+    fn scoped_row_assembly_reuses_only_authenticated_physical_issuance() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, ArtifactPayload};
+        let issue = || {
+            let product = full_native_fixture("ScopedRowOwner", vec![(7, vec![])], 1);
+            let entry = Arc::new(
+                ArtifactEntry::original(product.module_interface().producer_sha256(), product)
+                    .unwrap(),
+            );
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+                .unwrap();
+            (entry, view)
+        };
+        let (left, left_view) = issue();
+        let (right, right_view) = issue();
+        assert_eq!(
+            left.descriptor.id, right.descriptor.id,
+            "equal certified bytes alone do not share an issuer"
+        );
+        let certify = |entry: &ArtifactEntry,
+                       view: &crate::artifact_inventory::ArtifactView,
+                       validation: &mut PackageInterfaceValidation| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            let available = BTreeMap::from([(entry.descriptor.id, product)]);
+            OriginalValidationInventory::selected(&available, &validation.inventory)
+                .unwrap()
+                .certify_selected_scope(
+                    SelectedOriginalGroupScope::selected(view),
+                    &BTreeMap::new(),
+                    validation,
+                    None,
+                )
+        };
+        let mut validation = PackageInterfaceValidation::default();
+        let first = certify(&left, &left_view, &mut validation).unwrap().rows;
+        let repeated = certify(&left, &left_view, &mut validation).unwrap().rows;
+        let (binding, row) = first.first_key_value().unwrap();
+        assert!(Arc::ptr_eq(row, &repeated[binding]));
+        assert_eq!(
+            SelectedOriginalGroupScope::selected(&right_view)
+                .bindings(&validation.inventory)
+                .unwrap(),
+            vec![*binding]
+        );
+        assert!(matches!(
+            certify(&right, &right_view, &mut validation),
+            Err(CertificationError::Mismatch(
+                "native row differs from authenticated scope"
+            ))
+        ));
+        let foreign = certify(
+            &right,
+            &right_view,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .rows;
+        let ArtifactPayload::Original(product) = &left.payload else {
+            unreachable!()
+        };
+        let available = BTreeMap::from([(left.descriptor.id, product)]);
+        let mut fresh = PackageInterfaceValidation::default();
+        let current = BTreeMap::from([(*binding, foreign[binding].product().as_ref())]);
+        let refused = OriginalValidationInventory::selected(&available, &fresh.inventory)
+            .unwrap()
+            .certify_selected_scope(
+                SelectedOriginalGroupScope::selected(&left_view),
+                &current,
+                &mut fresh,
+                None,
+            );
+        assert!(
+            matches!(
+                refused,
+                Err(CertificationError::Mismatch(
+                    "native row differs from authenticated scope"
+                ))
+            ),
+            "an uncached current row must pass the same physical-owner check"
+        );
     }
 
     #[test]
@@ -20193,6 +20372,11 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_new_product_request_preserves_input_group_permissions() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
         };
@@ -20302,6 +20486,7 @@ pub(crate) mod tests {
                 let full_support = crate::declaration_context::issue_fixture_compiler_support(
                     projection.clone(),
                     full,
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let selected = ordinals
@@ -20568,6 +20753,11 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_request_keeps_two_input_permissions_separate_from_fresh_outputs() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
             CompilerInputProjection, ExactArtifactSelection, NativeGroupKey,
@@ -20659,6 +20849,7 @@ pub(crate) mod tests {
                             ])
                             .unwrap(),
                             full_baseline,
+                            &mut offer_validation,
                         )
                         .unwrap();
                         let baseline_entries = vec![unused_interface.clone(), entries[1].clone()];
@@ -20676,6 +20867,7 @@ pub(crate) mod tests {
                             CompilerInputProjection::from_issued_entries(&baseline_entries)
                                 .unwrap(),
                             baseline_view,
+                            &mut offer_validation,
                         )
                         .unwrap()
                         .retain_offers(
@@ -20699,6 +20891,7 @@ pub(crate) mod tests {
                         let full_required = issue_fixture_compiler_support(
                             required_projection.clone(),
                             full_required,
+                            &mut offer_validation,
                         )
                         .unwrap();
                         let selected_groups = selected
@@ -20738,13 +20931,14 @@ pub(crate) mod tests {
                                     &ExactArtifactSelection::from_recovered_graph_selection(graph),
                                 )
                                 .unwrap();
-                            let support =
-                                issue_fixture_compiler_support(required_projection.clone(), chosen)
-                                    .unwrap()
-                                    .retain_normalized_availability(
-                                        full_required.native_availability(),
-                                    )
-                                    .unwrap();
+                            let support = issue_fixture_compiler_support(
+                                required_projection.clone(),
+                                chosen,
+                                &mut offer_validation,
+                            )
+                            .unwrap()
+                            .retain_normalized_availability(full_required.native_availability())
+                            .unwrap();
                             if selected.is_none() {
                                 support.for_source_owners(&BTreeSet::new()).unwrap()
                             } else {
@@ -20758,7 +20952,12 @@ pub(crate) mod tests {
                                     &selected_groups,
                                 )
                                 .unwrap();
-                            issue_fixture_compiler_support(required_projection, chosen).unwrap()
+                            issue_fixture_compiler_support(
+                                required_projection,
+                                chosen,
+                                &mut offer_validation,
+                            )
+                            .unwrap()
                         } else {
                             full_required
                                 .selected_interfaces()
@@ -21032,6 +21231,11 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_request_preserves_selected_issuer_beside_historical_offer() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure, ArtifactPayload,
             ArtifactView, CanonicalProducerIdentity, CompilerInputProjection, IssuedNativeOffer,
@@ -21077,7 +21281,7 @@ pub(crate) mod tests {
             } else {
                 inventory.empty_view()
             };
-            let issue = |marker, version| {
+            let issue = |marker, version, validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
                 let view = inventory
                     .admit_recovery_selection(
                         &carrier,
@@ -21097,16 +21301,20 @@ pub(crate) mod tests {
                     NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &view)
                         .unwrap()
                         .expect("the actual issuer selected native groups");
-                let issuer =
-                    issue_fixture_compiler_support(projection.clone(), view.clone()).unwrap();
+                let issuer = issue_fixture_compiler_support(
+                    projection.clone(),
+                    view.clone(),
+                    validation,
+                )
+                .unwrap();
                 let offer = issuer
-                    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof), validation)
                     .unwrap();
                 assert!(offer.is_full());
                 (view, offer)
             };
-            let (left, a) = issue("HistoricalIssuerA", 132);
-            let (right, b) = issue("CurrentIssuerB", 133);
+            let (left, a) = issue("HistoricalIssuerA", 132, &mut offer_validation);
+            let (right, b) = issue("CurrentIssuerB", 133, &mut offer_validation);
             let exact_groups = |view: &ArtifactView| {
                 view.capture_graph_selection()
                     .roots
@@ -21165,10 +21373,14 @@ pub(crate) mod tests {
                 .product;
             let parent_entry =
                 Arc::new(ArtifactEntry::original(producer.sha256(), parent).unwrap());
-            let support = issue_fixture_compiler_support(projection.clone(), left.clone())
-                .unwrap()
-                .retain_offers([a.clone()])
-                .unwrap();
+            let support = issue_fixture_compiler_support(
+                projection.clone(),
+                left.clone(),
+                &mut offer_validation,
+            )
+            .unwrap()
+            .retain_offers([a.clone()])
+            .unwrap();
             let parent_context = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
@@ -21248,8 +21460,12 @@ pub(crate) mod tests {
                 .unwrap()
                 .contains(&historical_edge));
             assert!(!b_groups.contains(&historical_child));
-            let support =
-                issue_fixture_compiler_support(projection.clone(), right.clone()).unwrap();
+            let support = issue_fixture_compiler_support(
+                projection.clone(),
+                right.clone(),
+                &mut offer_validation,
+            )
+            .unwrap();
             let original_graph = support.artifacts().capture_graph_selection();
             let assert_retained_offer =
                 |stage: &str,
@@ -21434,8 +21650,12 @@ pub(crate) mod tests {
                 !input_b.same_issuance(&b),
                 "recovery checked the same B proof through its own input issuer"
             );
-            let left_support =
-                issue_fixture_compiler_support(projection.clone(), left.clone()).unwrap();
+            let left_support = issue_fixture_compiler_support(
+                projection.clone(),
+                left.clone(),
+                &mut offer_validation,
+            )
+            .unwrap();
             let joined = left_support.merge(&support);
             if shared_carrier {
                 assert!(matches!(joined, Err(CompileError::ArtifactInventory(error))
@@ -21470,8 +21690,10 @@ pub(crate) mod tests {
                     }
                 ])
             );
-            let selected_fragment = |view: ArtifactView| {
-                let issued = issue_fixture_compiler_support(projection.clone(), view).unwrap();
+            let selected_fragment = |view: ArtifactView, validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let issued =
+                    issue_fixture_compiler_support(projection.clone(), view, validation)
+                        .unwrap();
                 let context = ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
                     .extend_issued_compiler_support(&issued)
@@ -21487,8 +21709,8 @@ pub(crate) mod tests {
                     .unwrap()
                     .unwrap()
             };
-            let explicit_a = selected_fragment(left);
-            let explicit_b = selected_fragment(right);
+            let explicit_a = selected_fragment(left, &mut offer_validation);
+            let explicit_b = selected_fragment(right, &mut offer_validation);
             assert_ne!(
                 explicit_a
                     .issued_input_decisions()
@@ -21544,6 +21766,11 @@ pub(crate) mod tests {
 
     #[test]
     fn completed_request_retained_generation_history_uses_exact_input_permissions() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
             CompilerInputProjection, ExactArtifactSelection, NativeGroupKey,
@@ -21613,6 +21840,7 @@ pub(crate) mod tests {
         let support = issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&interfaces).unwrap(),
             view,
+            &mut offer_validation,
         )
         .unwrap();
         let context = Arc::new(
@@ -21762,8 +21990,12 @@ pub(crate) mod tests {
             carriers.first()
         );
         assert!(selected_input.selected_native_groups().is_empty());
-        let input_owner =
-            issue_fixture_compiler_support(input_roles.clone(), selected_input.clone()).unwrap();
+        let input_owner = issue_fixture_compiler_support(
+            input_roles.clone(),
+            selected_input.clone(),
+            &mut offer_validation,
+        )
+        .unwrap();
         let partial = selected_input
             .inventory()
             .admit_recovery_selection(
@@ -21784,12 +22016,13 @@ pub(crate) mod tests {
                         .unwrap()
                         .unwrap(),
                 ),
+                &mut offer_validation,
             )
             .unwrap();
         assert!(!partial_offer.is_full());
         let empty = selected_input.clone();
         let empty_offer = input_owner
-            .issue_native_offer(&original.descriptor.owner, None)
+            .issue_native_offer(&original.descriptor.owner, None, &mut offer_validation)
             .unwrap();
         for (label, view, offer, expected_one, expected_two) in [
             ("full", selected_input, full, Some(1), Some(2)),
@@ -21834,12 +22067,17 @@ pub(crate) mod tests {
                     &ExactArtifactSelection::from_recovered_graph_selection(graph),
                 )
                 .unwrap();
-            let support = recover_fixture_compiler_support(input_roles.clone(), view, [offer])
-                .unwrap()
-                .retain_normalized_availability(&availability)
-                .unwrap()
-                .for_source_owners(&BTreeSet::new())
-                .unwrap();
+            let support = recover_fixture_compiler_support(
+                input_roles.clone(),
+                view,
+                [offer],
+                &mut offer_validation,
+            )
+            .unwrap()
+            .retain_normalized_availability(&availability)
+            .unwrap()
+            .for_source_owners(&BTreeSet::new())
+            .unwrap();
             assert!(support
                 .projection()
                 .roles()
@@ -21907,6 +22145,11 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
     fn compiled_new_output_refuses_absent_input_native_permission() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
             CanonicalProducerIdentity, CompilerInputProjection, CompilerInputRole,
@@ -22024,6 +22267,7 @@ pub(crate) mod tests {
             let type_only = issue_fixture_compiler_support(
                 CompilerInputProjection::from_issued_entries(&[canonical_support.clone()]).unwrap(),
                 interface_view,
+                &mut offer_validation,
             )
             .unwrap();
             assert!(type_only.native_offers().is_empty());
@@ -22047,13 +22291,17 @@ pub(crate) mod tests {
                 .unwrap();
             let support_projection =
                 CompilerInputProjection::from_issued_entries(&[support_entry.clone()]).unwrap();
-            let support_source =
-                issue_fixture_compiler_support(support_projection, support_view).unwrap();
+            let support_source = issue_fixture_compiler_support(
+                support_projection,
+                support_view,
+                &mut offer_validation,
+            )
+            .unwrap();
             let support_output = OriginalCompilerInputs::from_issued_support(&support_source);
             let issued_view = support_output.issued_artifacts();
             let issued_graph = issued_view.capture_graph_selection();
             let empty_offer = support_source
-                .issue_native_offer(&support_entry.descriptor.owner, None)
+                .issue_native_offer(&support_entry.descriptor.owner, None, &mut offer_validation)
                 .unwrap();
             let empty_rows = RequestNativeAvailability::issue_checked(
                 support_source.compiler_roles(),
@@ -22066,6 +22314,7 @@ pub(crate) mod tests {
                 support_output.role_projection().clone(),
                 issued_view.clone(),
                 [empty_offer],
+                &mut offer_validation,
             )
             .unwrap()
             .retain_normalized_availability(&empty_rows)
@@ -22598,6 +22847,11 @@ pub(crate) mod tests {
         siblings: usize,
         grant_full: bool,
     ) -> BTreeSet<u32> {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
             CompilerInputProjection, NativeGroupKey,
@@ -22664,9 +22918,12 @@ pub(crate) mod tests {
         let full = inventory
             .admit_shared(&inventory.empty_view(), entries.clone())
             .unwrap();
-        let full_support =
-            crate::declaration_context::issue_fixture_compiler_support(projection.clone(), full)
-                .unwrap();
+        let full_support = crate::declaration_context::issue_fixture_compiler_support(
+            projection.clone(),
+            full,
+            &mut offer_validation,
+        )
+        .unwrap();
         let selected = inherited
             .iter()
             .map(|ordinal| NativeGroupKey {
@@ -22717,11 +22974,14 @@ pub(crate) mod tests {
                 .admit_recovery_selection(&inventory.empty_view(), entries, &selected)
                 .unwrap()
         };
-        let mut support =
-            crate::declaration_context::issue_fixture_compiler_support(projection, chosen)
-                .unwrap()
-                .retain_offers(full_support.native_offers().iter().cloned())
-                .unwrap();
+        let mut support = crate::declaration_context::issue_fixture_compiler_support(
+            projection,
+            chosen,
+            &mut offer_validation,
+        )
+        .unwrap()
+        .retain_offers(full_support.native_offers().iter().cloned())
+        .unwrap();
         if grant_full {
             support = support
                 .retain_normalized_availability(full_support.native_availability())
@@ -24687,6 +24947,11 @@ pub(crate) mod tests {
 
     #[test]
     fn request_native_availability_survives_private_input_handoff() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
             NativeArtifactDemand, NativeGroupKey,
@@ -24724,6 +24989,7 @@ pub(crate) mod tests {
                     projection.clone(),
                     complete.clone(),
                     [],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let no_offer_narrowed = no_offer
@@ -25746,6 +26012,11 @@ pub(crate) mod tests {
 
     #[test]
     fn current_dependency_without_root_choice_refuses_two_issued_scopes() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactBindingNode as InventoryNodeKey, ArtifactEntry, ArtifactInventory,
             ArtifactInventoryFailure, ArtifactPayload, CanonicalProducerIdentity,
@@ -25850,9 +26121,12 @@ pub(crate) mod tests {
                 &issued_selection,
             )
             .unwrap();
-        let support =
-            crate::declaration_context::issue_fixture_compiler_support(projection, selected)
-                .unwrap();
+        let support = crate::declaration_context::issue_fixture_compiler_support(
+            projection,
+            selected,
+            &mut offer_validation,
+        )
+        .unwrap();
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
@@ -31348,6 +31622,11 @@ pub(crate) mod tests {
 
     #[test]
     fn exact_cached_closure_without_cached_modules_does_not_walk_inventory() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let root = tempfile::tempdir().unwrap();
         let (_, mut receipt, current, original_a, original_b) = cached_closure_pair(root.path());
         let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
@@ -31375,8 +31654,12 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
-                    .unwrap()
+                crate::declaration_context::issue_fixture_compiler_support(
+                    projection,
+                    physical,
+                    &mut offer_validation,
+                )
+                .unwrap()
             })
             .unwrap();
         for module in &mut receipt.modules {
@@ -31461,6 +31744,11 @@ pub(crate) mod tests {
 
     #[test]
     fn exact_cached_closure_preserves_zero_group_custody_and_refuses_inherited_substitute() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let root = tempfile::tempdir().unwrap();
         let (candidates, mut receipt, current, a, b) = cached_closure_pair(root.path());
         let empty =
@@ -31490,8 +31778,12 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
-                    .unwrap()
+                crate::declaration_context::issue_fixture_compiler_support(
+                    projection,
+                    physical,
+                    &mut offer_validation,
+                )
+                .unwrap()
             })
             .unwrap();
         assert!(overlapping.recovery_products()[0].product_bytes().len() > 0);
@@ -31532,8 +31824,12 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
-                    .unwrap()
+                crate::declaration_context::issue_fixture_compiler_support(
+                    projection,
+                    physical,
+                    &mut offer_validation,
+                )
+                .unwrap()
             })
             .unwrap();
         receipt.modules.pop();
@@ -31610,6 +31906,11 @@ pub(crate) mod tests {
 
     #[test]
     fn exact_cached_closure_admits_checked_original_across_receipts() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let root = tempfile::tempdir().unwrap();
         let (mut candidates, mut receipt, mut current, _, b) = cached_closure_pair(root.path());
         let a_key = ("main".into(), "A".into());
@@ -31665,8 +31966,12 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
-                    .unwrap()
+                crate::declaration_context::issue_fixture_compiler_support(
+                    projection,
+                    physical,
+                    &mut offer_validation,
+                )
+                .unwrap()
             })
             .unwrap();
         assert!(context.lexical_graph().is_empty());
@@ -32567,6 +32872,11 @@ pub(crate) mod tests {
 
     #[test]
     fn repeated_retained_core_promotion_preserves_exact_original_membership() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::CanonicalProducerIdentity;
         use crate::declaration_context::ExactDeclarationContext;
         use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
@@ -33187,6 +33497,7 @@ None,
                 projection,
                 selected,
                 emitted.native_offers().iter().cloned(),
+                &mut offer_validation,
             )
             .unwrap()
             .retain_normalized_availability(emitted.native_availability())

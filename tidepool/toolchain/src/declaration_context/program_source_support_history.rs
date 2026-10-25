@@ -143,6 +143,11 @@ mod program_source_support_history {
 
     #[test]
     fn private_original_choices_survive_sparse_type_growth_capture_and_retry() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let directory = tempfile::tempdir().unwrap();
         let baseline = (0..20)
             .map(|index| support_product(&format!("Private{index:02}")))
@@ -317,11 +322,21 @@ mod program_source_support_history {
                 .in_program_context_with_private_input(published.clone(), &wrong_input)
                 .is_err());
             let wrong_view = wrong_inputs.compiler_source_support().artifacts().clone();
-            assert!(recover_fixture_compiler_support(projection.clone(), wrong_view, []).is_err());
+            assert!(recover_fixture_compiler_support(
+                projection.clone(),
+                wrong_view,
+                [],
+                &mut offer_validation
+            )
+            .is_err());
             let without_first = support_view(&selected[1..]);
-            assert!(
-                recover_fixture_compiler_support(projection.clone(), without_first, []).is_err()
-            );
+            assert!(recover_fixture_compiler_support(
+                projection.clone(),
+                without_first,
+                [],
+                &mut offer_validation
+            )
+            .is_err());
             assert_eq!(
                 continued.compiler_inputs().projection().roles(),
                 stable_roles

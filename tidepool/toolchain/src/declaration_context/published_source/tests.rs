@@ -494,6 +494,11 @@ fn check_interface_adapter(
     original: ArtifactId,
     child: ArtifactId,
 ) {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         ArtifactBindingNode, ArtifactDependency, ExactArtifactSelection,
     };
@@ -591,7 +596,7 @@ fn check_interface_adapter(
         assert!(narrowed.bindings.contains(&canonical_binding));
         assert!(
             matches!(crate::declaration_context::recover_fixture_compiler_support(
-                types.projection().clone(), original_only, [],
+                types.projection().clone(), original_only, [], &mut offer_validation,
             ), Err(CompileError::ExtractFailed(detail))
                 if detail == "exact declaration context: bound recovery namespace differs from recorded compiler roles"),
             "recorded type roles must refuse a namespace that omits their selected canonical attachment"
@@ -646,6 +651,11 @@ fn assert_sparse_partial_transport(context: &ExactDeclarationContext, original: 
 }
 
 fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::ArtifactBindingNode;
     let producer = [2; 32];
     let child_interface = crate::certified_products::fixture_module_interface(
@@ -801,15 +811,17 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
                     ])
                     .unwrap(),
                     views[1 - selected].clone(),
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let old = historical
-                    .issue_native_offer(&native.descriptor.owner, None)
+                    .issue_native_offer(&native.descriptor.owner, None, &mut offer_validation)
                     .unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection.clone(),
                     views[selected].clone(),
                     [old.clone(), old],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let issued = ExactDeclarationContext::retained_execution_fixture(
@@ -913,6 +925,11 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
 #[test]
 #[ignore = "requires the declared rooted compiler service"]
 fn authored_certifier_preserves_published_policy_with_complete_demand() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let fixture = compiled_publication_fixture();
     let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
         &fixture.producer_bytes,
@@ -1115,6 +1132,7 @@ fn authored_certifier_preserves_published_policy_with_complete_demand() {
                     &crate::declaration_context::issue_fixture_compiler_support(
                         fresh_projection,
                         fresh_view,
+                        &mut offer_validation,
                     )
                     .unwrap(),
                 )
@@ -1254,6 +1272,11 @@ fn published_native_custody_does_not_require_dependency_namespace_originals() {
 #[test]
 #[ignore = "requires the declared rooted compiler service"]
 fn nested_publication_digest_cannot_change_recovered_source_or_native_selection() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::exact_context::{
         hydrate_context, ExactContextSnapshot, Materializer, PublicationNativeFacts,
         PublicationNativeMaps, RecordedCompilerRow, RecordedOriginalProvenance,
@@ -1388,6 +1411,7 @@ fn nested_publication_digest_cannot_change_recovered_source_or_native_selection(
         &altered.roles,
         &altered.offers,
         &altered.native_availability,
+        &mut offer_validation,
     )
     .unwrap();
     let unfinished = context

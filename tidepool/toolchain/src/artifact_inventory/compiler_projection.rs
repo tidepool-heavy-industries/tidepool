@@ -636,6 +636,7 @@ pub(crate) struct AcquiredNativeClosures {
     owners: imbl::OrdMap<[u8; 32], Arc<[Arc<crate::linked_native::AcquiredNativeClosure>]>>,
     components: crate::exact_context::NativeComponentRecords,
     recorded: crate::exact_context::NativeAcquiredClosureRecords,
+    homes: imbl::OrdMap<NativeGroupBinding, crate::linked_native::AcquiredNativeCode>,
     // Payload custody for persistence, never occurrence or executable permission.
     packages: imbl::OrdMap<ArtifactId, Arc<crate::certified_products::CertifiedPackageCodeProduct>>,
 }
@@ -681,40 +682,43 @@ impl AcquiredNativeClosures {
         binding: NativeGroupBinding,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Option<crate::linked_native::AcquiredNativeCode>, CompileError> {
+        crate::host_work::checkpoint()?;
+        operation
+            .charge(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        Ok(self.homes.get(&binding).cloned())
+    }
+
+    fn same_home(
+        prior: &crate::linked_native::AcquiredNativeCode,
+        incoming: &crate::linked_native::AcquiredNativeCode,
+    ) -> Result<(), CompileError> {
         use crate::linked_native::NativeCodeGrant;
-        let mut selected: Option<crate::linked_native::AcquiredNativeCode> = None;
-        for closure in self.iter() {
-            crate::host_work::checkpoint()?;
-            operation
-                .charge(1)
-                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-            let Some(incoming) = closure.home(binding) else {
-                continue;
-            };
-            if let Some(prior) = &selected {
-                let (
-                    NativeCodeGrant::Home { product: held, .. },
-                    NativeCodeGrant::Home {
-                        product: incoming_product,
-                        ..
-                    },
-                ) = (prior.grant(), incoming.grant())
-                else {
-                    return Err(failure("acquired HOME lookup changed occurrence kind"));
-                };
-                if !held.same_issuance(incoming_product) {
-                    return Err(failure(
-                        "acquired HOME binding has competing physical occurrences",
-                    ));
-                }
-                if prior.code().id() != incoming.code().id() {
-                    return Err(failure("acquired HOME binding has competing linked code"));
-                }
-            } else {
-                selected = Some(incoming);
-            }
+        let (
+            NativeCodeGrant::Home {
+                binding: held_binding,
+                product: held,
+            },
+            NativeCodeGrant::Home { binding, product },
+        ) = (prior.grant(), incoming.grant())
+        else {
+            return Err(failure("acquired HOME lookup changed occurrence kind"));
+        };
+        if held_binding != binding
+            || !held.same_issuance(product)
+            || !prior
+                .issued_home_row()
+                .zip(incoming.issued_home_row())
+                .is_some_and(|(held, row)| held.same_selected_issuance(row))
+        {
+            return Err(failure(
+                "acquired HOME binding has competing physical occurrences",
+            ));
         }
-        Ok(selected)
+        if prior.code().id() != incoming.code().id() {
+            return Err(failure("acquired HOME binding has competing linked code"));
+        }
+        Ok(())
     }
 
     fn one(owner: Arc<crate::linked_native::AcquiredNativeClosure>) -> Result<Self, CompileError> {
@@ -725,6 +729,7 @@ impl AcquiredNativeClosures {
         }
         let mut components = crate::exact_context::NativeComponentRecords::new();
         let mut packages = imbl::OrdMap::new();
+        let mut homes = imbl::OrdMap::new();
         for acquired in owner.acquired() {
             crate::host_work::checkpoint()?;
             if let crate::linked_native::NativeCodeGrant::Package { product, .. } = acquired.grant()
@@ -735,6 +740,13 @@ impl AcquiredNativeClosures {
                     }
                 } else {
                     packages.insert(product.artifact_id(), Arc::clone(product));
+                }
+            }
+            if let crate::linked_native::NativeCodeGrant::Home { binding, .. } = acquired.grant() {
+                if let Some(prior) = homes.get(&binding) {
+                    Self::same_home(prior, &acquired)?;
+                } else {
+                    homes.insert(binding, acquired.clone());
                 }
             }
             let component = acquired.code().component();
@@ -762,6 +774,7 @@ impl AcquiredNativeClosures {
             owners: imbl::OrdMap::unit(identity, vec![owner].into()),
             components,
             recorded,
+            homes,
             packages,
         })
     }
@@ -865,6 +878,14 @@ impl AcquiredNativeClosures {
                 }
             } else {
                 retained.components.insert(*identity, record.clone());
+            }
+        }
+        for (binding, acquired) in &incoming.homes {
+            crate::host_work::checkpoint()?;
+            if let Some(prior) = retained.homes.get(binding) {
+                Self::same_home(prior, acquired)?;
+            } else {
+                retained.homes.insert(*binding, acquired.clone());
             }
         }
         for (id, product) in &incoming.packages {
@@ -2300,6 +2321,13 @@ pub(crate) struct CarriedCompilerSelection {
     rows: SelectedCompilerRows,
 }
 impl CarriedCompilerSelection {
+    pub(crate) fn seed_native_group_rows(
+        &self,
+        bindings: &BTreeSet<NativeGroupBinding>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        self.base.seed_native_group_rows(bindings, validation)
+    }
     pub(crate) fn empty() -> Self {
         CompilerSourceSupport::empty().carry_compiler_selection()
     }
@@ -4143,6 +4171,7 @@ impl CompilerSourceSupport {
     fn from_selected_issuance(
         projection: CompilerInputProjection,
         artifacts: ArtifactView,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         projection.validate(&artifacts)?;
         if projection
@@ -4188,7 +4217,7 @@ impl CompilerSourceSupport {
                     row: &selected[owner],
                     artifacts: &artifacts,
                 });
-                let offer = IssuedNativeOffer::issue(input, proof)?;
+                let offer = IssuedNativeOffer::issue(input, proof, validation)?;
                 let row = selected.remove(owner).expect("issued compiler row");
                 selected.insert(
                     owner.clone(),
@@ -4251,13 +4280,24 @@ impl CompilerSourceSupport {
         &self,
         owner: &ExactModuleIdentity,
         proof: Option<NativeOriginalRequirement>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<IssuedNativeOffer, CompileError> {
         let input = self.compiler_primary_input(owner)?.ok_or_else(|| {
             admission_failure(ArtifactInventoryFailure::MissingOriginal {
                 owner: owner.clone(),
             })
         })?;
-        IssuedNativeOffer::issue(input, proof)
+        if let Some(proof) = &proof {
+            // This only reuses physical evidence. The issuer below independently
+            // authenticates the complete proof and exact carrier pair.
+            let groups = &proof.selection.graph_selection().native_groups;
+            validation
+                .inventory
+                .reserve::<(NativeGroupBinding, [usize; 4])>(groups.len())
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            self.seed_native_group_rows(&groups.iter().copied().collect(), validation)?;
+        }
+        IssuedNativeOffer::issue(input, proof, validation)
     }
 
     pub(crate) fn compiler_primary_inputs(
@@ -4908,6 +4948,31 @@ impl CompilerSourceSupport {
         result
     }
 
+    pub(crate) fn seed_native_group_rows(
+        &self,
+        bindings: &BTreeSet<NativeGroupBinding>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        self.native_availability
+            .seed_native_group_rows(bindings, validation)?;
+        let operation = Arc::clone(&validation.inventory);
+        for binding in bindings {
+            if let Some(acquired) = self
+                .acquired_native_closures()
+                .group_owner(*binding, &operation)?
+            {
+                let row = acquired
+                    .issued_home_row()
+                    .ok_or_else(|| failure("acquired HOME lost its checked row"))?;
+                validation
+                    .native_group_rows
+                    .retain_issued(*binding, row, &operation)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn native_availability(
         &self,
     ) -> &crate::declaration_context::RequestNativeAvailability {
@@ -5055,11 +5120,12 @@ impl CompilerSourceSupport {
 
     pub(crate) fn from_recovered_selection(
         selection: crate::declaration_context::RecoveredCompilerSelection,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         let (artifacts, projection, issuance) = selection.into_parts();
         match issuance {
             crate::declaration_context::RecoveredCompilerIssuance::CheckedInput => {
-                let support = Self::from_selected_issuance(projection, artifacts)?;
+                let support = Self::from_selected_issuance(projection, artifacts, validation)?;
                 let mut draft = support.reopen();
                 draft.input_decisions = RecordedInputNativeDecisions::default()
                     .with_recorded_facts(draft.input_decisions.facts.clone());
@@ -5082,6 +5148,7 @@ impl CompilerSourceSupport {
             ArtifactId,
             crate::declaration_context::NativeAvailabilitySnapshotFacts,
         >,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         let mut projection = CompilerInputProjection::default();
         let mut births = BTreeMap::new();
@@ -5138,6 +5205,7 @@ impl CompilerSourceSupport {
                         &birth.native_facts.roles,
                         &birth.native_facts.offers,
                         &birth.native_facts.native_availability,
+                        validation,
                     )?;
                     let acquired = Arc::new(acquired);
                     births.insert(owner.clone(), Arc::clone(&acquired));
@@ -5178,7 +5246,7 @@ impl CompilerSourceSupport {
             None,
             Default::default(),
         )?;
-        acquired.restore_native_maps(rows, offers, availability)
+        acquired.restore_native_maps(rows, offers, availability, validation)
     }
 
     pub(crate) fn restore_snapshot_evidence(
@@ -5201,6 +5269,7 @@ impl CompilerSourceSupport {
             ArtifactId,
             crate::declaration_context::NativeAvailabilitySnapshotFacts,
         >,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         if self.projection.roles.len() != roles.len() {
             return Err(failure(
@@ -5238,7 +5307,7 @@ impl CompilerSourceSupport {
                 if *key != fact.identity()? {
                     return Err(failure("native offer key differs from its issued facts"));
                 }
-                fact.restore(&self.artifacts)
+                fact.restore(&self.artifacts, validation)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let proof_map = offers
@@ -7054,6 +7123,52 @@ mod tests {
     use super::*;
 
     impl AcquiredNativeClosures {
+        pub(crate) fn assert_physical_issuance_conflict(
+            held: &Arc<crate::linked_native::AcquiredNativeClosure>,
+            incoming: &Arc<crate::linked_native::AcquiredNativeClosure>,
+        ) {
+            let held = Self::one(Arc::clone(held)).unwrap();
+            let incoming = Self::one(Arc::clone(incoming)).unwrap();
+            let common = held
+                .homes
+                .keys()
+                .filter(|binding| incoming.homes.contains_key(*binding))
+                .collect::<Vec<_>>();
+            assert!(
+                !common.is_empty(),
+                "genuine restored owners overlap in HOME bindings"
+            );
+            for binding in &common {
+                let left = &held.homes[*binding];
+                let right = &incoming.homes[*binding];
+                assert_eq!(
+                    left.code().id(),
+                    right.code().id(),
+                    "the control changes physical issuer, not linked code"
+                );
+                assert!(!left
+                    .issued_home_row()
+                    .unwrap()
+                    .same_selected_issuance(right.issued_home_row().unwrap()));
+            }
+            assert!(
+                matches!(held.append(&incoming), Err(CompileError::ExtractFailed(detail))
+                if detail.ends_with("acquired HOME binding has competing physical occurrences"))
+            );
+            let operation =
+                tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+            for binding in common {
+                let retained = held.group_owner(*binding, &operation).unwrap().unwrap();
+                assert!(
+                    retained
+                        .issued_home_row()
+                        .unwrap()
+                        .same_selected_issuance(held.homes[binding].issued_home_row().unwrap()),
+                    "a refused append preserves the prior successful demand"
+                );
+            }
+        }
+
         /// Observe real issued owners. The independent reference model retains
         /// pointers, so equal immutable records cannot erase acquisition choices.
         pub(crate) fn assert_collection_history(
@@ -7086,6 +7201,7 @@ mod tests {
                     assert!(actual.components.ptr_eq(&repeated.components));
                     assert!(actual.recorded.ptr_eq(&repeated.recorded));
                     assert!(actual.packages.ptr_eq(&repeated.packages));
+                    assert!(actual.homes.ptr_eq(&repeated.homes));
                     assert!(actual.same_held_owners(&repeated));
                 }
                 let replay = order.iter().rev().fold(Self::default(), |prior, owner| {
@@ -7184,29 +7300,37 @@ mod tests {
 
     #[test]
     fn compiler_primary_issuer_rejects_crossed_acquisitions_and_canonical_pairs() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
-        let issue = |marker: &str| {
-            let mut issued = entries.clone();
-            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
-                marker,
-                &[],
-            )));
-            let view = inventory
-                .admit_shared_with_demand(
-                    &inventory.empty_view(),
-                    issued,
-                    NativeArtifactDemand::AllGroups,
+        let issue =
+            |marker: &str,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let mut issued = entries.clone();
+                issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                    marker,
+                    &[],
+                )));
+                let view = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        issued,
+                        NativeArtifactDemand::AllGroups,
+                    )
+                    .unwrap();
+                CompilerSourceSupport::from_selected_issuance(
+                    CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+                    view,
+                    validation,
                 )
-                .unwrap();
-            CompilerSourceSupport::from_selected_issuance(
-                CompilerInputProjection::from_issued_entries(&entries).unwrap(),
-                view,
-            )
-            .unwrap()
-        };
-        let first = issue("PrimaryFirst");
-        let second = issue("PrimarySecond");
+                .unwrap()
+            };
+        let first = issue("PrimaryFirst", &mut offer_validation);
+        let second = issue("PrimarySecond", &mut offer_validation);
         let owner = &entries[1].descriptor.owner;
         let row = &first.selected[owner];
         let foreign = &second.selected[owner];
@@ -7626,6 +7750,11 @@ mod tests {
 
     #[test]
     fn fresh_value_append_preserves_native_permissions_and_exact_execution_roots() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let raw = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture(
                 "AppendNative",
@@ -7644,16 +7773,19 @@ mod tests {
         let full = inventory
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
-        let full_source =
-            crate::declaration_context::issue_fixture_compiler_support(projection.clone(), full)
-                .unwrap();
+        let full_source = crate::declaration_context::issue_fixture_compiler_support(
+            projection.clone(),
+            full,
+            &mut offer_validation,
+        )
+        .unwrap();
         let full_proof = NativeOriginalRequirement::from_selected_view(
             entry.descriptor.id,
             full_source.artifacts(),
         )
         .unwrap();
         let full_offers = [full_source
-            .issue_native_offer(&entry.descriptor.owner, full_proof)
+            .issue_native_offer(&entry.descriptor.owner, full_proof, &mut offer_validation)
             .unwrap()];
         for ordinals in [vec![7, 9001], vec![7], vec![9001], vec![]] {
             let groups = ordinals
@@ -7669,6 +7801,7 @@ mod tests {
             let source = crate::declaration_context::issue_fixture_compiler_support(
                 projection.clone(),
                 chosen,
+                &mut offer_validation,
             )
             .unwrap()
             .retain_offers(full_offers.iter().cloned())
@@ -8154,6 +8287,11 @@ mod tests {
 
     #[test]
     fn resolved_selected_reads_do_not_visit_historical_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         for group_count in [1, 4, 16] {
             let inventory = ArtifactInventory::default();
             let selected = Arc::new(crate::artifact_inventory::tests::entry(
@@ -8206,6 +8344,7 @@ mod tests {
             let historical_source = crate::declaration_context::issue_fixture_compiler_support(
                 historical_projection.clone(),
                 view.clone(),
+                &mut offer_validation,
             )
             .unwrap();
             let proof = NativeOriginalRequirement::from_selected_view(
@@ -8214,12 +8353,13 @@ mod tests {
             )
             .unwrap();
             let offer = historical_source
-                .issue_native_offer(&historical.descriptor.owner, proof)
+                .issue_native_offer(&historical.descriptor.owner, proof, &mut offer_validation)
                 .unwrap();
             let support = crate::declaration_context::recover_fixture_compiler_support(
                 projection,
                 view,
                 [offer],
+                &mut offer_validation,
             )
             .unwrap();
             assert!(
@@ -8461,13 +8601,20 @@ mod tests {
 
     #[test]
     fn native_offer_facts_equality_survives_reversed_live_order() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let inventory = ArtifactInventory::default();
         let view = inventory
             .admit_shared(&inventory.empty_view(), entries)
             .unwrap();
-        let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+        let source =
+            CompilerSourceSupport::from_selected_issuance(projection, view, &mut offer_validation)
+                .unwrap();
         assert!(source.native_offers.len() > 1);
         let reversed = source
             .rebuild(
@@ -8503,6 +8650,11 @@ mod tests {
 
     #[test]
     fn completion_equivalent_wrapper_replacement_closes_all_views() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         // A sibling inventory holds equal-by-content but pointer-distinct
         // outer wrappers around the same issued authority.
@@ -8521,8 +8673,12 @@ mod tests {
         let view = inventory
             .admit_shared(&inventory.empty_view(), entries)
             .unwrap();
-        let source =
-            CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
+        let source = CompilerSourceSupport::from_selected_issuance(
+            projection.clone(),
+            view,
+            &mut offer_validation,
+        )
+        .unwrap();
         let sibling = ArtifactInventory::default();
         let sibling_view = sibling
             .admit_shared(&sibling.empty_view(), replacement)
@@ -8582,6 +8738,11 @@ mod tests {
 
     #[test]
     fn ordinary_native_fact_successors_encode_only_changed_facts() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::exact_context::{take_native_fact_work, NativeFactWork};
         for unrelated in [1, 32, 128] {
             let inventory = ArtifactInventory::default();
@@ -8601,7 +8762,12 @@ mod tests {
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
             take_native_fact_work();
-            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let source = CompilerSourceSupport::from_selected_issuance(
+                projection,
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             let cold = take_native_fact_work();
             assert!(
                 cold.changed_entries > 0
@@ -8728,6 +8894,11 @@ mod tests {
 
     #[test]
     fn program_fragment_keeps_selected_acquisitions_across_equal_witness_allocations() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::declaration_context::NativeTransportMode;
 
         for distinct_witness in [false, true] {
@@ -8811,6 +8982,7 @@ mod tests {
                 CompilerSourceSupport::from_selected_issuance(
                     CompilerInputProjection::from_issued_entries(&entries).unwrap(),
                     view,
+                    &mut offer_validation,
                 )
                 .unwrap()
             });
@@ -8967,6 +9139,11 @@ mod tests {
 
     #[test]
     fn program_original_promotion_qualifies_once_and_keeps_issued_dependencies() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let inventory = ArtifactInventory::default();
@@ -8975,6 +9152,7 @@ mod tests {
             inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap(),
+            &mut offer_validation,
         )
         .unwrap();
         let child = ExactModuleIdentity {
@@ -9083,6 +9261,11 @@ mod tests {
 
     #[test]
     fn program_fragment_metadata_matches_cold_multiversion_representatives_and_releases() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         for reverse in [false, true] {
             let (metadata, previous, weak) = {
                 let entries = [1, 2].map(|version| {
@@ -9108,6 +9291,7 @@ mod tests {
                 let first_support = CompilerSourceSupport::from_selected_issuance(
                     CompilerInputProjection::from_issued_entries(&[first]).unwrap(),
                     initial,
+                    &mut offer_validation,
                 )
                 .unwrap()
                 .for_source_owners(&BTreeSet::new())
@@ -9124,6 +9308,7 @@ mod tests {
                 let incoming = CompilerSourceSupport::from_selected_issuance(
                     CompilerInputProjection::from_issued_entries(&[second.clone()]).unwrap(),
                     expanded,
+                    &mut offer_validation,
                 )
                 .unwrap()
                 .for_source_owners(&BTreeSet::new())
@@ -9180,6 +9365,11 @@ mod tests {
 
     #[test]
     fn keyed_type_interfaces_preserve_native_choices_and_bound_role_work() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let mut observed = None;
         for unrelated in [1, 32, 128] {
             let inventory = ArtifactInventory::default();
@@ -9198,7 +9388,12 @@ mod tests {
             let view = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
-            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let source = CompilerSourceSupport::from_selected_issuance(
+                projection,
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             let metadata = source
                 .projection
                 .project_metadata(source.artifacts.metadata_snapshot())
@@ -9327,6 +9522,11 @@ mod tests {
 
     #[test]
     fn keyed_type_interfaces_refuse_conflicting_owner_and_equal_bytes_other_binding() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let canonical = Arc::new(ArtifactEntry::canonical(
             crate::certified_products::fixture_module_interface(
                 [2; 32],
@@ -9397,6 +9597,7 @@ mod tests {
             inventory
                 .admit_shared(&inventory.empty_view(), native_entries)
                 .unwrap(),
+            &mut offer_validation,
         )
         .unwrap();
         assert!(
@@ -9407,6 +9608,11 @@ mod tests {
 
     #[test]
     fn type_projection_and_delta_do_not_rescan_a_broad_incoming_issuer() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let mut semantic_work = None;
         for groups in [1, 32, 128] {
             scope_proof::take_ancestry_edge_visits();
@@ -9447,7 +9653,12 @@ mod tests {
             let view = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
-            let source = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+            let source = CompilerSourceSupport::from_selected_issuance(
+                projection,
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             let execution = Arc::new(
                 crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                     [2; 32],
@@ -9538,6 +9749,11 @@ mod tests {
 
     #[test]
     fn complete_support_new_and_merge_do_not_materialize_unused_metadata() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         for demand in [
             NativeArtifactDemand::AllGroups,
             NativeArtifactDemand::ScopeInterfaces,
@@ -9548,8 +9764,12 @@ mod tests {
                 .admit_shared_with_demand(&inventory.empty_view(), entries.clone(), demand)
                 .unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-            let issued =
-                CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
+            let issued = CompilerSourceSupport::from_selected_issuance(
+                projection.clone(),
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             assert!(issued.native_availability.rows().next().is_some());
             // A fresh read owner over the exact same issued lease prevents a
             // prior cached full snapshot from hiding eager metadata work.
@@ -9691,6 +9911,7 @@ mod tests {
                 actual.recorded_rows(),
                 &facts.offers,
                 &facts.native_availability,
+                &mut validation,
             )
             .unwrap();
         assert!(matches!(
@@ -9740,6 +9961,11 @@ mod tests {
 
     #[test]
     fn unissued_original_keeps_exact_execution_until_request_policy_issuance() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entry = decision_affinity_entries().remove(0);
         let owner = &entry.descriptor.owner;
         let ArtifactPayload::Original(product) = &entry.payload else {
@@ -9750,7 +9976,9 @@ mod tests {
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-        let issued = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+        let issued =
+            CompilerSourceSupport::from_selected_issuance(projection, view, &mut offer_validation)
+                .unwrap();
         let explicit = |source: &CompilerSourceSupport| {
             source
                 .artifacts
@@ -9779,6 +10007,7 @@ mod tests {
             &records,
             &facts.offers,
             &facts.native_availability,
+            &mut offer_validation,
         )
         .unwrap();
         let canonical = unissued.projection.snapshot_roles()[owner].interface();
@@ -9818,9 +10047,12 @@ mod tests {
                 ],
             )
             .unwrap();
-        let other =
-            CompilerSourceSupport::from_selected_issuance(issued.projection.clone(), other_view)
-                .unwrap();
+        let other = CompilerSourceSupport::from_selected_issuance(
+            issued.projection.clone(),
+            other_view,
+            &mut offer_validation,
+        )
+        .unwrap();
         let rival = explicit(&other);
         assert_ne!(expected, rival);
         assert_ne!(
@@ -9883,15 +10115,26 @@ mod tests {
 
     #[test]
     fn selected_native_acquisitions_follow_the_whole_winning_row() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let view = inventory
             .admit_shared(&inventory.empty_view(), entries[..2].to_vec())
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap();
-        let a = CompilerSourceSupport::from_selected_issuance(projection.clone(), view.clone())
-            .unwrap();
-        let b = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+        let a = CompilerSourceSupport::from_selected_issuance(
+            projection.clone(),
+            view.clone(),
+            &mut offer_validation,
+        )
+        .unwrap();
+        let b =
+            CompilerSourceSupport::from_selected_issuance(projection, view, &mut offer_validation)
+                .unwrap();
         assert!(a.same_recorded_facts(&b));
         let owner = &entries[1].descriptor.owner;
         let group = a.input_decisions.facts[owner].groups[&7];
@@ -9921,6 +10164,7 @@ mod tests {
                 &a.projection.recorded_roles,
                 &facts.offers,
                 &facts.native_availability,
+                &mut offer_validation,
             )
             .unwrap();
         assert!(matches!(
@@ -9953,47 +10197,70 @@ mod tests {
 
     #[test]
     fn source_merge_keeps_native_choices_with_the_selected_exact_issuer() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let foreign_inventory = ArtifactInventory::default();
-        let issue = |marker: &str, with_caller: bool, empty: bool, foreign: bool| {
-            let inventory = if foreign {
-                &foreign_inventory
-            } else {
-                &inventory
-            };
-            let selected = if with_caller {
-                &entries[..]
-            } else {
-                &entries[..2]
-            };
-            let mut issued = selected.to_vec();
-            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
-                marker,
-                &[],
-            )));
-            let view = inventory
-                .admit_shared_with_demand(
-                    &inventory.empty_view(),
-                    issued,
-                    if empty {
-                        NativeArtifactDemand::ScopeInterfaces
-                    } else {
-                        NativeArtifactDemand::AllGroups
-                    },
+        let issue =
+            |marker: &str,
+             with_caller: bool,
+             empty: bool,
+             foreign: bool,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let inventory = if foreign {
+                    &foreign_inventory
+                } else {
+                    &inventory
+                };
+                let selected = if with_caller {
+                    &entries[..]
+                } else {
+                    &entries[..2]
+                };
+                let mut issued = selected.to_vec();
+                issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                    marker,
+                    &[],
+                )));
+                let view = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        issued,
+                        if empty {
+                            NativeArtifactDemand::ScopeInterfaces
+                        } else {
+                            NativeArtifactDemand::AllGroups
+                        },
+                    )
+                    .unwrap();
+                CompilerSourceSupport::from_selected_issuance(
+                    CompilerInputProjection::from_issued_entries(selected).unwrap(),
+                    view,
+                    validation,
                 )
-                .unwrap();
-            CompilerSourceSupport::from_selected_issuance(
-                CompilerInputProjection::from_issued_entries(selected).unwrap(),
-                view,
-            )
-            .unwrap()
-        };
+                .unwrap()
+            };
         for (empty_winner, cross_inventory) in
             [(false, false), (true, false), (false, true), (true, true)]
         {
-            let winner = issue("WinnerMarker", false, empty_winner, false);
-            let historical = issue("HistoricalMarker", true, false, cross_inventory);
+            let winner = issue(
+                "WinnerMarker",
+                false,
+                empty_winner,
+                false,
+                &mut offer_validation,
+            );
+            let historical = issue(
+                "HistoricalMarker",
+                true,
+                false,
+                cross_inventory,
+                &mut offer_validation,
+            );
             let parent = &entries[1];
             let owner = &parent.descriptor.owner;
             let pair = |support: &CompilerSourceSupport| {
@@ -10168,31 +10435,40 @@ mod tests {
 
     #[test]
     fn source_choice_affinity_does_not_resolve_unselected_ambiguous_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
-        let issue = |marker: &str, with_caller: bool| {
-            let selected = if with_caller {
-                &entries[..]
-            } else {
-                &entries[..2]
+        let issue =
+            |marker: &str,
+             with_caller: bool,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let selected = if with_caller {
+                    &entries[..]
+                } else {
+                    &entries[..2]
+                };
+                let mut issued = selected.to_vec();
+                issued.push(Arc::new(crate::artifact_inventory::tests::entry(
+                    marker,
+                    &[],
+                )));
+                let view = inventory
+                    .admit_shared(&inventory.empty_view(), issued)
+                    .unwrap();
+                CompilerSourceSupport::from_selected_issuance(
+                    CompilerInputProjection::from_issued_entries(selected).unwrap(),
+                    view,
+                    validation,
+                )
+                .unwrap()
             };
-            let mut issued = selected.to_vec();
-            issued.push(Arc::new(crate::artifact_inventory::tests::entry(
-                marker,
-                &[],
-            )));
-            let view = inventory
-                .admit_shared(&inventory.empty_view(), issued)
-                .unwrap();
-            CompilerSourceSupport::from_selected_issuance(
-                CompilerInputProjection::from_issued_entries(selected).unwrap(),
-                view,
-            )
-            .unwrap()
-        };
-        let winner = issue("SelectedNamespaceMarker", false);
-        let historical = issue("HistoricalNamespaceMarker", true);
-        let extra = issue("CustodyOnlyMarker", false);
+        let winner = issue("SelectedNamespaceMarker", false, &mut offer_validation);
+        let historical = issue("HistoricalNamespaceMarker", true, &mut offer_validation);
+        let extra = issue("CustodyOnlyMarker", false, &mut offer_validation);
         let mut losing = historical
             .artifacts
             .retain_custody(&extra.artifacts)
@@ -10252,6 +10528,11 @@ mod tests {
 
     #[test]
     fn source_merge_keeps_receiving_choices_for_same_canonical_original_pair() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let base = inventory
@@ -10283,6 +10564,7 @@ mod tests {
             CompilerSourceSupport::from_selected_issuance(
                 CompilerInputProjection::from_issued_entries(&entries[..2]).unwrap(),
                 view,
+                &mut offer_validation,
             )
             .unwrap()
         });
@@ -10386,6 +10668,11 @@ mod tests {
 
     #[test]
     fn custody_only_support_additions_preserve_qualified_rows_and_selected_owners() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let product = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture(
                 "CustodyPermissions",
@@ -10410,8 +10697,12 @@ mod tests {
             let full = incoming_inventory
                 .admit_shared(&incoming_inventory.empty_view(), vec![entry.clone()])
                 .unwrap();
-            let incoming =
-                CompilerSourceSupport::from_selected_issuance(projection.clone(), full).unwrap();
+            let incoming = CompilerSourceSupport::from_selected_issuance(
+                projection.clone(),
+                full,
+                &mut offer_validation,
+            )
+            .unwrap();
             for ordinals in [Some(vec![7, 9001]), Some(vec![7]), Some(vec![]), None] {
                 let selected = ordinals
                     .as_deref()
@@ -10430,7 +10721,12 @@ mod tests {
                     )
                     .unwrap();
                 let support = if ordinals.is_some() {
-                    CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap()
+                    CompilerSourceSupport::from_selected_issuance(
+                        projection.clone(),
+                        view,
+                        &mut offer_validation,
+                    )
+                    .unwrap()
                 } else {
                     CompilerSourceSupport::new(
                         projection.for_source_owners(&BTreeSet::new()),
@@ -10548,6 +10844,11 @@ mod tests {
 
     #[test]
     fn namespace_finalization_reuses_only_an_unchanged_exact_view() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
@@ -10568,8 +10869,12 @@ mod tests {
                     },
                 )
                 .unwrap();
-            let support =
-                CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap();
+            let support = CompilerSourceSupport::from_selected_issuance(
+                projection.clone(),
+                view,
+                &mut offer_validation,
+            )
+            .unwrap();
             assert_eq!(support.input_decisions.facts.len(), entries.len());
             for (entry, ordinal) in entries.iter().zip([9, 7, 3]) {
                 let choice = &support.input_decisions.facts[&entry.descriptor.owner];
@@ -10724,6 +11029,11 @@ mod tests {
 
     #[test]
     fn checked_input_issuance_refuses_distinct_group_choices_before_recording_domain() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let product = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture(
                 "InputChoice",
@@ -10766,8 +11076,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(expected.len(), 1);
         let repeated = sources[0].merge_fixture_selections(&sources[0]).unwrap();
-        let admitted =
-            CompilerSourceSupport::from_selected_issuance(projection.clone(), repeated).unwrap();
+        let admitted = CompilerSourceSupport::from_selected_issuance(
+            projection.clone(),
+            repeated,
+            &mut offer_validation,
+        )
+        .unwrap();
         let actual = admitted.input_decisions.facts[&original.descriptor.owner]
             .groups
             .values()
@@ -10798,7 +11112,7 @@ mod tests {
                 "both genuine distinct issuers reach the production ingress"
             );
             assert!(
-                matches!(CompilerSourceSupport::from_selected_issuance(projection.clone(), ambiguous),
+                matches!(CompilerSourceSupport::from_selected_issuance(projection.clone(), ambiguous, &mut offer_validation),
                 Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == original.descriptor.id))
             );
         }

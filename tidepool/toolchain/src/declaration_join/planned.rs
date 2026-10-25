@@ -807,6 +807,11 @@ mod tests {
 
     #[test]
     fn authored_certification_preserves_historical_canonical_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
@@ -838,10 +843,11 @@ mod tests {
         let old_issuer = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[old_entry.clone()]).unwrap(),
             old_view.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let offer = old_issuer
-            .issue_native_offer(&old_entry.descriptor.owner, None)
+            .issue_native_offer(&old_entry.descriptor.owner, None, &mut offer_validation)
             .unwrap();
         let current_entry = Arc::new(ArtifactEntry::original([1; 32], current.clone()).unwrap());
         let current_view = inventory
@@ -854,6 +860,7 @@ mod tests {
             projection.clone(),
             current_view,
             [],
+            &mut offer_validation,
         )
         .unwrap();
         let current_view = current_support
@@ -868,6 +875,7 @@ mod tests {
                     projection.clone(),
                     current_view,
                     [offer],
+                    &mut offer_validation,
                 )
                 .unwrap(),
             )
@@ -894,6 +902,7 @@ mod tests {
         let issuer = crate::declaration_context::issue_fixture_compiler_support(
             issued.clone(),
             compiled.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let selection =
@@ -916,7 +925,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 issuer
-                    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
                     .unwrap()
             })
             .collect::<Vec<_>>();
@@ -943,6 +952,7 @@ mod tests {
                 issued.clone(),
                 scoped.clone(),
                 [],
+                &mut offer_validation,
             )
             .unwrap(),
             products.iter().map(|product| ExactModuleIdentity {
@@ -1054,6 +1064,11 @@ mod tests {
 
     #[test]
     fn authored_source_closure_preserves_issued_native_roles_and_refuses_other_versions() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
         use crate::certified_products::{
             fixture_finalized_product, fixture_finalized_product_with_requirements,
@@ -1122,6 +1137,7 @@ mod tests {
                 issued.clone(),
                 full.clone(),
                 [],
+                &mut offer_validation,
             )
             .unwrap();
             let projected = support
@@ -1159,6 +1175,7 @@ mod tests {
                         issued.clone(),
                         view.clone(),
                         [],
+                        &mut offer_validation,
                     )
                     .unwrap(),
                     [root.clone()],
@@ -1247,6 +1264,7 @@ mod tests {
                     issued.clone(),
                     first.clone(),
                     [],
+                    &mut offer_validation,
                 )
                 .unwrap()
                 .finalize_namespace()
@@ -1274,6 +1292,7 @@ mod tests {
                         issued.clone(),
                         first.clone(),
                         [],
+                        &mut offer_validation,
                     )
                     .unwrap(),
                     [root.clone()],
@@ -1293,7 +1312,8 @@ mod tests {
                         &crate::declaration_context::recover_fixture_compiler_support(
                             conflict_selection.clone(),
                             conflicting.clone(),
-                            []
+                            [],
+                            &mut offer_validation
                         )
                         .unwrap(),
                         [dependency.clone()],
@@ -1308,6 +1328,11 @@ mod tests {
 
     #[test]
     fn authored_interface_context_retains_type_only_source_closure() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::ArtifactKind;
         use crate::certified_products::fixture_module_interface;
 
@@ -1349,6 +1374,7 @@ mod tests {
                 .unwrap(),
                 compiled.clone(),
                 [],
+                &mut offer_validation,
             )
             .unwrap(),
             [root.clone()],
@@ -1387,6 +1413,11 @@ mod tests {
 
     #[test]
     fn authored_interface_context_excludes_changed_transient_consumers() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::certified_products::{
             fixture_module_interface, fixture_source_module_interface,
         };
@@ -1452,6 +1483,7 @@ mod tests {
                 first_roles.clone(),
                 first_offer.clone(),
                 [],
+                &mut offer_validation,
             )
             .unwrap(),
             [original.clone()],
@@ -1464,6 +1496,7 @@ mod tests {
                 second_roles.clone(),
                 second_offer.clone(),
                 [],
+                &mut offer_validation,
             )
             .unwrap(),
             [original.clone()],

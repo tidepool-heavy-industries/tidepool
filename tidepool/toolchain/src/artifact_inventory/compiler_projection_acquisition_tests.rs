@@ -4,6 +4,11 @@ use super::*;
 
 #[test]
 fn authored_promotion_preserves_actual_offered_acquisition() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let fixture = crate::artifacts::test_support::prepare_source_publication_entry_fixture()
         .expect("the actual compiler issues the first completed source observation");
     let frozen = crate::artifacts::FrozenEntrySources::capture(
@@ -93,6 +98,7 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
                 inventory
                     .admit_shared_with_demand(&inventory.empty_view(), entries, demand)
                     .unwrap(),
+                &mut offer_validation,
             )
             .unwrap()
         })
@@ -162,7 +168,12 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         [base, full].map(|view| {
-            CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap()
+            CompilerSourceSupport::from_selected_issuance(
+                projection.clone(),
+                view,
+                &mut offer_validation,
+            )
+            .unwrap()
         })
     });
     for inputs in &shared_inputs {
@@ -539,7 +550,7 @@ fn assert_fresh_dependency_permission_boundary(
     let request = context
         .capture_world_primary_inputs(helper.descriptor.producer_sha256)
         .unwrap();
-    let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
         request.inputs(),
         &validation.inventory,
@@ -567,6 +578,7 @@ fn assert_fresh_dependency_permission_boundary(
             full.recorded_rows(),
             &facts.offers,
             &facts.native_availability,
+            &mut validation,
         )
         .unwrap()
         .retain_normalized_availability(full.native_availability())

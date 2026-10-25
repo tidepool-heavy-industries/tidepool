@@ -4571,7 +4571,7 @@ impl ArtifactInventory {
             },
         )?;
         native_availability::CheckedNativeAvailability::from_cohort_custody(custody, &originals)?
-            .validate_current_cohort(validation)
+            .validate_current_cohort(selection, validation)
     }
 
     /// Issue complete private products using only the request's exact external
@@ -11574,6 +11574,11 @@ mod tests {
 
     #[test]
     fn graph_packets_project_selected_scope_ancestry_without_dropping_opaque_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = ArtifactInventory::default();
         let native = Arc::new(issued_native_groups(
             "ScopePacketNative",
@@ -11607,10 +11612,11 @@ mod tests {
         let issuer = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap(),
             selected.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let offer = issuer
-            .issue_native_offer(&native.descriptor.owner, Some(proof))
+            .issue_native_offer(&native.descriptor.owner, Some(proof), &mut offer_validation)
             .unwrap();
         let held = carrier
             .retain_issued_offer_custody([offer.clone()])
@@ -11695,7 +11701,7 @@ mod tests {
         assert!(!partial.is_full());
         assert!(partial.proof().is_some());
         let empty = issuer
-            .issue_native_offer(&native.descriptor.owner, None)
+            .issue_native_offer(&native.descriptor.owner, None, &mut offer_validation)
             .unwrap();
         for original in [&offer, &partial, &empty] {
             use crate::exact_context::NativeOfferSnapshotBody;
@@ -11715,7 +11721,7 @@ mod tests {
                 "the recorded selection holds extra authenticated availability facts"
             );
             *selection = ExactArtifactSelection::from_snapshot(Arc::new(snapshot));
-            let restored = facts.restore(&widened).unwrap();
+            let restored = facts.restore(&widened, &mut offer_validation).unwrap();
             assert_eq!(restored.snapshot_facts(), facts);
             assert_eq!(restored.is_full(), original.is_full());
             assert_eq!(
@@ -11723,7 +11729,9 @@ mod tests {
                 original.issued_group_carriers().unwrap()
             );
             assert!(
-                facts.restore(&inventory.empty_view()).is_err(),
+                facts
+                    .restore(&inventory.empty_view(), &mut offer_validation)
+                    .is_err(),
                 "missing actual acquisition still refuses"
             );
         }
@@ -11755,6 +11763,11 @@ mod tests {
             fn demotion_retains_undemanded_exact_native_dependency_custody(
                 late in 1u32..8, repeats in 1usize..9,
             ) {
+                let offer_operation = std::sync::Arc::new(
+                    tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                );
+                let mut offer_validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
                 let inventory = ArtifactInventory::default();
                 let dependency = Arc::new(issued_native_groups("DeferredDependency",
                     vec![(5, Vec::new())], &[], &BTreeMap::new()));
@@ -11772,7 +11785,7 @@ mod tests {
                     view = {
     let projection = CompilerInputProjection::from_issued_entries(&[original.clone(), dependency.clone()]).unwrap().interface_only();
     let issued = view.with_compiler_projection(&projection).map(std::borrow::Cow::into_owned).unwrap();
-    let support = crate::declaration_context::recover_fixture_compiler_support(projection, issued, []).unwrap();
+    let support = crate::declaration_context::recover_fixture_compiler_support(projection, issued, [], &mut offer_validation).unwrap();
     let selected = support.selected_interfaces().unwrap().select_owners(vec![owner.clone()]).unwrap();
     view.select_issued(selected.root_entries().iter().map(|entry| entry.descriptor.id).collect(), &ExactArtifactSelection::capture(&selected)).unwrap()
     };
@@ -11795,6 +11808,11 @@ mod tests {
             fn complete_native_group_custody_survives_demotion_histories(
                 count in 1u32..7, repeats in 1usize..12,
             ) {
+                let offer_operation = std::sync::Arc::new(
+                    tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                );
+                let mut offer_validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
                 let inventory = ArtifactInventory::default();
                 let original = Arc::new(issued_native_groups("CustodiedAvailable",
                     (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
@@ -11809,7 +11827,7 @@ mod tests {
                         &CompilerInputProjection::default(), &view, &roles,
                     ).unwrap().0;
                     view = {
-    let support = crate::declaration_context::recover_fixture_compiler_support(roles.clone(), view.with_compiler_projection(&roles).map(std::borrow::Cow::into_owned).unwrap(), []).unwrap();
+    let support = crate::declaration_context::recover_fixture_compiler_support(roles.clone(), view.with_compiler_projection(&roles).map(std::borrow::Cow::into_owned).unwrap(), [], &mut offer_validation).unwrap();
     let selected = support.selected_interfaces().unwrap().select_owners(vec![owner.clone()]).unwrap();
     view.select_issued(selected.root_entries().iter().map(|entry| entry.descriptor.id).collect(), &ExactArtifactSelection::capture(&selected)).unwrap()
     };
@@ -11878,6 +11896,11 @@ mod tests {
     }
 
     fn assert_hidden_group_carrier(other_carriers: usize, competing: bool) {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let producer = b"hidden bound carrier producer";
         let producer_sha256 = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
         let inventory = ArtifactInventory::default();
@@ -11926,23 +11949,28 @@ mod tests {
         );
         let original_roles =
             CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
-        let issue = |view: &ArtifactView| {
-            let source = crate::declaration_context::issue_fixture_compiler_support(
-                original_roles.clone(),
-                view.clone(),
-            )
-            .unwrap();
-            let output =
-                crate::declaration_context::OriginalCompilerInputs::from_issued_support(&source);
-            let complete = CompilerSourceSupport::close_complete_output(&output).unwrap();
-            let types = complete
-                .selected_interfaces()
-                .unwrap()
-                .support_for_owners(vec![native.descriptor.owner.clone()])
+        let issue =
+            |view: &ArtifactView,
+             validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+                let source = crate::declaration_context::issue_fixture_compiler_support(
+                    original_roles.clone(),
+                    view.clone(),
+                    validation,
+                )
                 .unwrap();
-            types.retain_template_availability(&complete).unwrap()
-        };
-        let mut support = issue(&left);
+                let output =
+                    crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                        &source,
+                    );
+                let complete = CompilerSourceSupport::close_complete_output(&output).unwrap();
+                let types = complete
+                    .selected_interfaces()
+                    .unwrap()
+                    .support_for_owners(vec![native.descriptor.owner.clone()])
+                    .unwrap();
+                types.retain_template_availability(&complete).unwrap()
+            };
+        let mut support = issue(&left, &mut offer_validation);
         let key = NativeGroupKey {
             artifact: id,
             original_ordinal: 7,
@@ -11975,7 +12003,7 @@ mod tests {
             let right = capture(&format!("OtherHiddenCarrier{index}"), selected);
             assert_ne!(left.namespace()[&id], right.namespace()[&id]);
             if competing {
-                let other = issue(&right);
+                let other = issue(&right, &mut offer_validation);
                 let other_groups = groups(&other);
                 assert_eq!(other_groups.len(), 1);
                 assert_eq!(other_groups, recorded_groups(&right));
@@ -11990,6 +12018,7 @@ mod tests {
                         .unwrap()
                         .into_owned(),
                     [],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 support = support.merge(&custody).unwrap();
@@ -12467,7 +12496,7 @@ mod tests {
         let chosen_request = chosen_context
             .prepare_compilation(request_directory.path(), producer)
             .unwrap();
-        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let source_selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                 chosen_request.compiler_inputs(),
@@ -12750,6 +12779,7 @@ mod tests {
                         projection,
                         issued,
                         [],
+                        &mut validation,
                     )
                     .unwrap();
                     let selected = support
@@ -13507,6 +13537,11 @@ mod tests {
 
     #[test]
     fn interface_projection_does_not_retain_native_importers() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = ArtifactInventory::default();
         let child = Arc::new(entry("OnlyImportedType", &[]));
         let native = Arc::new(issued_native_groups(
@@ -13546,6 +13581,7 @@ mod tests {
                 projection,
                 issued,
                 [],
+                &mut offer_validation,
             )
             .unwrap();
             let selected = support
@@ -13570,6 +13606,11 @@ mod tests {
 
     #[test]
     fn private_native_availability_resolves_exact_carrier_authority_controls() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = ArtifactInventory::default();
         let native = Arc::new(issued_native_groups(
             "CarrierAvailable",
@@ -13710,6 +13751,7 @@ mod tests {
                     view.with_compiler_projection(&interface_roles)
                         .map(std::borrow::Cow::into_owned)?,
                     [],
+                    &mut offer_validation,
                 )?;
                 let selected = support
                     .selected_interfaces()?
@@ -15820,6 +15862,11 @@ mod tests {
 
     #[test]
     fn proof_only_custody_keeps_payloads_without_blocking_new_view_initialization() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = ArtifactInventory::default();
         let native = Arc::new(issued_native_groups(
             "ProofOnlyLifetime",
@@ -15871,10 +15918,11 @@ mod tests {
         let issuer = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap(),
             view.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let offer = issuer
-            .issue_native_offer(&native.descriptor.owner, Some(proof))
+            .issue_native_offer(&native.descriptor.owner, Some(proof), &mut offer_validation)
             .unwrap();
         drop(issuer);
         drop(native);
@@ -17233,12 +17281,13 @@ mod tests {
             Arc::new(child.clone()),
         ])
         .unwrap();
-        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let types = ordinary.interface_only();
         let types = crate::declaration_context::recover_fixture_compiler_support(
             types,
             carriers.clone(),
             [],
+            &mut validation,
         )
         .unwrap();
         let retained = types
@@ -20292,6 +20341,11 @@ mod tests {
 
     #[test]
     fn later_native_group_keeps_inherited_carrier_binding() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = ArtifactInventory::default();
         let fixture = issued_native_groups(
             "Later",
@@ -20409,6 +20463,7 @@ mod tests {
                     projection,
                     issued,
                     [],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let selected = support
@@ -20482,6 +20537,11 @@ mod tests {
 
     #[test]
     fn accepted_view_merge_preserves_later_exact_native_dependency_binding() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let wire = Arc::new(issued_native_groups(
             "Wire",
             vec![(5, Vec::new())],
@@ -20562,6 +20622,7 @@ mod tests {
                     projection,
                     issued,
                     [],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let selected = support
@@ -20786,6 +20847,11 @@ mod tests {
 
     #[test]
     fn compiler_support_extension_keeps_native_issuer_roots_and_historical_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::declaration_context::ExactDeclarationContext;
         let producer = b"compiler support extension request";
         let producer_sha256 = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
@@ -20825,11 +20891,14 @@ mod tests {
         let old_projection = CompilerInputProjection::from_issued_entries(&old.entries()).unwrap();
         let new_projection = CompilerInputProjection::from_issued_entries(&new.entries()).unwrap();
         let owner = native.descriptor.owner.clone();
-        let support =
-            crate::declaration_context::issue_fixture_compiler_support(new_projection, new.clone())
-                .unwrap()
-                .source_support(&BTreeSet::from([owner.clone()]))
-                .unwrap();
+        let support = crate::declaration_context::issue_fixture_compiler_support(
+            new_projection,
+            new.clone(),
+            &mut offer_validation,
+        )
+        .unwrap()
+        .source_support(&BTreeSet::from([owner.clone()]))
+        .unwrap();
         let context = ExactDeclarationContext::retained_execution_fixture(
             producer_sha256,
             &old,
@@ -22039,6 +22108,11 @@ mod tests {
 
     #[test]
     fn native_variants_keep_exact_carriers_and_require_explicit_materialization_selection() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
         let first = issued_native_groups("Original", vec![(0, Vec::new())], &[], &BTreeMap::new());
@@ -22149,6 +22223,7 @@ mod tests {
                 projection,
                 issued,
                 [],
+                &mut offer_validation,
             )
             .unwrap();
             let selected = support
@@ -22177,6 +22252,11 @@ mod tests {
 
     #[test]
     fn projected_original_preserves_unselected_exact_native_dependency_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let leaf = issued_native_groups("Leaf", vec![(7, Vec::new())], &[], &BTreeMap::new());
         let old = issued_native_groups(
             "Helper",
@@ -22302,6 +22382,7 @@ mod tests {
                     projection,
                     issued,
                     [],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let selected = support
@@ -22442,6 +22523,11 @@ mod tests {
 
     #[test]
     fn later_native_admission_cannot_broaden_an_interface_capability() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let inventory = ArtifactInventory::default();
         let canonical = entry("Owner", &[]);
         let canonical_id = canonical.descriptor.id;
@@ -22471,6 +22557,7 @@ mod tests {
                 type_projection,
                 type_cap.clone(),
                 [],
+                &mut offer_validation,
             )
             .unwrap();
             let selected = support
@@ -22702,6 +22789,11 @@ mod tests {
 
     #[test]
     fn compiler_role_conflict_reports_bounded_exact_ids_and_commitments() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let owner = ExactModuleIdentity {
             unit: "unit".into(),
             module: "Shared".into(),
@@ -22722,6 +22814,7 @@ mod tests {
         let birth = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
             view,
+            &mut offer_validation,
         )
         .unwrap();
         let ArtifactPayload::Original(product) = &entry.payload else {

@@ -754,6 +754,11 @@ proptest! {
         seed in 1u8..=u8::MAX,
         choices in proptest::collection::vec(0usize..OWNERS, 0..12),
     ) {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let mut masks = left_masks;
         for mask in &mut masks[..OWNERS - 1] {
             *mask &= !(1 << (OWNERS - 1));
@@ -789,7 +794,7 @@ proptest! {
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection,
                     issued_namespace,
-                    [],
+                    [], &mut offer_validation,
                 ).unwrap();
                 let issued = support.selected_interfaces().unwrap()
                     .select_owners(vec![catalog.owner(*index)]).unwrap();
@@ -843,7 +848,7 @@ proptest! {
             let support = crate::declaration_context::recover_fixture_compiler_support(
                 projection,
                 issued_namespace,
-                [],
+                [], &mut offer_validation,
             ).unwrap();
             let types = support.selected_interfaces().unwrap()
                 .support_for_owners(vec![interface_owner.clone()]).unwrap();
@@ -1097,6 +1102,11 @@ fn empty_observation_preserves_inherited_roots_and_separate_native_custody() {
 
 #[test]
 fn zero_mask_empty_selection_boundary_releases_valid_fixture_views() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let catalog = Catalog::new(&[0; OWNERS], 1);
     let inventory = ArtifactInventory::default();
     let empty = inventory.empty_view();
@@ -1132,6 +1142,7 @@ fn zero_mask_empty_selection_boundary_releases_valid_fixture_views() {
             projection,
             issued_namespace,
             [],
+            &mut offer_validation,
         )
         .unwrap();
         let types = support

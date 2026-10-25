@@ -277,6 +277,11 @@ fn replay_native_transport_history(
     history: &NativeTransportHistory,
     coverage: &mut NativeTransportCoverage,
 ) {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
     };
@@ -386,7 +391,8 @@ fn replay_native_transport_history(
             entries[index + 1].clone(),
         ])
         .unwrap();
-        issue_fixture_compiler_support(projection, sources[index].clone()).unwrap()
+        issue_fixture_compiler_support(projection, sources[index].clone(), &mut offer_validation)
+            .unwrap()
     });
     let proofs = std::array::from_fn::<_, 2, _>(|index| {
         let canonical = ArtifactEntry::canonical(products[index + 1].module_interface().clone());
@@ -495,7 +501,9 @@ fn replay_native_transport_history(
                 let issuer = &source_issuers[index];
                 let before = supplied
                     .iter()
-                    .map(|(owner, proof)| issuer.issue_native_offer(owner, Some(proof.clone())))
+                    .map(|(owner, proof)| {
+                        issuer.issue_native_offer(owner, Some(proof.clone()), &mut offer_validation)
+                    })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
                 // Restore this source's complete selected namespace, including
@@ -509,7 +517,11 @@ fn replay_native_transport_history(
                 let after = supplied
                     .iter()
                     .map(|(owner, proof)| {
-                        receiving_issuer.issue_native_offer(owner, Some(proof.clone()))
+                        receiving_issuer.issue_native_offer(
+                            owner,
+                            Some(proof.clone()),
+                            &mut offer_validation,
+                        )
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
@@ -538,20 +550,27 @@ fn replay_native_transport_history(
             }
         }
     }
-    let context = |view: &ArtifactView| {
-        let view = inventory
-            .empty_view()
-            .merge_fixture_compiler_inputs(&CompilerInputProjection::default(), view, &interfaces)
-            .unwrap()
-            .0;
-        let support = issue_fixture_compiler_support(interfaces.clone(), view).unwrap();
-        Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
+    let context =
+        |view: &ArtifactView,
+         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+            let view = inventory
+                .empty_view()
+                .merge_fixture_compiler_inputs(
+                    &CompilerInputProjection::default(),
+                    view,
+                    &interfaces,
+                )
                 .unwrap()
-                .extend_issued_compiler_support(&support)
-                .unwrap(),
-        )
-    };
+                .0;
+            let support =
+                issue_fixture_compiler_support(interfaces.clone(), view, validation).unwrap();
+            Arc::new(
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_issued_compiler_support(&support)
+                    .unwrap(),
+            )
+        };
     let private = std::array::from_fn::<_, 2, _>(|index| {
         // The existing role issuer selects the parent Original's exact Group
         // root. Its TYPE child is reached through the issued dependency edge.
@@ -581,7 +600,9 @@ fn replay_native_transport_history(
         for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
             assert_eq!(binding(&selected, id), binding(&sources[index], id));
         }
-        let support = issue_fixture_compiler_support(root_projection, selected).unwrap();
+        let support =
+            issue_fixture_compiler_support(root_projection, selected, &mut offer_validation)
+                .unwrap();
         for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
             assert_eq!(
                 binding(support.artifacts(), id),
@@ -656,7 +677,7 @@ fn replay_native_transport_history(
             .all(|(received, issued)| received.same_issuance(issued)));
         input
     });
-    let base_context = context(&base);
+    let base_context = context(&base, &mut offer_validation);
     let first = usize::from(reverse);
     let closed = private.each_ref().map(|input| {
         crate::artifact_inventory::CompilerSourceSupport::close_complete_output(input).unwrap()
@@ -1121,7 +1142,7 @@ fn replay_native_transport_history(
             NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
-    let actual_context = context(&base);
+    let actual_context = context(&base, &mut offer_validation);
     let actual_request = ExactCompileContext::new(actual_context)
         .prepare_compilation_with_private_input(
             &root.path().join("new-output-input"),

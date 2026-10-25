@@ -6245,6 +6245,11 @@ mod tests {
         context: &crate::declaration_context::ExactDeclarationContext,
         cyclic: bool,
     ) -> Result<(), String> {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
@@ -6386,14 +6391,19 @@ mod tests {
         let full_issuer = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&entries).unwrap(),
             full.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let full_offer = full_issuer
-            .issue_native_offer(&authored.descriptor.owner, Some(proof))
+            .issue_native_offer(
+                &authored.descriptor.owner,
+                Some(proof),
+                &mut offer_validation,
+            )
             .unwrap();
         assert!(full_offer.is_full());
         let empty_offer = full_issuer
-            .issue_native_offer(&authored.descriptor.owner, None)
+            .issue_native_offer(&authored.descriptor.owner, None, &mut offer_validation)
             .unwrap();
         let authored_role =
             CompilerInputProjection::from_issued_entries(&[authored.clone()]).unwrap();
@@ -6423,10 +6433,15 @@ mod tests {
         let sparse_issuer = crate::declaration_context::issue_fixture_compiler_support(
             full_issuer.projection().clone(),
             sparse.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let sparse_offer = sparse_issuer
-            .issue_native_offer(&authored.descriptor.owner, Some(sparse_proof))
+            .issue_native_offer(
+                &authored.descriptor.owner,
+                Some(sparse_proof),
+                &mut offer_validation,
+            )
             .unwrap();
         assert!(matches!(
             sparse_offer.snapshot_facts().body,
@@ -6516,6 +6531,7 @@ mod tests {
                 CompilerInputProjection::default(),
                 context.artifact_view().clone(),
                 [offer],
+                &mut offer_validation,
             )
             .unwrap();
             let retained = context
@@ -6661,6 +6677,11 @@ mod tests {
         Vec<u8>,
         crate::artifact_inventory::ArtifactBinding,
     )> {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
@@ -6837,15 +6858,17 @@ mod tests {
                     ])
                     .unwrap(),
                     views[1 - selected].clone(),
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let old = historical
-                    .issue_native_offer(&native.descriptor.owner, None)
+                    .issue_native_offer(&native.descriptor.owner, None, &mut offer_validation)
                     .unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection.clone(),
                     views[selected].clone(),
                     [old.clone(), old],
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let original = ExactDeclarationContext::new(&[], &[], vec![])
@@ -6906,6 +6929,7 @@ mod tests {
                         competing,
                         views[1 - selected].clone(),
                         [],
+                        &mut offer_validation,
                     )
                     .unwrap();
                     assert!(
@@ -7092,6 +7116,11 @@ mod tests {
 
     #[test]
     fn independently_captured_values_preserve_one_compiler_native_issuer() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
@@ -7160,7 +7189,9 @@ mod tests {
                     .unwrap()
                     .extend_issued_compiler_support(
                         &crate::declaration_context::issue_fixture_compiler_support(
-                            projection, view,
+                            projection,
+                            view,
+                            &mut offer_validation,
                         )
                         .unwrap(),
                     )
@@ -7281,14 +7312,18 @@ mod tests {
                 let issuer = crate::declaration_context::issue_fixture_compiler_support(
                     projection.clone(),
                     available.clone(),
+                    &mut offer_validation,
                 )
                 .unwrap();
                 let offers = requirements
                     .iter()
                     .map(|requirement| {
                         assert_eq!(requirement.original, native_id);
-                        issuer
-                            .issue_native_offer(&native.descriptor.owner, Some(requirement.clone()))
+                        issuer.issue_native_offer(
+                            &native.descriptor.owner,
+                            Some(requirement.clone()),
+                            &mut offer_validation,
+                        )
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();

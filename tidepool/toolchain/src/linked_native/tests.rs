@@ -244,6 +244,31 @@ pub(crate) fn assert_actual_target_authentication(
         }
     }
 
+    if first
+        .acquired()
+        .any(|selected| matches!(selected.occurrence(), NativeOccurrenceId::Home(_)))
+    {
+        for selected in first.acquired() {
+            let Some(row) = selected.issued_home_row() else {
+                continue;
+            };
+            let repeated = second.get(selected.occurrence()).unwrap();
+            assert!(
+                Arc::ptr_eq(row, repeated.issued_home_row().unwrap()),
+                "overlapping restored closures retain the same canonical HOME row"
+            );
+        }
+        crate::artifact_inventory::AcquiredNativeClosures::assert_collection_history(&[
+            Arc::clone(&first),
+            Arc::clone(&second),
+        ]);
+        let independently_issued = restore(&mut PackageInterfaceValidation::default());
+        crate::artifact_inventory::AcquiredNativeClosures::assert_physical_issuance_conflict(
+            &first,
+            &independently_issued,
+        );
+    }
+
     if let Some(identity) = components.keys().next() {
         let mut missing = components.clone();
         missing.remove(identity);

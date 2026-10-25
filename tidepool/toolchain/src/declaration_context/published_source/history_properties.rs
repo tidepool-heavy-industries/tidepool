@@ -205,6 +205,11 @@ pub(super) fn restored_graph_roles(
     ),
     CompileError,
 > {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let view = context.artifact_view();
     let scratch = tempfile::tempdir().unwrap();
     let references = context.materialize_recovery_artifacts(
@@ -225,7 +230,12 @@ pub(super) fn restored_graph_roles(
         )
         .expect("history recovery: certificate acquisition");
     let authenticated = inventory
-        .context_with_graph_selection(&selection, roles, context.owner.facts.lexical.to_vec())
+        .context_with_graph_selection(
+            &selection,
+            roles,
+            context.owner.facts.lexical.to_vec(),
+            &mut offer_validation,
+        )
         .map_err(|error| {
             eprintln!("history recovery stage=graph-role-authentication error={error:?}");
             error
@@ -246,6 +256,11 @@ fn property_config() -> proptest::test_runner::Config {
 #[test]
 #[ignore = "requires the declared rooted compiler service"]
 fn publication_reopening_refuses_missing_type_namespace_with_retained_custody() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let fixture = super::tests::compiled_publication_fixture();
     let (root, helper, publication) = (&fixture.root, &fixture.helper, &fixture.publication);
     let context = publication.context();
@@ -300,6 +315,7 @@ fn publication_reopening_refuses_missing_type_namespace_with_retained_custody() 
                 .native_offers()
                 .iter()
                 .cloned(),
+            &mut offer_validation,
         )
         .and_then(|support| {
             changed

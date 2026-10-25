@@ -559,6 +559,11 @@ pub enum AcquiredNativeImport {
     },
 }
 impl AcquiredNativeCode {
+    pub(crate) fn issued_home_row(
+        &self,
+    ) -> Option<&Arc<crate::certified_products::IssuedSelectedNativeGroup>> {
+        self.node().home_grant().map(|grant| grant.issued_row())
+    }
     fn node(&self) -> &NativeAcquiredOccurrence {
         &self.owner.occurrences[&self.occurrence]
     }

@@ -990,6 +990,11 @@ fn assert_catalog_endpoint_released(endpoint: &Path) {
 
 #[test]
 fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory};
     for acquired_first in [false, true] {
         let fixture = Fixture::new();
@@ -1083,6 +1088,7 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
                         context.compiler_input_projection().clone(),
                         both.clone(),
                         [],
+                        &mut offer_validation,
                     )
                     .unwrap(),
                 )

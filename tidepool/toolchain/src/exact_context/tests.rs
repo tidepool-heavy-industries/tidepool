@@ -1681,6 +1681,11 @@ fn context_v10_requires_normalized_availability_root() {
 
 #[test]
 fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::artifact_inventory::{
         ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
         NativeOriginalRequirement,
@@ -1757,10 +1762,11 @@ fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
         let issuer = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[root.clone()]).unwrap(),
             view.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let offer = issuer
-            .issue_native_offer(&root.descriptor.owner, Some(proof))
+            .issue_native_offer(&root.descriptor.owner, Some(proof), &mut offer_validation)
             .unwrap();
         let facts = offer.snapshot_facts();
         let offer_id = facts.identity().unwrap();

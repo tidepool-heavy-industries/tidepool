@@ -81,6 +81,11 @@ fn restore_recorded_rows(
     context: &ExactDeclarationContext,
     rows: &RecordedRows,
 ) -> Result<ExactDeclarationContext, CompileError> {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     let (_scratch, inventory) = acquire_recovery_inventory(context);
     let mut snapshot = context.snapshot();
     snapshot.roles = rows.iter().cloned().collect();
@@ -95,6 +100,7 @@ fn restore_recorded_rows(
             snapshot.recorded_rows(),
             &snapshot.offers,
             &snapshot.native_availability,
+            &mut offer_validation,
         )?,
     );
     use fvm_ipld_blockstore::Blockstore;

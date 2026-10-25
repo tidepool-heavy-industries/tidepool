@@ -10,3 +10,7 @@ first = reverse
 {-# NOINLINE second #-}
 second :: [Int] -> [Int]
 second = LinkedNativeDependency.depReverse
+
+{-# NOINLINE third #-}
+third :: [Int] -> [Int]
+third xs = LinkedNativeDependency.depIdentity (LinkedNativeDependency.depReverse xs)

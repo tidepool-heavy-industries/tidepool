@@ -3465,6 +3465,11 @@ mod authored_tests {
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
     fn accepted_join_preserves_selected_dependencies_with_historical_interface_custody() {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         use crate::artifact_inventory::{
             ArtifactDependency, ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
@@ -3810,6 +3815,7 @@ mod authored_tests {
                     CompilerInputProjection::default(),
                     custody,
                     [],
+                    &mut offer_validation,
                 )
                 .unwrap(),
             )

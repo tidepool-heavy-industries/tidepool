@@ -1279,6 +1279,7 @@ pub(crate) fn package_interface_io() -> (u64, u64) {
 }
 
 pub(crate) struct PackageInterfaceValidation {
+    pub(crate) native_group_rows: crate::certified_products::NativeGroupRowAssembly,
     pub(crate) inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     // Canonical code owners may be shared across contexts admitted by this one
     // operation. Their presence never supplies a missing product or source grant.
@@ -1385,6 +1386,7 @@ impl PackageInterfaceValidation {
         Self {
             inventory,
             native_code_components: BTreeMap::new(),
+            native_group_rows: Default::default(),
             captured: BTreeMap::new(),
             retained_bytes: 0,
             hash_bytes: 0,

@@ -1132,6 +1132,11 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
 
 #[test]
 fn late_private_native_literals_and_graphs_survive_detached_capture() {
+    let offer_operation = std::sync::Arc::new(
+        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    );
+    let mut offer_validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
     use crate::certified_products::PendingImportOwner;
     use tidepool_repr::execution_schema::{Group, HeapRhs};
     let source = tempfile::tempdir().unwrap();
@@ -1244,29 +1249,32 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             })
             .unwrap()
     };
-    let private_inputs = |context: &Arc<ExactDeclarationContext>| {
-        // AllGroups is the existing issuer of exact native roots, not an
-        // inference from available code or a test certificate constructor.
-        let artifacts = context
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .inventory()
-            .admit_shared(
-                context.owner.facts.compiler_support.artifacts(),
-                entries.clone(),
-            )
-            .unwrap();
-        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let support = issue_fixture_compiler_support(projection, artifacts).unwrap();
-        let private = OriginalCompilerInputs::from_issued_support(&support);
+    let private_inputs =
+        |context: &Arc<ExactDeclarationContext>,
+         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation| {
+            // AllGroups is the existing issuer of exact native roots, not an
+            // inference from available code or a test certificate constructor.
+            let artifacts = context
+                .owner
+                .facts
+                .compiler_support
+                .artifacts()
+                .inventory()
+                .admit_shared(
+                    context.owner.facts.compiler_support.artifacts(),
+                    entries.clone(),
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let support =
+                issue_fixture_compiler_support(projection, artifacts, validation).unwrap();
+            let private = OriginalCompilerInputs::from_issued_support(&support);
 
-        let inputs = ProtectedScaffoldRequirements::default()
-            .compiler_inputs(context, Some(&private))
-            .unwrap();
-        (inputs, support)
-    };
+            let inputs = ProtectedScaffoldRequirements::default()
+                .compiler_inputs(context, Some(&private))
+                .unwrap();
+            (inputs, support)
+        };
     let descendant = extend(&ancestor, "BeforePrivate");
     let completed = materialize(
         &descendant,
@@ -1277,7 +1285,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     assert!(completed.groups.is_empty());
     assert!(completed.graph_paths.is_empty());
     let completed_directory = completed.directory().path().to_path_buf();
-    let (late_inputs, late_support) = private_inputs(&ancestor);
+    let (late_inputs, late_support) = private_inputs(&ancestor, &mut offer_validation);
     assert_eq!(
         late_inputs.metadata.retained.selected_native_groups.len(),
         2
@@ -1285,7 +1293,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     let late = materialize(&ancestor, &late_inputs);
     let late_directory = late.directory().path().to_path_buf();
     let next = extend(&descendant, "AfterPrivate");
-    let (inputs, support) = private_inputs(&next);
+    let (inputs, support) = private_inputs(&next, &mut offer_validation);
     assert_ne!(
         inputs.metadata.materialization_key(),
         descendant

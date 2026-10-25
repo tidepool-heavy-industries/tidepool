@@ -1302,7 +1302,7 @@ mod tests {
         let includes = [root.path().to_owned()];
         let invocation = crate::artifacts::CompileInvocation {
             source: include_str!("../../tests/fixtures/invocation-output/LinkedNativeTargets.hs"),
-            targets: &["second", "first"],
+            targets: &["third", "second", "first"],
             include: &includes,
             fallback_module_name: "LinkedNativeTargets",
         };
@@ -1323,6 +1323,24 @@ mod tests {
         };
         let first = linked("first");
         let second = linked("second");
+        let third = linked("third");
+        let home = |target: &crate::linked_native::LinkedNativeTarget| {
+            target
+                .acquired()
+                .filter_map(|code| match code.grant() {
+                    NativeCodeGrant::Home { binding, .. } => Some(binding),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let second_home = home(&second);
+        let third_home = home(&third);
+        assert!(!second_home.is_empty() && second_home.is_subset(&third_home));
+        assert!(
+            second_home.len() < third_home.len(),
+            "genuine target closures have overlapping but distinct HOME selections"
+        );
+        assert_ne!(second.closure().identity(), third.closure().identity());
         assert!(
             first
                 .acquired()
@@ -1344,9 +1362,16 @@ mod tests {
         crate::artifact_inventory::AcquiredNativeClosures::assert_collection_history(&[
             Arc::clone(first.closure()),
             Arc::clone(second.closure()),
+            Arc::clone(third.closure()),
             Arc::clone(first.closure()),
         ]);
-        for name in ["first", "second"] {
+        let authentication =
+            crate::linked_native::tests::assert_actual_target_authentication(&second);
+        assert!(
+            authentication.home_scope,
+            "the actual dependent target exercises HOME restoration"
+        );
+        for name in ["first", "second", "third"] {
             let target = &output.targets[name];
             let selected = linked(name);
             assert!(Arc::ptr_eq(selected.prepared(), target.prepared_owner()));
@@ -1494,10 +1519,12 @@ mod tests {
             .with_linked_native_target(&first)
             .unwrap()
             .with_linked_native_target(&second)
+            .unwrap()
+            .with_linked_native_target(&third)
             .unwrap();
         crate::exact_context::assert_linked_snapshot_recovery(
             &later,
-            &[Arc::clone(&first), Arc::clone(&second)],
+            &[Arc::clone(&first), Arc::clone(&second), Arc::clone(&third)],
         );
         assert_eq!(
             later.recorded_input_decisions(),

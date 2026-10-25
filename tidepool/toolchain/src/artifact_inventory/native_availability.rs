@@ -1831,6 +1831,23 @@ impl std::fmt::Debug for NativeOfferCustody {
 pub(crate) struct IssuedNativeOffer(Arc<NativeOfferFacts>);
 
 impl IssuedNativeOffer {
+    pub(crate) fn seed_native_group_rows(
+        &self,
+        bindings: &BTreeSet<NativeGroupBinding>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<(), CompileError> {
+        let operation = Arc::clone(&validation.inventory);
+        for binding in bindings {
+            if let Some(row) = self.0.rows.get(binding) {
+                validation
+                    .native_group_rows
+                    .retain_issued(*binding, row, &operation)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn same_recorded_facts(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0) || self.snapshot_facts() == other.snapshot_facts()
     }
@@ -1860,6 +1877,20 @@ thread_local! {
 }
 
 impl NativeOfferContribution {
+    pub(crate) fn issued_group(
+        &self,
+        binding: NativeGroupBinding,
+    ) -> Result<&Arc<crate::certified_products::IssuedSelectedNativeGroup>, CompileError> {
+        if !self.contains_group(binding) {
+            return Err(failure("native row exceeds its contribution membership"));
+        }
+        self.offer
+            .0
+            .rows
+            .get(&binding)
+            .ok_or_else(|| failure("native contribution lacks its checked scoped row"))
+    }
+
     pub(crate) fn same_acquisition(&self, other: &Self) -> bool {
         self.offer.same_issuance(&other.offer)
             && self.reachable == other.reachable
@@ -2241,7 +2272,7 @@ impl NativeOfferContribution {
 }
 
 #[derive(Debug)]
-struct NativeOfferFacts {
+struct UnissuedNativeOffer {
     original_acquisition: Arc<ArtifactEntry>,
     original: ArtifactId,
     interface: ArtifactId,
@@ -2250,6 +2281,99 @@ struct NativeOfferFacts {
     custody: NativeOfferCustody,
     snapshot: OnceLock<crate::exact_context::NativeOfferSnapshotFacts>,
     identity: OnceLock<[u8; 32]>,
+}
+
+/// A native offer cannot escape its issuer without checked scoped rows.
+#[derive(Debug)]
+struct NativeOfferFacts {
+    scope: UnissuedNativeOffer,
+    rows:
+        imbl::OrdMap<NativeGroupBinding, Arc<crate::certified_products::IssuedSelectedNativeGroup>>,
+}
+
+impl std::ops::Deref for NativeOfferFacts {
+    type Target = UnissuedNativeOffer;
+    fn deref(&self) -> &Self::Target {
+        &self.scope
+    }
+}
+
+impl UnissuedNativeOffer {
+    fn bindings(
+        &self,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<BTreeSet<NativeGroupBinding>, CompileError> {
+        let mut bindings = BTreeSet::new();
+        for node in &self.custody.reachable {
+            crate::host_work::checkpoint()?;
+            if let ArtifactBindingNode::Group(group) = node {
+                operation
+                    .reserve::<(NativeGroupBinding, [usize; 4])>(1)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                bindings.insert(*group);
+            }
+        }
+        Ok(bindings)
+    }
+
+    fn certify_rows(
+        &self,
+        inventory: &mut crate::certified_products::OriginalValidationInventory<'_>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<crate::certified_products::SelectedScopeCertification, CompileError> {
+        let view = ArtifactView::from_custody(Arc::clone(&self.custody.lease));
+        let bindings = self.bindings(&validation.inventory)?;
+        let scope = crate::artifact_inventory::SelectedOriginalGroupScope::acquired(
+            &view,
+            &bindings,
+            &validation.inventory,
+        )?;
+        inventory
+            .certify_selected_scope(scope, &BTreeMap::new(), validation, None)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))
+    }
+
+    fn seal(
+        self,
+        rows: crate::certified_products::SelectedScopeCertification,
+    ) -> IssuedNativeOffer {
+        IssuedNativeOffer(Arc::new(NativeOfferFacts {
+            scope: self,
+            rows: rows.rows.into_iter().collect(),
+        }))
+    }
+
+    fn certify(
+        self,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<IssuedNativeOffer, CompileError> {
+        let rows = {
+            let mut available = BTreeMap::new();
+            for id in &self.custody.native_originals {
+                let entry = self
+                    .custody
+                    .lease
+                    .payloads
+                    .get(id)
+                    .ok_or_else(|| failure("offer row lacks original payload custody"))?;
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    return Err(failure("offer row payload is not an Original"));
+                };
+                product
+                    .original_native()
+                    .validate_package_interfaces(validation)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+                available.insert(*id, product);
+            }
+            let mut inventory = crate::certified_products::OriginalValidationInventory::selected(
+                &available,
+                &validation.inventory,
+            )
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+            self.certify_rows(&mut inventory, validation)?
+        };
+        Ok(self.seal(rows))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2265,7 +2389,7 @@ enum NativeOfferBody {
 /// The scope solver has checked exact body rows. The product validator must
 /// accept the complete census before these offers can escape this owner.
 pub(crate) struct CheckedNativeAvailability {
-    offers: Vec<IssuedNativeOffer>,
+    offers: Vec<UnissuedNativeOffer>,
     entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     roots: BTreeSet<ArtifactId>,
 }
@@ -2294,27 +2418,21 @@ impl ValidatedFreshNativeAvailability {
 impl CheckedNativeAvailability {
     pub(super) fn validate_current_cohort(
         self,
+        selection: &crate::certified_products::CertifiedSourceSelection,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
         let evidence = |error| CompileError::CompilerEvidence(Box::new(error));
         let operation = Arc::clone(&validation.inventory);
-        operation
-            .reserve::<NativeOfferContribution>(self.offers.len())
-            .map_err(|error| evidence(error.into()))?;
-        let mut contributions = Vec::with_capacity(self.offers.len());
         let mut available = BTreeMap::new();
         for offer in &self.offers {
-            crate::host_work::checkpoint()?;
-            let contribution = offer
-                .contribution_for(&BTreeSet::from([offer.original()]))?
-                .ok_or_else(|| failure("cohort offer lost its own contribution"))?;
-            for id in contribution.originals() {
+            for id in &offer.custody.native_originals {
+                crate::host_work::checkpoint()?;
                 let entry = self
                     .entries
                     .get(id)
                     .ok_or_else(|| failure("cohort proof lost an exact original payload"))?;
                 let ArtifactPayload::Original(product) = &entry.payload else {
-                    return Err(failure("cohort native proof has non-original payload"));
+                    return Err(failure("cohort proof has non-original payload"));
                 };
                 if !available.contains_key(id) {
                     operation
@@ -2331,25 +2449,20 @@ impl CheckedNativeAvailability {
                     available.insert(*id, product);
                 }
             }
-            contributions.push(contribution);
         }
         let mut inventory = crate::certified_products::OriginalValidationInventory::selected(
             &available, &operation,
         )
         .map_err(evidence)?;
-        for contribution in &contributions {
-            inventory
-                .validate_selected_scope(
-                    crate::artifact_inventory::SelectedOriginalGroupScope::contribution(
-                        contribution,
-                    ),
-                    validation,
-                )
-                .map_err(evidence)?;
+        let mut offers = Vec::with_capacity(self.offers.len());
+        for offer in self.offers {
+            selection.seed_native_group_rows(&offer.bindings(&operation)?, validation)?;
+            let rows = offer.certify_rows(&mut inventory, validation)?;
+            offers.push(offer.seal(rows));
         }
         Ok(ValidatedFreshNativeAvailability {
             roots: self.roots,
-            offers: self.offers,
+            offers,
         })
     }
 
@@ -2361,7 +2474,7 @@ impl CheckedNativeAvailability {
         let offers = IssuedNativeOffer::issue_custody(admitted, originals)?;
         if offers
             .iter()
-            .any(|offer| matches!(offer.0.body, NativeOfferBody::Partial(_)))
+            .any(|offer| matches!(offer.body, NativeOfferBody::Partial(_)))
         {
             return Err(failure(
                 "complete availability lacks its issued group census",
@@ -2440,7 +2553,7 @@ impl IssuedNativeOffer {
     fn issue_custody(
         admitted: IssuedArtifactCustody,
         originals: &[ArtifactId],
-    ) -> Result<Vec<Self>, CompileError> {
+    ) -> Result<Vec<UnissuedNativeOffer>, CompileError> {
         let source_receipt = admitted.source_receipt;
         let supplied = admitted.supplied;
         let source = admitted.lease;
@@ -2637,7 +2750,7 @@ impl IssuedNativeOffer {
             .into_iter()
             .map(
                 |(original, interface, owner, original_acquisition, body, lease, nodes, roots)| {
-                    Ok(Self(Arc::new(NativeOfferFacts {
+                    Ok(UnissuedNativeOffer {
                         original_acquisition,
                         original,
                         interface,
@@ -2651,7 +2764,7 @@ impl IssuedNativeOffer {
                         )?,
                         snapshot: OnceLock::new(),
                         identity: OnceLock::new(),
-                    })))
+                    })
                 },
             )
             .collect()
@@ -2675,6 +2788,7 @@ impl IssuedNativeOffer {
     pub(super) fn issue(
         input: CompilerPrimaryInput<'_>,
         proof: Option<NativeOriginalRequirement>,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         let original_binding = input.original().ok_or_else(|| {
             admission_failure(ArtifactInventoryFailure::MissingOriginal {
@@ -2780,7 +2894,7 @@ impl IssuedNativeOffer {
             &IssuedNativeSourceReceipt::Unwitnessed,
             &BTreeMap::new(),
         )?;
-        Ok(Self(Arc::new(NativeOfferFacts {
+        (UnissuedNativeOffer {
             original_acquisition: Arc::clone(entry),
             original,
             interface,
@@ -2789,7 +2903,8 @@ impl IssuedNativeOffer {
             custody,
             snapshot: OnceLock::new(),
             identity: OnceLock::new(),
-        })))
+        })
+        .certify(validation)
     }
 
     /// Borrow durable custody facts without constructing a selected view.
@@ -2835,6 +2950,7 @@ impl IssuedNativeOffer {
     pub(crate) fn restore_snapshot(
         facts: &crate::exact_context::NativeOfferSnapshotFacts,
         source: &ArtifactView,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         use crate::exact_context::NativeOfferSnapshotBody;
         let selection = match &facts.body {
@@ -2992,7 +3108,7 @@ impl IssuedNativeOffer {
             &IssuedNativeSourceReceipt::Unwitnessed,
             &BTreeMap::new(),
         )?;
-        Ok(Self(Arc::new(NativeOfferFacts {
+        (UnissuedNativeOffer {
             original_acquisition: Arc::clone(entry),
             original: facts.original,
             interface,
@@ -3001,7 +3117,8 @@ impl IssuedNativeOffer {
             custody,
             snapshot: OnceLock::new(),
             identity: OnceLock::new(),
-        })))
+        })
+        .certify(validation)
     }
 
     pub(crate) fn original(&self) -> ArtifactId {
@@ -3520,14 +3637,17 @@ impl IssuedNativeOffer {
             return Ok(Some(self.clone()));
         }
         Ok(Some(Self(Arc::new(NativeOfferFacts {
-            original_acquisition: Arc::clone(&self.0.original_acquisition),
-            original: self.0.original,
-            interface: self.0.interface,
-            owner: self.0.owner.clone(),
-            body: NativeOfferBody::Partial(proof.clone()),
-            custody: self.0.custody.clone(),
-            snapshot: OnceLock::new(),
-            identity: OnceLock::new(),
+            scope: UnissuedNativeOffer {
+                original_acquisition: Arc::clone(&self.0.original_acquisition),
+                original: self.0.original,
+                interface: self.0.interface,
+                owner: self.0.owner.clone(),
+                body: NativeOfferBody::Partial(proof.clone()),
+                custody: self.0.custody.clone(),
+                snapshot: OnceLock::new(),
+                identity: OnceLock::new(),
+            },
+            rows: self.0.rows.clone(),
         }))))
     }
 }
@@ -3690,8 +3810,12 @@ mod normalized_dependency_tests {
             let graph = custody
                 .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
                 .unwrap();
-            let graph_only =
-                IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph).unwrap();
+            let graph_only = IssuedNativeOffer::restore_snapshot(
+                &offer.snapshot_facts(),
+                &graph,
+                &mut validation,
+            )
+            .unwrap();
             assert!(
                 matches!(
                     graph_only.0.custody.source_receipt,
@@ -3804,7 +3928,8 @@ mod normalized_dependency_tests {
             .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
             .unwrap();
         let graph_only =
-            IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph).unwrap();
+            IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph, &mut validation)
+                .unwrap();
         assert!(
             matches!(
                 graph_only.source_causes_at(left, child).unwrap().as_ref(),
@@ -4129,7 +4254,7 @@ mod normalized_dependency_tests {
             .compiler_source_support()
             .retain_custody(&broad)
             .unwrap()
-            .issue_native_offer(&entries[0].descriptor.owner, Some(proof))
+            .issue_native_offer(&entries[0].descriptor.owner, Some(proof), &mut validation)
             .unwrap();
         assert!(broad_offer.is_full());
         let mixed = Arc::new(
@@ -4852,6 +4977,11 @@ mod normalized_dependency_tests {
         crate::certified_products::CertifiedSourceSelection,
         NativeGroupBinding,
     ) {
+        let offer_operation = std::sync::Arc::new(
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        );
+        let mut offer_validation =
+            crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let product = fixture_finalized_product(
             original_groups_fixture_with_interface(
@@ -4884,6 +5014,7 @@ mod normalized_dependency_tests {
         let birth = crate::declaration_context::issue_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
             artifacts.clone(),
+            &mut offer_validation,
         )
         .unwrap();
         let mut projection = CompilerInputProjection::default();
