@@ -7467,6 +7467,7 @@ impl CheckedValueTypeProduct {
     ) -> Result<bool, CompileError> {
         let entries = expected.entries();
         if self.leaf_binding != expected.leaf_binding()
+            || self.dependencies.contains_key(&self.leaf_binding)
             || entries.len() != self.dependencies.len() + 1
         {
             return Ok(false);
@@ -7642,27 +7643,24 @@ impl RetainedArtifactMaterialization {
         Ok(Arc::new(owned))
     }
 
-    fn type_row_candidates(
-        owners: &[Arc<Self>],
-    ) -> BTreeMap<ArtifactId, Vec<Arc<RetainedArtifactRow>>> {
-        let mut candidates = BTreeMap::<ArtifactId, Vec<Arc<RetainedArtifactRow>>>::new();
+    fn type_row_owners(owners: &[Arc<Self>]) -> Vec<&Self> {
+        let mut observed = Vec::new();
         let mut visited = BTreeSet::new();
         for owner in owners {
-            owner.visit_owners(&mut visited, &mut |owner| {
-                for (id, row) in &owner.rows {
-                    candidates.entry(*id).or_default().push(row.clone());
-                }
-            });
+            owner.visit_owners(&mut visited, &mut |owner| observed.push(owner));
         }
-        candidates
+        observed
     }
 
     fn borrow_type_row(
-        candidates: &BTreeMap<ArtifactId, Vec<Arc<RetainedArtifactRow>>>,
+        owners: &[&Self],
         entry: &ArtifactEntry,
         require_value_issuer: bool,
     ) -> Result<Option<Arc<RetainedArtifactRow>>, CompileError> {
-        for row in candidates.get(&entry.descriptor.id).into_iter().flatten() {
+        for row in owners
+            .iter()
+            .filter_map(|owner| owner.rows.get(&entry.descriptor.id))
+        {
             if require_value_issuer
                 && !matches!(&row.value_custody, ValueRowCustody::Private(issued) if issued.same_issued_facts(entry))
             {
@@ -7720,7 +7718,7 @@ impl RetainedArtifactMaterialization {
                     return Ok(product);
                 }
                 let mut validation = PackageInterfaceValidation::default();
-                let candidates = Self::type_row_candidates(physical);
+                let candidates = Self::type_row_owners(physical);
                 let leaf_binding = expected.leaf_binding();
                 let mut leaf = None;
                 let mut dependencies = imbl::OrdMap::new();
@@ -8305,14 +8303,33 @@ impl RetainedArtifactRow {
             _ => return Ok(false),
         }
         let payloads = original_inputs::entry_payloads(entry);
-        if payloads.iter().any(|(kind, bytes)| {
-            self.owned_inputs.get(kind).is_none_or(|slice| {
-                slice.len() != bytes.len() as u64
-                    || slice.sha256()
-                        != &<[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(bytes))
-            })
-        }) {
-            return Ok(false);
+        for (kind, bytes) in &payloads {
+            let seal = match kind {
+                original_inputs::OriginalInputKind::Interface => {
+                    Some(entry.descriptor.interface_sha256)
+                }
+                original_inputs::OriginalInputKind::Packages => {
+                    Some(entry.descriptor.package_imports_sha256)
+                }
+                original_inputs::OriginalInputKind::Certificate => {
+                    entry.descriptor.certification_sha256
+                }
+                original_inputs::OriginalInputKind::Core => match &entry.payload {
+                    ArtifactPayload::Canonical(canonical) => {
+                        canonical.core_descriptor().map(|core| core.sha256)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(seal) = seal else { return Ok(false) };
+            if self
+                .owned_inputs
+                .get(kind)
+                .is_none_or(|slice| slice.len() != bytes.len() as u64 || slice.sha256() != &seal)
+            {
+                return Ok(false);
+            }
         }
         let parts = self.original_input_parts(entry)?;
         Ok(parts.len() == payloads.len()
@@ -27408,6 +27425,94 @@ mod tests {
     }
 
     #[test]
+    fn checked_value_type_product_refuses_incomplete_and_wrong_physical_rows() {
+        let (context, _) = metadata_fixture();
+        let entry = context
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap()
+            .get(&identity("fixture", "Value"))
+            .unwrap()
+            .clone();
+        let ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) =
+            &entry.payload
+        else {
+            panic!("value fixture")
+        };
+        let certificate = CertifiedValueInterface::from_checked_compilation(
+            entry.descriptor.producer_sha256,
+            entry.descriptor.owner.clone(),
+            interface.interface_bytes().to_vec(),
+            interface.package_imports_bytes().to_vec(),
+            entry.requirements.clone(),
+        )
+        .unwrap();
+        let expected = context
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap()
+            .checked_value_type_closure(&certificate)
+            .unwrap();
+        let (product, _) = RetainedArtifactMaterialization::capture_checked_value(
+            context.compiler_source_support(),
+            CheckedValueRowSource::Fresh(&certificate),
+        )
+        .unwrap();
+        assert!(!product.dependencies.is_empty());
+        let incomplete = CheckedValueTypeProduct {
+            leaf_binding: product.leaf_binding,
+            leaf: product.leaf.clone(),
+            dependencies: Default::default(),
+        };
+        assert!(
+            !incomplete.matches_expected(&expected).unwrap(),
+            "internal consistency cannot replace the expected dependency census"
+        );
+        let mut substituted = product.dependencies.clone();
+        substituted.remove(product.dependencies.keys().next().unwrap());
+        substituted.insert(product.leaf_binding, product.leaf.clone());
+        let substituted = CheckedValueTypeProduct {
+            leaf_binding: product.leaf_binding,
+            leaf: product.leaf.clone(),
+            dependencies: substituted,
+        };
+        assert!(
+            !substituted.matches_expected(&expected).unwrap(),
+            "the leaf cannot replace an expected dependency while preserving the map length"
+        );
+        let (binding, dependency) = product.dependencies.iter().next().unwrap();
+        let mut validation = PackageInterfaceValidation::default();
+        let mut physical = RetainedArtifactRow::issue_type(
+            dependency.entry.clone(),
+            &mut validation,
+            ValueRowLocation::Private,
+        )
+        .unwrap();
+        physical.owned_inputs.insert(
+            original_inputs::OriginalInputKind::Interface,
+            product.leaf.row.owned_inputs[&original_inputs::OriginalInputKind::Packages].clone(),
+        );
+        let mut dependencies = product.dependencies.clone();
+        dependencies.insert(
+            *binding,
+            CheckedValueDependencyRow {
+                entry: dependency.entry.clone(),
+                row: Arc::new(physical),
+            },
+        );
+        let wrong_physical = CheckedValueTypeProduct {
+            leaf_binding: product.leaf_binding,
+            leaf: product.leaf.clone(),
+            dependencies,
+        };
+        assert!(
+            !wrong_physical.matches_expected(&expected).unwrap(),
+            "matching private entry metadata cannot bless another physical arena slice"
+        );
+        assert!(product.matches_expected(&expected).unwrap());
+    }
+
+    #[test]
     fn dedicated_value_row_refuses_independent_equal_payload_facts() {
         let (context, producer) = metadata_fixture();
         let scratch = tempfile::tempdir().unwrap();
@@ -27421,7 +27526,7 @@ mod tests {
         let entry = &entries[&identity("fixture", "Value")];
         let owner = &request.materialization;
         let row = RetainedArtifactMaterialization::borrow_type_row(
-            &RetainedArtifactMaterialization::type_row_candidates(std::slice::from_ref(owner)),
+            &RetainedArtifactMaterialization::type_row_owners(std::slice::from_ref(owner)),
             entry,
             true,
         )
@@ -27443,7 +27548,7 @@ mod tests {
         );
         assert!(!entry.same_issued_facts(&foreign));
         assert!(RetainedArtifactMaterialization::borrow_type_row(
-            &RetainedArtifactMaterialization::type_row_candidates(std::slice::from_ref(owner)),
+            &RetainedArtifactMaterialization::type_row_owners(std::slice::from_ref(owner)),
             &foreign,
             true
         )
@@ -27460,7 +27565,7 @@ mod tests {
         assert_eq!(fresh.interface.sha256, row.interface.sha256);
         assert!(validation.work().written_bytes > 0);
         assert!(RetainedArtifactMaterialization::borrow_type_row(
-            &RetainedArtifactMaterialization::type_row_candidates(std::slice::from_ref(owner)),
+            &RetainedArtifactMaterialization::type_row_owners(std::slice::from_ref(owner)),
             entry,
             true
         )
@@ -27504,7 +27609,7 @@ mod tests {
         let owner = &request.materialization;
         assert!(
             RetainedArtifactMaterialization::borrow_type_row(
-                &RetainedArtifactMaterialization::type_row_candidates(std::slice::from_ref(owner)),
+                &RetainedArtifactMaterialization::type_row_owners(std::slice::from_ref(owner)),
                 value_entry,
                 true
             )

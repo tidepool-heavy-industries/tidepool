@@ -2560,31 +2560,43 @@ impl SelectedCompilerInterfaces<'_> {
             if rows.contains_key(&binding) {
                 continue;
             }
-            if self
-                .artifacts
-                .lease
-                .selection
-                .namespace
-                .get(&binding.artifact)
-                != Some(&binding)
-            {
-                return Err(failure(
-                    "checked value TYPE dependency has another selected binding",
-                ));
-            }
             let entry = self
                 .artifacts
                 .lease
                 .payloads
                 .get(&binding.artifact)
                 .ok_or_else(|| failure("checked value TYPE dependency lacks custody"))?;
+            let namespace = self
+                .artifacts
+                .lease
+                .selection
+                .namespace
+                .get(&binding.artifact)
+                .copied();
+            if namespace != Some(binding) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::CheckedValueTypeBindingMismatch {
+                        owner: entry.descriptor.owner.clone(),
+                        expected: binding,
+                        selected: namespace,
+                    },
+                ));
+            }
             let selected = self
                 .selected
                 .get(&entry.descriptor.owner)
                 .ok_or_else(|| failure("checked value TYPE dependency lacks a selected row"))?
                 .interface();
-            if selected.0 != binding
-                || !selected.1.same_issued_facts(entry)
+            if selected.0 != binding {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::CheckedValueTypeBindingMismatch {
+                        owner: entry.descriptor.owner.clone(),
+                        expected: binding,
+                        selected: Some(selected.0),
+                    },
+                ));
+            }
+            if !selected.1.same_issued_facts(entry)
                 || entry.descriptor.producer_sha256 != producer
                 || !matches!(
                     &entry.payload,
@@ -2622,6 +2634,7 @@ impl SelectedCompilerInterfaces<'_> {
                 .iter()
                 .take_while(|(source, _, _)| *source == node)
             {
+                crate::host_work::checkpoint()?;
                 if !matches!(label, ArtifactDependency::Interface) {
                     continue;
                 }
@@ -8267,7 +8280,16 @@ mod tests {
         CompilerSourceSupport,
         Arc<crate::recovery_artifacts::CertifiedValueInterface>,
     ) {
-        let inventory = ArtifactInventory::default();
+        checked_value_type_product_fixture_in(&ArtifactInventory::default(), extra)
+    }
+
+    fn checked_value_type_product_fixture_in(
+        inventory: &ArtifactInventory,
+        extra: usize,
+    ) -> (
+        CompilerSourceSupport,
+        Arc<crate::recovery_artifacts::CertifiedValueInterface>,
+    ) {
         let a = Arc::new(crate::artifact_inventory::tests::entry("TypeA", &["TypeB"]));
         let b = Arc::new(crate::artifact_inventory::tests::entry("TypeB", &["TypeA"]));
         let joined = value_certificate("TypeJoin", vec![a.descriptor.owner.clone()]);
@@ -8384,6 +8406,12 @@ mod tests {
             CheckedValueRowIssuer, CheckedValueRowSource, RetainedArtifactMaterialization,
         };
         let (source, certificate) = checked_value_type_product_fixture(0);
+        let warm = RetainedArtifactMaterialization::capture_checked_value(
+            &source,
+            CheckedValueRowSource::Fresh(&certificate),
+        )
+        .unwrap()
+        .0;
         let issuer = CheckedValueRowIssuer::new(certificate.clone());
         let capture = |source: &CompilerSourceSupport| {
             RetainedArtifactMaterialization::capture_checked_value(
@@ -8395,13 +8423,18 @@ mod tests {
         let first = capture(&source).unwrap();
         let again = capture(&source).unwrap();
         assert!(Arc::ptr_eq(&first, &again));
-        assert_eq!(issuer.promotion_count(), 1);
+        assert!(Arc::ptr_eq(&first, &warm));
+        assert_eq!(
+            issuer.promotion_count(),
+            0,
+            "a warm first issuance borrows existing physical rows"
+        );
         let child = source
             .admit_value_interfaces(&[value_certificate("UnrelatedType", vec![])])
             .unwrap();
         let inherited = capture(&child).unwrap();
         assert!(Arc::ptr_eq(&first, &inherited));
-        assert_eq!(issuer.promotion_count(), 1);
+        assert_eq!(issuer.promotion_count(), 0);
         let (other, other_certificate) = checked_value_type_product_fixture(1);
         assert_eq!(certificate.artifact_id(), other_certificate.artifact_id());
         assert_ne!(
@@ -8412,6 +8445,12 @@ mod tests {
                 .interface()
                 .0
         );
+        let _warm_other = RetainedArtifactMaterialization::capture_checked_value(
+            &other,
+            CheckedValueRowSource::Fresh(&other_certificate),
+        )
+        .unwrap()
+        .0;
         assert!(
             capture(&other).is_err(),
             "an internally consistent product for a different expected scoped closure must refuse"
@@ -8420,7 +8459,7 @@ mod tests {
             Arc::ptr_eq(&first, &capture(&source).unwrap()),
             "refusal never replaces the first issuance"
         );
-        assert_eq!(issuer.promotion_count(), 1);
+        assert_eq!(issuer.promotion_count(), 0);
     }
 
     #[test]
@@ -8470,36 +8509,47 @@ mod tests {
 
     #[test]
     fn checked_value_type_closure_refuses_crossed_selected_dependency_scope() {
-        let (source, certificate) = checked_value_type_product_fixture(0);
-        let (other, _) = checked_value_type_product_fixture(1);
+        let inventory = ArtifactInventory::default();
+        let (source, certificate) = checked_value_type_product_fixture_in(&inventory, 0);
+        let (other, _) = checked_value_type_product_fixture_in(&inventory, 1);
         let owner = ExactModuleIdentity {
             unit: "unit".into(),
             module: "TypeA".into(),
         };
-        let mut crossed = source.clone();
+        let expected_binding = source.selected[&owner].interface().0;
+        let selected_binding = other.selected[&owner].interface().0;
+        assert_ne!(expected_binding, selected_binding);
+        let mut crossed = source.retain_custody(&other.artifacts).unwrap();
+        assert!(crossed
+            .artifacts
+            .lease
+            .selection
+            .scopes
+            .contains_key(&expected_binding.selection));
+        assert!(crossed
+            .artifacts
+            .lease
+            .selection
+            .scopes
+            .contains_key(&selected_binding.selection));
         Arc::make_mut(&mut crossed.selected)
             .rows
             .insert(owner.clone(), other.selected[&owner].clone());
-        assert!(crossed
-            .selected_interfaces()
-            .unwrap()
+        let mut namespace = crossed.artifacts.namespace().clone();
+        namespace.insert(selected_binding.artifact, selected_binding);
+        crossed.artifacts.replace_namespace(&namespace);
+        let selected = crossed.selected_interfaces().unwrap();
+        assert!(selected.type_interfaces_for_owners(vec![ExactModuleIdentity { unit: "unit".into(), module: "TypeRoot".into() }]).is_ok(),
+            "the owner-only projection accepts both valid scopes; it does not correlate the parent's exact edge");
+        let error = selected
             .checked_value_type_closure(&certificate)
-            .is_err());
-        // Merely changing selected row metadata cannot mint another proof edge.
-        let mut crossed = source.clone();
-        let mut row = crossed.selected[&owner].clone();
-        let mut entry = row.interface().1.as_ref().clone();
-        entry.requirements.clear();
-        match &mut row.0 {
-            SelectedCompilerRow::InterfaceOnly { interface }
-            | SelectedCompilerRow::Original { interface, .. } => interface.1 = Arc::new(entry),
-        }
-        Arc::make_mut(&mut crossed.selected).rows.insert(owner, row);
-        assert!(crossed
-            .selected_interfaces()
-            .unwrap()
-            .checked_value_type_closure(&certificate)
-            .is_err());
+            .err()
+            .expect("the exact parent edge must reject another selected child binding");
+        assert!(
+            matches!(error, CompileError::ArtifactInventory(error) if error.failure == ArtifactInventoryFailure::CheckedValueTypeBindingMismatch {
+                owner, expected: expected_binding, selected: Some(selected_binding),
+            })
+        );
     }
 
     // The ordinary type-query front door parses Names through the existing

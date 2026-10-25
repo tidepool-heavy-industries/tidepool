@@ -1726,6 +1726,14 @@ pub enum ArtifactInventoryFailure {
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
     #[error("artifact {artifact:?} has multiple issued dependency bindings")]
     BindingAmbiguity { artifact: ArtifactId },
+    #[error(
+        "checked value TYPE dependency {owner:?} requires {expected:?}, selected {selected:?}"
+    )]
+    CheckedValueTypeBindingMismatch {
+        owner: ExactModuleIdentity,
+        expected: ArtifactBinding,
+        selected: Option<ArtifactBinding>,
+    },
     #[error("program extension for {owner:?} requires matching issued bindings: {reason:?}")]
     ProgramExtension {
         owner: ExactModuleIdentity,
@@ -6292,8 +6300,8 @@ enum MaterializationReuse {
     FreshOnly,
 }
 
-/// A physical leaf augments inherited custody; only a complete compiler
-/// materialization can replace traversal of its issuing view's parents.
+/// A checked-value TYPE materialization augments inherited custody. Only a
+/// complete compiler materialization replaces traversal of the view's parents.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MaterializationKey {
     Compilation([u8; 32]),

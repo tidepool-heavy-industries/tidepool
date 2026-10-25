@@ -801,6 +801,11 @@ impl CertifiedModuleInterface {
                 .matches_references(&reference.package_interfaces)
     }
 
+    /// Authenticated physical Core facts, projected from the issuing receipt.
+    pub(crate) fn core_descriptor(&self) -> Option<&CapturedArtifactDescriptor> {
+        self.receipt.core.as_ref()
+    }
+
     /// Materialization can retain Core without making it available through an
     /// interface capability. Preparation requires a separate admission owner.
     pub(crate) fn core_bytes(&self) -> Option<&[u8]> {

@@ -1299,7 +1299,7 @@ impl CapturedValueInterface {
 
 /// An original checked output owns its certification and selected compiler
 /// support, including the exact native byte custody needed by later consumers.
-/// Its value-sized immutable row survives independently of producing staging.
+/// Its complete immutable TYPE product survives independently of producing staging.
 #[derive(Debug)]
 pub struct CheckedValueArtifact {
     interface: ValueInterfaceBytes,
