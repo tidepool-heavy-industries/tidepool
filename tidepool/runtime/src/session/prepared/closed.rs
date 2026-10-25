@@ -257,10 +257,7 @@ impl NativeInstantiationPlan {
             else {
                 return Err(PreparedRuntimeError::certified_target_owners());
             };
-            if !matches!(acquired.grant(), NativeCodeGrant::Package { .. }) {
-                return Err(PreparedRuntimeError::certified_target_owners());
-            }
-            pending.push(acquired.code().clone());
+            pending.push(acquired.clone());
             imports.push(NativeCodeImport::Code {
                 code: acquired.code().clone(),
                 value: *value,
@@ -269,21 +266,29 @@ impl NativeInstantiationPlan {
         // A package spelling alone cannot authorize a permanent root. Check
         // the actual closed package graph selected by the installing target.
         let mut visited = BTreeSet::new();
-        while let Some(code) = pending.pop() {
-            if !visited.insert(code.id()) {
-                continue;
-            }
+        while let Some(acquired) = pending.pop() {
+            let code = acquired.code();
             let definitions = code.body().definitions();
-            if !matches!(code.body(), NativeCodeBody::Package(_))
+            if !matches!(acquired.grant(), NativeCodeGrant::Package { .. })
+                || !matches!(code.body(), NativeCodeBody::Package(_))
                 || !definitions.sites().is_empty()
-                || !definitions.constructor_replies().is_empty()
+                || !definitions
+                    .constructor_replies()
+                    .iter()
+                    .all(|(_, reply)| matches!(reply, ConstructorReply::Static(_)))
             {
                 return Err(PreparedRuntimeError::certified_target_owners());
             }
-            for import in code.imports() {
+            // Intrinsic constructor type facts carry no site authority. Keep
+            // every acquired occurrence's grant and selected children distinct
+            // even when another occurrence has equal immutable code.
+            if !visited.insert((*acquired.closure().identity(), acquired.occurrence())) {
+                continue;
+            }
+            for import in acquired.imports() {
                 match import {
-                    NativeCodeImport::Code { code, .. } => pending.push(code),
-                    NativeCodeImport::Retained(_) => {
+                    AcquiredNativeImport::Code { acquired, .. } => pending.push(acquired),
+                    AcquiredNativeImport::Retained { .. } => {
                         return Err(PreparedRuntimeError::certified_target_owners());
                     }
                 }
