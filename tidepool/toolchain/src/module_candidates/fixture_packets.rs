@@ -840,10 +840,12 @@ fn source_boot_world_value_type_packet_producer() {
     enum WorldValueFixture {
         Nominal,
         Captured,
+        Historical,
     }
     let fixture = match text_field(&fields[0]) {
         "TPSOURCEBOOTVALUETYPE1" => WorldValueFixture::Nominal,
         "TPSOURCEBOOTCAPTUREDVALUETYPE1" => WorldValueFixture::Captured,
+        "TPSOURCEBOOTHISTORICALVALUETYPE1" => WorldValueFixture::Historical,
         _ => panic!("unsupported World value fixture request"),
     };
     let directory = packet.join("world-values");
@@ -853,6 +855,9 @@ fn source_boot_world_value_type_packet_producer() {
         }
         WorldValueFixture::Captured => {
             crate::compiler_world::world_captured_value_transport_fixture(&directory)
+        }
+        WorldValueFixture::Historical => {
+            crate::compiler_world::world_historical_value_transport_fixture(&directory)
         }
     }
     .expect("production checked-value issuance and World transport");

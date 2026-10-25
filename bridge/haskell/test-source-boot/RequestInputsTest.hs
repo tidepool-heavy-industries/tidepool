@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, worldValueTypeHistories, worldCapturedValueTypeHistories, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
+module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, worldValueTypeHistories, worldCapturedValueTypeHistories, worldHistoricalValueTypeSelections, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
 
 import Tidepool.RequestCompletion (finishCompletion, captureCompletion, completionResult, completionFailures, completionAsync, BodyOutcome(..), CleanupStage(CompilerScopeRestore), cleanupStage, cleanupException)
 import Tidepool.WorkerServer (runWorkerLoop, WorkerResponse(..), requireNativeDemandOwner)
@@ -736,6 +736,63 @@ worldValueTypeHistories = worldValueTypeHistoriesFor NominalWorldValue
 
 worldCapturedValueTypeHistories :: IO ()
 worldCapturedValueTypeHistories = worldValueTypeHistoriesFor CapturedWorldValue
+
+worldHistoricalValueTypeSelections :: IO ()
+worldHistoricalValueTypeSelections = withTiming $ withScratch $ \work ->
+  bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
+    packet <- newPacketDirectory work "world-historical-type-fixture"
+    BS.writeFile (packet </> "request.cbor") (encode (TList [TString "TPSOURCEBOOTHISTORICALVALUETYPE1"]))
+    completion <- runPacketProducer WorldValueTypeProducer packet
+    bytes <- completedPacketOutput completion (packet </> "world-value-types.cbor")
+    (cold,firstOperand,secondOperand) <- worldFixtureTerm bytes >>= \term -> case term of
+      TList [TString "TPCWHISTORICALTYPEFIXTURE1",cold,firstOperand,secondOperand] ->
+        pure (cold,firstOperand,secondOperand)
+      _ -> fail "historical TYPE fixture omitted its genuine versions"
+    let writeDescriptor label term = do
+          sealed <- sealWorldValueDescriptor handles term
+          let path = work </> (label ++ ".cbor")
+              body = encode sealed
+          BS.writeFile path body
+          pure (path,SHA.hash body)
+    (path,_) <- writeDescriptor "historical-cold" cold
+    owner <- newExactInputOwner
+    facts <- readWorldInputsWithOwner owner path
+    (aliases,counts,dependencyOwners) <- worldValueColdCensus cold
+    bindings <- forM (Map.keys counts) (worldFixtureTerm >=> worldValueBindingOrder)
+    unless (worldInputsPrimaryIsEmpty facts && Map.keys aliases == ["first","second"]
+        && Map.size counts == 2 && all (== 1) (Map.elems counts)
+        && dependencyOwners == Set.singleton ("main","Module")
+        && Set.size (Set.fromList (map fst bindings)) == 2)
+      (fail "historical TYPE fixture lacks distinct artifacts for one passive module owner")
+    withRootedCompilerEnvironment work $
+      withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
+        environment <- getSession
+        let demand alias = liftIO (readWorldBindingInputs owner environment facts [alias])
+              >>= either (liftIO . fail) (pure . (\(_,_,types) -> types))
+            moduleSeal types = exactSha256 . worldTypeEntryArtifact <$>
+              maybe (fail "historical demand lost its defining Module") pure (Map.lookup ("main","Module") types)
+        first <- demand "first"
+        second <- demand "second"
+        firstSeal <- liftIO (moduleSeal first)
+        secondSeal <- liftIO (moduleSeal second)
+        liftIO $ unless (firstSeal /= secondSeal)
+          (fail "individual historical demands collapsed different authenticated TYPE bodies")
+        conflict <- liftIO (readWorldBindingInputs owner environment facts ["first","second"])
+        liftIO $ case conflict of
+          Left "world TYPE contributions select conflicting exact bindings" -> pure ()
+          Left reason -> fail ("historical active conflict had another refusal: " ++ reason)
+          Right _ -> fail "historical TYPE versions entered one selected owner namespace"
+        retried <- demand "first"
+        retriedSeal <- liftIO (moduleSeal retried)
+        liftIO $ unless (retriedSeal == firstSeal && Map.keysSet (worldInputsBindings facts) == Map.keysSet aliases)
+          (fail "historical conflict changed the retained predecessor or its individual selection")
+        operands <- forM [("first",firstOperand),("second",secondOperand)] $ \(label,operand) -> do
+          (operandPath,seal) <- liftIO (writeDescriptor ("historical-operand-" ++ label) operand)
+          liftIO (readWorldCellOperandWithOwner owner environment facts operandPath seal)
+        liftIO $ case mergeWorldTypeInputs (map worldCellOperandBinding operands) (map worldCellOperandTypes operands) of
+          Left "world TYPE contributions select conflicting exact bindings" -> pure ()
+          Left reason -> fail ("historical operand conflict had another refusal: " ++ reason)
+          Right _ -> fail "historical operand versions collapsed before their active join"
 
 worldValueTypeHistoriesFor :: WorldValueFixture -> IO ()
 worldValueTypeHistoriesFor fixture = withTiming $ withScratch $ \work ->
