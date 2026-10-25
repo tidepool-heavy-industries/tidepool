@@ -4659,17 +4659,21 @@ homeDependencyDigests graph policies = dependencyIdentityDigests ownFrame (Map.m
         HomeDependency name kind = dependency
         HomeDependencyWitness _selectedPath fingerprint = fst (graph Map.! dependency)
 
-reverseDependencyClosure :: Ord owner => Map.Map owner (Set.Set owner) -> Set.Set owner -> Set.Set owner
-reverseDependencyClosure graph changed = visit Set.empty (Set.toList changed)
+dependencyClosure :: Ord owner => Map.Map owner (Set.Set owner) -> Set.Set owner -> Set.Set owner
+dependencyClosure graph changed = visit Set.empty (Set.toList changed)
   where
-    dependents = Map.fromListWith Set.union
-      [(dependency,Set.singleton owner) | (owner,dependencies) <- Map.toList graph
-        , dependency <- Set.toList dependencies]
     visit seen [] = seen
     visit seen (owner:rest)
       | owner `Set.member` seen = visit seen rest
       | otherwise = visit (Set.insert owner seen)
-          (Set.toList (Map.findWithDefault Set.empty owner dependents) ++ rest)
+          (Set.toList (Map.findWithDefault Set.empty owner graph) ++ rest)
+
+reverseDependencyClosure :: Ord owner => Map.Map owner (Set.Set owner) -> Set.Set owner -> Set.Set owner
+reverseDependencyClosure graph changed = dependencyClosure dependents changed
+  where
+    dependents = Map.fromListWith Set.union
+      [(dependency,Set.singleton owner) | (owner,dependencies) <- Map.toList graph
+        , dependency <- Set.toList dependencies]
 
 sourceImportOwners :: ModSummary -> Set.Set Module
 sourceImportOwners summary = Set.fromList (mapMaybe selected
@@ -6112,18 +6116,18 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         candidateKeys = Set.fromList [mkNodeKey (ModuleNode [] (admittedCandidateSummary candidate))
           | candidate <- Map.elems acceptedCandidates]
         loadDependencies = sourceLoadDependencyGraph modGraphRaw
-        loadDependents = Map.fromListWith Set.union
-          [(dependency,Set.singleton owner) | (owner,dependencies) <- Map.toList loadDependencies
-            , dependency <- Set.toList dependencies]
-        -- A selected SOURCE memo borrows the current ordinary target's details
-        -- knot. Keep its component and dependencies in Make so GHC can retie
-        -- that knot, even when an accepted candidate would defer the importer.
-        sourceMemoKeys = Set.fromList [mkNodeKey (ModuleNode [] summary)
-          | summary <- sourceOrder, ms_mod summary `Map.member` validatedMemo
-          , not (null (ms_srcimps summary))]
-        sourceMemoDependencies = reverseDependencyClosure loadDependents sourceMemoKeys
-        deferred = if loadRequired then Set.empty else
-          reverseDependencyClosure loadDependencies candidateKeys `Set.difference` sourceMemoDependencies
+        candidateDeferred = if loadRequired then Set.empty else
+          reverseDependencyClosure loadDependencies candidateKeys
+        -- SOURCE importers, including transitive users of their types, need
+        -- Make to tie their details against the current ordinary homes. Keep
+        -- affected dependents and their dependencies in the existing plan.
+        bootKeys = Set.fromList [mkNodeKey node
+          | node@(ModuleNode _ summary) <- mgModSummaries' (cpLoadGraph originalPlan)
+          , ms_hsc_src summary == HsBootFile]
+        sourceDependents = reverseDependencyClosure loadDependencies bootKeys
+        sourceLoadKeys = dependencyClosure loadDependencies
+          (candidateDeferred `Set.intersection` sourceDependents)
+        deferred = candidateDeferred `Set.difference` sourceLoadKeys
         candidateLoadGraph = mkModuleGraph
           [node | node <- mgModSummaries' (cpLoadGraph originalPlan)
             , mkNodeKey node `Set.notMember` deferred]
