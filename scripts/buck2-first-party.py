@@ -56,6 +56,13 @@ GENERATED_BIN_NAMES = {
     "tidepool-effects-gen": "tidepool_effects_gen",
 }
 TOOLCHAIN_COMPILER_FREE_TESTS = [
+    "artifact_inventory::compiler_projection::tests::checked_value_type_product_retains_exact_cycles_and_type_roles",
+    "artifact_inventory::compiler_projection::tests::checked_value_type_product_cache_checks_expected_binding_and_inherited_reuse",
+    "artifact_inventory::compiler_projection::tests::checked_value_type_product_borrows_shared_dependency_physical_rows",
+    "artifact_inventory::compiler_projection::tests::checked_value_type_closure_refuses_crossed_selected_dependency_scope",
+    "declaration_context::tests::checked_value_type_product_refuses_incomplete_and_wrong_physical_rows",
+    "compiler_world::answer_tests::complete_value_row_fact_binds_exact_dependency_associations",
+    "compiler_world::answer_tests::dependency_deltas_match_full_distinct_row_census",
     "certified_products::tests::input_home_contracts_bind_selected_issuer_and_ordered_package_slots",
     "declaration_context::tests::retained_group_materialization_keeps_scope_aliases_on_cold_and_cache_hits",
     "declaration_context::tests::nonempty_native_imports_keep_issued_rows_through_custody_and_request",
@@ -2476,6 +2483,7 @@ tidepool_buildscript_run(
                 ("toolchain_world_mixed_seal_test", "artifacts::module_product_tests::real_world_mixed_output_retains_prior_native_stages"),
                 ("toolchain_world_lifetime_test", "artifacts::module_product_tests::real_world_shadow_successors_release_transport_ancestors_before_cold_restore"),
                 ("toolchain_world_value_selection_test", "artifacts::world_value_selection_tests::real_world_value_selection_preserves_physical_owner_and_item_prefix"),
+                ("toolchain_world_value_type_history_test", "compiler_world::answer_tests::genuine_world_type_transport_matches_cold_dependency_census"),
                 ("toolchain_world_produced_value_prefix_test", "artifacts::world_value_selection_tests::real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand"),
                 ("toolchain_world_reference_history_test", "artifacts::world_value_selection_tests::real_world_reference_history_restores_same_owner_and_rejects_crossed_ready"),
                 ("toolchain_staged_world_first_demands_test", "artifacts::world_value_selection_tests::prior_source_home_links_bind_first_packagefree_and_packageful_targets"),
