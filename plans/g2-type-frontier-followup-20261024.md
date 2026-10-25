@@ -34,7 +34,13 @@ exit 0. Its source, artifacts and counts are in the prior evidence root's
 Inventory-wide native issuer identity changes require evidence from production
 callers and an explicit treatment of content-addressed recovery. Do not replace
 physical issuer checks with semantic equality. A bounded independent audit is
-examining that boundary while the immediate repairs proceed.
+complete at `7ec29daa12`: no production counterexample was found. Retain this as
+a separate API-hardening decision, not a required wire identity change.
+
+The baseline actual acquisition cohort reproduces the shared-validator refusal.
+The existing second acquisition test passes, contrary to the report's predicted
+immediate assertion failure. The equal-Original regression must independently
+establish canonicalization occurred and test the producer/offer allocation join.
 
 The live World decoder cache redesign remains separate: its owner must supply
 current live custody and rebased wrappers with correct retained-byte accounting.
