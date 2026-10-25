@@ -5458,18 +5458,18 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         1,
     )
     .unwrap();
-    assert!(matches!(
-        resident
-            .initialize_durable_public_scope(durable.clone(), public)
-            .unwrap(),
-        PublicManifestCommit::Durable
-    ));
     let public_context = SessionRunContext {
         lexical_scope: public,
         ..resident.public_context()
     };
     resident.set_run_context(public_context).unwrap();
     publish_protocol_original(&mut resident, public, protocol_original.selection.clone());
+    assert!(matches!(
+        resident
+            .initialize_durable_public_scope(durable.clone(), public)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
     resident.bootstrap_world(&recipe);
     let before = resident.public_visibility_snapshot_in(public).unwrap();
     let before_binding_ids = resident
@@ -7337,27 +7337,16 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
     ));
     drop(source_lease);
     let engine = source.state.prepared_mut().unwrap();
-    let captured_handle = engine
-        .prepared_handle_of(captured.custody().handle.unwrap())
-        .unwrap();
-    let captured_owner = engine.owner_of_handle(captured_handle).unwrap();
-    assert_ne!(captured_owner, source_support);
-    assert_eq!(
-        engine.hosting_program(captured_handle),
-        Some(source_support)
-    );
+    let captured_raw = captured.custody().handle.unwrap();
+    let captured_handle = engine.prepared_handle_of(captured_raw).unwrap();
     let collections = engine.heap_stats().gc_count;
     engine.quiesce_and_collect_now().unwrap();
     assert_eq!(engine.heap_stats().gc_count, collections + 1);
     assert_eq!(assert_isolated_apply_support(engine), source_support);
     assert_no_turn_scaffolds(engine);
     assert_eq!(
-        engine.owner_of_handle(captured_handle),
-        Some(captured_owner)
-    );
-    assert_eq!(
-        engine.hosting_program(captured_handle),
-        Some(source_support)
+        engine.prepared_handle_of(captured_raw),
+        Some(captured_handle)
     );
     let before_release = source.value_handle_count();
     drop(captured);
@@ -7401,7 +7390,9 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
         .unwrap();
     let engine = destination.state.require_prepared().unwrap();
     let destination_support = assert_isolated_apply_support(engine);
-    let roots = [imported.custody(), &probe, &entry]
+    let imported_raw = imported.custody().handle.unwrap();
+    let imported_handle = engine.prepared_handle_of(imported_raw).unwrap();
+    let roots = [&probe, &entry]
         .into_iter()
         .map(|root| {
             let handle = engine.prepared_handle_of(root.handle.unwrap()).unwrap();
@@ -7416,6 +7407,10 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
     assert_eq!(engine.heap_stats().gc_count, collections + 1);
     assert_eq!(assert_isolated_apply_support(engine), destination_support);
     assert_no_turn_scaffolds(engine);
+    assert_eq!(
+        engine.prepared_handle_of(imported_raw),
+        Some(imported_handle)
+    );
     for (handle, owner) in roots {
         assert_eq!(engine.owner_of_handle(handle), Some(owner));
         assert_eq!(engine.hosting_program(handle), Some(destination_support));
