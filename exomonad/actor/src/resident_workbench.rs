@@ -20915,10 +20915,8 @@ pub(crate) mod request_tests {
             let body = format!("module WorldQuestion where\nknown :: Int\nknown = {known}\n");
             let mut files = vec![("WorldQuestion.hs", body.as_str())];
             files.extend_from_slice(additional);
-            let (captured, source_owner) = world_query_test_source_files_with_support(
-                &[files],
-                &source.base_include,
-            );
+            let (captured, source_owner) =
+                world_query_test_source_files_with_support(&[files], &source.base_include);
             public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
             let workbench =
                 ResidentActorWorkbench::new(machines, source.bind_preparation(client), None);
@@ -21088,6 +21086,94 @@ pub(crate) mod request_tests {
                 .expect("a fresh invocation consumes the promoted value after producer retirement");
             consumer.publish_completed_cell_for_test(context).await.unwrap();
         }).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn world_operand_type_closure_does_not_require_a_primary_type_projection() {
+        with_test_compiler_owner(|client| async move {
+            let fixture = RootedWorldInputTest::new(client, 7).await;
+            let (frontend, context) = fixture
+                .workbench
+                .shared_view()
+                .with_json_input(Some(serde_json::json!({"greeting": "operand only"})))
+                .admit_private_cell_with_source_for_test(
+                    fixture.public.clone(),
+                    fixture.captured.clone(),
+                    fixture.source_owner.clone(),
+                )
+                .await;
+            frontend
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    let view = session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap();
+                    assert!(view.exact_declaration_context().unwrap().compiler_roles().keys()
+                    .all(|owner| owner.module != "Data.Aeson.Types.Internal"),
+                    "this private World has no JSON observation scaffold or primary JSON TYPE row");
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let input = frontend.lease_cell_input(&context).await.unwrap().unwrap();
+            let name = input.mounted_input().binder.name.clone();
+            let (plan, input) = plan_actual_world_input(
+                &frontend,
+                &context,
+                input,
+                include_str!("fixtures/world-operand-type-consumer.hs"),
+                WorldInputPlanBoundary::Actual,
+            )
+            .await;
+            let plan =
+                plan.expect("the parser admits the operand's own transitive TYPE dependencies");
+            drop(plan);
+            let (checked, prepared) = frontend
+                .prepare_checked_cell(
+                    context.clone(),
+                    include_str!("fixtures/world-operand-type-consumer.hs").into(),
+                    frontend.compilation_authority.clone().unwrap(),
+                    frontend.private_execution.clone().unwrap(),
+                    Some(input),
+                )
+                .await
+                .expect("the same operand crosses parser END into native preparation");
+            let PreparedCell {
+                mut items,
+                dependencies,
+            } = prepared;
+            assert_eq!(items.len(), 1);
+            let result = frontend
+                .begin_prepared_cell_item(
+                    context.clone(),
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: checked.items[0].source.clone(),
+                    },
+                    items.remove(0),
+                )
+                .await
+                .unwrap();
+            let result = match result {
+                ResidentWorkbenchStep::Running { fragment, outcome } => frontend
+                    .settle_item(context.clone(), *fragment, (*outcome).into())
+                    .await
+                    .unwrap(),
+                other => other,
+            };
+            assert!(
+                matches!(result, ResidentWorkbenchStep::Committed { .. }),
+                "the operand's value executes through the compiled consumer"
+            );
+            drop(dependencies);
+            frontend
+                .wait_for_host_input_retirement_for_test(context, name)
+                .await;
+            fixture.assert_public_unchanged().await;
+        })
+        .await;
     }
 
     #[tokio::test]
