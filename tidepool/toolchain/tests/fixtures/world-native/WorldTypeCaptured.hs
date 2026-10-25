@@ -1,3 +1,3 @@
 data Wrapped = Wrapped Nominal.Token
-captured () = Wrapped input
+captured () = Wrapped TidepoolHostInput.supplied
 let supplied = captured ()
