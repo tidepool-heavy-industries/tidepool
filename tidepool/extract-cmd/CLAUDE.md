@@ -231,6 +231,10 @@ lengths are checked before allocation in direct and daemon transports; oversized
 accepted responses remain indeterminate and cannot be replayed. The worker
 checks capture file sizes before reading them and returns a bounded infrastructure
 failure for oversized or changing captures, without truncating successful data.
+Rejected captures retain a raw stderr head/tail sample with measured sizes,
+retained-byte counts and truncation metadata inside the actual remaining response
+allowance. Failure diagnostics take priority; zero remaining payload still permits
+a failed terminal frame, never a successful typed response.
 Compiler artifacts remain file-backed. This bounds response materialization;
 temporary capture files can still grow while the request handler runs, and fixed
 metadata subprocess probes do not use the framed response budget.

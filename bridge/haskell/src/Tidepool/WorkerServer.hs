@@ -21,11 +21,13 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
+import qualified Data.Text.Lazy as LT
+import qualified Data.Text.Lazy.Encoding as LTE
 import Data.Word (Word32, Word64)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode(..))
 import System.IO
-  ( Handle, IOMode(ReadMode), hClose, hFileSize, hFlush, openTempFile
+  ( Handle, IOMode(ReadMode), SeekMode(AbsoluteSeek), hClose, hFileSize, hFlush, hSeek, openTempFile
   , openBinaryFile, stderr, stdin, stdout )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), ReportOutcome(..), renderDiagsJson)
 import Tidepool.ExtractRequest (EnsureExactInputsOutcome(..), encodeEnsureExactInputsOutcomeWithin)
@@ -235,8 +237,27 @@ data OutputChannels = OutputChannels Handle Handle
 
 data CaptureOutcome
   = Captured BS.ByteString BS.ByteString
-  | RejectedCapture String
+  | RejectedCapture CaptureRejection
   | UnavailableCapture
+
+data CaptureRejection = CaptureRejection
+  { rejectionReason :: CaptureRejectionReason
+  , rejectionBudgetRemainingBytes :: Integer
+  , rejectionStdoutBytes :: Integer
+  , rejectionStderrBytes :: Integer
+  , rejectionSample :: Maybe CapturedStderrSample
+  }
+
+data CaptureRejectionReason = CapturePayloadExceeded | CaptureLengthsChanged | CaptureDiagnosticsExceeded
+  deriving Eq
+
+data CapturedStderrSample = CapturedStderrSample
+  { sampleObservedStdoutBytes :: Integer
+  , sampleObservedStderrBytes :: Integer
+  , sampleHead :: BS.ByteString
+  , sampleTailOffset :: Integer
+  , sampleTail :: BS.ByteString
+  }
 
 withOutputChannels :: (OutputChannels -> IO a) -> IO a
 withOutputChannels use = do
@@ -404,16 +425,16 @@ captureOutputWithin remaining channels action = mask $ \restore -> do
             attemptReleases [(CaptureClose, hClose outHandle), (CaptureClose, hClose errHandle)]
           readStart <- attemptReleases
             [(CaptureRead, emitPhase (phaseSink channels) (CleanupStarted CaptureRead))]
-          budget <- remaining
-          readResult <- readCapturedResponse budget outPath errPath
+          readResult <- flattenCompletion <$> captureCompletion (do
+            budget <- remaining
+            readCapturedResponse budget outPath errPath)
           readEnd <- attemptReleases
             [(CaptureRead, emitPhase (phaseSink channels) (CleanupFinished CaptureRead))]
           removed <- observedRelease channels CaptureRemove $
             attemptReleases [(CaptureRemove, removeFile outPath), (CaptureRemove, removeFile errPath)]
           let failures = restored ++ closed ++ readStart ++ asCleanupFailures CaptureRead readResult ++ readEnd ++ removed
               captured = case completionResult readResult of
-                BodySucceeded (Right (out, err)) -> Captured out err
-                BodySucceeded (Left reason) -> RejectedCapture reason
+                BodySucceeded result -> result
                 _ -> UnavailableCapture
           pure (appendCleanupFailures completed failures, captured)
 
@@ -443,31 +464,117 @@ renderCapturedWithin budget channels completed captured = do
     Just failure -> throwIO failure
     Nothing -> pure ()
   emitPhase (phaseSink channels) RenderingResponse
-  let assessment = case captured of
-        Captured _ _ -> CaptureComplete
-        RejectedCapture reason -> CaptureBudgetRejected reason
-        UnavailableCapture -> CaptureUnavailable
-      (capturedOut, capturedErr) = case captured of
-        Captured out err -> (out, err)
-        _ -> (BS.empty, BS.empty)
-      remaining = budget
-        - toInteger (BS.length capturedOut) - toInteger (BS.length capturedErr)
-  (code, diagnostics, human) <- renderCompletion (fmap responseDiagnostics completed) assessment
-  -- Only the typed successful body supplies a control response. Capture and
-  -- release failures retain their diagnostics and can never expose Ready.
-  let machine = case (code, completionResult completed) of
-        (ExitSuccess, BodySucceeded (ExactInputsResponse outcome)) ->
-          encodeEnsureExactInputsOutcomeWithin remaining outcome
-        _ -> boundedUtf8 remaining diagnostics
-  case machine of
-    Just out -> case boundedUtf8 (remaining - toInteger (BS.length out)) human of
-      Just debug -> pure (code, out, capturedOut <> capturedErr <> debug)
-      Nothing -> budgetFailure
-    Nothing -> budgetFailure
+  case captured of
+    Captured capturedOut capturedErr -> do
+      let remaining = budget - byteLength capturedOut - byteLength capturedErr
+      (code, diagnostics, human) <- renderCompletion (fmap responseDiagnostics completed) CaptureComplete
+      -- Only a successful typed body with complete capture supplies control
+      -- data. Captured stdout remains diagnostic text on the human channel.
+      let machine = case (code, completionResult completed) of
+            (ExitSuccess, BodySucceeded (ExactInputsResponse outcome)) ->
+              encodeEnsureExactInputsOutcomeWithin remaining outcome
+            _ -> boundedUtf8 remaining diagnostics
+          rendered = do
+            out <- machine
+            debug <- boundedUtf8 (remaining - byteLength out) human
+            pure (code, out, capturedOut <> capturedErr <> debug)
+      case rendered of
+        Just response -> pure response
+        Nothing -> renderRejectedWithin budget completed (Just (CaptureRejection
+          CaptureDiagnosticsExceeded
+          budget (byteLength capturedOut) (byteLength capturedErr)
+          (Just (sampleCapturedStderr budget capturedOut capturedErr))))
+    RejectedCapture rejection -> renderRejectedWithin budget completed (Just rejection)
+    UnavailableCapture -> renderRejectedWithin budget completed Nothing
+
+byteLength :: BS.ByteString -> Integer
+byteLength = toInteger . BS.length
+
+captureRejectionMessage :: CaptureRejection -> String
+captureRejectionMessage rejection = reason
+  ++ " (stdout_bytes=" ++ show (rejectionStdoutBytes rejection)
+  ++ ", stderr_bytes=" ++ show (rejectionStderrBytes rejection)
+  ++ ", capture_truncated=true)"
   where
-    budgetFailure = pure (ExitFailure 1, TE.encodeUtf8 (T.pack (renderDiagsJson ReportWorkerFailure
-      [Diag Nothing DiagError ("compiler response diagnostics exceed "
-        ++ show maxResponsePayloadBytes ++ " bytes")] ++ "\n")), BS.empty)
+    reason = case rejectionReason rejection of
+      CapturePayloadExceeded -> "compiler response capture exceeds " ++ show maxResponsePayloadBytes
+        ++ " bytes remaining=" ++ show (rejectionBudgetRemainingBytes rejection)
+      CaptureLengthsChanged -> "compiler response capture changed while being read"
+      CaptureDiagnosticsExceeded -> "compiler response diagnostics exceed " ++ show maxResponsePayloadBytes
+        ++ " bytes remaining=" ++ show (rejectionBudgetRemainingBytes rejection)
+
+renderRejectedWithin :: Integer -> Completion WorkerResponse -> Maybe CaptureRejection
+  -> IO (ExitCode, BS.ByteString, BS.ByteString)
+renderRejectedWithin budget completed rejection = do
+  let assessment = maybe CaptureUnavailable (CaptureBudgetRejected . captureRejectionMessage) rejection
+  (_, diagnostics, human) <- renderCompletion (fmap responseDiagnostics completed) assessment
+  let compact = renderDiagsJson ReportWorkerFailure [Diag Nothing DiagError
+        ("compiler failure diagnostics truncated; " ++ maybe "capture unavailable" captureRejectionMessage rejection)] ++ "\n"
+      minimal = renderDiagsJson ReportWorkerFailure [] ++ "\n"
+      -- Failure framing is still possible when no payload bytes remain. Never
+      -- exceed the actual exchange allowance merely to report its exhaustion.
+      machine = firstEncoded [diagnostics,compact,minimal]
+      firstEncoded [] = BS.empty
+      firstEncoded (candidate:rest) = maybe (firstEncoded rest) id (boundedUtf8 budget candidate)
+      humanBytes = diagnosticPrefixWithin (max 0 (budget - byteLength machine)) human
+      sampleBudget = max 0 (budget - byteLength machine - byteLength humanBytes)
+      sample = maybe BS.empty (renderRejectedStderr sampleBudget) rejection
+  pure (ExitFailure 1, machine, sample <> humanBytes)
+
+diagnosticPrefixWithin :: Integer -> String -> BS.ByteString
+diagnosticPrefixWithin budget text = case boundedUtf8 budget text of
+  Just bytes -> bytes
+  Nothing -> case filter ((<= budget) . byteLength)
+      ["\n[compiler failure diagnostics truncated]\n", "capture_truncated=true\n", "truncated\n"] of
+    marker:_ -> BL.toStrict (BL.take (fromInteger (budget - byteLength marker))
+      (LTE.encodeUtf8 (LT.pack text))) <> marker
+    [] -> BS.empty
+
+-- This is an evidence retention budget, not a limit on valid compiler output.
+-- Keep at most 32 KiB at each end, leaving up to 4 KiB for failure diagnostics
+-- before reading. Small exchange allowances reserve half instead.
+rejectedStderrReadBudget :: Integer -> Integer
+rejectedStderrReadBudget budget = min 65536 (max 0 (budget - min 4096 (max 0 budget `div` 2)))
+
+sampleCapturedStderr :: Integer -> BS.ByteString -> BS.ByteString -> CapturedStderrSample
+sampleCapturedStderr budget out err =
+  let count = min (byteLength err) (rejectedStderrReadBudget budget)
+      headCount = fromInteger ((count + 1) `div` 2)
+      tailCount = fromInteger count - headCount
+  in CapturedStderrSample (byteLength out) (byteLength err)
+    (BS.take headCount err) (byteLength err - toInteger tailCount) (BS.drop (BS.length err - tailCount) err)
+
+renderRejectedStderr :: Integer -> CaptureRejection -> BS.ByteString
+renderRejectedStderr budget rejection = case rejectionSample rejection of
+  Nothing -> BS.empty
+  Just sampled -> render (min budget (byteLength (sampleHead sampled) + byteLength (sampleTail sampled)))
+    where
+      render count =
+        let headCount0 = min (byteLength (sampleHead sampled)) ((count + 1) `div` 2)
+            tailCount = min (byteLength (sampleTail sampled)) (count - headCount0)
+            headCount = min (byteLength (sampleHead sampled)) (count - tailCount)
+            headBytes = BS.take (fromInteger headCount) (sampleHead sampled)
+            tailBytes = BS.drop (BS.length (sampleTail sampled) - fromInteger tailCount) (sampleTail sampled)
+            tailOffset = sampleTailOffset sampled + byteLength (sampleTail sampled) - tailCount
+            omitted = max 0 (max (rejectionStderrBytes rejection) (sampleObservedStderrBytes sampled) - headCount - tailCount)
+            changed = rejectionReason rejection == CaptureLengthsChanged
+              || rejectionStdoutBytes rejection /= sampleObservedStdoutBytes sampled
+              || rejectionStderrBytes rejection /= sampleObservedStderrBytes sampled
+            metadata = BSC.pack ("[compiler stderr sample budget_remaining_bytes=" ++ show (rejectionBudgetRemainingBytes rejection)
+              ++ " stdout_bytes=" ++ show (rejectionStdoutBytes rejection)
+              ++ " stderr_bytes=" ++ show (rejectionStderrBytes rejection)
+              ++ " observed_stdout_bytes=" ++ show (sampleObservedStdoutBytes sampled)
+              ++ " observed_stderr_bytes=" ++ show (sampleObservedStderrBytes sampled)
+              ++ " head_bytes=" ++ show headCount ++ " tail_offset=" ++ show tailOffset
+              ++ " tail_bytes=" ++ show tailCount ++ " retained_stderr_bytes=" ++ show (headCount + tailCount)
+              ++ " omitted_stderr_bytes=" ++ show omitted
+              ++ " capture_changed=" ++ (if changed then "true" else "false")
+              ++ " truncated=" ++ (if omitted > 0 || changed then "true" else "false") ++ "]\n")
+            separator = if tailOffset == headCount then BS.empty else "\n[compiler stderr tail]\n"
+            bytes = metadata <> headBytes <> separator <> tailBytes <> "\n"
+            excess = byteLength bytes - budget
+        in if excess <= 0 then bytes else if count <= 0 then BS.empty
+          else render (max 0 (count - excess))
 
 responseDiagnostics :: WorkerResponse -> [Diag]
 responseDiagnostics (DiagnosticResponse diagnostics) = diagnostics
@@ -480,31 +587,54 @@ responseDiagnostics (ExactInputsResponse _) = []
 maxResponsePayloadBytes :: Integer
 maxResponsePayloadBytes = 16777216
 
-readCapturedResponse :: Integer -> FilePath -> FilePath -> IO (Completion (Either String (BS.ByteString, BS.ByteString)))
+readCapturedResponse :: Integer -> FilePath -> FilePath -> IO (Completion CaptureOutcome)
 readCapturedResponse budget outPath errPath =
   withCompletionRelease CaptureClose (openBinaryFile outPath ReadMode) hClose $ \outHandle ->
-  withCompletionRelease CaptureClose (openBinaryFile errPath ReadMode) hClose $ \errHandle ->
-  captureCompletion $ do
-    outSize <- hFileSize outHandle
-    errSize <- hFileSize errHandle
-    if outSize + errSize > budget
-      then pure (Left ("compiler response capture exceeds " ++ show maxResponsePayloadBytes
-        ++ " bytes remaining=" ++ show budget ++ " (stdout=" ++ show outSize ++ ", stderr=" ++ show errSize ++ ")"))
-      else do
+  withCompletionRelease CaptureClose (openBinaryFile errPath ReadMode) hClose $ \errHandle -> do
+    observed <- captureCompletion $ do
+      outSize <- hFileSize outHandle
+      errSize <- hFileSize errHandle
+      let rejected reason = RejectedCapture (CaptureRejection reason budget outSize errSize Nothing)
+      if outSize + errSize > budget
+        then pure (rejected CapturePayloadExceeded)
+        else do
         -- Read only the measured lengths plus one growth sentinel per file.
         -- A concurrent inherited writer cannot force unbounded allocation or
         -- turn a partial captured response into successful typed data.
-        out <- BS.hGet outHandle (fromInteger outSize)
-        outExtra <- BS.hGet outHandle 1
-        err <- BS.hGet errHandle (fromInteger errSize)
-        errExtra <- BS.hGet errHandle 1
-        finalOutSize <- hFileSize outHandle
-        finalErrSize <- hFileSize errHandle
-        if toInteger (BS.length out) /= outSize || not (BS.null outExtra)
-            || toInteger (BS.length err) /= errSize || not (BS.null errExtra)
-            || finalOutSize /= outSize || finalErrSize /= errSize
-          then pure (Left "compiler response capture changed while being read")
-          else pure (Right (out, err))
+          out <- BS.hGet outHandle (fromInteger outSize)
+          outExtra <- BS.hGet outHandle 1
+          err <- BS.hGet errHandle (fromInteger errSize)
+          errExtra <- BS.hGet errHandle 1
+          finalOutSize <- hFileSize outHandle
+          finalErrSize <- hFileSize errHandle
+          if byteLength out /= outSize || not (BS.null outExtra)
+              || byteLength err /= errSize || not (BS.null errExtra)
+              || finalOutSize /= outSize || finalErrSize /= errSize
+            then pure (rejected CaptureLengthsChanged)
+            else pure (Captured out err)
+    case completionResult observed of
+      BodySucceeded (RejectedCapture rejection) -> do
+        sampled <- captureCompletion (sampleStderrFile budget outHandle errHandle rejection)
+        let actual = case completionResult sampled of
+              BodySucceeded value -> Just value
+              _ -> Nothing
+        pure (appendCleanupFailures (fmap (const (RejectedCapture rejection {rejectionSample=actual})) observed)
+          (asCleanupFailures CaptureRead sampled))
+      _ -> pure observed
+
+sampleStderrFile :: Integer -> Handle -> Handle -> CaptureRejection -> IO CapturedStderrSample
+sampleStderrFile budget outHandle errHandle rejection = do
+  let count = min (rejectionStderrBytes rejection) (rejectedStderrReadBudget budget)
+      headCount = fromInteger ((count + 1) `div` 2)
+      tailCount = fromInteger count - headCount
+      tailOffset = rejectionStderrBytes rejection - toInteger tailCount
+  headBytes <- if headCount == 0 then pure BS.empty else
+    hSeek errHandle AbsoluteSeek 0 >> BS.hGet errHandle headCount
+  tailBytes <- if tailCount == 0 then pure BS.empty else
+    hSeek errHandle AbsoluteSeek tailOffset >> BS.hGet errHandle tailCount
+  finalOutSize <- hFileSize outHandle
+  finalErrSize <- hFileSize errHandle
+  pure (CapturedStderrSample finalOutSize finalErrSize headBytes tailOffset tailBytes)
 
 exitCodeToInt :: ExitCode -> Int
 exitCodeToInt ExitSuccess = 0

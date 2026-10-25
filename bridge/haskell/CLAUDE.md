@@ -784,7 +784,7 @@ Diagnostics are opt-in:
 
 | Variable | Purpose |
 |---|---|
-| `TIDEPOOL_LOG=off\|error\|warn\|info\|debug\|trace` | structured `tidepool-log` worker events; the `full` trace profile defaults to `trace` |
+| `TIDEPOOL_LOG=off\|error\|warn\|info\|debug\|trace` | structured `tidepool-log` worker events; the `full` profile defaults to `debug`; per-identifier native-use rows require `trace` |
 | `TIDEPOOL_TIMING=1` | phase timings, nested breakdowns, and counts, correlated by compiler request |
 | `TIDEPOOL_VARID_AUDIT=1` | report VarId collisions |
 | `TIDEPOOL_VARID_AUDIT=<hex>,...` | resolve selected VarIds to names |

@@ -19,7 +19,7 @@ import System.IO (Handle, hClose, hFlush, openTempFile, stdin, stdout, stderr)
 import System.Process (ProcessHandle, CreateProcess(..), StdStream(..), createProcess, proc, terminateProcess, waitForProcess, readProcessWithExitCode)
 import System.IO.Error (isFullError)
 import System.Timeout (timeout)
-import System.Posix.Files (setFileMode)
+import System.Posix.Files (setFileMode, createSymbolicLink)
 import GHC.Conc (getNumCapabilities, ThreadStatus(..), BlockReason(..), threadStatus)
 import GHC.Clock (getMonotonicTimeNSec)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, compileCheckedRequest, CheckedCompilationTarget(..))
@@ -42,6 +42,11 @@ limit = 16777216
 
 successReport :: BS.ByteString
 successReport = BSC.pack "{\"version\":2,\"outcome\":\"success\",\"diagnostics\":[]}\n"
+
+captureHead, captureTail, oversizedStderr :: BS.ByteString
+captureHead = "distinctive-capture-head\n"
+captureTail = "\ndistinctive-capture-tail"
+oversizedStderr = captureHead <> BS.replicate (limit + 1) 101 <> captureTail
 
 workerChild :: Bool -> FilePath -> IO ()
 workerChild oneFreeFd scratch = do
@@ -187,6 +192,10 @@ workerChild oneFreeFd scratch = do
           exchange <- maybe (fail "native budget lost its active channel") pure native
           _ <- exchangeNativeDemand exchange 0 "small"
           pure ()
+        ["native-capture-budget"] -> do
+          exchange <- maybe (fail "capture budget lost its active channel") pure native
+          _ <- exchangeNativeDemand exchange 0 "small"
+          BS.hPut stderr oversizedStderr
         ["native-refusal"] -> do
           exchange <- maybe (fail "native refusal lost its active channel") pure native
           reply <- exchangeNativeDemand exchange 0 "refused-root"
@@ -195,7 +204,22 @@ workerChild oneFreeFd scratch = do
             _ -> fail "native semantic refusal became successful resolution"
         ["source-free"] -> BSC.hPutStr stdout "captured-control-debug"
         ["source-free-rejected"] -> pure ()
-        ["source-free-capture-overflow"] -> BS.hPut stdout (BS.replicate (limit + 1) 111)
+        ["source-free-capture-overflow"] -> BS.hPut stderr oversizedStderr
+        ["capture-primary-overflow"] -> do
+          BS.hPut stderr oversizedStderr
+          throwIO (SourceRejection "distinctive-primary-capture-failure")
+        ["capture-overlap"] -> do
+          BS.hPut stdout (BS.replicate (limit + 1) 111)
+          BS.hPut stderr ("single-overlap-marker" <> BS.pack [255,254])
+        ["capture-changing"] -> do
+          names <- listDirectory scratch
+          path <- case [scratch ++ "/" ++ name | name <- names, "tidepool-worker-stderr" `isPrefixOf` name] of
+            [value] -> pure value
+            _ -> fail "changing capture lost its actual stderr file"
+          removeFile path
+          -- A proc file reports length zero while yielding bytes. This enters
+          -- the real growth-sentinel refusal without racing an append thread.
+          createSymbolicLink "/proc/self/comm" path
         ["source-free-unbounded-reference"] -> pure ()
         ["source-free-capture-failure"] -> removeCaptureFiles scratch
         ["source-free-rejected-capture-failure"] -> removeCaptureFiles scratch
@@ -220,6 +244,8 @@ workerChild oneFreeFd scratch = do
         ["source-free"] -> ExactInputsResponse (ExactInputsNeedsAcquisition (replicate 64 'a') WorldNotResidentOnThisWorker)
         ["source-free-rejected"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
         ["source-free-capture-overflow"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (replicate 64 '1' ++ ".7") WorldRetainedAtAdmission)
+        ["native-capture-budget"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (replicate 64 '1' ++ ".7") WorldRetainedAtAdmission)
+        ["capture-changing"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (replicate 64 '1' ++ ".7") WorldRetainedAtAdmission)
         ["source-free-unbounded-reference"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (repeat 'x') WorldRetainedAtAdmission)
         ["source-free-capture-failure"] -> ExactInputsResponse (ExactInputsReady (replicate 64 'a') (replicate 64 '1' ++ ".7") WorldRetainedAtAdmission)
         ["source-free-rejected-capture-failure"] -> ExactInputsResponse (ExactInputsRejected AcquisitionRejected)
@@ -292,7 +318,7 @@ check scratch = do
           (fail "capture overflow exposed an unconfirmed Ready result")
       forRequest input output "source-free-unbounded-reference" $ \code out err ->
         unless (code == 1 && BSC.isInfixOf "worker-failure" out
-            && BS.length out < 1024 && BS.null err)
+            && BS.length out < 1024 && BS.length out + BS.length err <= limit)
           (fail "typed response encoding forced or admitted an unbounded invalid reference")
       forRequest input output "source-free-rejected" $ \code out err ->
         unless (code == 0
@@ -310,7 +336,9 @@ check scratch = do
             && BS.length out + BS.length err == limit)
           (fail "exact aggregate boundary was truncated or refused")
       forRequest input output "aggregate-overflow" $ \code out err ->
-        unless (code == 1 && BSC.isInfixOf "worker-failure" out && BS.length out < 1024 && BS.null err)
+        unless (code == 1 && BSC.isInfixOf "worker-failure" out && BS.length out < 1024
+            && BSC.isInfixOf "compiler stderr sample" err
+            && BSC.isInfixOf "truncated=true" err && BS.length out + BS.length err <= limit)
           (fail "aggregate capture overflow was not refused")
       forRequest input output "next-request" $ \code out err ->
         unless (code == 0 && out == successReport && err == "complete-next-request")
@@ -381,13 +409,88 @@ check scratch = do
       unless (null leftovers) (fail ("capture tempfiles retained: " ++ show leftovers))
       putStrLn "worker response bounds and cleanup: 1 passed"
 
+checkCaptureSamples :: FilePath -> IO ()
+checkCaptureSamples scratch = withSourceChild scratch $ \input output child -> do
+  forM_ ["source-free-capture-overflow", "capture-primary-overflow"] $ \mode ->
+    forRequest input output mode $ \code out err -> do
+      assertReport "worker-failure" out
+      assertFailedBudget limit code out err
+      unless (captureHead `BS.isInfixOf` err && captureTail `BS.isInfixOf` err
+          && BSC.isInfixOf (BSC.pack ("stderr_bytes=" ++ show (BS.length oversizedStderr))) err
+          && BSC.isInfixOf "truncated=true" err && BS.length err < 70000)
+        (fail "rejected capture lost measured size or distinctive head/tail evidence")
+      assertSampleBudget limit err
+      when (mode == "capture-primary-overflow") $
+        unless (BSC.isInfixOf "distinctive-primary-capture-failure" out)
+          (fail "capture overflow erased its primary source failure")
+  forRequest input output "capture-overlap" $ \code out err -> do
+    assertFailedBudget limit code out err
+    unless (occurrences "single-overlap-marker" err == 1)
+      (fail "short stderr sample split or duplicated its contiguous bytes")
+    unless (BS.count 255 err == 1 && BS.count 254 err == 1)
+      (fail "raw stderr sample expanded or discarded invalid UTF-8")
+    unless (BSC.isInfixOf "omitted_stderr_bytes=0 capture_changed=false truncated=false" err)
+      (fail "complete stderr sample invented truncation")
+  forRequest input output "capture-changing" $ \code out err -> do
+    unless (code == 1 && BSC.isInfixOf "capture changed while being read" out
+        && not (BSC.isInfixOf "TPEXO" out) && BSC.isInfixOf "capture_changed=true truncated=true" err)
+      (fail "capture growth sentinel exposed a successful typed response")
+  forM_ [("native-budget",0),("native-capture-budget",0),("native-capture-budget",1)
+      ,("native-capture-budget",16),("native-capture-budget",512)
+      ,("native-capture-budget",4096),("native-capture-budget",131072)] $ \(mode,budget) -> do
+    beginSource input mode
+    (stage,number,payload) <- readDemand output
+    unless (stage == 0 && number == 1 && payload == "small")
+      (fail "capture budget did not use its actual native exchange")
+    replyDemand input stage number 0 (BS.replicate (limit - 331 - BS.length payload - budget) 114)
+    tag <- exact output 1
+    code <- word32 <$> exact output 4
+    out <- readFrame output
+    err <- readFrame output
+    unless (tag == BS.singleton 0) (fail "exhausted capture did not retain its failed terminal frame")
+    assertFailedBudget budget code out err
+    when (budget >= 512) (assertReport "worker-failure" out)
+    when (budget >= 4096) $
+      do
+        unless (captureHead `BS.isInfixOf` err && captureTail `BS.isInfixOf` err
+            && BSC.isInfixOf "truncated=true" err)
+          (fail "remaining budget discarded bounded head/tail evidence")
+        assertSampleBudget budget err
+    forRequest input output "next-request" $ \nextCode nextOut nextErr ->
+      unless (nextCode == 0 && nextOut == successReport && nextErr == "complete-next-request")
+        (fail "capture-budget refusal poisoned the next request")
+  finishSourceChild input output child
+  leftovers <- listDirectory scratch
+  unless (null leftovers) (fail "capture sampling retained temporary files")
+  where
+    occurrences marker bytes = case BS.breakSubstring marker bytes of
+      (_,suffix) | BS.null suffix -> 0 :: Int
+      (_,suffix) -> 1 + occurrences marker (BS.drop (BS.length marker) suffix)
+    assertFailedBudget budget code out err = do
+      let encoded = put32 code <> frame out <> frame err
+      unless (code == 1 && BS.length out + BS.length err <= budget
+          && BS.length encoded <= budget + 12 && not (BSC.isInfixOf "TPEXO" out))
+        (fail ("failed capture exceeded its actual encoded budget or exposed Ready: " ++ show (budget,code,BS.length out,BS.length err)))
+    assertSampleBudget budget err = do
+      let field name = case BSC.breakSubstring (BSC.pack (name ++ "=")) err of
+            (_,suffix) -> case reads (BSC.unpack (BSC.takeWhile (\c -> c >= '0' && c <= '9')
+                (BS.drop (length name + 1) suffix))) of
+              [(value,"")] -> pure (value :: Integer)
+              _ -> fail ("stderr metadata lacks numeric field " ++ name)
+      actualBudget <- field "budget_remaining_bytes"
+      retained <- field "retained_stderr_bytes"
+      headCount <- field "head_bytes"
+      tailCount <- field "tail_bytes"
+      unless (actualBudget == toInteger budget && retained == headCount + tailCount)
+        (fail "stderr metadata lost original allowance or retained-byte count")
+
 -- Real protocol channels must retire malformed accepted framing without
 -- waiting for EOF or exposing an unconfirmed terminal result.
 checkNativeExchangeFailures :: FilePath -> IO ()
 checkNativeExchangeFailures scratch = do
   executable <- lookupEnv "TIDEPOOL_TEST_WORKER_RESPONSE_CHILD" >>= maybe
     (fail "missing declared worker-response child executable") pure
-  forM_ ["owner","stage","sequence","outcome","oversize","cumulative"] $ \mode ->
+  forM_ ["owner","stage","sequence","outcome","oversize"] $ \mode ->
     bracket (createProcess (proc executable ["--worker",scratch])
         {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit})
       (\(_,_,_,child) -> terminateProcess child >> void (waitForProcess child)) $
@@ -400,9 +503,8 @@ checkNativeExchangeFailures scratch = do
         unless (ack == BS.singleton 1) (fail "native refusal lost BEGIN acknowledgement")
         let header = "TPNDX001" <> BS.replicate 32 1 <> BS.replicate 32 2
               <> BS.replicate 32 3 <> BS.replicate 32 4 <> put64 999999999999999999
-            cumulative = mode == "cumulative"
-            label = if cumulative then "native-budget" else "native-exchange"
-            stage = if cumulative then 0 else 3
+            label = "native-exchange"
+            stage = 3
         BS.hPut input (BS.singleton 6 <> header <> frame "." <> put32 1 <> frame label)
         hFlush input
         observed <- exact output 161
@@ -413,7 +515,7 @@ checkNativeExchangeFailures scratch = do
             selectedStage = if mode == "stage" then stage + 1 else stage
             sequenceNumber = if mode == "sequence" then 2 else 1
             outcome = if mode == "outcome" then 2 else 0
-            reply = if cumulative then BS.replicate (limit - 331 - 5) 114 else "first-product"
+            reply = "first-product"
             lengthAndBody = if mode == "oversize" then put32 (fromIntegral limit + 1) else frame reply
         BS.hPut input (BS.singleton 5 <> selectedHeader <> put64 selectedStage <> put64 sequenceNumber
           <> BS.singleton outcome <> lengthAndBody)
