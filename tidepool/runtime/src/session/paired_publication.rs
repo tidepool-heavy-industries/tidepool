@@ -552,7 +552,9 @@ impl PersistentSession {
             return Err(super::SessionTransitionReason::ScopeRevoked.into());
         }
         let transition = admission.begin_freeze()?;
-        self.reconcile_private_visible_hosts(admission, true)?;
+        if transition.is_some() {
+            self.reconcile_private_visible_hosts(admission, true)?;
+        }
         let world = self
             .lib()
             .tips
