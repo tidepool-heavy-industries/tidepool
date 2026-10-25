@@ -41,6 +41,7 @@
     "exomonad/actor/src/fixtures/world-nominal-private-consumer.hs",
     "exomonad/actor/src/fixtures/world-nominal-producer.hs",
     "exomonad/actor/src/fixtures/world-nominal-public-consumer.hs",
+    "exomonad/actor/src/fixtures/world-operand-type-consumer.hs",
     "exomonad/actor/src/local_actor/failure_origin.hs",
     "exomonad/actor/src/request/fixtures/reply-tool-request.hs",
     "exomonad/actor/src/request/fixtures/request-signature-progress.hs",

@@ -53,6 +53,7 @@ rust_filegroup(
         "src/fixtures/world-nominal-private-consumer.hs": "exomonad/actor/src/fixtures/world-nominal-private-consumer.hs",
         "src/fixtures/world-nominal-producer.hs": "exomonad/actor/src/fixtures/world-nominal-producer.hs",
         "src/fixtures/world-nominal-public-consumer.hs": "exomonad/actor/src/fixtures/world-nominal-public-consumer.hs",
+        "src/fixtures/world-operand-type-consumer.hs": "exomonad/actor/src/fixtures/world-operand-type-consumer.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
         "src/forms.rs": "exomonad/actor/src/forms.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_rs]": "exomonad/actor/src/generated/actor.rs",
@@ -305,6 +306,7 @@ rust_filegroup(
         "src/fixtures/world-nominal-private-consumer.hs": "exomonad/actor/src/fixtures/world-nominal-private-consumer.hs",
         "src/fixtures/world-nominal-producer.hs": "exomonad/actor/src/fixtures/world-nominal-producer.hs",
         "src/fixtures/world-nominal-public-consumer.hs": "exomonad/actor/src/fixtures/world-nominal-public-consumer.hs",
+        "src/fixtures/world-operand-type-consumer.hs": "exomonad/actor/src/fixtures/world-operand-type-consumer.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
         "src/forms.rs": "exomonad/actor/src/forms.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_rs]": "exomonad/actor/src/generated/actor.rs",
@@ -885,13 +887,14 @@ tidepool_rust_test_cases(
     binary = ":exomonad_actor_unit_tests",
     exact_tests = [
         "resident_workbench::request_tests::world_checked_nominal_values_retain_type_closure_through_private_promotion",
+        "resident_workbench::request_tests::world_operand_type_closure_does_not_require_a_primary_type_projection",
     ],
-    expected_count = 1,
+    expected_count = 2,
     ignored = True,
     jobs = 1,
     timeout = 600,
     test_rule_timeout_ms = 1260000,
-    case_compiler_modes = {"resident_workbench::request_tests::world_checked_nominal_values_retain_type_closure_through_private_promotion": "owned-resident"},
+    case_compiler_modes = {"resident_workbench::request_tests::world_checked_nominal_values_retain_type_closure_through_private_promotion": "owned-resident", "resident_workbench::request_tests::world_operand_type_closure_does_not_require_a_primary_type_projection": "owned-resident"},
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -1945,6 +1948,7 @@ filegroup(
         "exomonad/actor/src/fixtures/world-nominal-private-consumer.hs": "src/fixtures/world-nominal-private-consumer.hs",
         "exomonad/actor/src/fixtures/world-nominal-producer.hs": "src/fixtures/world-nominal-producer.hs",
         "exomonad/actor/src/fixtures/world-nominal-public-consumer.hs": "src/fixtures/world-nominal-public-consumer.hs",
+        "exomonad/actor/src/fixtures/world-operand-type-consumer.hs": "src/fixtures/world-operand-type-consumer.hs",
         "exomonad/actor/src/fork_workspace.rs": "src/fork_workspace.rs",
         "exomonad/actor/src/forms.rs": "src/forms.rs",
         "exomonad/actor/src/hosted_lifecycle.rs": "src/hosted_lifecycle.rs",
@@ -2361,6 +2365,13 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f776f726c642d6e6f6d696e616c2d7075626c69632d636f6e73756d65722e6873",
     src = "src/fixtures/world-nominal-public-consumer.hs",
     out = "world-nominal-public-consumer.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f776f726c642d6f706572616e642d747970652d636f6e73756d65722e6873",
+    src = "src/fixtures/world-operand-type-consumer.hs",
+    out = "world-operand-type-consumer.hs",
     visibility = ["PUBLIC"],
 )
 

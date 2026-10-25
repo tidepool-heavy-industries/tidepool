@@ -2225,6 +2225,7 @@ tidepool_buildscript_run(
                     ]),
                     ("actor_world_value_type_history_test", [
                         "resident_workbench::request_tests::world_checked_nominal_values_retain_type_closure_through_private_promotion",
+                        "resident_workbench::request_tests::world_operand_type_closure_does_not_require_a_primary_type_projection",
                     ]),
                     ("actor_world_durable_generation_history_test", [
                         "resident_workbench::request_tests::quoted_source_original_survives_coherent_generation_replacement",
