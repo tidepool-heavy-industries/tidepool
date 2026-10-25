@@ -56,6 +56,8 @@ GENERATED_BIN_NAMES = {
     "tidepool-effects-gen": "tidepool_effects_gen",
 }
 TOOLCHAIN_COMPILER_FREE_TESTS = [
+    "artifact_inventory::tests::captured_canonical_producer_rows_share_acquired_fact_owner",
+    "artifact_inventory::compiler_projection::tests::general_value_admission_preserves_canonicalized_issuer_facts",
     "artifact_inventory::compiler_projection::tests::checked_value_type_product_retains_exact_cycles_and_type_roles",
     "artifact_inventory::compiler_projection::tests::checked_value_type_product_cache_checks_expected_binding_and_inherited_reuse",
     "artifact_inventory::compiler_projection::tests::checked_value_type_product_borrows_shared_dependency_physical_rows",
