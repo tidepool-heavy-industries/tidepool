@@ -8,7 +8,7 @@ module Tidepool.GhcPipeline
   , CheckedPublicModuleResult, checkedPublicModuleIdentity, checkedPublicModuleEvidence
   , WorldModulePolicyFailure(..), WorldModulePolicy(..)
   , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprOriginalReferences, pprReuseContext
-  , AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
+  , AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, preparedCandidateRoots, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
   , PreparedDependencies, PreparedSourceRoute(..), preparedSourceRoute
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , runPipelineSelected, runPipelineSessionSelected
@@ -546,6 +546,9 @@ preparedCandidateOriginal = admittedCandidateOriginal
 
 preparedCandidateProof :: AdmittedSourceCandidate -> CanonicalInterfaceProof
 preparedCandidateProof = admittedCandidateProof
+
+preparedCandidateRoots :: AdmittedSourceCandidate -> PackageImportEvidence
+preparedCandidateRoots = admittedCandidateRoots
 
 revalidatePreparedCandidateInputs :: PreparedPipelineResult -> IO ()
 revalidatePreparedCandidateInputs prepared =

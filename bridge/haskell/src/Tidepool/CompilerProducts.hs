@@ -139,7 +139,7 @@ import Tidepool.GhcPipeline
   , PreparedModuleCompletionInputs(..), PreparedSourceRoute(..), preparedSourceRoute
   , acquireWorldSourceOriginal, worldSourceOriginalFinalization, worldSourceOriginalPackages, captureWorldSourceOriginals
   , preparedFreshDependencies, preparedExactCompilation
-  , preparedCandidateOriginal, preparedCandidateProof
+  , preparedCandidateOriginal, preparedCandidateProof, preparedCandidateRoots
   , revalidatePreparedCandidateInputs )
 import Tidepool.GhcPipeline (WorldCellInputs, worldCellTypeInterfaces, worldCellDependencyBasis
   , WorldCellInputReference, worldCellInputReferenceBinding, selectWorldCellExecutionInputReferences)
@@ -1469,7 +1469,9 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
             Just (StagedOriginalProducts previous _ _ _ _) -> certifiedTargetContext previous
       certified <- encodeCertifiedOriginalProductsWithPrior outDir priorContext (Just originalInterfaces)
         [(path,SHA256.hash bytes) | (path,bytes) <- packageWrites, takeDirectory path == "package-products"]
-        capturedPackages packageLinks (pprOriginalReferences prepared) kind retainedProofs emittedSeals reconciled hscEnv sourceRecipe selectedInterfaces finalized (pprAcceptedCandidates prepared)
+        capturedPackages packageLinks (pprOriginalReferences prepared) kind retainedProofs emittedSeals reconciled hscEnv sourceRecipe selectedInterfaces finalized
+        [(preparedCandidateOriginal admission,preparedCandidateRoots admission)
+        | admission <- pprCandidateAdmissions prepared]
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes
