@@ -934,10 +934,8 @@ worldValueSuccessorPhysical (rows,parts) (TList [TString "TPCWSUCC6",_,_,TList p
   forM_ (Map.toList (Map.intersectionWith (,) incoming parts)) $ \(_,facts) ->
     unless (uncurry (==) facts) (fail "physical census observed conflicting bytes at one retained path")
   edits <- concat <$> forM [(0,primary),(1,visible),(2,dependencies)] (\(kind,changes) -> forM changes $ \entry -> case entry of
-    TList [key,row] -> do
-      owner <- if kind == 2 then pure key else TList <$> sequence
-        [worldFixtureField "unit" key,worldFixtureField "module" key]
-      pure (encode (TList [TInt kind,owner]),row)
+    TList [key,row] | kind == 2 -> pure (encode (TList [TInt kind,key]),row)
+    TList [unit,name,row] | kind /= 2 -> pure (encode (TList [TInt kind,TList [unit,name]]),row)
     _ -> fail "physical census needs exact successor row edits")
   let changed = foldl (\held (key,row) -> if row == TNull then Map.delete key held else Map.insert key row held) rows edits
   pure (changed,Map.union incoming parts)
