@@ -2533,11 +2533,14 @@ impl SelectedCompilerInterfaces<'_> {
             unit: value.interface().unit().to_owned(),
             module: value.interface().module().to_owned(),
         };
-        let root = self
+        let root_row = self
             .selected
             .get(&owner)
-            .ok_or_else(|| failure("checked value has no selected row"))?
-            .interface();
+            .ok_or_else(|| failure("checked value has no selected row"))?;
+        if root_row.original().is_some() {
+            return Err(failure("checked value TYPE root has an Original role"));
+        }
+        let root = root_row.interface();
         if root.1.descriptor.id != value.artifact_id()
             || root.1.requirements != value.requirements()
             || !matches!(&root.1.payload, ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) if interface == value.interface())
@@ -2659,6 +2662,15 @@ impl SelectedCompilerInterfaces<'_> {
                 .map(|entry| entry.descriptor.owner.clone())
                 .collect(),
         )?;
+        if support.selected.rows.len() != rows.len()
+            || support.selected.iter().any(|(_, row)| {
+                let (binding, entry) = row.interface();
+                rows.get(binding)
+                    .is_none_or(|expected| !expected.same_issued_facts(entry))
+            })
+        {
+            return Err(failure("demoted checked value TYPE projection differs from its exact expected binding closure"));
+        }
         Ok(ExpectedCheckedValueClosure {
             leaf: root.0,
             entries: rows,
@@ -8215,6 +8227,26 @@ mod tests {
             actual.artifacts.capture_graph_selection(),
             oracle.artifacts.capture_graph_selection()
         );
+        let product =
+            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
+                &actual,
+                crate::declaration_context::CheckedValueRowSource::Fresh(&left),
+            )
+            .map(|(product, _)| product)
+            .unwrap();
+        assert_eq!(product.dependencies().len(), 1);
+        assert_eq!(
+            product
+                .dependencies()
+                .values()
+                .next()
+                .unwrap()
+                .entry()
+                .descriptor
+                .id,
+            right.artifact_id()
+        );
+        assert!(!product.dependencies().contains_key(&product.leaf_binding()));
         let namespace = actual.artifacts.namespace();
         let edges = actual.artifacts.binding_dependencies();
         assert!(edges.contains(&(
@@ -8227,6 +8259,247 @@ mod tests {
             InventoryNodeKey::Artifact(namespace[&left.artifact_id()]),
             ArtifactDependency::Interface
         )));
+    }
+
+    fn checked_value_type_product_fixture(
+        extra: usize,
+    ) -> (
+        CompilerSourceSupport,
+        Arc<crate::recovery_artifacts::CertifiedValueInterface>,
+    ) {
+        let inventory = ArtifactInventory::default();
+        let a = Arc::new(crate::artifact_inventory::tests::entry("TypeA", &["TypeB"]));
+        let b = Arc::new(crate::artifact_inventory::tests::entry("TypeB", &["TypeA"]));
+        let joined = value_certificate("TypeJoin", vec![a.descriptor.owner.clone()]);
+        let joined = Arc::new(ArtifactEntry::interface(
+            joined.interface().clone(),
+            JoinedInterfaceRole::LexicalJoin,
+            joined.requirements().to_vec(),
+        ));
+        let value = value_certificate("TypeValue", vec![joined.descriptor.owner.clone()]);
+        let root = value_certificate(
+            "TypeRoot",
+            vec![ExactModuleIdentity {
+                unit: "unit".into(),
+                module: "TypeValue".into(),
+            }],
+        );
+        let mut entries = vec![a, b, joined];
+        for value in [&value, &root] {
+            entries.push(Arc::new(ArtifactEntry::interface(
+                value.interface().clone(),
+                JoinedInterfaceRole::ValueInterface,
+                value.requirements().to_vec(),
+            )));
+        }
+        entries.extend((0..extra).map(|index| {
+            Arc::new(crate::artifact_inventory::tests::entry(
+                &format!("UnusedType{index}"),
+                &[],
+            ))
+        }));
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), entries)
+            .unwrap();
+        (
+            CompilerSourceSupport::new(projection, view, [], Default::default()).unwrap(),
+            root,
+        )
+    }
+
+    #[test]
+    fn checked_value_type_product_retains_exact_cycles_and_type_roles() {
+        use crate::declaration_context::original_inputs::OriginalInputKind;
+        use crate::declaration_context::{CheckedValueRowSource, RetainedArtifactMaterialization};
+        let (source, certificate) = checked_value_type_product_fixture(16);
+        let expected = source
+            .selected_interfaces()
+            .unwrap()
+            .checked_value_type_closure(&certificate)
+            .unwrap();
+        // Independent owner census from the fixture recipe, not traversal output.
+        let owners = expected
+            .entries()
+            .values()
+            .map(|entry| entry.descriptor.owner.module.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            owners,
+            BTreeSet::from(["TypeA", "TypeB", "TypeJoin", "TypeValue", "TypeRoot"])
+        );
+        let demoted = expected.support();
+        assert!(demoted.artifacts.selected_native_groups().is_empty());
+        assert_eq!(demoted.native_availability.rows().count(), 0);
+        assert!(demoted.native_offers.is_empty());
+        assert!(demoted
+            .selected
+            .values()
+            .all(|row| row.original().is_none()));
+        assert_eq!(demoted.artifacts.descriptors().len(), 5);
+        let product = RetainedArtifactMaterialization::capture_checked_value(
+            &source,
+            CheckedValueRowSource::Fresh(&certificate),
+        )
+        .map(|(product, _)| product)
+        .unwrap();
+        assert!(product.matches_expected(&expected).unwrap());
+        assert_eq!(product.leaf_binding(), expected.leaf_binding());
+        assert!(!product.dependencies().contains_key(&product.leaf_binding()));
+        assert_eq!(product.dependencies().len(), 4);
+        let mut paths = product
+            .leaf_parts()
+            .unwrap()
+            .into_iter()
+            .map(|part| part.path)
+            .collect::<Vec<_>>();
+        for dependency in product.dependencies().values() {
+            let parts = dependency.parts().unwrap();
+            assert!(parts.iter().all(|part| !matches!(
+                part.kind,
+                OriginalInputKind::Native | OriginalInputKind::Census | OriginalInputKind::Graph
+            )));
+            if matches!(dependency.entry().payload, ArtifactPayload::Canonical(_)) {
+                assert!(parts
+                    .iter()
+                    .any(|part| part.kind == OriginalInputKind::Certificate));
+            }
+            paths.extend(parts.into_iter().map(|part| part.path));
+        }
+        let view = Arc::downgrade(&source.artifacts.lease);
+        drop(expected);
+        drop(source);
+        assert!(
+            view.upgrade().is_none(),
+            "the complete physical product cannot retain its issuing view/cache"
+        );
+        assert!(paths.iter().all(|path| path.exists()));
+        drop(product);
+        assert!(paths.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn checked_value_type_product_cache_checks_expected_binding_and_inherited_reuse() {
+        use crate::declaration_context::{
+            CheckedValueRowIssuer, CheckedValueRowSource, RetainedArtifactMaterialization,
+        };
+        let (source, certificate) = checked_value_type_product_fixture(0);
+        let issuer = CheckedValueRowIssuer::new(certificate.clone());
+        let capture = |source: &CompilerSourceSupport| {
+            RetainedArtifactMaterialization::capture_checked_value(
+                source,
+                CheckedValueRowSource::Produced(&issuer),
+            )
+            .map(|(product, _)| product)
+        };
+        let first = capture(&source).unwrap();
+        let again = capture(&source).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        assert_eq!(issuer.promotion_count(), 1);
+        let child = source
+            .admit_value_interfaces(&[value_certificate("UnrelatedType", vec![])])
+            .unwrap();
+        let inherited = capture(&child).unwrap();
+        assert!(Arc::ptr_eq(&first, &inherited));
+        assert_eq!(issuer.promotion_count(), 1);
+        let (other, other_certificate) = checked_value_type_product_fixture(1);
+        assert_eq!(certificate.artifact_id(), other_certificate.artifact_id());
+        assert_ne!(
+            source.selected[&first.leaf_entry().descriptor.owner]
+                .interface()
+                .0,
+            other.selected[&first.leaf_entry().descriptor.owner]
+                .interface()
+                .0
+        );
+        assert!(
+            capture(&other).is_err(),
+            "an internally consistent product for a different expected scoped closure must refuse"
+        );
+        assert!(
+            Arc::ptr_eq(&first, &capture(&source).unwrap()),
+            "refusal never replaces the first issuance"
+        );
+        assert_eq!(issuer.promotion_count(), 1);
+    }
+
+    #[test]
+    fn checked_value_type_product_borrows_shared_dependency_physical_rows() {
+        use crate::declaration_context::{CheckedValueRowSource, RetainedArtifactMaterialization};
+        let (source, certificate) = checked_value_type_product_fixture(0);
+        let first = RetainedArtifactMaterialization::capture_checked_value(
+            &source,
+            CheckedValueRowSource::Fresh(&certificate),
+        )
+        .map(|(product, _)| product)
+        .unwrap();
+        let owner = ExactModuleIdentity {
+            unit: "unit".into(),
+            module: "TypeA".into(),
+        };
+        let second_certificate = value_certificate("AnotherTypeRoot", vec![owner]);
+        let child = source
+            .admit_value_interfaces(&[second_certificate.clone()])
+            .unwrap();
+        let second = RetainedArtifactMaterialization::capture_checked_value(
+            &child,
+            CheckedValueRowSource::Fresh(&second_certificate),
+        )
+        .map(|(product, _)| product)
+        .unwrap();
+        assert_eq!(
+            second.dependencies().len(),
+            2,
+            "the second root retains only its own exact cycle closure"
+        );
+        for (binding, dependency) in second.dependencies() {
+            let original = &first.dependencies()[binding];
+            let before = original.parts().unwrap();
+            let after = dependency.parts().unwrap();
+            assert_eq!(before.len(), after.len());
+            for (before, after) in before.iter().zip(&after) {
+                assert_eq!(before.kind, after.kind);
+                assert_eq!(before.path, after.path);
+                assert!(Arc::ptr_eq(
+                    &before.transport.compiler_file_lease(),
+                    &after.transport.compiler_file_lease()
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn checked_value_type_closure_refuses_crossed_selected_dependency_scope() {
+        let (source, certificate) = checked_value_type_product_fixture(0);
+        let (other, _) = checked_value_type_product_fixture(1);
+        let owner = ExactModuleIdentity {
+            unit: "unit".into(),
+            module: "TypeA".into(),
+        };
+        let mut crossed = source.clone();
+        Arc::make_mut(&mut crossed.selected)
+            .rows
+            .insert(owner.clone(), other.selected[&owner].clone());
+        assert!(crossed
+            .selected_interfaces()
+            .unwrap()
+            .checked_value_type_closure(&certificate)
+            .is_err());
+        // Merely changing selected row metadata cannot mint another proof edge.
+        let mut crossed = source.clone();
+        let mut row = crossed.selected[&owner].clone();
+        let mut entry = row.interface().1.as_ref().clone();
+        entry.requirements.clear();
+        match &mut row.0 {
+            SelectedCompilerRow::InterfaceOnly { interface }
+            | SelectedCompilerRow::Original { interface, .. } => interface.1 = Arc::new(entry),
+        }
+        Arc::make_mut(&mut crossed.selected).rows.insert(owner, row);
+        assert!(crossed
+            .selected_interfaces()
+            .unwrap()
+            .checked_value_type_closure(&certificate)
+            .is_err());
     }
 
     // The ordinary type-query front door parses Names through the existing

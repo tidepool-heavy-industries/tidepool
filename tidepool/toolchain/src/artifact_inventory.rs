@@ -6297,7 +6297,7 @@ enum MaterializationReuse {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MaterializationKey {
     Compilation([u8; 32]),
-    CheckedValueLeaf(ArtifactBinding),
+    CheckedValueType(ArtifactBinding),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -7480,7 +7480,7 @@ impl ArtifactView {
         })
     }
 
-    /// Cache one complete TYPE product under the existing physical leaf owner.
+    /// Cache one complete TYPE product under the existing physical materialization owner.
     /// Receiver caches precede ancestors; prepare receives rows and cannot reenter.
     pub(crate) fn retain_checked_value_materialization(
         &self,
@@ -7493,7 +7493,7 @@ impl ArtifactView {
             CompileError,
         >,
     ) -> Result<Arc<crate::declaration_context::CheckedValueTypeProduct>, CompileError> {
-        let key = MaterializationKey::CheckedValueLeaf(expected.leaf_binding());
+        let key = MaterializationKey::CheckedValueType(expected.leaf_binding());
         let mut cache = self.lease.lock_materialization()?;
         if let Some(owner) = cache.get(&key) {
             let product = owner
@@ -7532,11 +7532,11 @@ impl ArtifactView {
             ));
         }
         cache.insert(key, Arc::new(
-            crate::declaration_context::RetainedArtifactMaterialization::checked_value_product_leaf(product.clone())));
+            crate::declaration_context::RetainedArtifactMaterialization::checked_value_materialization(product.clone())));
         Ok(product)
     }
 
-    fn checked_value_leaves(
+    fn checked_value_materializations(
         &self,
         retained: &BTreeMap<
             MaterializationKey,
@@ -7547,7 +7547,7 @@ impl ArtifactView {
         let leaves = retained
             .iter()
             .filter_map(|(key, leaf)| match key {
-                MaterializationKey::CheckedValueLeaf(binding)
+                MaterializationKey::CheckedValueType(binding)
                     if self
                         .lease
                         .payloads
@@ -7562,7 +7562,7 @@ impl ArtifactView {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_leaf_cache_scan",
+        tracing::debug!(target: "tidepool_toolchain::artifacts", phase = "checked_value_type_cache_scan",
             cache_entries_visited = retained.len(), selected_leaf_references = leaves.len(),
             "observed current scoped physical leaves");
         leaves
@@ -7617,7 +7617,7 @@ impl ArtifactView {
         // stop edge without interrupting that producer or evicting its result.
         let mut retained = self.lease.lock_materialization()?;
         let key = MaterializationKey::Compilation(metadata.materialization_key());
-        let leaves = self.checked_value_leaves(&retained, metadata);
+        let leaves = self.checked_value_materializations(&retained, metadata);
         if let Some(complete) = retained.get(&key) {
             match reuse {
                 MaterializationReuse::Allowed => {}
@@ -7628,7 +7628,7 @@ impl ArtifactView {
                     ));
                 }
             }
-            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
+            let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_materializations(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
             retained.insert(key, complete.clone());
             return Ok(complete);
         }
@@ -7701,8 +7701,8 @@ impl ArtifactView {
         let Some(complete) = retained.get(&key) else {
             return Ok(None);
         };
-        let leaves = self.checked_value_leaves(&retained, metadata);
-        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
+        let leaves = self.checked_value_materializations(&retained, metadata);
+        let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_materializations(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect())?;
         retained.insert(key, complete.clone());
         Ok(Some(complete))
     }

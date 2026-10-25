@@ -7569,7 +7569,7 @@ impl RetainedArtifactMaterialization {
 
     /// A complete physical view owns current facts directly. Overlay revisions
     /// share persistent rows and immutable graph/scope owners, never predecessors.
-    pub(crate) fn overlay_checked_value_leaves(
+    pub(crate) fn overlay_checked_value_products(
         complete: &Arc<Self>,
         leaves: &[Arc<Self>],
         metadata: &CompilerArtifactMetadata,
@@ -7642,37 +7642,34 @@ impl RetainedArtifactMaterialization {
         Ok(Arc::new(owned))
     }
 
-    fn issued_type_row(
-        &self,
-        entry: &Arc<ArtifactEntry>,
-        leaf: bool,
-    ) -> Result<Option<Arc<RetainedArtifactRow>>, CompileError> {
-        let mut candidates = Vec::new();
-        self.visit_owners(&mut BTreeSet::new(), &mut |owner| {
-            if let Some(row) = owner.rows.get(&entry.descriptor.id) {
-                candidates.push(row.clone());
-            }
-            if let Some(product) = &owner.checked_value_product {
-                if product.leaf.entry.descriptor.id == entry.descriptor.id {
-                    candidates.push(product.leaf.row.clone());
+    fn type_row_candidates(
+        owners: &[Arc<Self>],
+    ) -> BTreeMap<ArtifactId, Vec<Arc<RetainedArtifactRow>>> {
+        let mut candidates = BTreeMap::<ArtifactId, Vec<Arc<RetainedArtifactRow>>>::new();
+        let mut visited = BTreeSet::new();
+        for owner in owners {
+            owner.visit_owners(&mut visited, &mut |owner| {
+                for (id, row) in &owner.rows {
+                    candidates.entry(*id).or_default().push(row.clone());
                 }
-                candidates.extend(
-                    product
-                        .dependencies
-                        .values()
-                        .filter(|row| row.entry.descriptor.id == entry.descriptor.id)
-                        .map(|row| row.row.clone()),
-                );
-            }
-        });
-        for row in candidates {
-            if leaf
+            });
+        }
+        candidates
+    }
+
+    fn borrow_type_row(
+        candidates: &BTreeMap<ArtifactId, Vec<Arc<RetainedArtifactRow>>>,
+        entry: &ArtifactEntry,
+        require_value_issuer: bool,
+    ) -> Result<Option<Arc<RetainedArtifactRow>>, CompileError> {
+        for row in candidates.get(&entry.descriptor.id).into_iter().flatten() {
+            if require_value_issuer
                 && !matches!(&row.value_custody, ValueRowCustody::Private(issued) if issued.same_issued_facts(entry))
             {
                 continue;
             }
             if row.matches_type_entry(entry)? {
-                return Ok(Some(row));
+                return Ok(Some(row.clone()));
             }
         }
         Ok(None)
@@ -7689,16 +7686,8 @@ impl RetainedArtifactMaterialization {
         (owners, rows)
     }
 
-    #[cfg(test)]
-    pub(crate) fn capture_checked_value(
-        support: &crate::artifact_inventory::CompilerSourceSupport,
-        source: CheckedValueRowSource<'_>,
-    ) -> Result<Arc<CheckedValueTypeProduct>, CompileError> {
-        Self::capture_checked_value_with_interfaces(support, source).map(|(product, _)| product)
-    }
-
     /// Validate once, then issue physical custody and the same demoted projection.
-    pub(crate) fn capture_checked_value_with_interfaces(
+    pub(crate) fn capture_checked_value(
         support: &crate::artifact_inventory::CompilerSourceSupport,
         source: CheckedValueRowSource<'_>,
     ) -> Result<(Arc<CheckedValueTypeProduct>, Arc<SelectedTypeInterfaces>), CompileError> {
@@ -7731,20 +7720,15 @@ impl RetainedArtifactMaterialization {
                     return Ok(product);
                 }
                 let mut validation = PackageInterfaceValidation::default();
+                let candidates = Self::type_row_candidates(physical);
                 let leaf_binding = expected.leaf_binding();
-                let leaf_entry = expected.entries()[&leaf_binding].clone();
                 let mut leaf = None;
                 let mut dependencies = imbl::OrdMap::new();
                 let mut fresh_leaf = false;
                 for (binding, entry) in expected.entries() {
                     crate::host_work::checkpoint()?;
-                    let mut borrowed = None;
-                    for owner in physical {
-                        if let Some(row) = owner.issued_type_row(entry, *binding == leaf_binding)? {
-                            borrowed = Some(row);
-                            break;
-                        }
-                    }
+                    let borrowed =
+                        Self::borrow_type_row(&candidates, entry, *binding == leaf_binding)?;
                     let row = match borrowed {
                         Some(row) => row,
                         None => {
@@ -7789,7 +7773,7 @@ impl RetainedArtifactMaterialization {
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
-                let _ = (fresh_leaf, leaf_entry);
+                let _ = fresh_leaf;
                 Ok(product)
             },
         )?;
@@ -7800,20 +7784,19 @@ impl RetainedArtifactMaterialization {
         self.checked_value_product.as_ref()
     }
 
-    pub(crate) fn checked_value_product_leaf(product: Arc<CheckedValueTypeProduct>) -> Self {
+    pub(crate) fn checked_value_materialization(product: Arc<CheckedValueTypeProduct>) -> Self {
+        let mut rows = product
+            .dependencies
+            .iter()
+            .map(|(binding, row)| (binding.artifact, row.row.clone()))
+            .collect::<imbl::OrdMap<_, _>>();
+        rows.insert(product.leaf_binding.artifact, product.leaf.row.clone());
         Self {
-            checked_value_product: Some(product.clone()),
-            ..Self::checked_value_leaf(product.leaf_binding.artifact, product.leaf.row.clone())
-        }
-    }
-
-    fn checked_value_leaf(id: ArtifactId, row: Arc<RetainedArtifactRow>) -> Self {
-        Self {
-            checked_value_product: None,
+            checked_value_product: Some(product),
             kind: MaterializationKind::Issued,
             _directory: None,
             _parents: Vec::new(),
-            rows: std::iter::once((id, row)).collect(),
+            rows,
             package_rows: Default::default(),
             groups: Default::default(),
             execution_scope: None,
@@ -27437,7 +27420,13 @@ mod tests {
             .unwrap();
         let entry = &entries[&identity("fixture", "Value")];
         let owner = &request.materialization;
-        let row = owner.issued_value_row(entry).unwrap();
+        let row = RetainedArtifactMaterialization::borrow_type_row(
+            &RetainedArtifactMaterialization::type_row_candidates(std::slice::from_ref(owner)),
+            entry,
+            true,
+        )
+        .unwrap()
+        .unwrap();
         let ArtifactPayload::Interface(interface, role) = &entry.payload else {
             panic!("value interface fixture");
         };
@@ -27453,7 +27442,13 @@ mod tests {
             "equal payload is insufficient"
         );
         assert!(!entry.same_issued_facts(&foreign));
-        assert!(owner.issued_value_row(&foreign).is_none());
+        assert!(RetainedArtifactMaterialization::borrow_type_row(
+            &RetainedArtifactMaterialization::type_row_candidates(std::slice::from_ref(owner)),
+            &foreign,
+            true
+        )
+        .unwrap()
+        .is_none());
         let mut validation = PackageInterfaceValidation::default();
         let fresh = RetainedArtifactRow::issue_value(
             foreign.clone(),
@@ -27464,7 +27459,13 @@ mod tests {
         assert_ne!(fresh.interface.path, row.interface.path);
         assert_eq!(fresh.interface.sha256, row.interface.sha256);
         assert!(validation.work().written_bytes > 0);
-        assert!(owner.issued_value_row(entry).is_some());
+        assert!(RetainedArtifactMaterialization::borrow_type_row(
+            &RetainedArtifactMaterialization::type_row_candidates(std::slice::from_ref(owner)),
+            entry,
+            true
+        )
+        .unwrap()
+        .is_some());
     }
 
     #[test]
@@ -27502,7 +27503,13 @@ mod tests {
         let value_entry = &value_entry[&identity("fixture", "Value")];
         let owner = &request.materialization;
         assert!(
-            owner.issued_value_row(value_entry).is_none(),
+            RetainedArtifactMaterialization::borrow_type_row(
+                &RetainedArtifactMaterialization::type_row_candidates(std::slice::from_ref(owner)),
+                value_entry,
+                true
+            )
+            .unwrap()
+            .is_none(),
             "packet-owned files cannot issue independently retained checked custody"
         );
         assert!(matches!(

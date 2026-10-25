@@ -1680,7 +1680,7 @@ impl HostBindingInterfaceOffer {
             .type_interfaces
             .with_host_value_interfaces(std::slice::from_ref(&certificate))?;
         let (row, type_interfaces) =
-            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value_with_interfaces(
+            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Fresh(&certificate),
             )?;
@@ -1698,11 +1698,7 @@ impl HostBindingInterfaceOffer {
             },
             authority: (self.prototype.producer, Sha256::digest(receipt).into()),
             certified_interface: certificate.clone(),
-            type_interfaces:
-                crate::declaration_context::SelectedTypeInterfaces::issue_checked_value(
-                    &compiler_support,
-                    &certificate,
-                )?,
+            type_interfaces,
             compiler_support,
             source_lexical: Vec::new(),
             template_imports: None,
@@ -2174,7 +2170,7 @@ impl CheckedValueInputs {
         // Promote into the completed issuer before its existing physical
         // projection chooses the value's independently retained support.
         let (row, type_interfaces) =
-            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value_with_interfaces(
+            crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&output.row),
             )?;
@@ -2198,11 +2194,7 @@ impl CheckedValueInputs {
             interface: input,
             authority: (cell.producer, cell.receipt_digest),
             certified_interface: certificate.clone(),
-            type_interfaces:
-                crate::declaration_context::SelectedTypeInterfaces::issue_checked_value(
-                    &compiler_support,
-                    &certificate,
-                )?,
+            type_interfaces,
             compiler_support,
             source_lexical,
             template_imports,
@@ -5267,6 +5259,7 @@ mod tests {
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
+            .map(|(product, _)| product)
             .unwrap();
         let surface = crate::declaration_context::PreparedValueSourceSupport::new(context, &[])
             .unwrap()
@@ -5297,12 +5290,14 @@ mod tests {
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
+            .map(|(product, _)| product)
             .unwrap();
         let again =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
+            .map(|(product, _)| product)
             .unwrap();
         assert!(Arc::ptr_eq(&row, &again));
         assert_eq!(produced.1.promotion_count(), 1);
@@ -5595,6 +5590,7 @@ mod tests {
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
+            .map(|(product, _)| product)
             .unwrap();
         assert_eq!(
             value.checked_value_interface().path,
@@ -5710,6 +5706,7 @@ mod tests {
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
+            .map(|(product, _)| product)
             .unwrap();
         assert_eq!(
             value.checked_value_interface().path,
@@ -5767,6 +5764,7 @@ mod tests {
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
+            .map(|(product, _)| product)
             .unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let first = context
@@ -5823,6 +5821,7 @@ mod tests {
                     context.compiler_source_support(),
                     crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
                 )
+                .map(|(product, _)| product)
                 .unwrap()
             })
             .collect::<Vec<_>>();
@@ -5842,6 +5841,7 @@ mod tests {
                     context.compiler_source_support(),
                     crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
                 )
+                .map(|(product, _)| product)
                 .unwrap();
             let request = context
                 .prepare_compilation(
@@ -5905,25 +5905,26 @@ mod tests {
                 .unwrap(),
         );
         let barrier = std::sync::Barrier::new(2);
-        let values = std::thread::scope(|scope| {
-            let first = scope.spawn(|| {
+        let values =
+            std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
                 barrier.wait();
                 crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                     context.compiler_source_support(),
                     crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
-                )
+                ).map(|(product, _)| product)
                 .unwrap()
             });
-            let second = scope.spawn(|| {
+                let second = scope.spawn(|| {
                 barrier.wait();
                 crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                     context.compiler_source_support(),
                     crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
-                )
+                ).map(|(product, _)| product)
                 .unwrap()
             });
-            [first.join().unwrap(), second.join().unwrap()]
-        });
+                [first.join().unwrap(), second.join().unwrap()]
+            });
         assert!(Arc::ptr_eq(&values[0], &values[1]));
         assert_eq!(produced.1.promotion_count(), 1);
     }
@@ -5949,6 +5950,7 @@ mod tests {
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
+            .map(|(product, _)| product)
             .is_err()
         );
         assert_eq!(produced.1.promotion_count(), 0);
@@ -5963,6 +5965,7 @@ mod tests {
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
+            .map(|(product, _)| product)
             .unwrap();
         assert_eq!(value.checked_value_interface().module, owner.module_name());
         assert_eq!(produced.1.promotion_count(), 1);
@@ -5995,6 +5998,7 @@ mod tests {
                     context.compiler_source_support(),
                     crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
                 )
+                .map(|(product, _)| product)
             },
         );
         assert!(refused.action.is_err());
@@ -6010,6 +6014,7 @@ mod tests {
                 context.compiler_source_support(),
                 crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
+            .map(|(product, _)| product)
             .unwrap();
         assert_eq!(produced.1.promotion_count(), 1);
         assert!(value.checked_value_interface().path.exists());
@@ -6667,7 +6672,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_value_leaf_preserves_preexisting_dependency_rows_through_next_request() {
+    fn checked_value_type_product_preserves_preexisting_dependency_rows_through_next_request() {
         assert_eq!(
             capture_value_custody_histories_with_materialized_source(true).len(),
             4
@@ -6961,7 +6966,7 @@ mod tests {
                 let result = crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                     prepared_context.compiler_source_support(),
                     crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
-                ).and_then(|row| prepared_support.retain_output(&interface).map(|surface| (surface, row, interface.clone())));
+                ).map(|(product, _)| product).and_then(|row| prepared_support.retain_output(&interface).map(|surface| (surface, row, interface.clone())));
                 let captured = match result {
                     Ok(captured) => captured,
                     Err(error) => {
