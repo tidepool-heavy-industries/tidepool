@@ -118,7 +118,7 @@ import Tidepool.ExactScope
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
   , readWorldBindingInputs, worldBindingRow, worldBindingRowFactCID, worldBindingRowInterface
   , readWorldCellOperandWithOwner, worldCellOperandTypes, worldCellOperandBinding, mergeWorldTypeInputs
-  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
+  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedPrimary, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readPackageInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation
   , prepareWorldCell, commitPreparedWorldDependencies
@@ -1450,6 +1450,122 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
           Left (WorldInputsFailure WorldInputsCorrupt _) -> pure ()
           Left failure -> throwIO failure
           Right _ -> fail ("successor accepted malformed immutable facts: " ++ label)
+  -- The canonical Rust HAMT writer selects subsets of genuinely issued
+  -- primary facts. Cold admission independently recomputes the complete maps;
+  -- these codec parcels are decoder DATA, not new runtime selection authority.
+  ownedPrimary <- forM primaryRows $ \(key,reference) -> do
+    unit <- worldFixtureField "unit" key >>= \value -> case value of
+      TString name -> pure (T.unpack name)
+      _ -> fail "primary owner unit is not text"
+    name <- worldFixtureField "module" key >>= \value -> case value of
+      TString name -> pure (T.unpack name)
+      _ -> fail "primary owner module is not text"
+    cid <- worldFixtureLink reference
+    row <- case [row | row@(TList [TList (TString u:TString n:_),_]) <- base
+        , (u,n) == (T.pack unit,T.pack name)] of
+      [row] -> pure row
+      _ -> fail "primary history lacks one exact transport owner"
+    pure ((unit,name),(cid,row))
+  unless (length ownedPrimary >= 2) (fail "primary history needs a same-size owner substitution")
+  let allPrimary = Map.fromList ownedPrimary
+      firstPrimary = Map.fromList (take 1 ownedPrimary)
+      secondPrimary = Map.fromList (take 1 (drop 1 ownedPrimary))
+      reviseSelection (TMap fields) = TMap (map (\field -> case field of
+        (TString "selection",TList (TInt byte:rest)) -> (TString "selection",TList (TInt (byte `xor` 1):rest))
+        other -> other) fields)
+      reviseSelection _ = error "primary replacement needs an exact binding"
+  let (replacementOwner,(oldCID,replacementRow)) = head ownedPrimary
+  replacementFact <- worldFixtureBlock blockPairs oldCID >>= \fact -> case fact of
+    TList [tag,TList (role:interface:rest),semantic] ->
+      pure (TList [tag,TList (role:reviseSelection interface:rest),semantic])
+    _ -> fail "primary replacement needs a genuine association"
+  let replacementBody = encode replacementFact
+  replacementCID <- worldFixtureCID replacementBody
+  unless (replacementCID /= oldCID) (fail "primary replacement did not change the scoped binding")
+  let replacedPrimary = Map.insert replacementOwner (replacementCID,replacementRow) allPrimary
+      selections = [firstPrimary,secondPrimary,Map.empty,allPrimary,allPrimary,replacedPrimary,allPrimary]
+      offeredMaps = TList [TList [TList [text unit,text name,TBytes cid]
+        | ((unit,name),(cid,_)) <- Map.toAscList selected] | selected <- selections]
+  mapParcels <- fixture "world-primary-maps" [offeredMaps] >>= decode >>= \value -> case value of
+    TList parcels | length parcels == length selections -> forM parcels (\parcel -> case parcel of
+      TList [TBytes root,pairs] -> (,) root <$> decodePairs pairs
+      _ -> fail "primary map writer omitted its canonical frontier")
+    _ -> fail "primary map writer omitted a history step"
+  let rowEdit (unit,name) value = TList [text unit,text name,maybe TNull snd value]
+      primaryObservation facts key@(unit,name) =
+        (worldHasSelectedPrimary facts key,worldHasSelectedSource facts key
+        ,worldOriginalReferenceFor facts (mkModule (stringToUnit unit) (mkModuleName name)))
+      changedOwners before after = Set.filter (\key -> fmap fst (Map.lookup key before) /= fmap fst (Map.lookup key after))
+        (Set.union (Map.keysSet before) (Map.keysSet after))
+  (_,_,_,primaryHistory) <- foldM (\(before,beforeSelection,beforePairs,observed) (index,(selected,(root,mapBlocks))) -> do
+    let changed = changedOwners beforeSelection selected
+        rowChanges = [rowEdit key (Map.lookup key selected) | key <- Set.toAscList changed
+          , fmap snd (Map.lookup key beforeSelection) /= fmap snd (Map.lookup key selected)]
+        receipt = restoration 6 context root emptyBinding
+    pairs <- reachable [root,emptyBinding,lexical] ((replacementCID,replacementBody):mapBlocks ++ blockPairs)
+    let incoming = [(cid,body) | (cid,body) <- pairs,not (Map.member cid (Map.fromList beforePairs))]
+        nextPacket edits = TList [TString "TPCWSUCC6",TBytes receipt,blocks incoming,TList edits,TList [],TList [],acquisition]
+        label = "primary-history-" ++ show index
+    (result,diagnostics) <- captureDiagnostics (readSuccessor label before (nextPacket rowChanges))
+    let incremental = worldSuccessorFacts result
+    cold <- readPacket (label ++ "-cold") (packet 6 receipt root pairs (map snd (Map.elems selected)) [] acquisition emptyBinding)
+    unless (worldInputsIdentityBytes incremental == worldInputsIdentityBytes cold
+        && worldInputsCompilerIdentity incremental == worldInputsCompilerIdentity cold
+        && worldInputsRetainedCharge incremental == worldInputsRetainedCharge cold
+        && all (\key -> primaryObservation incremental key == primaryObservation cold key) (Map.keys allPrimary)
+        && all (\key -> worldHasSelectedPrimary incremental key == Map.member key selected) (Map.keys allPrimary)
+        && counterValues "world.successor.primary_validation_rows" diagnostics == [toInteger (Set.size changed)]
+        && counterValues "world.successor.primary_changed_associations" diagnostics == [toInteger (Set.size changed)]
+        && null (counterValues "world.successor.primary_full_validation_rows" diagnostics))
+      (fail ("primary delta differs from cold facts, exact charge or bounded work: " ++ label))
+    unless (null rowChanges) $ do
+      requireSuccessorCorrupt (label ++ "-omitted-row-edit") before (nextPacket (drop 1 rowChanges))
+      retry <- worldSuccessorFacts <$> readSuccessor (label ++ "-retry") before (nextPacket rowChanges)
+      unless (worldInputsRetainedCharge retry == worldInputsRetainedCharge incremental
+          && all (\key -> primaryObservation retry key == primaryObservation incremental key) (Map.keys allPrimary))
+        (fail "primary refusal mutated the held predecessor")
+    pure (incremental,selected,pairs,(incremental,cold):observed))
+    (original,allPrimary,blockPairs,[]) (zip [0 :: Int ..] (zip selections mapParcels))
+  -- An unchanged association must reject a semantically changed admitted base
+  -- row even though owner counts agree. Retagging strips SOURCE evidence while
+  -- retaining genuine captured interface/package bytes for admission.
+  let baseOnly = TList [TString "TPCWSUCC6",TBytes product,TList []
+        ,TList [rowEdit replacementOwner (Just (oldCID,retag replacementRow))],TList [],TList [],acquisition]
+  baseOnlyResult <- try (readSuccessor "primary-base-only-semantic-replacement" original baseOnly)
+  case baseOnlyResult of
+    Left (WorldInputsFailure WorldInputsCorrupt reason)
+      | "world primary transport changed without its semantic association" `isInfixOf` reason -> pure ()
+    Left failure -> throwIO failure
+    Right _ -> fail "unchanged primary association accepted changed base semantics"
+  -- A single-owner canonical HAMT supplies a genuine bucket. Moving its
+  -- route or repeating it through child links must refuse in both readers.
+  (singleRoot,singleBlocks) <- case mapParcels of
+    first:_ -> pure first
+    _ -> fail "primary history omitted the canonical single-owner map"
+  (singleBits,singlePointer) <- worldFixtureBlock singleBlocks singleRoot >>= \value -> case value of
+    TList [TBytes bits,TList [pointer]] -> pure (bits,pointer)
+    _ -> fail "single-owner primary HAMT is not one canonical bucket"
+  let singleSlot = head [slot | slot <- [0..31],
+        (sum [toInteger byte * 256 ^ power | (byte,power) <- zip (BS.unpack (BS.reverse singleBits)) [0 :: Int ..]])
+          == 2 ^ (slot :: Int)]
+      bitmap slot = BS.dropWhile (== 0) (BS.pack [fromInteger ((2 ^ slot `div` 256 ^ power) `mod` 256) | power <- [3 :: Int,2,1,0]])
+      movedBody = encode (TList [TBytes (bitmap ((singleSlot+1) `mod` 32)),TList [singlePointer]])
+      childBody = encode (TList [TBytes singleBits,TList [singlePointer]])
+  childCID <- worldFixtureCID childBody
+  let childLink = TTagged 42 (TBytes (BS.cons 0 childCID))
+      repeatedBody = encode (TList [TBytes (BS.singleton 3),TList [childLink,childLink]])
+  forM_ [("moved",movedBody,[]),("repeated",repeatedBody,[(childCID,childBody)])] $ \(label,body,extra) -> do
+    root <- worldFixtureCID body
+    pairs <- reachable [root,emptyBinding,lexical] ((root,body):extra ++ blockPairs)
+    let receipt = restoration 6 context root emptyBinding
+        offered = TList [TString "TPCWSUCC6",TBytes receipt
+          ,blocks [(cid,bytes) | (cid,bytes) <- pairs,not (Map.member cid (Map.fromList blockPairs))]
+          ,TList [],TList [],TList [],noInputs]
+    requireSuccessorCorrupt ("primary-" ++ label ++ "-subtree") original offered
+    requireCorrupt Nothing ("primary-cold-" ++ label ++ "-subtree")
+      (packet 6 receipt root pairs (map snd (Map.elems firstPrimary)) [] acquisition emptyBinding)
+  putStrLn "primary delta DATA history: 7 steps, 6 mutations, same-size swap, binding replacement, base-only refusal, moved/repeated subtree refusals"
+
   next <- readSuccessor "lexical-delta" original (successor importedProduct [(importsRoot,importsBody)])
   unless (worldInputsIdentityBytes (worldSuccessorFacts next) == worldInputsIdentityBytes imported
       && worldInputsCompilerIdentity (worldSuccessorFacts next) == worldInputsCompilerIdentity imported
@@ -1530,6 +1646,22 @@ semanticWorldInputControls published handles work scopePath contextParcel = do
   exported <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> scopedRunGhc compiler $ do
     environment <- getSession
     owner <- liftIO newExactInputOwner
+    typeOutcomes <- forM primaryHistory $ \(incremental,cold) -> forM (Map.keys allPrimary) $ \key -> do
+      actual <- liftIO (readWorldTypeInputs owner environment incremental [key])
+      expected <- liftIO (readWorldTypeInputs owner environment cold [key])
+      liftIO $ case (actual,expected) of
+        (Left a,Left b) | a == b -> pure False
+        (Right a,Right b) | Map.keysSet a == Map.keysSet b
+          , Map.map worldTypeEntryArtifact a == Map.map worldTypeEntryArtifact b
+          , Map.map worldTypeEntryPackages a == Map.map worldTypeEntryPackages b
+          , Right _ <- mergeWorldTypeInputs [] [a,b] -> pure True
+        _ -> fail "primary successor TYPE demand differs from independent cold admission"
+    let successfulTypes = length (filter id (concat typeOutcomes))
+        refusedTypes = length (filter not (concat typeOutcomes))
+    liftIO $ do
+      unless (successfulTypes >= 3 * Map.size allPrimary && refusedTypes >= Map.size allPrimary)
+        (fail "primary TYPE differential history missed successful demands or removals")
+      putStrLn ("primary delta TYPE demands: successful=" ++ show successfulTypes ++ "; refused=" ++ show refusedTypes)
     (selectedTypes,selectedDiagnostics) <- liftIO (captureDiagnostics
       (readWorldTypeInputs owner environment original selectedOwners))
     types <- either (liftIO . fail) pure selectedTypes

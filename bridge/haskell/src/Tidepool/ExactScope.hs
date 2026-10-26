@@ -3075,16 +3075,8 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
         >>= \cost -> checkedWorldCharge cost
           (64 * toInteger (length addedDependencies-length removedDependencies),length addedDependencies-length removedDependencies)
         >>= \cost -> foldM (\next (WorldAdmittedRow _ _ _ charge _) -> checkedWorldCharge next charge) cost added
-      primaryFacts <- if associations == oldAssociations
-        then do
-          unless (null removedBase && null addedBase)
-            (worldCorrupt "world primary transport changed without its semantic roots")
-          pure (worldInputsPrimary previous)
-        else do
-          timing <- readTimingEnabled
-          emitCount timing "world.successor.primary_full_validation_rows" (toInteger (Map.size base))
-          readWorldPrimary frontier associations producer
-            [(row,input) | WorldAdmittedRow row input _ _ _ <- Map.elems base]
+      primaryFacts <- advanceWorldPrimary comparison oldAssociations associations
+        (worldInputsPrimary previous) base removedBase addedBase
       lexical <- if lexicalRoot == oldLexical && associations == oldAssociations
         then pure (worldInputsLexicalSurface previous)
         else readWorldLexicalSurface frontier lexicalRoot primaryFacts
@@ -3915,6 +3907,48 @@ readWorldPrimary frontier root producer base = do
         (sum [size | (_,(_,size)) <- selected],2 * toInteger (Map.size facts))
   when (entries > toInteger (maxBound :: Int)) (worldCorrupt "compiler world primary retention count exceeds host range")
   pure (WorldPrimaryFacts facts (bytes,fromInteger entries))
+
+-- A held predecessor already established the complete primary/base census.
+-- Check the union of semantic and transport edits: an unchanged association
+-- must not borrow a replacement base row merely because its owner still exists.
+advanceWorldPrimary :: Map.Map BS.ByteString BS.ByteString -> BS.ByteString -> BS.ByteString
+  -> WorldPrimaryFacts -> Map.Map InterfaceOwner WorldAdmittedRow
+  -> [WorldAdmittedRow] -> [WorldAdmittedRow] -> IO WorldPrimaryFacts
+advanceWorldPrimary frontier oldRoot newRoot previous base removed added = do
+  (changes,nodeCharge) <- worldHamtChanges frontier oldRoot newRoot
+    decodeWorldModuleKey encodeWorldModuleKey worldCID
+  let changedRows = Set.fromList [rowOwner input | WorldAdmittedRow _ (ScopeInterfaceInput input _) _ _ _ <- removed ++ added]
+      touched = Set.union (Map.keysSet changes) changedRows
+  initialCharge <- checkedWorldCharge (worldPrimaryRetainedCharge previous) nodeCharge
+  (selected,charge) <- foldM (advance changes) (worldPrimarySelected previous,initialCharge) (Set.toAscList touched)
+  timing <- readTimingEnabled
+  emitCount timing "world.successor.primary_changed_associations" (toInteger (Map.size changes))
+  emitCount timing "world.successor.primary_validation_rows" (toInteger (Set.size touched))
+  pure (WorldPrimaryFacts selected charge)
+  where
+    body cid = maybe (worldCorrupt "compiler world primary product is absent") pure (Map.lookup cid frontier)
+    advance changes (selected,charge) key = case Map.lookup key changes of
+      Nothing -> worldCorrupt "world primary transport changed without its semantic association"
+      Just (before,after) -> do
+        unless (isJust before == Map.member key selected)
+          (worldCorrupt "compiler world primary delta differs from its predecessor")
+        unless (isJust after == Map.member key base)
+          (worldCorrupt "compiler world primary census differs from admitted base inputs")
+        released <- case before of
+          Nothing -> pure charge
+          Just cid -> do
+            oldBody <- body cid
+            checkedWorldCharge charge (-toInteger (BS.length oldBody),-3)
+        case after of
+          Nothing -> pure (Map.delete key selected,released)
+          Just cid -> do
+            nextBody <- body cid
+            (binding,semantic) <- decodeWorldBytes (decodeWorldPrimaryAssociation (BS.length nextBody)) nextBody
+            input <- case Map.lookup key base of
+              Just (WorldAdmittedRow _ row expected _ _) | semantic == expected -> pure row
+              _ -> worldCorrupt "compiler world primary product differs from admitted owner or TYPE facts"
+            nextCharge <- checkedWorldCharge released (toInteger (BS.length nextBody),3)
+            pure (Map.insert key (WorldPrimaryAssociation binding input) selected,nextCharge)
 
 -- Scan the fixed DAG-CBOR block envelope for CID links before schema-specific
 -- decoding. Counting pending values avoids an unbounded recursive term tree;

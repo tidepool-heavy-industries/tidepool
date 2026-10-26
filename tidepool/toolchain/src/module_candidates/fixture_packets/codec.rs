@@ -164,6 +164,8 @@ enum CodecOperation {
     WorldBlocks,
     #[serde(rename = "world-context-blocks")]
     WorldContextBlocks,
+    #[serde(rename = "world-primary-maps")]
+    WorldPrimaryMaps,
     InspectionPurpose,
     ReceiptFacts,
     CertificateFacts,
@@ -211,6 +213,7 @@ enum CodecRequest {
     ScopeEmpty,
     WorldBlocks,
     WorldContextBlocks(NativeBytes),
+    WorldPrimaryMaps(Vec<Vec<(String, String, NativeBytes)>>),
     InspectionPurpose(Vec<PathBuf>, Vec<ValueInterfaceInput>),
     ReceiptFacts(PathBuf),
     CertificateFacts(PathBuf),
@@ -264,6 +267,10 @@ fn packet_request(bytes: &[u8]) -> CodecRequest {
         CodecOperation::WorldBlocks => {
             let _: [String; 0] = decode_arguments(&arguments, 0);
             CodecRequest::WorldBlocks
+        }
+        CodecOperation::WorldPrimaryMaps => {
+            let (maps,) = decode_arguments(&arguments, 1);
+            CodecRequest::WorldPrimaryMaps(maps)
         }
         CodecOperation::WorldContextBlocks => {
             let [producer]: [NativeBytes; 1] = decode_arguments(&arguments, 1);
@@ -355,6 +362,49 @@ fn source_boot_codec_packet_producer() {
             ciborium::ser::into_writer(&parcel, &mut encoded).unwrap();
             assert!(encoded.len() <= MANIFEST_LIMIT, "world block parcel bound");
             let output = root.join("world-blocks.cbor");
+            tidepool_atomic_write::write_best_effort(&output, &encoded).unwrap();
+            output
+        }
+        // Canonical HAMT DATA around already issued primary product CIDs.
+        // This codec neither constructs products nor grants runtime selection.
+        CodecRequest::WorldPrimaryMaps(maps) => {
+            let store = fvm_ipld_blockstore::MemoryBlockstore::new();
+            let mut parcels = Vec::new();
+            for rows in maps {
+                let count = rows.len();
+                let facts = rows
+                    .into_iter()
+                    .map(|(unit, module, cid)| {
+                        (
+                            crate::declaration_join::ExactModuleIdentity { unit, module },
+                            cid::Cid::try_from(cid.0.as_slice()).expect("primary product CID"),
+                        )
+                    })
+                    .collect::<imbl::OrdMap<crate::declaration_join::ExactModuleIdentity, cid::Cid>>();
+                assert_eq!(facts.len(), count, "duplicate primary fixture owner");
+                let mut materializer = crate::exact_context::Materializer::new(&store);
+                let map = materializer.materialize_map(None, &facts).unwrap();
+                let staged = materializer.finish().unwrap();
+                parcels.push(Value::Array(vec![
+                    Value::Bytes(map.root().cid().to_bytes()),
+                    Value::Array(
+                        staged
+                            .blocks()
+                            .iter()
+                            .map(|(cid, bytes)| {
+                                Value::Array(vec![
+                                    Value::Bytes(cid.to_bytes()),
+                                    Value::Bytes(bytes.to_vec()),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ]));
+            }
+            let mut encoded = Vec::new();
+            ciborium::ser::into_writer(&Value::Array(parcels), &mut encoded).unwrap();
+            assert!(encoded.len() <= MANIFEST_LIMIT, "primary maps parcel bound");
+            let output = root.join("world-primary-maps.cbor");
             tidepool_atomic_write::write_best_effort(&output, &encoded).unwrap();
             output
         }
