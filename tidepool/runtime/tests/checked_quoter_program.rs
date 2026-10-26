@@ -277,63 +277,81 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             "this fixture must exercise canonical dependencies without native products"
         );
         let selection = original_context.snapshot().graph_selection().unwrap();
-        use tidepool_toolchain::declaration_join::RecoveryPayloadReference;
-        let incomplete_payloads = references
+        use tidepool_toolchain::artifact_inventory::ArtifactKind;
+        use tidepool_toolchain::declaration_join::RecoveredArtifactAcquisition;
+        let mut payload_ids = selection
+            .bindings
             .iter()
-            .cloned()
-            .map(RecoveryPayloadReference::Original)
-            .chain(
-                companions
-                    .iter()
-                    .cloned()
-                    .map(RecoveryPayloadReference::Canonical),
-            )
-            .collect::<Vec<_>>();
-        let incomplete_ids = references
-            .iter()
-            .map(tidepool_toolchain::artifact_inventory::ArtifactDescriptor::from_recovery_product)
-            .chain(companions.iter().map(
-                tidepool_toolchain::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface,
-            ))
-            .map(|descriptor| descriptor.id)
+            .map(|binding| binding.artifact)
             .collect::<BTreeSet<_>>();
-        let descriptors = original_context.artifact_view().descriptors();
-        let omitted = descriptors
+        payload_ids.extend(
+            original_context
+                .snapshot()
+                .native_package_artifacts_introduced(None),
+        );
+        let payloads = original_context
+            .materialize_recovery_artifacts(durable.path(), &payload_ids)
+            .unwrap();
+        let descriptors = payloads
             .iter()
-            .filter(|descriptor| !incomplete_ids.contains(&descriptor.id))
+            .map(recovery_payload_descriptor)
             .collect::<Vec<_>>();
-        assert!(!omitted.is_empty());
-        for descriptor in omitted {
-            assert!(type_only_owners.contains(&(
-                descriptor.owner.unit.clone(),
-                descriptor.owner.module.clone(),
-            )));
-            assert!(selection
-                .bindings
+        let dependencies = original_context.artifact_view().binding_dependencies();
+        RecoveredArtifactAcquisition::new(durable.path())
+            .capture_payloads_bound(&payloads, &descriptors, &selection.bindings, &dependencies)
+            .expect("the complete issued recovery closure certifies before either omission");
+        let is_bound =
+            |descriptor: &&tidepool_toolchain::artifact_inventory::ArtifactDescriptor| {
+                selection
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.artifact == descriptor.id)
+            };
+        let canonical = descriptors
+            .iter()
+            .filter(is_bound)
+            .find(|descriptor| {
+                descriptor.kind == ArtifactKind::CanonicalModuleInterface
+                    && type_only_owners.contains(&(
+                        descriptor.owner.unit.clone(),
+                        descriptor.owner.module.clone(),
+                    ))
+            })
+            .expect("fixture retains an exact bound canonical TYPE-only dependency");
+        let value = descriptors.iter().filter(is_bound).find(|descriptor| descriptor.kind == ArtifactKind::ValueInterface)
+            .expect("checked slots retain an exact bound value interface independently of canonical module interfaces");
+        assert_ne!(canonical.id, value.id);
+        // Keep the complete issued graph fixed and omit exactly one payload.
+        // Native originals' canonical companions cannot replace either kind.
+        for omitted in [canonical, value] {
+            let incomplete_payloads = payloads
                 .iter()
-                .any(|binding| binding.artifact == descriptor.id));
-        }
-        let incomplete_descriptors = descriptors
-            .into_iter()
-            .filter(|descriptor| incomplete_ids.contains(&descriptor.id))
-            .collect::<Vec<_>>();
-        let incomplete =
-            tidepool_toolchain::declaration_join::RecoveredArtifactAcquisition::new(durable.path())
+                .filter(|payload| recovery_payload_descriptor(payload).id != omitted.id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let incomplete_descriptors = descriptors
+                .iter()
+                .filter(|descriptor| descriptor.id != omitted.id)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(incomplete_payloads.len() + 1, payloads.len());
+            assert_eq!(incomplete_descriptors.len() + 1, descriptors.len());
+            let incomplete = RecoveredArtifactAcquisition::new(durable.path())
                 .capture_payloads_bound(
                     &incomplete_payloads,
                     &incomplete_descriptors,
                     &selection.bindings,
-                    &original_context.artifact_view().binding_dependencies(),
+                    &dependencies,
                 );
-        match incomplete {
-            Err(tidepool_toolchain::declaration_join::RecoveryInventoryError::Certification(
-                CompileError::ExtractFailed(detail),
-            )) => assert_eq!(
-                detail,
-                "exact declaration context: bound recovery has duplicate or missing exact endpoints"
-            ),
-            Err(other) => panic!("expected incomplete recovery closure refusal, got {other:?}"),
-            Ok(_) => panic!("incomplete canonical closure cannot authorize exact acquisition"),
+            match incomplete {
+                Err(tidepool_toolchain::declaration_join::RecoveryInventoryError::Certification(
+                    CompileError::ExtractFailed(detail),
+                )) => assert_eq!(detail,
+                    "exact declaration context: bound recovery has duplicate or missing exact endpoints",
+                    "omitted exact descriptor: {omitted:?}"),
+                Err(other) => panic!("expected missing exact endpoint for {omitted:?}, got {other:?}"),
+                Ok(_) => panic!("omitting {omitted:?} cannot authorize exact acquisition"),
+            }
         }
         assert_original_durability(
             durable.path(),
@@ -354,6 +372,30 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
     }
     Ok(())
+}
+
+fn recovery_payload_descriptor(
+    reference: &tidepool_toolchain::declaration_join::RecoveryPayloadReference,
+) -> tidepool_toolchain::artifact_inventory::ArtifactDescriptor {
+    use tidepool_toolchain::artifact_inventory::ArtifactDescriptor;
+    use tidepool_toolchain::declaration_join::RecoveryPayloadReference;
+    match reference {
+        RecoveryPayloadReference::Original(reference) => {
+            ArtifactDescriptor::from_recovery_product(reference)
+        }
+        RecoveryPayloadReference::Canonical(reference) => {
+            ArtifactDescriptor::from_recovery_module_interface(reference)
+        }
+        RecoveryPayloadReference::Join(reference) => {
+            ArtifactDescriptor::from_recovery_join(reference)
+        }
+        RecoveryPayloadReference::Value(reference) => {
+            ArtifactDescriptor::from_recovery_value_interface(reference)
+        }
+        RecoveryPayloadReference::PackageCode(reference) => {
+            ArtifactDescriptor::from_recovery_package_code(reference)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -385,10 +427,7 @@ fn assert_original_durability(
         SourceReplay::Unavailable => assert!(reference.execution_source.is_none()),
     }
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
-    use tidepool_toolchain::artifact_inventory::ArtifactDescriptor;
-    use tidepool_toolchain::declaration_join::{
-        RecoveredArtifactAcquisition, RecoveryPayloadReference,
-    };
+    use tidepool_toolchain::declaration_join::RecoveredArtifactAcquisition;
     use tidepool_toolchain::exact_context::{hydrate_context, Materializer};
     let snapshot = issued.snapshot();
     let blocks = MemoryBlockstore::new();
@@ -410,23 +449,7 @@ fn assert_original_durability(
         .unwrap();
     let descriptors = payloads
         .iter()
-        .map(|reference| match reference {
-            RecoveryPayloadReference::Original(reference) => {
-                ArtifactDescriptor::from_recovery_product(reference)
-            }
-            RecoveryPayloadReference::Canonical(reference) => {
-                ArtifactDescriptor::from_recovery_module_interface(reference)
-            }
-            RecoveryPayloadReference::Join(reference) => {
-                ArtifactDescriptor::from_recovery_join(reference)
-            }
-            RecoveryPayloadReference::Value(reference) => {
-                ArtifactDescriptor::from_recovery_value_interface(reference)
-            }
-            RecoveryPayloadReference::PackageCode(reference) => {
-                ArtifactDescriptor::from_recovery_package_code(reference)
-            }
-        })
+        .map(recovery_payload_descriptor)
         .collect::<Vec<_>>();
     let recovered = RecoveredArtifactAcquisition::new(durable)
         .capture_payloads_bound(
