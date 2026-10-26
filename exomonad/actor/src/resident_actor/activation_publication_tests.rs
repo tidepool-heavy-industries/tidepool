@@ -362,19 +362,29 @@ async fn interrupt_during_preview_with_compiler_owner(
         release.send(()).unwrap();
         mounted
     };
-    let (parked, (binding, module, certificate, interface)) = tokio::join!(
-        behavior.park_interactive(
+    let (parked, (binding, module, certificate, interface)) = {
+        let park = behavior.park_interactive(
             &fixture.kernel,
             &context,
             crate::ResidentInteractiveSession {
                 request,
                 hole,
-                input
+                input,
             },
             prepared,
-        ),
-        cancellation,
-    );
+        );
+        tokio::pin!(park);
+        let mounted = tokio::select! {
+            biased;
+            mounted = cancellation => mounted,
+            early = &mut park => match early {
+                Err(error) => panic!("activation refused before preview observer: {error:?}"),
+                Ok(InteractivePark::Parked) => panic!("activation parked before preview observer"),
+                Ok(InteractivePark::Cancelled(request)) => panic!("activation cancelled before preview observer: {request:?}"),
+            },
+        };
+        (park.await, mounted)
+    };
     match interruption {
         Interruption::Cancellation => assert!(
             matches!(parked.unwrap(), InteractivePark::Cancelled(actual) if actual == request_id)
