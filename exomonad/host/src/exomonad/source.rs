@@ -1102,7 +1102,7 @@ impl ExomonadSourceReload {
     /// and the host says which while admitting it.
     pub(crate) fn bind_run(&self, actor: PrincipalId) {
         self.scopes.write().insert(actor, ActorSourceScope::Run);
-        self.helper_scopes.write().insert(actor, "run".to_owned());
+        self.bind_helper_branch(actor, "run");
     }
 
     /// What `caller`'s own source calls reach.
@@ -1321,6 +1321,16 @@ impl ExomonadSourceReload {
         self.helper_scopes.read().get(&actor).cloned()
     }
 
+    fn bind_helper_branch(&self, actor: PrincipalId, branch: &str) {
+        let mut helpers = self.helper_scopes.write();
+        // Child admission uses an empty string when no helper branch was allocated.
+        if branch.is_empty() {
+            helpers.remove(&actor);
+        } else {
+            helpers.insert(actor, branch.to_owned());
+        }
+    }
+
     fn ensure_helper_active(&self, branch: &str) -> Result<SourceRevision> {
         let seed = self.helper_root.join("empty");
         std::fs::create_dir_all(&seed)?;
@@ -1532,9 +1542,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         checkpoint: &exomonad_actor::CheckpointSourceLayer,
     ) -> std::result::Result<(), String> {
         self.validate_source_authority(checkpoint)?;
-        self.helper_scopes
-            .write()
-            .insert(actor, helper_branch.to_owned());
+        self.bind_helper_branch(actor, helper_branch);
         self.scopes
             .write()
             .insert(actor, ActorSourceScope::Checkpoint(checkpoint.clone()));
@@ -1555,9 +1563,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
     }
 
     fn bind_for(&self, actor: PrincipalId, helper_branch: &str) {
-        self.helper_scopes
-            .write()
-            .insert(actor, helper_branch.to_owned());
+        self.bind_helper_branch(actor, helper_branch);
         self.scopes
             .write()
             .insert(actor, ActorSourceScope::RunReadOnly);
@@ -2055,6 +2061,149 @@ mod tests {
             reload.freeze_checkpoint_layer(checkpoint_actor).unwrap(),
             captured,
             "a checkpoint descendant must retain the frozen helper and run graph"
+        );
+    }
+
+    #[test]
+    fn child_toolset_source_restores_with_absent_empty_and_forked_helper_bindings() {
+        use exomonad_actor::ActorSourceLayers;
+        let (_project, reload) = generation_owner();
+        let child = PrincipalId::new(1, 1);
+        let sibling = PrincipalId::new(1, 2);
+        reload.bind_for(sibling, "sibling");
+        for branch in [None, Some(""), Some("forked-child"), Some("")] {
+            if let Some(branch) = branch {
+                reload.bind_for(child, branch);
+            }
+            let expected = branch.filter(|branch| !branch.is_empty());
+            assert_eq!(reload.helper_branch_for(child).as_deref(), expected);
+            assert_eq!(
+                reload.helper_branch_for(sibling).as_deref(),
+                Some("sibling")
+            );
+            let selected = reload.freeze_toolset_layer(child).unwrap();
+            assert!(matches!(reload.scope(child), ActorSourceScope::RunReadOnly));
+            let active = reload.layer.read_active().unwrap();
+            assert!(matches!(
+                reload.clone().stage_reload(child, &selected, &[]),
+                Err(exomonad_actor::SourceLayerReload::Unavailable(detail))
+                    if detail == "captured or read-only actors cannot republish source"
+            ));
+            assert_eq!(reload.layer.read_active().unwrap(), active);
+            let reference = &selected.generation_evidence().unwrap().reference;
+            let graph: serde_json::Value = serde_json::from_slice(reference.bytes()).unwrap();
+            assert_eq!(graph["helper_branch"], expected.unwrap_or("run"));
+            let restored = reload.restore_source(reference).unwrap();
+            let fresh = reload.fresh_toolset_layer_from(&selected).unwrap();
+            for source in [&restored, &fresh] {
+                reload.validate_source_authority(source).unwrap();
+                assert_eq!(source.identities(), selected.identities());
+                assert_eq!(source.include_paths(), selected.include_paths());
+                assert_eq!(
+                    source.source_revision_identity(),
+                    selected.source_revision_identity()
+                );
+                assert_eq!(source.generation_evidence().unwrap().reference, *reference);
+            }
+        }
+        reload.bind_run(child);
+        assert_eq!(reload.helper_branch_for(child).as_deref(), Some("run"));
+        assert!(matches!(reload.scope(child), ActorSourceScope::Run));
+        let selected = reload.freeze_toolset_layer(child).unwrap();
+        reload.fresh_toolset_layer_from(&selected).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_child_empty_helper_binding_preserves_exact_issued_generation() {
+        use exomonad_actor::ActorSourceLayers;
+        let (project, reload) = generation_owner();
+        let creator = PrincipalId::new(1, 1);
+        let child = PrincipalId::new(2, 1);
+        reload.bind_for(creator, "forked-parent");
+        let selected = reload.freeze_checkpoint_layer(creator).unwrap();
+        reload
+            .bind_checkpoint_for(creator, "forked-parent", &selected)
+            .unwrap();
+        reload.bind_for(child, "old-child");
+        assert_eq!(
+            reload
+                .admit_checkpoint_layer(&selected, creator, "")
+                .unwrap(),
+            selected.include_paths()
+        );
+        reload.bind_checkpoint_for(child, "", &selected).unwrap();
+        assert_eq!(reload.helper_branch_for(child), None);
+        assert_eq!(
+            reload.helper_branch_for(creator).as_deref(),
+            Some("forked-parent")
+        );
+        for frozen in [
+            reload.freeze_toolset_layer(child).unwrap(),
+            reload.freeze_checkpoint_layer(child).unwrap(),
+        ] {
+            assert!(frozen.same_revision(&selected));
+            let fresh = reload.fresh_toolset_layer_from(&frozen).unwrap();
+            assert_eq!(
+                fresh.generation_evidence().unwrap().reference,
+                selected.generation_evidence().unwrap().reference
+            );
+        }
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork = 99\n",
+        )
+        .unwrap();
+        let newer = reload
+            .layer
+            .capture_from_workspace(&reload.frozen, project.path())
+            .unwrap();
+        reload.layer.publish(newer).unwrap();
+        let live = PrincipalId::new(3, 1);
+        reload.bind_for(live, "forked-parent");
+        let newer = reload.freeze_checkpoint_layer(live).unwrap();
+        assert!(!newer.same_revision(&selected));
+        assert!(reload.admit_checkpoint_layer(&newer, creator, "").is_err());
+        assert!(reload
+            .freeze_toolset_layer(child)
+            .unwrap()
+            .same_revision(&selected));
+        let (_foreign_project, foreign_owner) = generation_owner();
+        let foreign = foreign_owner
+            .freeze_checkpoint_layer(PrincipalId::SYSTEM)
+            .unwrap();
+        assert!(reload
+            .bind_checkpoint_for(child, "foreign", &foreign)
+            .is_err());
+        assert!(reload
+            .admit_checkpoint_layer(&foreign, creator, "")
+            .is_err());
+        assert!(reload.fresh_toolset_layer_from(&foreign).is_err());
+        assert_eq!(reload.helper_branch_for(child), None);
+        assert!(reload
+            .freeze_toolset_layer(child)
+            .unwrap()
+            .same_revision(&selected));
+    }
+
+    #[test]
+    fn child_toolset_source_does_not_normalize_malformed_nonempty_helper_branches() {
+        use exomonad_actor::ActorSourceLayers;
+        let (_project, reload) = generation_owner();
+        let child = PrincipalId::new(1, 1);
+        reload.bind_for(child, "nested/branch");
+        assert_eq!(
+            reload.helper_branch_for(child).as_deref(),
+            Some("nested/branch")
+        );
+        let selected = reload.freeze_toolset_layer(child).unwrap();
+        assert_eq!(
+            reload.fresh_toolset_layer_from(&selected).unwrap_err(),
+            "source reference carries an invalid helper branch"
+        );
+        let reference = &selected.generation_evidence().unwrap().reference;
+        assert_eq!(
+            reload.restore_source(reference).unwrap_err(),
+            "source reference carries an invalid helper branch"
         );
     }
 
