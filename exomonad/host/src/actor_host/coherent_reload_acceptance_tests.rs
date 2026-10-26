@@ -695,16 +695,33 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
     let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
-    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
-        // Source inventory is issued by the production capture owner. These
-        // unchanged modules enlarge the receipt without adding compilation work.
-        configure_workshop_inventory(
-            config,
-            judgments.clone(),
-            Some(include_str!("fixtures/sync_reload_spec_a.hs")),
-            450,
-        );
-    })
+    let stages = Arc::new(ReloadGate::default());
+    let transform = {
+        let stages = stages.clone();
+        Arc::new(move |owner| {
+            Arc::new(GatedSourceLayers {
+                owner,
+                gate: stages.clone(),
+                observe_gate: None,
+                captured_gate: None,
+            }) as exomonad_actor::ActorSourceLayerResolver
+        })
+    };
+    let host = HostedTestRuntime::start_configured_with_source_layers(
+        &settings,
+        &provider,
+        |config| {
+            // Source inventory is issued by the production capture owner. These
+            // unchanged modules enlarge the receipt without adding compilation work.
+            configure_workshop_inventory(
+                config,
+                judgments.clone(),
+                Some(include_str!("fixtures/sync_reload_spec_a.hs")),
+                450,
+            );
+        },
+        transform,
+    )
     .await
     .unwrap();
     host.run_scenario(|host| Box::pin(async move {
@@ -732,6 +749,8 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
             next_hosted_script_round(&mut requests, &mut pending, &root)).await.unwrap();
         let model = round.settled_output("large-reload");
         assert_eq!(model["status"], "committed");
+        assert_eq!(model["publication"]["status"], "notPublished");
+        assert_eq!(model["publication"]["reason"], "generationReset");
         assert_reload_disposition(&model,
             tidepool_runtime::session::WorkbenchOperationDisposition::Committed);
         let shown = model["items"][0]["output"].as_str().unwrap();
@@ -744,7 +763,10 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
         }));
         assert!(serde_json::to_vec(&model).unwrap().len() < 28 * 1024,
             "the provider sees the compact presentation and omission receipt, not the full inventories");
-        let native = installation_a.policy.retained_operation(context).unwrap().terminal();
+        let retained = installation_a.policy.retained_operation(context.clone()).unwrap();
+        assert_eq!(retained.finalization(), exomonad_actor::HostedOperationFinalization::Settled(
+            Ok(exomonad_actor::ProviderFinalizationKind::Completed)));
+        let native = retained.terminal();
         let exomonad_actor::HostedOperationTerminal::Settled(
             exomonad_actor::WorkbenchCancellationOutcome::PublicationSettled {
                 reply: Ok(receipt), ..
@@ -766,13 +788,229 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
         }
         assert_ne!(contents["reloadPrevious"]["revisionIdentity"], contents["reloadCandidate"]["revisionIdentity"]);
         assert!(contents["reloadRetirementState"]["contents"][0].as_array().unwrap().contains(&serde_json::json!("Project.Work")));
-        assert_ne!(selected_root_generation(host).await, generation_a);
+        let generation_b = selected_root_generation(host).await;
+        assert_ne!(generation_b, generation_a);
+        let retained_reply = serde_json::to_value(retained.reply().unwrap().unwrap()).unwrap();
+        let retry = host.while_host_running(installation_a.policy.dispatch_boxed(
+            exomonad_tool::ToolInvocation {
+                context: Some(context.clone()), name: "apply_draft".into(),
+                arguments: exomonad_tool::ToolArguments::Structured(serde_json::json!({})),
+            },
+        )).await.unwrap().unwrap().into_json().unwrap();
+        assert_eq!(retry, retained_reply, "the exact invocation reuses its original terminal");
+        assert_eq!(selected_root_generation(host).await, generation_b);
+        assert_eq!(stages.staged.load(Ordering::SeqCst), 1,
+            "exact terminal replay cannot prepare another reload");
         assert_eq!(authored_tool_names(&round.request), tools_a);
         assert_ne!(round.request.instructions, instructions_a);
         assert!(round.request.instructions.contains(include_str!("fixtures/coherent_reload_prompt_b.md")));
         assert_eq!(judgments.0.load(Ordering::SeqCst), 0);
+        let round = authored_cell(host, &mut requests, &mut pending, &root, round,
+            "use-b-after-reload", include_str!("fixtures/coherent_reload_use_b.hs")).await;
+        assert_use_b_with_constituents(host, &round.settled_output("use-b-after-reload"));
+        assert_eq!(selected_root_generation(host).await, generation_b);
+        assert_eq!(serde_json::to_value(retained.reply().unwrap().unwrap()).unwrap(), retained_reply);
         round.finish();
     })).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_rejects_staged_binding_and_does_not_run_trailing_effects() {
+    reload_supersession_history(
+        include_str!("fixtures/reload_supersession_binding.hs"),
+        Some(("stagedReloadValue", "stagedReloadValue")),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_rejects_staged_declaration_and_does_not_run_trailing_effects() {
+    reload_supersession_history(
+        include_str!("fixtures/reload_supersession_declaration.hs"),
+        Some((
+            "StagedReloadDeclaration",
+            "undefined :: StagedReloadDeclaration",
+        )),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_rejects_bound_result_and_does_not_run_trailing_effects() {
+    reload_supersession_history(
+        include_str!("fixtures/reload_supersession_bound_result.hs"),
+        Some(("stagedReloadReceipt", "stagedReloadReceipt")),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bindingless_reload_rejects_trailing_effects_without_replaying_reload() {
+    reload_supersession_history(include_str!("fixtures/reload_supersession_empty.hs"), None).await;
+}
+
+async fn reload_supersession_history(
+    script: &'static str,
+    absent: Option<(&'static str, &'static str)>,
+) {
+    use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation};
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let judgments = Arc::new(UnexpectedJudgment(AtomicUsize::new(0)));
+    let stages = Arc::new(ReloadGate::default());
+    let transform = {
+        let stages = stages.clone();
+        Arc::new(move |owner| {
+            Arc::new(GatedSourceLayers {
+                owner,
+                gate: stages.clone(),
+                observe_gate: None,
+                captured_gate: None,
+            }) as exomonad_actor::ActorSourceLayerResolver
+        })
+    };
+    let host = HostedTestRuntime::start_configured_with_source_layers(
+        &settings,
+        &provider,
+        |config| {
+            configure_workshop(
+                config,
+                judgments.clone(),
+                Some(include_str!("fixtures/sync_reload_spec_a.hs")),
+            )
+        },
+        transform,
+    )
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = VecDeque::new();
+            host.input("Observe one source replacement and preserve its exact terminal.")
+                .await
+                .unwrap();
+            let round = host
+                .while_host_running(next_hosted_script_round(&mut requests, &mut pending, &root))
+                .await
+                .unwrap();
+            let installation = host
+                .context
+                .observer
+                .installation(host.context.actor.identity())
+                .await;
+            let policy = installation.policy.clone();
+            let generation_a = selected_root_generation(host).await;
+            let authored = host.context.config.workspace.join(".exomonad");
+            std::fs::write(
+                authored.join("Project/Work.hs"),
+                include_str!("fixtures/coherent_reload_work_b.hs"),
+            )
+            .unwrap();
+            std::fs::write(
+                authored.join("prompts/agent.md"),
+                include_str!("fixtures/coherent_reload_prompt_b.md"),
+            )
+            .unwrap();
+            let (invocation, completion) =
+                super::test_campaign::original_tool_call(OriginalOperation {
+                    origin: ConversationOrigin::External {
+                        thread_id: "reload-supersession".into(),
+                    },
+                    request_id: "one-source-replacement".into(),
+                    call_id: "reload-once".into(),
+                });
+            let response = host
+                .while_host_running(policy.dispatch_boxed(ToolInvocation {
+                    context: Some(invocation.clone()),
+                    name: exomonad_actor::HASKELL_TOOL.into(),
+                    arguments: ToolArguments::Raw(script.into()),
+                }))
+                .await
+                .unwrap()
+                .expect("supersession returns its retained rejected response");
+            let response = response.into_json().unwrap();
+            assert_eq!(response["status"], "rejected", "{response}");
+            assert_eq!(response["publication"]["status"], "rejected", "{response}");
+            assert_reload_disposition(
+                &response,
+                tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
+            );
+            let items = response["items"].as_array().unwrap();
+            assert_eq!(items.last().unwrap()["status"], "notRun", "{response}");
+            assert!(items.last().unwrap()["operations"]
+                .as_array()
+                .is_none_or(Vec::is_empty));
+            assert!(!host
+                .context
+                .config
+                .workspace
+                .join("reload-tail-ran.txt")
+                .exists());
+            let retained = policy.retained_operation(invocation.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(retained.reply().unwrap().unwrap()).unwrap(),
+                response
+            );
+            policy.complete_boxed(completion.clone()).await.unwrap();
+            assert!(
+                matches!(
+                    retained.finalization(),
+                    exomonad_actor::HostedOperationFinalization::Settled(Ok(_))
+                ),
+                "negative publication still needs confirmed finalization"
+            );
+            let generation_b = selected_root_generation(host).await;
+            assert_ne!(generation_b, generation_a);
+            let replay = host
+                .while_host_running(policy.dispatch_boxed(ToolInvocation {
+                    context: Some(invocation),
+                    name: exomonad_actor::HASKELL_TOOL.into(),
+                    arguments: ToolArguments::Raw(script.into()),
+                }))
+                .await
+                .unwrap()
+                .unwrap()
+                .into_json()
+                .unwrap();
+            assert_eq!(
+                replay, response,
+                "the original action body reuses the exact terminal"
+            );
+            policy.complete_boxed(completion).await.unwrap();
+            assert_eq!(selected_root_generation(host).await, generation_b);
+            assert_eq!(stages.staged.load(Ordering::SeqCst), 1);
+            assert!(!host
+                .context
+                .config
+                .workspace
+                .join("reload-tail-ran.txt")
+                .exists());
+            let fresh = policy.snapshot_for_request().unwrap();
+            let used = super::tests::dispatch_haskell_script(
+                fresh.as_ref(),
+                include_str!("fixtures/coherent_reload_use_b.hs"),
+            )
+            .await;
+            assert_use_b_with_constituents(host, &used);
+            if let Some((name, probe)) = absent {
+                let missing = super::tests::dispatch_haskell_script(fresh.as_ref(), probe).await;
+                assert_eq!(missing["status"], "rejected", "{missing}");
+                let diagnostic = missing.to_string();
+                assert!(
+                    diagnostic.contains(name) && diagnostic.to_lowercase().contains("not in scope"),
+                    "B must reject the absent authored name, not inaccessible source: {missing}"
+                );
+            }
+            // Runtime settlement controls observe A's retained public snapshot and
+            // actual private-scope retirement; this host observes B through fresh calls.
+            assert_eq!(selected_root_generation(host).await, generation_b);
+            assert_eq!(judgments.0.load(Ordering::SeqCst), 0);
+            round.finish();
+        })
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

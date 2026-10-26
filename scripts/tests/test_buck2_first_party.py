@@ -1545,6 +1545,7 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         cases = {}
         for name in ("facade_process_tests", "facade_host_tests", "facade_host_raw_test",
                      "facade_root_startup_source_test", "facade_root_declaration_recovery_test",
+                     "facade_reload_supersession_test",
                      "facade_introspection_service_test",
                      "facade_late_output_test", "facade_browser_test", "exomonad_host_unit_tests_all"):
             cases[name] = self.rule("exomonad/host", name, "tidepool_rust_test_cases")
@@ -1568,6 +1569,21 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.assertEqual(recovery["resource_env"]["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"],
                          "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin")
         self.assertIn("//build/package:compiler_service_deployment", recovery["resources"])
+        supersession = cases["facade_reload_supersession_test"]
+        self.assertEqual(supersession["exact_tests"], [
+            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_binding_and_does_not_run_trailing_effects",
+            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_declaration_and_does_not_run_trailing_effects",
+            "actor_host::coherent_reload_acceptance_tests::reload_rejects_bound_result_and_does_not_run_trailing_effects",
+            "actor_host::coherent_reload_acceptance_tests::bindingless_reload_rejects_trailing_effects_without_replaying_reload",
+        ])
+        self.assertEqual(supersession["expected_count"], 4)
+        self.assertEqual(supersession["jobs"], 1)
+        self.assertEqual(supersession["case_compiler_modes"], {
+            name: "owned-resident" for name in supersession["exact_tests"]
+        })
+        self.assertEqual(supersession["resource_env"]["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"],
+                         "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin")
+        self.assertIn("//build/package:compiler_service_deployment", supersession["resources"])
         startup = cases["facade_root_startup_source_test"]
         self.assertEqual(startup["exact_tests"], [
             "actor_host::startup_context_acceptance_tests::released_root_startup_already_owns_its_source_generation",
