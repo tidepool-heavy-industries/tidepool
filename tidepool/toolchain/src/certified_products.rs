@@ -501,14 +501,19 @@ impl ValidatedHomeContracts {
                 HomeMembership::CurrentReceipt { original }
             } else {
                 operation.charge(source_selection.prior_program_products.len())?;
-                if let Some((product_index, product)) = source_selection
-                    .prior_program_products
-                    .iter()
-                    .enumerate()
-                    .find(|(_, product)| {
-                        let owner = product.row().original_owner();
-                        owner.unit == key.unit && owner.module == key.module
-                    })
+                if let Some((product_index, product)) =
+                    crate::declaration_context::CompletedNativeProductAvailability::select_prior(
+                        source_selection.prior_program_products.iter().enumerate(),
+                        &key.unit,
+                        &key.module,
+                        None,
+                        Some(
+                            crate::declaration_context::PriorNativeProductReference::Home {
+                                ordinal: key.original_ordinal,
+                            },
+                        ),
+                        Some(operation),
+                    )?
                 {
                     check_prior_home_package_links(
                         product,
@@ -2495,7 +2500,7 @@ impl OriginalNativeWitness {
         &self.inventory
     }
 
-    fn group(&self, original_ordinal: u32) -> Option<&AuthenticatedOriginalGroup> {
+    pub(crate) fn group(&self, original_ordinal: u32) -> Option<&AuthenticatedOriginalGroup> {
         self.group_positions
             .get(&original_ordinal)
             .map(|position| self.groups[*position].as_ref())
@@ -4130,7 +4135,7 @@ fn decode_package_links(
                 ));
             }
         } else if let PackageLinkTargets::WorldStage(prior) = &targets {
-            if let Some(product) = prior.physical_product(&unit, &module)? {
+            if let Some(product) = prior.physical_product(&unit, &module, original_ordinal)? {
                 check_prior_home_package_links(product, original_ordinal, &links, &occurrences)?;
             }
         }
@@ -5091,7 +5096,7 @@ impl<'a> CurrentProductRef<'a> {
             .map_err(evidence)?;
         if let Some(completed) = self
             .selection
-            .prior_program_product(unit, module, Some(&owner.module_version))
+            .prior_program_product(unit, module, Some(&owner.module_version), None)
             .map_err(evidence)?
         {
             if !self
@@ -5258,7 +5263,7 @@ impl<'a> CurrentProductRef<'a> {
             ));
         };
         self.selection
-            .exact_source_owner_with_demand(unit, module, Some(version), ordinal)
+            .exact_source_owner_with_demand(unit, module, Some(version), ordinal, None)
     }
 
     pub(crate) fn operation(&self) -> Option<&'a InventoryOperation> {
@@ -5812,19 +5817,20 @@ impl CertifiedSourceSelection {
         unit: &str,
         module: &str,
         version: Option<&ModuleVersion>,
+        reference: Option<crate::declaration_context::PriorNativeProductReference<'_>>,
     ) -> CertResult<Option<&Arc<crate::declaration_context::CompletedNativeProductAvailability>>>
     {
-        let Some(product) = self.prior_program_products.iter().find(|product| {
-            let owner = product.row().original_owner();
-            owner.unit == unit && owner.module == module
-        }) else {
-            return Ok(None);
-        };
-        if version.is_some_and(|version| version != &product.row().original_owner().module_version)
-        {
-            return Err(CertificationError::Mismatch("prior Source module version"));
-        }
-        Ok(Some(product))
+        crate::declaration_context::CompletedNativeProductAvailability::select_prior(
+            self.prior_program_products.iter().enumerate(),
+            unit,
+            module,
+            version,
+            reference,
+            self.original_bindings
+                .as_ref()
+                .map(|bindings| bindings.authenticated.operation.as_ref()),
+        )
+        .map(|selected| selected.map(|(_, product)| product))
     }
 
     fn prior_nominal_member(
@@ -5871,7 +5877,8 @@ impl CertifiedSourceSelection {
                 unit,
                 module,
                 module_version,
-                ..
+                original_ordinal,
+                binder,
             } = &reference.owner
             else {
                 continue;
@@ -5884,7 +5891,16 @@ impl CertifiedSourceSelection {
                 unit: unit.clone(),
                 module: module.clone(),
             };
-            let Some(product) = inputs.prior_nominal_source_product(&owner)? else {
+            let Some(product) = inputs.prior_nominal_source_product(
+                &owner,
+                crate::declaration_context::PriorNativeProductReference::Source {
+                    version: module_version.as_ref(),
+                    ordinal: *original_ordinal,
+                    binder,
+                },
+                operation,
+            )?
+            else {
                 continue;
             };
             if module_version
@@ -5926,7 +5942,14 @@ impl CertifiedSourceSelection {
                 unit: key.unit.clone(),
                 module: key.module.clone(),
             };
-            let Some(product) = inputs.prior_nominal_source_product(&owner)? else {
+            let Some(product) = inputs.prior_nominal_source_product(
+                &owner,
+                crate::declaration_context::PriorNativeProductReference::Home {
+                    ordinal: key.original_ordinal,
+                },
+                operation,
+            )?
+            else {
                 // Input HOME annotations have no same-program predecessor.
                 // Their exact membership is checked by the mandatory issuer.
                 continue;
@@ -6402,8 +6425,25 @@ impl CertifiedSourceSelection {
         else {
             return Err(CertificationError::Mismatch("target Source reference kind"));
         };
-        let owner = self.receipt_source_member(unit, module, module_version.as_ref())?;
-        let entry = match self.prior_program_product(unit, module, module_version.as_ref())? {
+        let owner = self.receipt_source_nominal_member(
+            unit,
+            module,
+            module_version.as_ref(),
+            *original_ordinal,
+            binder,
+        )?;
+        let entry = match self.prior_program_product(
+            unit,
+            module,
+            module_version.as_ref(),
+            Some(
+                crate::declaration_context::PriorNativeProductReference::Source {
+                    version: module_version.as_ref(),
+                    ordinal: *original_ordinal,
+                    binder,
+                },
+            ),
+        )? {
             Some(product) => product.row().target_original(owner).cloned(),
             None => self.target_original(owner)?,
         }
@@ -6458,6 +6498,11 @@ impl CertifiedSourceSelection {
             &product.owner().unit,
             &product.owner().module,
             Some(&product.owner().module_version),
+            Some(
+                crate::declaration_context::PriorNativeProductReference::Home {
+                    ordinal: key.original_ordinal,
+                },
+            ),
         )? {
             if key.artifact != entry.descriptor.id
                 || receipt.row().original_artifact_id() != key.artifact
@@ -7185,15 +7230,40 @@ impl CertifiedSourceSelection {
             })
     }
 
+    fn receipt_source_nominal_member(
+        &self,
+        unit: &str,
+        module: &str,
+        version: Option<&ModuleVersion>,
+        ordinal: u32,
+        binder: &SymbolIdentity,
+    ) -> CertResult<&CachedHomeOwner> {
+        self.receipt_source_owner_with_demand(
+            unit,
+            module,
+            version,
+            None,
+            Some(
+                crate::declaration_context::PriorNativeProductReference::Source {
+                    version,
+                    ordinal,
+                    binder,
+                },
+            ),
+        )
+    }
+
+    #[cfg(test)]
     fn receipt_source_member(
         &self,
         unit: &str,
         module: &str,
         version: Option<&ModuleVersion>,
     ) -> CertResult<&CachedHomeOwner> {
-        self.receipt_source_owner_with_demand(unit, module, version, None)
+        self.receipt_source_owner_with_demand(unit, module, version, None, None)
     }
 
+    #[cfg(test)]
     fn receipt_source_owner(
         &self,
         unit: &str,
@@ -7201,7 +7271,13 @@ impl CertifiedSourceSelection {
         version: Option<&ModuleVersion>,
         ordinal: u32,
     ) -> CertResult<&CachedHomeOwner> {
-        self.receipt_source_owner_with_demand(unit, module, version, Some(ordinal))
+        self.receipt_source_owner_with_demand(
+            unit,
+            module,
+            version,
+            Some(ordinal),
+            Some(crate::declaration_context::PriorNativeProductReference::Home { ordinal }),
+        )
     }
 
     fn receipt_source_owner_with_demand(
@@ -7210,6 +7286,7 @@ impl CertifiedSourceSelection {
         module: &str,
         version: Option<&ModuleVersion>,
         ordinal: Option<u32>,
+        reference: Option<crate::declaration_context::PriorNativeProductReference<'_>>,
     ) -> CertResult<&CachedHomeOwner> {
         if let Some(selected) = self
             .modules
@@ -7232,7 +7309,7 @@ impl CertifiedSourceSelection {
                 _ => {}
             }
         }
-        self.exact_source_owner_with_demand(unit, module, version, ordinal)
+        self.exact_source_owner_with_demand(unit, module, version, ordinal, reference)
     }
 
     fn exact_source_owner_with_demand(
@@ -7241,6 +7318,7 @@ impl CertifiedSourceSelection {
         module: &str,
         version: Option<&ModuleVersion>,
         ordinal: Option<u32>,
+        reference: Option<crate::declaration_context::PriorNativeProductReference<'_>>,
     ) -> CertResult<&CachedHomeOwner> {
         if let Some(selected) = self
             .modules
@@ -7260,7 +7338,7 @@ impl CertifiedSourceSelection {
             }
             return Ok(&selected.owner);
         }
-        if let Some(product) = self.prior_program_product(unit, module, version)? {
+        if let Some(product) = self.prior_program_product(unit, module, version, reference)? {
             let owner = product.row().original_owner();
             if ordinal.is_some_and(|ordinal| {
                 product
@@ -8964,11 +9042,18 @@ fn resolve_receipt_owner_with_validation(
             binder,
         } => {
             let resolved = if let Some(selection) = selection {
-                let owner = selection.receipt_source_owner(
+                let owner = selection.receipt_source_owner_with_demand(
                     &unit,
                     &module,
                     module_version.as_ref(),
-                    original_ordinal,
+                    Some(original_ordinal),
+                    Some(
+                        crate::declaration_context::PriorNativeProductReference::Source {
+                            version: module_version.as_ref(),
+                            ordinal: original_ordinal,
+                            binder: &binder,
+                        },
+                    ),
                 )?;
                 sources
                     .get(&(owner.clone(), original_ordinal, binder.clone()))
@@ -9065,7 +9150,13 @@ fn authenticate_source_receipt_metadata<'a>(
     sources: &SourceGroupMap,
     selection: &'a CertifiedSourceSelection,
 ) -> CertResult<&'a CachedHomeOwner> {
-    let owner = selection.receipt_source_member(unit, module, module_version)?;
+    let owner = selection.receipt_source_nominal_member(
+        unit,
+        module,
+        module_version,
+        original_ordinal,
+        binder,
+    )?;
     if sources
         .get(&(owner.clone(), original_ordinal, binder.clone()))
         .is_none()
@@ -19250,6 +19341,265 @@ pub(crate) mod tests {
                 "current group outside selected binding closure"
             ))
         ));
+    }
+
+    #[test]
+    fn prior_native_nominal_queries_preserve_disjoint_history_and_refuse_competing_proofs() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactPayload};
+        use crate::declaration_context::{
+            CompletedNativeProductAvailability, PriorNativeProductReference,
+        };
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let issue = |ordinal, tag| {
+            let producer = [17; 32];
+            let product = fixture_finalized_product(
+                original_groups_fixture(
+                    "PriorNative",
+                    vec![(ordinal, vec![])],
+                    tag,
+                    &BTreeMap::new(),
+                ),
+                producer,
+            );
+            let canonical = Arc::new(ArtifactEntry::canonical(product.module_interface().clone()));
+            let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
+            let owner = entry.descriptor.owner.clone();
+            let mut selected = CertifiedSourceSelection::empty_product_output();
+            selected
+                .admit_current(
+                    product.owner(),
+                    ProductOrigin::Fresh,
+                    product.module_interface(),
+                    &operation,
+                )
+                .unwrap();
+            selected
+                .bind_produced_originals(
+                    &IssuedGroupCandidates::bind(Arc::from([]), &[product]).unwrap(),
+                )
+                .unwrap();
+            let inventory = crate::artifact_inventory::ArtifactInventory::default();
+            let captured = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selected,
+                &inventory.empty_view(),
+                vec![canonical, entry],
+                &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
+            )
+            .unwrap();
+            captured
+                .source_selection()
+                .produced_source_receipt(&owner, captured.issued_artifacts())
+                .unwrap()
+                .unwrap()
+        };
+        let first = issue(7, 1);
+        let second = issue(11, 2);
+        let unit = first.row().original_owner().unit.clone();
+        let competing = issue(7, 1);
+        assert_eq!(
+            first.row().original_owner(),
+            competing.row().original_owner()
+        );
+        assert!(!first.own_offer().same_issuance(competing.own_offer()));
+        let mut selection = CertifiedSourceSelection::empty_product_output();
+        selection.prior_program_products =
+            vec![Arc::clone(&first), Arc::clone(&second), Arc::clone(&first)].into();
+        let mut home_receipt = CertifiedReceipt {
+            package_products: Vec::new(),
+            package_links: PackageLinks::empty_for_target("target"),
+            source_recipe: WorkerExecutionSource::Ordinary,
+            finalization: fixture_finalization(None, &[]),
+            modules: Vec::new(),
+            targets: BTreeMap::new(),
+            packages: BTreeMap::new(),
+        };
+        let current_groups = IssuedGroupCandidates::bind(Arc::from([]), &[]).unwrap();
+        for (product, ordinal) in [(&first, 7), (&second, 11)] {
+            let entry = product.own_offer().original_acquisition();
+            let ArtifactPayload::Original(original) = &entry.payload else {
+                unreachable!()
+            };
+            let binder = &original
+                .original_native()
+                .group(ordinal)
+                .unwrap()
+                .group()
+                .binders()[0];
+            let query = PriorNativeProductReference::Source {
+                version: None,
+                ordinal,
+                binder,
+            };
+            let (_, found) = CompletedNativeProductAvailability::select_prior(
+                selection.prior_program_products.iter().enumerate(),
+                &unit,
+                "PriorNative",
+                None,
+                Some(query),
+                Some(&operation),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(Arc::ptr_eq(found, product));
+            assert_eq!(
+                authenticate_source_receipt_metadata(
+                    &unit,
+                    "PriorNative",
+                    None,
+                    ordinal,
+                    binder,
+                    &SourceGroupMap::new(),
+                    &selection
+                )
+                .unwrap(),
+                product.row().original_owner()
+            );
+            let source = ReceiptImportOwner::Source {
+                unit: unit.clone(),
+                module: "PriorNative".into(),
+                module_version: None,
+                original_ordinal: ordinal,
+                binder: binder.clone(),
+            };
+            assert_eq!(
+                selection
+                    .target_source_entry(&source)
+                    .unwrap()
+                    .0
+                    .descriptor
+                    .id,
+                entry.descriptor.id
+            );
+            let (_, home) = CompletedNativeProductAvailability::select_prior(
+                selection.prior_program_products.iter().enumerate(),
+                &unit,
+                "PriorNative",
+                None,
+                Some(PriorNativeProductReference::Home { ordinal }),
+                Some(&operation),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(Arc::ptr_eq(home, product));
+            Arc::make_mut(&mut home_receipt.package_links.home_roots).clear();
+            Arc::make_mut(&mut home_receipt.package_links.home_roots).insert(
+                PackageHomeRootKey {
+                    target: "target".into(),
+                    unit: unit.clone(),
+                    module: "PriorNative".into(),
+                    original_ordinal: ordinal,
+                },
+                Vec::new(),
+            );
+            let proof = ValidatedHomeContracts::issue(
+                &home_receipt,
+                &selection,
+                &current_groups,
+                &operation,
+            )
+            .unwrap();
+            let HomeMembership::PriorProgram { product_index } = &proof.memberships[0].1 else {
+                panic!("actual prior product owns the HOME annotation")
+            };
+            assert!(Arc::ptr_eq(&proof.prior_products[*product_index], product));
+            let absent = CertifiedSourceSelection::empty_product_output();
+            assert!(ValidatedHomeContracts::issue(
+                &home_receipt,
+                &absent,
+                &current_groups,
+                &operation
+            )
+            .is_err());
+            assert!(authenticate_source_receipt_metadata(
+                &unit,
+                "PriorNative",
+                None,
+                ordinal,
+                binder,
+                &SourceGroupMap::new(),
+                &absent
+            )
+            .is_err());
+            let mut wrong = binder.clone();
+            wrong.occurrence.push_str("_wrong");
+            assert!(authenticate_source_receipt_metadata(
+                &unit,
+                "PriorNative",
+                None,
+                ordinal,
+                &wrong,
+                &SourceGroupMap::new(),
+                &selection
+            )
+            .is_err());
+            assert!(authenticate_source_receipt_metadata(
+                &unit,
+                "PriorNative",
+                Some(&ModuleVersion([255; 32])),
+                ordinal,
+                binder,
+                &SourceGroupMap::new(),
+                &selection
+            )
+            .is_err());
+        }
+        selection.prior_program_products = vec![Arc::clone(&first), second, competing].into();
+        Arc::make_mut(&mut home_receipt.package_links.home_roots).clear();
+        Arc::make_mut(&mut home_receipt.package_links.home_roots).insert(
+            PackageHomeRootKey {
+                target: "target".into(),
+                unit: unit.clone(),
+                module: "PriorNative".into(),
+                original_ordinal: 7,
+            },
+            Vec::new(),
+        );
+        assert!(ValidatedHomeContracts::issue(
+            &home_receipt,
+            &selection,
+            &current_groups,
+            &operation
+        )
+        .is_err());
+        let ArtifactPayload::Original(original) = &first.own_offer().original_acquisition().payload
+        else {
+            unreachable!()
+        };
+        let binder = &original
+            .original_native()
+            .group(7)
+            .unwrap()
+            .group()
+            .binders()[0];
+        assert!(authenticate_source_receipt_metadata(
+            &unit,
+            "PriorNative",
+            None,
+            7,
+            binder,
+            &SourceGroupMap::new(),
+            &selection
+        )
+        .is_err());
+        assert!(CompletedNativeProductAvailability::select_prior(
+            selection.prior_program_products.iter().enumerate(),
+            &unit,
+            "PriorNative",
+            None,
+            Some(PriorNativeProductReference::Home { ordinal: 7 }),
+            Some(&operation),
+        )
+        .is_err());
+        assert!(CompletedNativeProductAvailability::select_prior(
+            selection.prior_program_products.iter().enumerate(),
+            &unit,
+            "PriorNative",
+            None,
+            Some(PriorNativeProductReference::Home { ordinal: u32::MAX }),
+            Some(&operation),
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]

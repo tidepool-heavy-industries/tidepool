@@ -1309,6 +1309,52 @@ impl std::fmt::Debug for CompletedNativeProductAvailability {
 }
 
 impl CompletedNativeProductAvailability {
+    /// Select only a matching nominal coordinate among actual completed
+    /// receipts. Retained alternatives are passive until this query chooses.
+    pub(crate) fn select_prior<'a>(
+        products: impl IntoIterator<Item = (usize, &'a Arc<Self>)>,
+        unit: &str,
+        module: &str,
+        version: Option<&tidepool_repr::execution_schema::ModuleVersion>,
+        reference: Option<PriorNativeProductReference<'_>>,
+        operation: Option<&tidepool_repr::execution_schema::InventoryOperation>,
+    ) -> Result<Option<(usize, &'a Arc<Self>)>, crate::certified_products::CertificationError> {
+        let mut selected: Option<(usize, &Arc<Self>)> = None;
+        for (index, product) in products {
+            if let Some(operation) = operation {
+                operation.charge(1 + unit.len() + module.len())?;
+            }
+            let actual = product.row().original_owner();
+            if actual.unit != unit || actual.module != module {
+                continue;
+            }
+            if let Some(operation) = operation {
+                operation.charge(
+                    product
+                        .own_offer()
+                        .original_acquisition()
+                        .native_group_ordinals
+                        .len(),
+                )?;
+            }
+            if version.is_some_and(|version| version != &actual.module_version)
+                || reference.is_some_and(|reference| !reference.matches(product))
+            {
+                continue;
+            }
+            if let Some((_, previous)) = selected {
+                if !previous.own_offer().same_issuance(product.own_offer()) {
+                    return Err(crate::certified_products::CertificationError::Mismatch(
+                        "competing prior native physical issuers",
+                    ));
+                }
+            } else {
+                selected = Some((index, product));
+            }
+        }
+        Ok(selected)
+    }
+
     pub(crate) fn own_offer(&self) -> &crate::artifact_inventory::IssuedNativeOffer {
         self.own.offer()
     }
@@ -10375,6 +10421,50 @@ impl CompilerArtifactMetadata {
     }
 }
 
+/// A nominal receipt coordinate. HOME annotations carry a physical ordinal;
+/// Source references additionally carry the actual binder and optional version.
+#[derive(Clone, Copy)]
+pub(crate) enum PriorNativeProductReference<'a> {
+    Source {
+        version: Option<&'a tidepool_repr::execution_schema::ModuleVersion>,
+        ordinal: u32,
+        binder: &'a tidepool_repr::execution_schema::SymbolIdentity,
+    },
+    Home {
+        ordinal: u32,
+    },
+}
+
+impl PriorNativeProductReference<'_> {
+    pub(crate) fn matches(self, receipt: &CompletedNativeProductAvailability) -> bool {
+        let owner = receipt.row().original_owner();
+        let (ordinal, binder) = match self {
+            Self::Source {
+                version,
+                ordinal,
+                binder,
+            } => {
+                if version.is_some_and(|version| version != &owner.module_version) {
+                    return false;
+                }
+                (ordinal, Some(binder))
+            }
+            Self::Home { ordinal } => (ordinal, None),
+        };
+        let ArtifactPayload::Original(product) =
+            &receipt.own_offer().original_acquisition().payload
+        else {
+            return false;
+        };
+        product
+            .original_native()
+            .group(ordinal)
+            .is_some_and(|group| {
+                binder.is_none_or(|binder| group.group().binders().contains(binder))
+            })
+    }
+}
+
 /// Borrowed issued facts needed by output certification. Finite inputs require
 /// unambiguous native selection when consumed; demanded inputs retain their
 /// already selected map. The owned source support lets a demanded World carry
@@ -10387,6 +10477,7 @@ pub(crate) struct ProductCompilerInputs<'a> {
     original_sources: &'a crate::certified_products::RetainedOriginalSources,
     original_bindings: Option<crate::certified_products::OriginalBindingSelection>,
     program_support: Option<&'a ProgramSourceSupport>,
+    prior_native_products: Option<&'a imbl::Vector<WorldStageNativeProducts>>,
 }
 
 #[derive(Clone, Copy)]
@@ -10420,11 +10511,20 @@ impl<'a> ProductCompilerInputs<'a> {
             original_sources: &inputs.original_sources,
             original_bindings: None,
             program_support: None,
+            prior_native_products: None,
         }
     }
 
     fn with_program_support(mut self, support: Option<&'a ProgramSourceSupport>) -> Self {
         self.program_support = support;
+        self
+    }
+
+    fn with_prior_native_products(
+        mut self,
+        products: &'a imbl::Vector<WorldStageNativeProducts>,
+    ) -> Self {
+        self.prior_native_products = Some(products);
         self
     }
 
@@ -10434,14 +10534,24 @@ impl<'a> ProductCompilerInputs<'a> {
     pub(crate) fn prior_nominal_source_product(
         &self,
         owner: &ExactModuleIdentity,
+        reference: PriorNativeProductReference<'_>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<
         Option<&Arc<CompletedNativeProductAvailability>>,
         crate::certified_products::CertificationError,
     > {
-        let Some(support) = self.program_support else {
-            return Ok(None);
-        };
-        support.physical_product(owner)
+        let source = self
+            .program_support
+            .map(|support| support.physical_product(owner))
+            .transpose()?
+            .flatten();
+        WorldStageNativeProducts::prior_product(
+            self.prior_native_products,
+            owner,
+            reference,
+            source,
+            operation,
+        )
     }
 
     pub(crate) fn produced_source(
@@ -10506,6 +10616,7 @@ impl<'a> ProductCompilerInputs<'a> {
             original_sources,
             original_bindings: Some(original_bindings),
             program_support: None,
+            prior_native_products: None,
         }
     }
 
@@ -10715,6 +10826,7 @@ pub(crate) struct DemandedWorldCompilerInputs {
     stage_primary: WorldPrimaryInputs,
     checked_values: crate::checked_cell::CheckedValueImportAuthority,
     program_support: Option<ProgramSourceSupport>,
+    prior_native_products: imbl::Vector<WorldStageNativeProducts>,
 }
 
 impl DemandedWorldCompilerInputs {
@@ -10753,6 +10865,7 @@ impl DemandedWorldCompilerInputs {
             self.original_bindings.clone(),
         )
         .with_program_support(self.program_support.as_ref())
+        .with_prior_native_products(&self.prior_native_products)
     }
 
     fn facts(&self) -> ProductInputFacts<'_> {
@@ -12869,6 +12982,7 @@ pub(crate) struct WorldProgramContinuation {
     program: ProgramSourceSupportState,
     private_input: Option<Arc<OriginalCompilerInputs>>,
     native_prefix: Option<Arc<crate::artifacts::SealedTurnProducts>>,
+    prior_native_products: imbl::Vector<WorldStageNativeProducts>,
     next_stage: usize,
 }
 
@@ -12877,6 +12991,7 @@ pub(crate) struct WorldProgramContinuation {
 /// already-issued products it used. It grants no compiler namespace role.
 pub(crate) struct PriorProgramSourceWitness<'a> {
     support: Option<&'a ProgramSourceSupport>,
+    native_products: &'a imbl::Vector<WorldStageNativeProducts>,
     operation: &'a tidepool_repr::execution_schema::InventoryOperation,
 }
 
@@ -12889,19 +13004,29 @@ impl PriorProgramSourceWitness<'_> {
         &self,
         unit: &str,
         module: &str,
+        ordinal: u32,
     ) -> Result<
         Option<&Arc<CompletedNativeProductAvailability>>,
         crate::certified_products::CertificationError,
     > {
-        let Some(support) = self.support else {
-            return Ok(None);
-        };
         self.operation
             .charge(unit.len().saturating_add(module.len()))?;
-        support.physical_product(&ExactModuleIdentity {
+        let owner = ExactModuleIdentity {
             unit: unit.to_owned(),
             module: module.to_owned(),
-        })
+        };
+        let source = self
+            .support
+            .map(|support| support.physical_product(&owner))
+            .transpose()?
+            .flatten();
+        WorldStageNativeProducts::prior_product(
+            Some(self.native_products),
+            &owner,
+            PriorNativeProductReference::Home { ordinal },
+            source,
+            self.operation,
+        )
     }
 }
 
@@ -12921,6 +13046,7 @@ impl WorldProgramContinuation {
             program: ProgramSourceSupportState::default(),
             private_input: None,
             native_prefix: None,
+            prior_native_products: imbl::Vector::new(),
             next_stage: 0,
         }
     }
@@ -13008,6 +13134,7 @@ impl WorldProgramContinuation {
         }
         let prior = PriorProgramSourceWitness {
             support: self.program.program_support.as_ref(),
+            native_products: &self.prior_native_products,
             operation: self.request.operation().as_ref(),
         };
         Ok(PreparedWorldStageInputs { initial, prior })
@@ -13107,6 +13234,7 @@ impl WorldProgramContinuation {
             stage_primary,
             checked_values,
             program_support: prepared.prior.support.cloned(),
+            prior_native_products: prepared.prior.native_products.clone(),
         };
         #[cfg(test)]
         stage_type_anchor_tests::assert_actual_type_anchors(
@@ -13127,6 +13255,7 @@ impl WorldProgramContinuation {
             program: self.program.clone(),
             private_input: self.private_input.clone(),
             native_prefix: self.native_prefix.clone(),
+            prior_native_products: self.prior_native_products.clone(),
             next_stage: self.next_stage,
         }
     }
@@ -13414,6 +13543,14 @@ impl WorldProgramSegment {
             Arc::clone(&self.stage),
             self.originals.captured_stage(),
         )?;
+        self.continuation
+            .request
+            .operation()
+            .reserve::<WorldStageNativeProducts>(1)
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        self.continuation
+            .prior_native_products
+            .push_back(native_products.clone());
         self.continuation.next_stage = self.stage.index() + 1;
         Ok((
             self.continuation,
@@ -13566,10 +13703,10 @@ impl PendingWorldExecutableStage {
 /// Physical products projected from their actual completed stage at sealing.
 /// The receipts retain their own Original acquisitions; no later inventory can
 /// substitute an equal payload or infer the issuing stage from a module name.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct WorldStageNativeProducts {
     stage: Arc<crate::compiler_world::CheckedWorldCellStage>,
-    products: Vec<Arc<CompletedNativeProductAvailability>>,
+    products: Arc<[Arc<CompletedNativeProductAvailability>]>,
 }
 
 impl WorldStageNativeProducts {
@@ -13600,7 +13737,44 @@ impl WorldStageNativeProducts {
             }
             products.push(receipt);
         }
-        Ok(Self { stage, products })
+        Ok(Self {
+            stage,
+            products: products.into(),
+        })
+    }
+
+    /// Only completed stages of this program lend nominal membership. This
+    /// does not consult general custody, issue SOURCE roles, or choose groups.
+    fn prior_product<'a>(
+        stages: Option<&'a imbl::Vector<Self>>,
+        owner: &ExactModuleIdentity,
+        reference: PriorNativeProductReference<'_>,
+        source: Option<&'a Arc<CompletedNativeProductAvailability>>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<
+        Option<&'a Arc<CompletedNativeProductAvailability>>,
+        crate::certified_products::CertificationError,
+    > {
+        if let Some(stages) = stages {
+            operation.charge(stages.len())?;
+        }
+        CompletedNativeProductAvailability::select_prior(
+            source
+                .into_iter()
+                .chain(
+                    stages
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|stage| stage.products.iter()),
+                )
+                .enumerate(),
+            &owner.unit,
+            &owner.module,
+            None,
+            Some(reference),
+            Some(operation),
+        )
+        .map(|selected| selected.map(|(_, product)| product))
     }
 
     pub(crate) fn stage(&self) -> &Arc<crate::compiler_world::CheckedWorldCellStage> {
@@ -13741,7 +13915,14 @@ pub(crate) fn assert_completed_nominal_program_support(
         ),
     };
     let inputs = ProductCompilerInputs::from_exact(receiving).with_program_support(Some(&support));
-    let carried = inputs.prior_nominal_source_product(owner).unwrap().unwrap();
+    let carried = inputs
+        .prior_nominal_source_product(
+            owner,
+            PriorNativeProductReference::Home { ordinal: blocked },
+            operation,
+        )
+        .unwrap()
+        .unwrap();
     assert!(
         Arc::ptr_eq(carried, &expected),
         "nominal borrowing retains this live physical issuer"
@@ -13775,7 +13956,11 @@ pub(crate) fn assert_completed_nominal_program_support(
     }
     assert!(
         ProductCompilerInputs::from_exact(receiving)
-            .prior_nominal_source_product(owner)
+            .prior_nominal_source_product(
+                owner,
+                PriorNativeProductReference::Home { ordinal: blocked },
+                operation
+            )
             .unwrap()
             .is_none(),
         "absent predecessor evidence differs from a completed unoffered body"
@@ -13847,6 +14032,93 @@ pub(crate) fn assert_world_repeated_source_refusals(
             )
             .expect("actual first stage admission");
         if matches!(observation, Observation::Unchanged) {
+            let captured = WorldStageNativeProducts::capture(
+                Arc::clone(&segment.stage),
+                segment.originals.captured_stage(),
+            )
+            .unwrap();
+            let mut history = imbl::Vector::new();
+            history.push_back(captured.clone());
+            history.push_back(captured.clone());
+            let mut receiving = segment.inputs.compiler_inputs();
+            receiving.program_support = None;
+            let before = receiving
+                .source_support
+                .artifacts()
+                .capture_graph_selection();
+            let mut observed = 0;
+            for completed in captured.products.iter() {
+                let entry = completed.own_offer().original_acquisition();
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    unreachable!()
+                };
+                let Some((ordinal, binder)) =
+                    entry.native_group_ordinals.iter().find_map(|ordinal| {
+                        product.original_native().group(*ordinal).and_then(|group| {
+                            group
+                                .group()
+                                .binders()
+                                .first()
+                                .map(|binder| (*ordinal, binder))
+                        })
+                    })
+                else {
+                    continue;
+                };
+                let owner = &entry.descriptor.owner;
+                let reference = PriorNativeProductReference::Source {
+                    version: None,
+                    ordinal,
+                    binder,
+                };
+                assert!(receiving
+                    .prior_nominal_source_product(owner, reference, &validation.inventory)
+                    .unwrap()
+                    .is_none());
+                let receiving = receiving.clone().with_prior_native_products(&history);
+                let selected = receiving
+                    .prior_nominal_source_product(owner, reference, &validation.inventory)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    Arc::ptr_eq(selected, completed),
+                    "ledger lends the exact actual stage receipt without SOURCE adjacency"
+                );
+                assert!(receiving
+                    .prior_nominal_source_product(
+                        owner,
+                        PriorNativeProductReference::Home { ordinal: u32::MAX },
+                        &validation.inventory
+                    )
+                    .unwrap()
+                    .is_none());
+                let mut wrong_binder = binder.clone();
+                wrong_binder.occurrence.push_str("_not_issued");
+                assert!(receiving
+                    .prior_nominal_source_product(
+                        owner,
+                        PriorNativeProductReference::Source {
+                            version: None,
+                            ordinal,
+                            binder: &wrong_binder
+                        },
+                        &validation.inventory
+                    )
+                    .unwrap()
+                    .is_none());
+                assert_eq!(
+                    receiving
+                        .source_support
+                        .artifacts()
+                        .capture_graph_selection(),
+                    before
+                );
+                observed += 1;
+            }
+            assert!(
+                observed > 0,
+                "actual World stage must exercise nominal predecessor lending"
+            );
             let stage = segment.artifacts();
             let combined = stage
                 .with_prior_world_target(prior, &validation.inventory)
