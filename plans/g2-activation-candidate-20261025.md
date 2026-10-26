@@ -5,8 +5,8 @@ Integrated code candidate: `89e0ea1867572dc05b5b693afa218716ce32764e`.
 Reviewed base: code `69a6ea506b`, docs `9bd10232b9`.
 Current evidence: `/srv/swarm/evidence/inanna/g2-four-boundaries-20261025/`.
 
-G2 remains unqualified. Apply the four source-confirmed repairs, execute their
-joined consumers, then review the integrated candidate. Preserve exact source,
+G2 remains unqualified. Finish the carried-operand repair exposed by joined
+validation, then review the integrated candidate. Preserve exact source,
 product, lexical, TYPE, native and lifecycle authority throughout.
 
 ## Implementation and acceptance
@@ -33,20 +33,33 @@ old compiler; the W7 omitted-base-check mutant fails its targeted refusal. The
 mixed-origin Haskell case is positive-only and passes both versions. Q3's actual
 discriminator is the new authored-in-exact-context Rust test: it fails before Q3
 and passes with Q1+Q3 on `25aa73f6c8`. Early authored/durable joined checks passed
-2/2 there. Final joined validation is running at `89e0ea1867`; component results
-and the earlier pin are not substitutes for those outcomes.
+2/2 there. On `89e0ea1867`, the four core runtime checks and two adjacent
+frozen/callable checks pass **6/6**, each with one executed case and confirmed
+process/compiler cleanup. See `joined-runtime/89e0/summary.json`.
 
 Argon's source trace corrects the earlier rich-case investigation: its checked
 inspection pass succeeded; the subsequent authored product probe intentionally
 has no checked purpose and correctly refused the shell's gratuitous Text import.
-The carrier failure arises when World TYPE inputs are treated as unsealed,
-evicting the just-compiled source memo before a later stage acquires it.
+The original carrier failure combined unsealed World TYPE inputs with omitted
+validity recording for canonical observations. The repair preserves immutable
+completed-version and StableName checks; both targeted memo regressions fail
+against the old compiler and pass with the repair.
+
+The actor carrier now completes JSON execution and Text mounting but fails when
+the final Text cell restores carried imports. All three early
+`restoreWorldImportBasis` calls omit checked-value authority for the already
+authenticated active operand. Derive that authority from its verified capture
+and pass it through those calls, preserving SOURCE collision checks, separate
+generated-scaffold authority and the later complete checked-value union. Require
+a genuine carried-import/operand positive and foreign/missing-operand refusals,
+then rerun the actor case. See `cleanup/carried-operand-review.md`.
 
 ## Cleanup decisions
 
-- W2/W3/W4/W6 are already implemented at this base: guarded prepared operations,
-  honest shared introspection resolution, inventory-owned selected group scope,
-  and retained decoded package evidence. Do not recreate their obsolete paths.
+- W2's request-facing raw PreparedCompilation escape is already closed. The
+  lower-level `prHscEnv` still serves internal product/session owners; it has not
+  been globally removed. W3/W4/W6 already have honest shared introspection,
+  inventory-owned selected group scope and retained decoded package evidence.
 - W1: remove the readerless runtime-visibility field separately. Decoder
   retention needs a live-world seal owner covering both pruning paths,
   active-only worlds, END, eviction and cancellation. Optional cache enumeration
@@ -66,21 +79,22 @@ are source evidence, not executed qualification.
 
 ## Integrated verification still required
 
-Run durable activation, rich suffix retraction, attached-domain rollback and
-typed host-carrier mounting on the integrated candidate, plus the affected
-Haskell World/source controls and representative publication/retirement
-histories. Preserve full diagnostics and process/compiler cleanup evidence.
-The final runtime core-four and adjacent-two selections are under
-`joined-runtime/89e0/`; actor carrier and full source-boot/prepared-STG checks are
-under `joined-haskell/`. W7's component evidence covers genuine primary-only
+Finish actor carrier and full source-boot/prepared-STG checks, retained under
+`joined-haskell/`. The completed runtime selections are under
+`joined-runtime/89e0/`. Rich retraction's embedded timing record list reached its
+256 KiB limit; the full retained trace separately yields 279/279 records and
+40/40 request identities under a 1 MiB extraction bound. The original diagnostic
+completeness flag is unchanged. W7's component evidence covers genuine primary-only
 advancement, codec DATA histories, cold-versus-delta facts/charges, malformed
 transition refusal and bounded validation work; it does not claim whole-successor
 O(delta) performance or transactional cancellation qualification.
 
-The existing broad publication test separately fails in an unchanged raw-recovery
-fixture before the new handoff assertions. No pre-change execution was made in
-this round. The new real-owner test is isolated from that setup; retain the
-failure as an open fixture boundary rather than treating it as a handoff pass.
+The existing broad publication test separately fails in a raw-recovery fixture
+before recorded publication authentication. A bounded test-only migration to
+emitted snapshot hydration and `context_for_expected_snapshot` is in flight;
+keep all production refusals and meaningful corruption controls. No pre-change
+execution was made in this round, so regression chronology is unknown. The new
+real-owner handoff test is isolated and passes on `89e0ea1867`.
 
 Prior evidence remains bound to its own sources under
 `/srv/swarm/evidence/inanna/g2-apply-closure-20261025/`: the established joined
