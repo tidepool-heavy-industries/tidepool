@@ -1571,9 +1571,9 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.assertIn("//build/package:compiler_service_deployment", recovery["resources"])
         supersession = cases["facade_reload_supersession_test"]
         self.assertEqual(supersession["exact_tests"], [
-            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_binding_and_does_not_run_trailing_effects",
-            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_declaration_and_does_not_run_trailing_effects",
-            "actor_host::coherent_reload_acceptance_tests::reload_rejects_bound_result_and_does_not_run_trailing_effects",
+            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_binding_without_trailing_units",
+            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_declaration_without_trailing_units",
+            "actor_host::coherent_reload_acceptance_tests::reload_rejects_bound_result_without_trailing_units",
             "actor_host::coherent_reload_acceptance_tests::bindingless_reload_rejects_trailing_effects_without_replaying_reload",
         ])
         self.assertEqual(supersession["expected_count"], 4)

@@ -815,31 +815,40 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reload_rejects_staged_binding_and_does_not_run_trailing_effects() {
+async fn reload_rejects_staged_binding_without_trailing_units() {
     reload_supersession_history(
         include_str!("fixtures/reload_supersession_binding.hs"),
-        Some(("stagedReloadValue", "stagedReloadValue")),
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn reload_rejects_staged_declaration_and_does_not_run_trailing_effects() {
-    reload_supersession_history(
-        include_str!("fixtures/reload_supersession_declaration.hs"),
         Some((
-            "StagedReloadDeclaration",
-            "undefined :: StagedReloadDeclaration",
+            "stagedReloadValue",
+            "stagedReloadValue",
+            "stagedReloadValue",
         )),
     )
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reload_rejects_bound_result_and_does_not_run_trailing_effects() {
+async fn reload_rejects_staged_declaration_without_trailing_units() {
+    reload_supersession_history(
+        include_str!("fixtures/reload_supersession_declaration.hs"),
+        Some((
+            "StagedReloadDeclaration",
+            "undefined :: StagedReloadDeclaration",
+            "declarations: true",
+        )),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_rejects_bound_result_without_trailing_units() {
     reload_supersession_history(
         include_str!("fixtures/reload_supersession_bound_result.hs"),
-        Some(("stagedReloadReceipt", "stagedReloadReceipt")),
+        Some((
+            "stagedReloadReceipt",
+            "stagedReloadReceipt",
+            "stagedReloadReceipt",
+        )),
     )
     .await;
 }
@@ -851,7 +860,7 @@ async fn bindingless_reload_rejects_trailing_effects_without_replaying_reload() 
 
 async fn reload_supersession_history(
     script: &'static str,
-    absent: Option<(&'static str, &'static str)>,
+    absent: Option<(&'static str, &'static str, &'static str)>,
 ) {
     use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation};
     let files = tempfile::tempdir().unwrap();
@@ -938,10 +947,30 @@ async fn reload_supersession_history(
                 tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
             );
             let items = response["items"].as_array().unwrap();
-            assert_eq!(items.last().unwrap()["status"], "notRun", "{response}");
-            assert!(items.last().unwrap()["operations"]
-                .as_array()
-                .is_none_or(Vec::is_empty));
+            if let Some((_, _, discarded_detail)) = absent {
+                assert_eq!(
+                    response["nextIndex"].as_u64().unwrap(),
+                    response["total"].as_u64().unwrap(),
+                    "{response}"
+                );
+                assert!(
+                    items.iter().all(|item| item["status"] != "notRun"),
+                    "{response}"
+                );
+                let detail = response["publication"]["detail"].as_str().unwrap();
+                assert!(
+                    detail.contains("DiscardedPrivateWrites") && detail.contains(discarded_detail),
+                    "the no-tail rejection must retain actual staged writes: {response}"
+                );
+            } else {
+                assert!(
+                    response["nextIndex"].as_u64().unwrap() < response["total"].as_u64().unwrap()
+                );
+                assert_eq!(items.last().unwrap()["status"], "notRun", "{response}");
+                assert!(items.last().unwrap()["operations"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty));
+            }
             assert!(!host
                 .context
                 .config
@@ -994,7 +1023,7 @@ async fn reload_supersession_history(
             )
             .await;
             assert_use_b_with_constituents(host, &used);
-            if let Some((name, probe)) = absent {
+            if let Some((name, probe, _)) = absent {
                 let missing = super::tests::dispatch_haskell_script(fresh.as_ref(), probe).await;
                 assert_eq!(missing["status"], "rejected", "{missing}");
                 let diagnostic = missing.to_string();

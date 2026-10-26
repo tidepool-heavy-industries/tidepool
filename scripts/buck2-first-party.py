@@ -1701,9 +1701,9 @@ def facade_test_cases(binary):
             "actor_host::coherent_reload_acceptance_tests::standard_reload_retains_complete_large_source_receipts_after_publication",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
         ("facade_reload_supersession_test", [
-            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_binding_and_does_not_run_trailing_effects",
-            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_declaration_and_does_not_run_trailing_effects",
-            "actor_host::coherent_reload_acceptance_tests::reload_rejects_bound_result_and_does_not_run_trailing_effects",
+            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_binding_without_trailing_units",
+            "actor_host::coherent_reload_acceptance_tests::reload_rejects_staged_declaration_without_trailing_units",
+            "actor_host::coherent_reload_acceptance_tests::reload_rejects_bound_result_without_trailing_units",
             "actor_host::coherent_reload_acceptance_tests::bindingless_reload_rejects_trailing_effects_without_replaying_reload",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
         ("facade_reload_frozen_source_test", [
