@@ -59,7 +59,7 @@ import Tidepool.PreparedStg (pmModule, pmBindings, pmOriginalTopNames)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..))
 import Tidepool.SessionArtifacts
 import qualified Tidepool.Session as Session
-import Tidepool.CheckedPrefixImports (hydrateCompletedValueAliases, transformCompletedValueAliases)
+import Tidepool.CheckedPrefixImports (hydrateCompletedValueAliases, transformCompletedValueAliases, refineParsedDeclarationImports)
 import Tidepool.CheckedCell (typecheckNativeModule, unannotatedModule)
 import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), depanalSourceModules, emptyHydratedInterfaceClosure, retainInstalledInterfaceInputs, captureCompletedInterfaceInputs, hydratedExactEnvironment
@@ -111,7 +111,7 @@ typedValueAliasControl libdir root prepared = do
     (nameSymbolIdentity (Text.pack "value") (varName identifier))
   let artifact = ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
         (Session.sessionHiPath (root </> "stage0") session) (shaHex (snd (Session.capturedSessionInterface captured))) required
-      requested = [("renamed",symbol,artifact),("synonym",symbol,artifact)]
+      requested = [(alias,symbol,artifact) | alias <- ["renamed","synonym","first","id","unK1","keptField"]]
   let empty = emptyHydratedInterfaceClosure
   inputs <- captureCompletedInterfaceInputs hydrated empty [(artifact,injectedCapture)] []
   ownerInputs <- retainInstalledInterfaceInputs hydrated inputs
@@ -124,9 +124,19 @@ typedValueAliasControl libdir root prepared = do
       Right _ -> fail "completed value alias accepted a different defining unit or identity namespace"
   let path = root </> "TypedAliasProbe.hs"
   writeFile path (unlines
-    ["{-# LANGUAGE NoMonomorphismRestriction #-}","module TypedAliasProbe where"
-    ,"reference = renamed", "other = synonym"
-    ,"shadow = let renamed = (False :: Bool) in renamed"])
+    ["{-# LANGUAGE NoMonomorphismRestriction, DisambiguateRecordFields #-}","module TypedAliasProbe where"
+    ,"import Prelude", "import Data.Bifunctor (first)", "import qualified Prelude as Original"
+    ,"import GHC.Generics (K1(..), M1(..))", "import AliasShadowLabels (Label(..))"
+    ,"reference = renamed", "other = synonym", "importedShadow = first"
+    ,"preludeShadow = id", "selectorShadow = unK1", "labelShadow = keptField"
+    ,"qualifiedSelector = GHC.Generics.unK1 (K1 (True :: Bool))"
+    ,"preservedLabel = Label { keptField = True }"
+    ,"unM1 = (False :: Bool)", "localSelectorProof = unM1"
+    ,"qualifiedLocalSelector = GHC.Generics.unK1 (GHC.Generics.unM1 (M1 (K1 (True :: Bool))))"
+    ,"qualifiedOriginal = Original.id (True :: Bool)"
+    ,"qualifiedFirst = Data.Bifunctor.first Original.not (True, ())"
+    ,"shadow = let first = (False :: Bool) in first"])
+
   runGhc (Just libdir) $ do
     setSession ready
     flags <- getSessionDynFlags
@@ -141,8 +151,9 @@ typedValueAliasControl libdir root prepared = do
     current <- getSession
     syntax <- either (liftIO . fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
     driver <- either (liftIO . fail . show) pure (matchDriverImports syntax parsed)
-    native <- liftIO (transformCompletedValueAliases aliases current
+    declared <- liftIO (refineParsedDeclarationImports current
       (unannotatedModule (beginImportRefinement driver)))
+    native <- liftIO (transformCompletedValueAliases aliases current declared)
     checked <- typecheckNativeModule native
     let (checkedEnvironment,_) = tm_internals_ checked
         actual = typeEnvIds (tcg_type_env checkedEnvironment)
@@ -152,6 +163,14 @@ typedValueAliasControl libdir root prepared = do
     liftIO $ do
       check "reference" (idType identifier)
       check "other" (idType identifier)
+      check "importedShadow" (idType identifier)
+      check "preludeShadow" (idType identifier)
+      check "selectorShadow" (idType identifier)
+      check "labelShadow" (idType identifier)
+      check "qualifiedSelector" boolTy
+      check "localSelectorProof" boolTy
+      check "qualifiedLocalSelector" boolTy
+      check "qualifiedOriginal" boolTy
       check "shadow" boolTy
 
 -- The owning selector performs the actual whole-source frontend, typed
@@ -163,6 +182,9 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
   prelude <- requiredInput "TIDEPOOL_PRELUDE_DIR"
   libdir <- getLibdir
   flags <- runGhc (Just libdir) getSessionDynFlags
+  writeFile (root </> "AliasShadowLabels.hs") (unlines
+    ["{-# LANGUAGE NoFieldSelectors #-}", "module AliasShadowLabels where"
+    ,"data Label = Label { keptField :: Bool }"])
   let shadowDirectory = root </> "Tidepool" </> "Internal"
   createDirectoryIfMissing True shadowDirectory
   -- A package-qualified compiler import must not inspect or compile this source.
@@ -171,7 +193,8 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
       includes = [root, fixtures, effects, prelude]
   withResidentPipelineSelectedRequests includes $ \runRequest ->
     forM_ (zip [0 :: Int ..] preparationCases) $ \(index, (name, expected)) -> do
-      body <- readFile (fixtures </> name ++ ".hs")
+      fixtureBody <- readFile (fixtures </> name ++ ".hs")
+      let body = (if name == "let-poly" then "import AliasShadowLabels\n" else "") ++ fixtureBody
       helpers <- if name == "template-helper-use"
         then readFile (fixtures </> "template-helper-definitions.hs")
         else pure ""

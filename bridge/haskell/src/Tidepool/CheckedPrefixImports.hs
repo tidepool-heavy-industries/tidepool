@@ -10,7 +10,7 @@ module Tidepool.CheckedPrefixImports
   ) where
 
 import Control.Exception (evaluate)
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (filterM, forM, forM_, unless)
 import Data.List (nub, sort)
 import Data.Maybe (isJust)
 import qualified Data.IntMap.Strict as IntMap
@@ -30,7 +30,9 @@ import GHC.Types.Name (Name, nameOccName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (OccName, isTcOcc, isDataOcc, mkVarOcc, occNameString, occNameFS, varToRecFieldOcc, fieldOcc_maybe)
 import GHC.Types.Name.Reader (RdrName(Exact), mkRdrUnqual, rdrNameOcc)
 import GHC.Types.Name.Set (extendNameSet, unionNameSets)
-import GHC.Types.Id (Id, idName, idType)
+import GHC.Types.Id (Id, idName, idType, idDetails)
+import GHC.Types.Id.Info (IdDetails(..))
+import GHC.Types.FieldLabel (FieldLabel(..), FieldSelectors(..))
 import GHC.Types.TyThing (TyThing(AnId))
 import GHC.Iface.Syntax (IfaceDecl(..), IfaceIdDetails(..), freeNamesIfDecl)
 import GHC.CoreToIface (toIfaceType)
@@ -146,8 +148,14 @@ transformCompletedValueAliases (CompletedValueAliases owners aliases) env (Nativ
           (idName identifier) | identifier <- Map.elems aliases]
   unless (all ((`notElem` authored) . mkVarOcc) (Map.keys aliases))
     (fail "completed value alias conflicts with a generated top-level binder")
+  -- Demand renaming gives notebook aliases precedence over imported values.
+  -- Preserve that same scope when the selected aliases become native binders.
+  let shadowed = Set.fromList (map mkVarOcc (Map.keys aliases))
+  refined <- if Set.null shadowed then pure parsed else
+    refineUnqualifiedImports (\_ _ -> False)
+      (unshadowedImportedName env shadowed) env parsed
   next <- mapImportPreservingSource (\source -> pure (case source of
-    L location _ -> L location syntax {hsmodDecls=additions ++ hsmodDecls syntax})) parsed
+    L location current -> L location current {hsmodDecls=additions ++ hsmodDecls current})) refined
   pure (NativeParsedModule next (unionNameSets [usesBefore, uses]))
   where
     aliasDeclarations (alias,identifier) =
@@ -195,7 +203,7 @@ refineProgramDeclarationImports originals env = mapPrefixImports $ \parsed -> do
         , root == importOccurrenceRoot (importOccurrenceId occurrence)]
       shadowKeys = Set.fromList (map lexicalKey (concatMap refinementNames owners))
   verified <- refineUnqualifiedImports (\occurrence _ -> not (null (bound occurrence)))
-    ((`Set.notMember` shadowKeys) . lexicalKey . exportIdentity) env parsed
+    (pure . (`Set.notMember` shadowKeys) . lexicalKey . exportIdentity) env parsed
   let select occurrence located = case [owner | owner <- bound occurrence
           , ideclQualified (unLoc located) == NotQualified] of
         [] -> pure KeepImport
@@ -235,7 +243,30 @@ refineParsedDeclarationImports env = mapPrefixImports $ \parsed ->
   let locals = nub (concatMap parsedDeclarationOccurrences
         (hsmodDecls (unLoc (pm_parsed_source (refinedParsedModule parsed)))))
   in if null locals then pure parsed else refineUnqualifiedImports (\_ _ -> False)
-      ((`notElem` locals) . nameOccName) env parsed
+      (unshadowedImportedName env (Set.fromList locals)) env parsed
+
+-- A variable shadows enabled record selectors as GHC's notebook renamer does,
+-- without conflating field labels, constructors or type names with variables.
+unshadowedImportedName :: HscEnv -> Set.Set OccName -> Name -> IO Bool
+unshadowedImportedName env locals name
+  | occurrence `Set.member` locals = pure False
+  | isJust (fieldOcc_maybe occurrence)
+      && mkVarOcc (occNameString occurrence) `Set.member` locals = do
+      known <- lookupType env name
+      resolved <- case known of
+        Just thing -> pure (Just thing)
+        Nothing | Just owner <- nameModule_maybe name
+            , not (isHomeUnit (hsc_home_unit env) (moduleUnit owner)) -> do
+              loaded <- initIfaceLoad env (importDecl name)
+              pure $ case loaded of Succeeded thing -> Just thing; Failed _ -> Nothing
+        _ -> pure Nothing
+      case resolved of
+        Just (AnId identifier) | idName identifier == name -> case idDetails identifier of
+          RecSelId {sel_fieldLabel=field} -> pure (flHasFieldSelector field /= FieldSelectors)
+          _ -> fail "imported field lacks its exact selector metadata"
+        _ -> fail "imported field lacks its exact hydrated identifier"
+  | otherwise = pure True
+  where occurrence = nameOccName name
 
 parsedDeclarationOccurrences :: LHsDecl GhcPs -> [OccName]
 parsedDeclarationOccurrences (L _ declaration) = case declaration of
@@ -306,7 +337,7 @@ bindCapturedImports owners parsed = forM owners $ \owner -> do
 -- Narrow only the unqualified view. The qualified clone keeps the submitted
 -- alias and import selection, so shadowing cannot widen historical access.
 refineUnqualifiedImports
-  :: (ImportOccurrence -> LImportDecl GhcPs -> Bool) -> (Name -> Bool)
+  :: (ImportOccurrence -> LImportDecl GhcPs -> Bool) -> (Name -> IO Bool)
   -> HscEnv -> RefinedImportSyntax -> IO RefinedImportSyntax
 refineUnqualifiedImports protected retain env parsed = do
   let module_ = refinedParsedModule parsed
@@ -334,7 +365,7 @@ refineUnqualifiedImports protected retain env parsed = do
           Succeeded found -> pure (mi_exports found)
           Failed _ -> fail "checked import refinement cannot load an original import interface"
         selected <- either fail pure (selectedImportNames available (ideclImportList declaration))
-        let retained = filter retain selected
+        retained <- filterM retain selected
         if length retained == length selected
           then pure KeepImport
           else pure (NarrowUnqualified (map importName retained))) withPrelude
