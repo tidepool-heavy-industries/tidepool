@@ -615,24 +615,23 @@ makeScopeInputs rows evidence roots = AdmittedScopeInputs (map rowOwner rows)
 
 scopeAvailableOriginalProducts :: ExactScope -> [ExactProduct]
 scopeAvailableOriginalProducts scope =
-  [case Map.lookup (originalUnit selected,originalModule selected) census of
-     Just (AdmittedOriginalCensus _ _ full _ availability) -> availableNativeProduct full availability
-     -- Request-private additions already carry the full groups issued by the
-     -- current original inventory. They need no fabricated external receipt.
-     Nothing -> selected
-  | selected <- scopeProducts scope]
+  [availableNativeProduct full availability
+  | selected <- scopeProducts scope
+  , let AdmittedOriginalCensus _ _ full _ availability =
+          census Map.! (originalUnit selected,originalModule selected)]
   where AdmittedScopeInputs _ _ _ census _ = scopeInputs scope
 
 -- Native dependency observations follow admitted availability, independently of
--- selected executable roots. Request-private additions have no external census.
+-- selected executable roots. Every product retains its authenticated census.
 scopeAvailableNativeGroupObservations :: ExactScope
   -> Either String [(ExactProduct, [NativeGroupObservation])]
-scopeAvailableNativeGroupObservations scope = mapM available
-  [row | selected <- scopeProducts scope
-       , Just row <- [Map.lookup (originalUnit selected, originalModule selected) census]]
+scopeAvailableNativeGroupObservations scope = mapM available (scopeProducts scope)
   where
     AdmittedScopeInputs _ _ _ census _ = scopeInputs scope
-    available (AdmittedOriginalCensus _ _ full native availability) = do
+    available selected = do
+      AdmittedOriginalCensus _ _ full native availability <- maybe
+        (Left "admitted scope product lacks its authenticated native census") Right
+        (Map.lookup (originalUnit selected, originalModule selected) census)
       groups <- case availability of
         FullCarrier -> Right (nativeCensusGroupObservations native)
         IssuedGroups issued -> selectNativeCensusGroupObservations native (map originalOrdinal issued)
@@ -756,32 +755,27 @@ extendExactScopeInputs scope offered = do
       Just old | old == ScopeInterfaceInput row evidence -> pure (selected,added)
       _ -> fail "exact input extension conflicts with an admitted original owner"
 
--- Complete additions form one immutable generation. Product and lexical roots
--- cannot be published independently of the interface evidence that owns them.
+-- Lexical roots and their interface evidence enter one immutable generation.
+-- Native products enter only through authenticated census admission.
 extendExactScopeGeneration :: ExactScope -> [(InterfaceRow,ExactInterfaceEvidence)]
-  -> [ExactScopeOriginal] -> [((String,String),[(String,String)])]
+  -> [((String,String),[(String,String)])]
   -> IO (Either String ExactScope)
-extendExactScopeGeneration scope offered products lexical = do
-  let oldProducts = Map.fromList [((originalUnit p,originalModule p),entry) | entry <- ownedScopeProducts scope, let p = scopeOriginalProduct entry]
-      oldLexical = Map.fromList (scopeLexical scope)
+extendExactScopeGeneration scope offered lexical = do
+  let oldLexical = Map.fromList (scopeLexical scope)
       merge selected values = foldM (\known (key,value) -> case Map.lookup key known of
         Just previous | previous /= value -> Left "scope generation replaces an admitted owner"
         _ -> Right (Map.insert key value known)) selected values
       admittedOwners = Set.fromList (map rowOwner (scopeInterfaces scope ++ map fst offered))
       lexicalOwners = Set.union (Map.keysSet oldLexical) (Set.fromList (map fst lexical))
-      productKeys = [(originalUnit p,originalModule p) | entry <- products, let p = scopeOriginalProduct entry]
-  if Set.size (Set.fromList productKeys) /= length products
-      || Set.size (Set.fromList (map fst lexical)) /= length lexical
-    then pure (Left "scope generation repeats a product or lexical owner")
+  if Set.size (Set.fromList (map fst lexical)) /= length lexical
+    then pure (Left "scope generation repeats a lexical owner")
     else
-     case (merge oldProducts [((originalUnit p,originalModule p),entry) | entry <- products, let p = scopeOriginalProduct entry], merge oldLexical lexical) of
-       (Right _,Right _) | all (\(key,requirements) -> key `Set.member` admittedOwners
+     case merge oldLexical lexical of
+       Right _ | all (\(key,requirements) -> key `Set.member` admittedOwners
            && all (`Set.member` lexicalOwners) requirements) lexical ->
          extendExactScopeInputs (scope
-           { ownedScopeProducts=ownedScopeProducts scope ++ [entry | entry <- products, let p = scopeOriginalProduct entry, Map.notMember (originalUnit p,originalModule p) oldProducts]
-           , ownedScopeLexical=scopeLexical scope ++ [entry | entry@(key,_) <- lexical, Map.notMember key oldLexical] }) offered
-       (Left reason,_) -> pure (Left reason)
-       (_,Left reason) -> pure (Left reason)
+           { ownedScopeLexical=scopeLexical scope ++ [entry | entry@(key,_) <- lexical, Map.notMember key oldLexical] }) offered
+       Left reason -> pure (Left reason)
        _ -> pure (Left "scope generation lexical edge leaves admitted interface owners")
 
 canonicalRequirementsSelected :: Map.Map (String,String) String -> ExactIfaceArtifact -> CanonicalInterfaceProof -> Bool

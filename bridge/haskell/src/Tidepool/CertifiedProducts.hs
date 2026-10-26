@@ -355,16 +355,17 @@ validateTargetOriginalUses target context roots witnesses declared =
 
 -- Census observations retain every field of an authenticated native global.
 -- They add context topology only; emitted module and target rows remain local.
-nativeGlobalWitness :: Native.NativeGlobalObservation -> GlobalWitness
-nativeGlobalWitness global =
-  (Native.nativeGlobalIdentity global, Native.nativeGlobalRep global,
-   Native.nativeGlobalSignature global, Native.nativeGlobalEvaluated global, owner)
-  where
-    owner = case Native.nativeGlobalImport global of
+nativeGlobalWitness :: Native.NativeGlobalObservation -> Either String GlobalWitness
+nativeGlobalWitness global = do
+  owner <- case Native.nativeGlobalImport global of
       Native.NativeSourceImport unit name version ordinal _ ->
-        SourceOwner (T.pack unit) (T.pack name) (Just (T.pack version)) ordinal
-      Native.NativeRetainedImport _ generation -> RetainedOwner generation
-      Native.NativePackageImport unit name seal _ -> PackageOwner (T.pack unit) (T.pack name) (T.pack seal)
+        Right (SourceOwner (T.pack unit) (T.pack name) (Just (T.pack version)) ordinal)
+      Native.NativeRetainedImport _ generation -> Right (RetainedOwner generation)
+      Native.NativePackageImport unit name seal _ -> Right (PackageOwner (T.pack unit) (T.pack name) (T.pack seal))
+      Native.NativeOriginalBindingImport{} -> Left
+        "native Original binding lacks an authenticated exact scope association"
+  pure (Native.nativeGlobalIdentity global, Native.nativeGlobalRep global,
+    Native.nativeGlobalSignature global, Native.nativeGlobalEvaluated global, owner)
 
 mergeCertifiedGroupObservations :: Eq reference => Map.Map BinderOwner (CertifiedGroupFor reference)
   -> Map.Map BinderOwner (CertifiedGroupFor reference)
@@ -872,12 +873,12 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
         forM_ observations $ \(product,_) -> unless
           (product `elem` unrecoveredExactProducts reconciled)
           (Left "native census observation leaves its reconciled exact product admission")
-        pure observations
-      nativeObservationRows =
-        [ ((T.pack (originalUnit product), T.pack (originalModule product),
+        forM [(product,group) | (product,groups) <- observations, group <- groups] $ \(product,group) -> do
+          globals <- mapM nativeGlobalWitness (Native.nativeGroupGlobals group)
+          pure ((T.pack (originalUnit product), T.pack (originalModule product),
              Just (T.pack (originalVersion product)), Native.nativeGroupOrdinal group),
-            Native.nativeGroupBinders group, map nativeGlobalWitness (Native.nativeGroupGlobals group))
-        | (product,groups) <- either (const []) id nativeObservations, group <- groups ]
+            Native.nativeGroupBinders group, globals)
+      nativeObservationRows = either (const []) id nativeObservations
       admittedBinders =
         [ (binder, (T.pack (originalUnit product), T.pack (originalModule product),
                     Just (T.pack (originalVersion product)), originalOrdinal group))

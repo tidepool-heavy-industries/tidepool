@@ -76,6 +76,7 @@ data NativeImportObservation
   = NativeSourceImport String String String Word SymbolIdentity
   | NativeRetainedImport SymbolIdentity Word64
   | NativePackageImport String String String SymbolIdentity
+  | NativeOriginalBindingImport String String (BS.ByteString,BS.ByteString) (BS.ByteString,BS.ByteString)
   deriving (Eq, Show)
 
 nativeGroupOrdinal :: NativeGroupObservation -> Word
@@ -104,6 +105,7 @@ nativeGlobalImport global = case nativeImportOwner global of
   SourceImport unit name version ordinal binder -> NativeSourceImport unit name version ordinal binder
   RetainedImport identityValue generation -> NativeRetainedImport identityValue generation
   PackageImport unit name seal binder -> NativePackageImport unit name seal binder
+  OriginalBindingImport unit name interface original -> NativeOriginalBindingImport unit name interface original
 
 nativeCensusGroupObservations :: OriginalNativeCensus -> [NativeGroupObservation]
 nativeCensusGroupObservations census =
@@ -140,6 +142,7 @@ data ImportOwner
   = SourceImport String String String Word SymbolIdentity
   | RetainedImport SymbolIdentity Word64
   | PackageImport String String String SymbolIdentity
+  | OriginalBindingImport String String (BS.ByteString,BS.ByteString) (BS.ByteString,BS.ByteString)
   deriving (Eq, Show)
 
 data ParsedCensus = ParsedCensus
@@ -228,7 +231,16 @@ decodeImportOwner = do
         Nothing -> fail "stored home source owner lacks its module version"
     ("retained", 3) -> RetainedImport <$> identity <*> decodeWord64
     ("package", 5) -> PackageImport <$> text <*> text <*> digest <*> identity
+    ("original-binding", 5) -> OriginalBindingImport <$> text <*> text <*> artifactBinding <*> artifactBinding
     _ -> fail "invalid native import owner tag or arity"
+
+artifactBinding :: Decoder s (BS.ByteString,BS.ByteString)
+artifactBinding = array 2 >> ((,) <$> bindingDigest <*> bindingDigest)
+  where
+    bindingDigest = do
+      value <- decodeBytes
+      unless (BS.length value == 32) (fail "invalid native artifact binding digest width")
+      pure value
 
 homeOwner :: Decoder s HomeOwner
 homeOwner = do
@@ -347,6 +359,11 @@ validateGlobal sources packages global = case nativeImportOwner global of
   PackageImport unit moduleName sha binder -> validatePackage unit moduleName sha binder
   RetainedImport identityValue _ -> unless (identityValue == nativeIdentity global)
     (fail "native retained global identity mismatch")
+  OriginalBindingImport unit moduleName _ _ -> unless
+    (not (null unit) && not (null moduleName)
+      && symbolUnit (nativeIdentity global) == T.pack unit
+      && symbolModule (nativeIdentity global) == T.pack moduleName)
+    (fail "native original binding global disagrees with its owner")
   where
     validatePackage unit moduleName sha binder = case Map.lookup (unit, moduleName) packages of
       Just (_, packageSha) -> unless (sha == packageSha && binder == nativeIdentity global
@@ -376,6 +393,7 @@ requiresDefinition global = case nativeImportOwner global of
   SourceImport{} -> True
   PackageImport{} -> True
   RetainedImport{} -> False
+  OriginalBindingImport{} -> True
 
 encodeCensus :: ParsedCensus -> BS.ByteString
 encodeCensus parsed = toStrictByteString $ encodeListLen 9
@@ -407,6 +425,10 @@ encodeImport owner = case owner of
     <> encodeIdentity binder <> encodeWord64 generation
   PackageImport unit moduleName sha binder -> encodeListLen 5 <> encodeString "package"
     <> encodeText unit <> encodeText moduleName <> encodeText sha <> encodeIdentity binder
+  OriginalBindingImport unit moduleName interface original -> encodeListLen 5 <> encodeString "original-binding"
+    <> encodeText unit <> encodeText moduleName <> encodeBinding interface <> encodeBinding original
+  where
+    encodeBinding (artifact,selection) = encodeListLen 2 <> encodeBytes artifact <> encodeBytes selection
 
 encodeHome :: HomeOwner -> Encoding
 encodeHome (unit, moduleName, version, interfaceSha, productSha) = encodeListLen 5

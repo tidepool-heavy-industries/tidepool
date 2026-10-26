@@ -680,7 +680,7 @@ admitCheckedInspectionScope original paths values = do
     let packages = exactPath artifact ++ ".packages"
     bytes <- BS.readFile packages
     pure ((artifact,packages,digest bytes),CheckedValueEvidence)
-  admitted <- extendExactScopeGeneration scope rows [] [] >>= either fail pure
+  admitted <- extendExactScopeGeneration scope rows [] >>= either fail pure
   unless (all (\artifact -> Map.lookup (exactUnit artifact,exactModule artifact)
       (scopeInterfaceEvidence admitted) == Just CheckedValueEvidence) values) $
     fail "checked fixture lost its actual checked-value role"
@@ -917,7 +917,7 @@ canonicalMixedSourceAdjacency = withScratch $ \work -> do
       base <- readExactScope scopePath >>= either fail pure
       inspection <- admitInspectionScope base includes []
       let lexicalRows = [(("main",name),[]) | name <- retained]
-      admitted <- extendExactScopeGeneration inspection [] [] lexicalRows >>= either fail pure
+      admitted <- extendExactScopeGeneration inspection [] lexicalRows >>= either fail pure
       unless (Map.fromList (scopeLexical admitted) == Map.fromList lexicalRows
           && Set.null (scopeSourceSelectedOwners admitted)) $
         fail "mixed source fixture lost its retained lexical/source-selection partition"
@@ -946,7 +946,7 @@ canonicalMixedSourceAdjacency = withScratch $ \work -> do
         (preparedExactCompilation prepared >>= compilationSourceSelection) admitted)
       captured <- extendExactScopeGeneration inherited
         [(row,ModuleInterfaceEvidence proof) | (_,row,proof,_) <- rows]
-        [] [(key,imports) | (key,_,_,imports) <- rows] >>= either fail pure
+        [(key,imports) | (key,_,_,imports) <- rows] >>= either fail pure
       reused <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose captured)
         (Just session) target includes Nothing
       unless (isNothing (preparedExactCompilation reused >>= compilationSourceSelection)) $
@@ -954,12 +954,12 @@ canonicalMixedSourceAdjacency = withScratch $ \work -> do
       -- Reload inspection deliberately requalifies the current source graph.
       -- Reapply real owner extensions after reading its distinct purpose.
       reloadBase <- admitReloadInspectionScope base includes []
-      reloadLexical <- extendExactScopeGeneration reloadBase [] [] lexicalRows >>= either fail pure
+      reloadLexical <- extendExactScopeGeneration reloadBase [] lexicalRows >>= either fail pure
       reloadInherited <- either fail pure (extendSourceSelectedOriginals
         (preparedExactCompilation prepared >>= compilationSourceSelection) reloadLexical)
       reload <- extendExactScopeGeneration reloadInherited
         [(row,ModuleInterfaceEvidence proof) | (_,row,proof,_) <- rows]
-        [] [(key,imports) | (key,_,_,imports) <- rows] >>= either fail pure
+        [(key,imports) | (key,_,_,imports) <- rows] >>= either fail pure
       unless (Map.fromList (scopeLexical reload) == Map.fromList (scopeLexical captured)) $
         fail "mixed source reload changed its captured lexical graph"
       rechecked <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose reload)
@@ -3203,16 +3203,13 @@ originalNativeAvailabilityChecks environment scope emitted = do
   unless (owner `elem` map productOwner (scopeRecipeOriginals compilerOriginal)
       && owner `notElem` map productOwner (scopeRecipeOriginals privateNative)) $
     fail "recipe original ownership ignored the issued native classification"
-  let emptyProduct = snapshot {originalGroups=[]}
-  forM_ [(compilerOriginal,CompilerOriginal emptyProduct),(privateNative,PrivateNative emptyProduct)] $ \(classified,original) -> do
-    continued <- extendExactScopeGeneration classified [] [original] [] >>= either fail pure
+  forM_ [compilerOriginal,privateNative] $ \classified -> do
+    continued <- extendExactScopeGeneration classified [] [] >>= either fail pure
     hydrated <- readExactScope (scopeManifestPath classified) >>= either fail pure
     unless (scopeRecipeOriginals continued == scopeRecipeOriginals classified
         && scopeRecipeOriginals hydrated == scopeRecipeOriginals classified
         && scopeAvailableOriginalProducts continued == available) $
       fail "continuation or hydration lost native input classification"
-  requireInvalid (extendExactScopeGeneration compilerOriginal [] [PrivateNative emptyProduct] [])
-  requireInvalid (extendExactScopeGeneration privateNative [] [CompilerOriginal emptyProduct] [])
   requireInvalid (withClassification "unknown-native-role")
   requireInvalid (readScopeVariant zeroScope (\fields ->
     [if index == 1 then text "15" else field | (index,field) <- zip [0::Int ..] fields]))
@@ -3231,7 +3228,7 @@ originalNativeAvailabilityChecks environment scope emitted = do
     unless (scopeRequestSha256 bounded /= scopeRequestSha256 fullSelection) $
       fail "bounded native availability did not enter the actual request identity"
     extended <- extendExactScopeInputs bounded [] >>= either fail pure
-    generation <- extendExactScopeGeneration bounded [] [] [] >>= either fail pure
+    generation <- extendExactScopeGeneration bounded [] [] >>= either fail pure
     reread <- readExactScope (scopeManifestPath bounded) >>= either fail pure
     forM_ [bounded,extended,generation,reread] $ \retained -> do
       observations <- either fail pure (scopeAvailableNativeGroupObservations retained)
@@ -3433,6 +3430,49 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
   restored <- readExactScope (scopeManifestPath scope) >>= either fail pure
   unless (scopeAvailableOriginalProducts restored == available && scopeProducts restored == scopeProducts scope) $
     fail "restored native certificate changed the retained census or selected roots"
+
+-- Decoder-only DATA exercises the complete pair, without issuing scope authority.
+nativeOriginalBindingCensusDecoding :: IO ()
+nativeOriginalBindingCensusDecoding = do
+  let seal = TString (T.replicate 64 "1")
+      symbol name occurrence = TList [TString "main",TString name,TString "value",TString occurrence,TNull]
+      binding a b = TList [TBytes (BS.replicate 32 a),TBytes (BS.replicate 32 b)]
+      owner = [TString "original-binding",TString "main",TString "Decl.J",binding 1 2,binding 3 4]
+      certificate fields = toStrictByteString $ encodeTerm $ TList
+        [TString "TPHOMEOWNERS",TInt 6
+        ,TList [TString "main",TString "Decl.K",seal,seal,seal]
+        ,TList [TList [TInt 0,TList [symbol "Decl.K" "k"]
+          ,TList [TList [symbol "Decl.J" "j",TList [TString "lifted",TInt 0],TNull,TBool False,TList fields]]]]
+        ,TList [],TList [],TNull,TList [],TNull]
+      decode fields = let bytes = certificate fields in
+        Native.decodeOriginalNativeCensusBody (digest bytes) (captureArtifactBytes bytes)
+      observed census = [Native.nativeGlobalImport global
+        | group <- Native.nativeCensusGroupObservations census, global <- Native.nativeGroupGlobals group]
+      refused fields = do
+        result <- try (decode fields) :: IO (Either IOException Native.OriginalNativeCensus)
+        case result of
+          Left _ -> pure ()
+          Right _ -> fail "malformed original binding census was accepted"
+  census <- decode owner
+  unless (observed census == [Native.NativeOriginalBindingImport "main" "Decl.J"
+      (BS.replicate 32 1,BS.replicate 32 2) (BS.replicate 32 3,BS.replicate 32 4)]) $
+    fail "native original binding decoder discarded an artifact or selection"
+  forM_ [3,4] $ \index -> forM_ [0,1] $ \field -> do
+    let change value = [if i == index then TList
+          [if j == field then value else part | (j,part) <- zip [0::Int ..] parts] else part
+          | (i,part) <- zip [0::Int ..] owner
+          , let parts = case part of TList values -> values; _ -> []]
+    forM_ [TBytes (BS.replicate 31 1),TBytes (BS.replicate 33 1),seal,TNull] (refused . change)
+    changed <- decode (change (TBytes (BS.replicate 32 9)))
+    unless (observed changed /= observed census) $
+      fail "native original binding decoder erased a historical selection distinction"
+  refused (take 4 owner)
+  refused (owner ++ [TNull])
+  forM_ [3,4] $ \index -> forM_ [TList [],TList [TBytes (BS.replicate 32 1)]
+      ,TList [TBytes (BS.replicate 32 1),TBytes (BS.replicate 32 2),TNull]] $ \pair ->
+    refused [if i == index then pair else part | (i,part) <- zip [0::Int ..] owner]
+  refused [TString "original-binding",TString "other",TString "Decl.J",binding 1 2,binding 3 4]
+  refused [TString "original-binding",TString "main",TString "Decl.X",binding 1 2,binding 3 4]
 
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work ->
