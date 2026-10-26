@@ -28886,7 +28886,7 @@ pub(crate) mod request_tests {
         drop(tools);
         workbench
             .access
-            .with_machine(context, move |session, context, _| {
+            .with_compiler_world(context, None, move |session, context, _| {
                 assert_eq!(
                     session.public_visibility_snapshot_in(context.placement.lexical_scope),
                     Some(installed_public)
@@ -34015,9 +34015,22 @@ pub(crate) mod request_tests {
             let session = held.as_mut().unwrap();
             let owner = self.prepared.execution.owner.durable().unwrap();
             let scope = self.context.placement.lexical_scope;
-            let writer = session
-                .begin_durable_private_execution(owner, scope)
+            let source = self.context.source_dependency().source_lease().unwrap();
+            let settled = session
+                .with_source_compiler_transaction(
+                    source.original_source().clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| session.begin_durable_private_execution(owner, scope),
+                )
                 .unwrap();
+            assert_eq!(
+                settled.close(),
+                &tidepool_runtime::CompilerTransactionClose::NotStarted
+            );
+            let writer = settled.into_outcome().action.unwrap();
             let intent = session.freeze_private_execution(&writer).unwrap();
             let tidepool_runtime::session::ExecutionPublication::Bindings(base) = session
                 .restage_execution_publication(owner.clone(), intent)
