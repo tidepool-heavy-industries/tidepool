@@ -2893,6 +2893,30 @@ impl SelectedCompilerInterfaces<'_> {
 }
 
 impl ArtifactView {
+    /// Retain one live value's exact canonical issuer as a candidate for an
+    /// equal finalized output. Child bindings remain custody; existing primary
+    /// namespace choices still govern qualification of the new output graph.
+    pub(crate) fn retain_type_issuance_candidate(
+        &self,
+        support: &CompilerSourceSupport,
+        owner: &ExactModuleIdentity,
+        binding: ArtifactBinding,
+    ) -> Result<Self, CompileError> {
+        let selected = support.selected_interfaces()?;
+        let narrowed = selected.type_interfaces_for_owners(vec![owner.clone()])?;
+        let row = narrowed
+            .selected
+            .get(owner)
+            .ok_or_else(|| failure("live TYPE candidate lacks its selected owner"))?;
+        if row.interface().0 != binding || row.original().is_some() {
+            return Err(failure(
+                "live TYPE candidate differs from its checked binding",
+            ));
+        }
+        let retained = self.retain_custody(&narrowed.artifacts)?;
+        retained.append_type_interfaces(&[(narrowed.artifacts.clone(), row.clone())])
+    }
+
     /// Reuse the exact issued canonical rows and proof owners. This operation
     /// adds no native roots, decisions, materialization inventory or new scope.
     fn append_type_interfaces<'a>(
@@ -7418,6 +7442,76 @@ impl CompilerInputProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_type_candidates_reuse_exact_binding_and_refuse_competing_issuers() {
+        let entry = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "fixture",
+                "Live",
+                BTreeMap::new(),
+            ),
+        ));
+        let extra = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "fixture",
+                "Other",
+                BTreeMap::new(),
+            ),
+        ));
+        let issue = |entries: Vec<Arc<ArtifactEntry>>| {
+            let inventory = ArtifactInventory::default();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let view = inventory
+                .admit_shared(&inventory.empty_view(), entries)
+                .unwrap();
+            CompilerSourceSupport::new(projection, view, [], Default::default()).unwrap()
+        };
+        let first = issue(vec![entry.clone()]);
+        let second = issue(vec![entry.clone(), extra]);
+        let owner = &entry.descriptor.owner;
+        let first_binding = first
+            .compiler_primary_input(owner)
+            .unwrap()
+            .unwrap()
+            .interface();
+        let second_binding = second
+            .compiler_primary_input(owner)
+            .unwrap()
+            .unwrap()
+            .interface();
+        assert_eq!(first_binding.artifact, second_binding.artifact);
+        assert_ne!(first_binding, second_binding);
+        let empty = ArtifactInventory::default().empty_view();
+        let retained = empty
+            .retain_type_issuance_candidate(&first, owner, first_binding)
+            .unwrap();
+        assert!(retained.selected_native_groups().is_empty());
+        let repeated = retained
+            .retain_type_issuance_candidate(&first, owner, first_binding)
+            .unwrap();
+        assert_eq!(
+            retained.capture_graph_selection(),
+            repeated.capture_graph_selection()
+        );
+        let issued = retained
+            .inventory()
+            .admit_shared(&retained, vec![entry.clone()])
+            .unwrap();
+        assert_eq!(
+            issued.namespace().get(&entry.descriptor.id),
+            Some(&first_binding)
+        );
+        let refusal = retained
+            .retain_type_issuance_candidate(&second, owner, second_binding)
+            .unwrap_err();
+        assert!(
+            matches!(refusal, CompileError::ArtifactInventory(ref failure)
+            if matches!(&failure.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if *artifact == entry.descriptor.id))
+        );
+    }
 
     impl AcquiredNativeClosures {
         pub(crate) fn assert_physical_issuance_conflict(

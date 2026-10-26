@@ -1791,6 +1791,119 @@ struct WorldCellPosition {
 }
 
 impl CompilerWorld {
+    /// Offer an exact live TYPE binding to the physical output issuer only
+    /// after that issuer has finalized the canonical artifact identity. This
+    /// does not select a compiler role or retain a historical value after its
+    /// last visible row disappears.
+    pub(crate) fn retain_live_type_candidates(
+        &self,
+        primary: &crate::artifact_inventory::CompilerSourceSupport,
+        baseline: &crate::artifact_inventory::ArtifactView,
+        entries: &[Arc<crate::artifact_inventory::ArtifactEntry>],
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<crate::artifact_inventory::ArtifactView, CompileError> {
+        use crate::artifact_inventory::{ArtifactInventoryFailure, ArtifactPayload};
+        let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
+            result.map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))
+        };
+        let mut wanted = BTreeMap::new();
+        for entry in entries {
+            charge(operation.charge(1))?;
+            if matches!(&entry.payload, ArtifactPayload::Canonical(interface)
+                if matches!(interface.origin(), crate::certified_products::CanonicalOrigin::SourceOriginal { .. }))
+                && primary
+                    .compiler_primary_input(&entry.descriptor.owner)?
+                    .is_none()
+            {
+                charge(operation.reserve::<(
+                    crate::artifact_inventory::ArtifactId,
+                    &Arc<crate::artifact_inventory::ArtifactEntry>,
+                )>(1))?;
+                wanted.insert(entry.descriptor.id, entry);
+            }
+        }
+        if wanted.is_empty() {
+            return Ok(baseline.clone());
+        }
+        let mut selected = BTreeMap::new();
+        for (&id, entry) in &wanted {
+            let first = ArtifactBinding {
+                artifact: id,
+                selection: crate::artifact_inventory::ArtifactSelectionId([0; 32]),
+            };
+            let last = ArtifactBinding {
+                artifact: id,
+                selection: crate::artifact_inventory::ArtifactSelectionId([u8::MAX; 32]),
+            };
+            for (binding, dependency) in self.restoration.dependency_rows.range(first..=last) {
+                crate::host_work::checkpoint()?;
+                charge(operation.charge(1))?;
+                if !dependency.row.entry().same_issued_facts(entry) {
+                    charge(operation.charge(
+                        entry.descriptor.owner.unit.len() + entry.descriptor.owner.module.len(),
+                    ))?;
+                    if dependency.row.entry().as_ref() != entry.as_ref() {
+                        return Err(source_failure(
+                            "live TYPE artifact differs from its finalized facts",
+                        ));
+                    }
+                }
+                charge(
+                    operation
+                        .reserve::<(crate::artifact_inventory::ArtifactId, ArtifactBinding)>(1),
+                )?;
+                if selected
+                    .insert(binding.artifact, *binding)
+                    .is_some_and(|prior| prior != *binding)
+                {
+                    return Err(crate::artifact_inventory::admission_failure(
+                        ArtifactInventoryFailure::BindingAmbiguity {
+                            artifact: binding.artifact,
+                        },
+                    ));
+                }
+            }
+        }
+        let mut retained = baseline.clone();
+        // Distinct live rows, rather than aliases, own the witnesses. The
+        // dependency index above owns liveness; a retained graph is not a census.
+        for artifact in self.restoration.inputs.bindings.rows.values() {
+            if selected.is_empty() {
+                break;
+            }
+            let support = artifact.type_interfaces().compiler_source_support();
+            let mut accepted = Vec::new();
+            for (id, binding) in &selected {
+                charge(operation.charge(1))?;
+                if !artifact.type_product().dependencies().contains_key(binding) {
+                    continue;
+                }
+                let entry = wanted[id];
+                let Some(row) = support.compiler_primary_input(&entry.descriptor.owner)? else {
+                    continue;
+                };
+                if row.interface() == *binding {
+                    retained = retained.retain_type_issuance_candidate(
+                        support,
+                        &entry.descriptor.owner,
+                        *binding,
+                    )?;
+                    charge(operation.reserve::<crate::artifact_inventory::ArtifactId>(1))?;
+                    accepted.push(*id);
+                }
+            }
+            for id in accepted {
+                selected.remove(&id);
+            }
+        }
+        if !selected.is_empty() {
+            return Err(source_failure(
+                "live TYPE dependency lacks its checked value witness",
+            ));
+        }
+        Ok(retained)
+    }
+
     pub fn binding_scope(&self) -> u64 {
         self.restoration.inputs.bindings.query_scope
     }
@@ -4225,6 +4338,8 @@ pub(crate) fn world_historical_value_transport_fixture(
         position: None,
     };
     assert_eq!(world.restoration.dependency_rows.len(), 2);
+    assert_live_type_candidate_history(&world, &[first_dependency.entry().clone()])?;
+    assert_live_type_candidate_history(&world, &[second_dependency.entry().clone()])?;
     assert!(world
         .restoration
         .dependency_rows
@@ -4261,6 +4376,120 @@ pub(crate) fn world_historical_value_transport_fixture(
         operand("first", 77, first)?,
         operand("second", 78, second)?,
     ]))
+}
+
+#[cfg(test)]
+fn assert_live_type_candidate_history(
+    world: &CompilerWorld,
+    entries: &[Arc<crate::artifact_inventory::ArtifactEntry>],
+) -> Result<(), CompileError> {
+    use crate::artifact_inventory::{ArtifactInventory, ArtifactPayload};
+    let empty_primary = crate::artifact_inventory::CompilerSourceSupport::empty();
+    let primary = &empty_primary;
+    let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let entries = entries
+        .iter()
+        .map(|entry| {
+            let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                unreachable!()
+            };
+            let reacquired = Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(
+                crate::certified_products::recover_module_interface(
+                    interface.producer_sha256(),
+                    interface.certificate_bytes().to_vec(),
+                    interface.interface_bytes().to_vec(),
+                    interface.package_imports_bytes().to_vec(),
+                    interface.core_bytes().map(<[u8]>::to_vec),
+                    interface.package_interfaces(),
+                    &mut validation,
+                )
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
+            ));
+            assert_eq!(entry, &reacquired);
+            assert!(
+                !entry.same_issued_facts(&reacquired),
+                "fresh facts must not borrow the old allocation"
+            );
+            Ok(reacquired)
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let baseline = ArtifactInventory::default().empty_view();
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    let namespace = |view: &crate::artifact_inventory::ArtifactView| {
+        view.capture_graph_selection()
+            .namespace
+            .into_iter()
+            .map(|binding| (binding.artifact, binding))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let retained = world.retain_live_type_candidates(primary, &baseline, &entries, &operation)?;
+    let mut expected = BTreeMap::new();
+    // Independent oracle starts from the current visible row manifests, not
+    // the incrementally maintained dependency reference counts.
+    for row in world.restoration.inputs.bindings.rows.values() {
+        for (binding, dependency) in row.type_product().dependencies() {
+            if matches!(&dependency.entry().payload, ArtifactPayload::Canonical(interface)
+                if matches!(interface.origin(), crate::certified_products::CanonicalOrigin::SourceOriginal { .. }))
+                && entries
+                    .iter()
+                    .any(|entry| entry.descriptor.id == binding.artifact)
+                && primary
+                    .compiler_primary_input(&dependency.entry().descriptor.owner)?
+                    .is_none()
+            {
+                assert!(expected
+                    .insert(binding.artifact, *binding)
+                    .is_none_or(|prior| prior == *binding));
+            }
+        }
+    }
+    assert_eq!(namespace(&retained), expected);
+    assert!(retained.selected_native_groups().is_empty());
+    let fixed = world
+        .restoration
+        .primary_inputs
+        .inputs()
+        .compiler_source_support();
+    let priority = world.retain_live_type_candidates(fixed, &baseline, &entries, &operation)?;
+    for entry in &entries {
+        if fixed
+            .compiler_primary_input(&entry.descriptor.owner)?
+            .is_some()
+        {
+            assert!(
+                !namespace(&priority).contains_key(&entry.descriptor.id),
+                "an existing primary TYPE or SOURCE role takes precedence over fallback"
+            );
+        }
+    }
+    if let Some(entry) = entries.first() {
+        let unrelated = Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                entry.descriptor.producer_sha256,
+                &entry.descriptor.owner.unit,
+                &entry.descriptor.owner.module,
+                BTreeMap::new(),
+            ),
+        ));
+        assert_ne!(entry.descriptor.id, unrelated.descriptor.id);
+        let fresh =
+            world.retain_live_type_candidates(primary, &baseline, &[unrelated], &operation)?;
+        assert!(
+            namespace(&fresh).is_empty(),
+            "same-owner historical TYPE does not anchor a different finalized artifact"
+        );
+    }
+    let issued = retained
+        .inventory()
+        .admit_shared(&retained, entries.to_vec())?;
+    for (id, binding) in expected {
+        assert_eq!(
+            namespace(&issued).get(&id),
+            Some(&binding),
+            "physical issuance reuses the live canonical binding"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4326,7 +4555,23 @@ fn world_value_transport_fixture_rows(
         realization: Arc::new(Mutex::new(None)),
         position: None,
     });
+    let candidate_entries = first
+        .type_product()
+        .dependencies()
+        .values()
+        .chain(second.type_product().dependencies().values())
+        .filter(|row| {
+            matches!(
+                row.entry().payload,
+                crate::artifact_inventory::ArtifactPayload::Canonical(_)
+            )
+        })
+        .map(|row| (row.entry().descriptor.id, row.entry().clone()))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect::<Vec<_>>();
     let assert_census = |world: &Arc<CompilerWorld>| -> Result<(), CompileError> {
+        assert_live_type_candidate_history(world, &candidate_entries)?;
         let restoration = &world.restoration;
         let mut seen = BTreeSet::new();
         let mut expected = BTreeMap::<ArtifactBinding, u64>::new();

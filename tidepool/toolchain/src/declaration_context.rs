@@ -14373,6 +14373,8 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             operation,
         );
         let originals = crate::certified_products::CertifiedSegmentOriginals::issue(
+            program.reservation().plan().world(),
+            inputs.stage_primary.inputs().compiler_source_support(),
             raw,
             receipt,
             admission,

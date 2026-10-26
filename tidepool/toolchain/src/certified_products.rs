@@ -1663,6 +1663,8 @@ impl CertifiedSegmentOriginals {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue(
+        world: &crate::compiler_world::CompilerWorld,
+        stage_primary: &crate::artifact_inventory::CompilerSourceSupport,
         raw: ParsedModuleProducts,
         receipt: CertifiedReceipt,
         source: crate::declaration_context::MatchedExactProductAdmission<'_>,
@@ -1808,8 +1810,36 @@ impl CertifiedSegmentOriginals {
             .chain(&value_entries)
             .cloned()
             .collect();
+        validation
+            .inventory
+            .reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(artifact_entries.len())?;
+        validation
+            .inventory
+            .charge(artifact_entries.len().saturating_mul(receipt.modules.len()))?;
+        let fresh_interfaces = artifact_entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.payload,
+                    crate::artifact_inventory::ArtifactPayload::Canonical(_)
+                ) && receipt.modules.iter().any(|module| {
+                    module.origin == ProductOrigin::Fresh
+                        && module.unit == entry.descriptor.owner.unit
+                        && module.module == entry.descriptor.owner.module
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let baseline = world
+            .retain_live_type_candidates(
+                stage_primary,
+                compiler_inputs.artifacts(),
+                &fresh_interfaces,
+                &validation.inventory,
+            )
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let products = products
-            .capture_certificates(compiler_inputs.artifacts(), entries, validation)
+            .capture_certificates(&baseline, entries, validation)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let admission = if authored.is_some() {
             SegmentOriginalAdmission::OriginalOnly(Arc::clone(products.captured_stage()))
