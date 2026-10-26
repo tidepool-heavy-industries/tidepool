@@ -1347,6 +1347,7 @@ fn write_invocation_summary(
     use std::fmt::Write;
 
     match failure {
+        Failure::WithReceipts { source, .. } => write_invocation_summary(out, source),
         Failure::RequestReplyRefused {
             request,
             refusal,
