@@ -116,7 +116,7 @@ import Tidepool.ExactScope
   , worldInputsSources, worldSourceDomainSha256
   , worldSourceRoots, worldSourceFiles, worldOriginalReferenceFor
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
-  , readWorldBindingInputs, worldBindingRow, worldBindingRowFactCID, worldBindingRowInterface
+  , readWorldBindingInputs, worldBindingSymbol, worldBindingRow, worldBindingRowFactCID, worldBindingRowInterface
   , readWorldCellOperandWithOwner, worldCellOperandInterface, worldCellOperandTypes, worldCellOperandBinding, mergeWorldTypeInputs
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedPrimary, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readPackageInterface)
@@ -136,7 +136,7 @@ import Tidepool.GhcPipeline
   , scopedEnsureWorld, scopedReadExactScope, scopedCompileWorldCell, scopedPrepareWorldCellStage, scopedValidateWorldCell
   , completedCompilerWorldStage, CompilerRecoveryCaches(..), withCompiledWorldStage
   , completedCompilerResult, completedCompilerWorldCompletion, worldCompilerCompletionInputs
-  , worldCellExactImports, pprOriginalBindings, pprOriginalReferences
+  , worldCellExactImports, worldCellTypeInterfaces, worldCellSourceSelection, pprOriginalBindings, pprOriginalReferences
   , heldWorldCellStagePath, heldWorldCellStageTypedSource, heldWorldCellStageOriginal
   , heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
   , WorldCellRefusal(..), CompilerTransactionFailure(..), emitWorldAcquisitionRejection
@@ -2688,12 +2688,17 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
           runScope (pure ()) $ \compiler -> do
             reference <- scopedEnsureWorld compiler
               (ExactInputsRequest (worldInputsIdentity facts) (CompleteExactInputs packetPath)) >>= requireReady
-            (outcome,diagnostics) <- captureDiagnostics $ try $
+            (outcome,diagnostics) <- captureDiagnostics $ try $ do
+              let expressionRecipe = WorldCellRecipe "(1 :: Int)" operandTemplate []
+              expressionArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity facts)
+                reference expressionRecipe operand (rootB </> (label ++ "-expression.cbor")))]
+              _ <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest expressionArgs) >=> finishCompletion)
+                runBoundWorldCellPlan
               compileDeclaration compiler facts reference rootB operandTemplate operand label 151
                 "operandProbe = (1 :: Int)"
             case (accepted,outcome) of
               (True,Right _) -> pure ()
-              (True,Left failure) -> hPutStrLn stderr diagnostics >> throwIO (failure :: SomeException)
+              (True,Left failure) -> hPutStrLn stderr diagnostics >> fail (label ++ ": " ++ show (failure :: SomeException))
               (False,Right _) -> fail (label ++ " borrowed another operand's lexical authority")
               (False,Left failure)
                 | "source graph imports unadmitted home implementation" `isInfixOf` diagnostics
@@ -2703,7 +2708,74 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
                     && "Could not find module" `isInfixOf` diagnostics
                     && operandModule `isInfixOf` diagnostics ->
                     hPutStrLn stderr (label ++ ": source resolution refused before lexical admission")
-                | otherwise -> hPutStrLn stderr diagnostics >> throwIO failure
+                | "import frontend lacks its admitted selected module" `isInfixOf` show failure
+                    && operandModule `isInfixOf` show failure ->
+                    hPutStrLn stderr (label ++ ": selected interface unavailable at import admission")
+                | otherwise -> hPutStrLn stderr diagnostics >> fail (label ++ ": " ++ show failure)
+        -- The imported operand must survive name planning as well as actual
+        -- compilation. Source qualification must not downsweep the generated
+        -- operand/prefix imports as ordinary workspace files.
+        let sourceRoot = rootB </> "operand-source"
+        createDirectory sourceRoot
+        sourceFiles <- forM names $ \name -> do
+          bytes <- BS.readFile (rootA </> name ++ ".hs")
+          pure (BS8.pack (name ++ ".hs"),bytes)
+        (sourcePath,_) <- writeWorldCellAdmissionPacketWithSources handles sourceRoot producer profile carried sourceFiles
+        sourceOwner <- newExactInputOwner
+        sourceFacts <- readWorldInputsWithOwner sourceOwner sourcePath
+        forM_ [(0,"input"),(1,"sessionInput")] $ \(exposure,alias) -> do
+          sealed <- sealWorldValueDescriptor handles (head operandTerms)
+          exposed <- case sealed of
+            TList (magic:_:fields) -> pure (TList (magic:TInt exposure:fields))
+            _ -> fail "operand fixture lost its exposure field"
+          let descriptor = sourceRoot </> (alias ++ ".cbor")
+              bytes = encode exposed
+              selectedOperand = WorldCellOperandRequest descriptor (SHA.hash bytes)
+          BS.writeFile descriptor bytes
+          selected <- readWorldCellOperandWithOwner owner (prHscEnv (pprPipelineResult original)) facts descriptor (SHA.hash bytes)
+          let aliasTemplate = unlines [if line == "{{CELL_DECLS}}"
+                then "class TidepoolCellExpression value where { __tidepoolCellExpression :: value -> Eff '[] () }\n"
+                  ++ "instance TidepoolCellExpression Int where { __tidepoolCellExpression value = value `seq` pure () }\n"
+                  ++ alias ++ " = FixtureOperand." ++ T.unpack (symbolOccurrence (worldBindingSymbol (worldCellOperandBinding selected))) ++ "\n" ++ line
+                else line | line <- lines operandTemplate]
+          forM_ [("plain",packetPath,facts,""),("source",sourcePath,sourceFacts,"import CanonicalPartialConsumer\n")] $
+            \(label,selectedPath,selectedFacts,imports) -> runScope (pure ()) $ \compiler -> do
+              reference <- scopedEnsureWorld compiler (ExactInputsRequest (worldInputsIdentity selectedFacts)
+                (CompleteExactInputs selectedPath)) >>= requireReady
+              let directory = sourceRoot </> (label ++ "-" ++ alias)
+                  recipe = WorldCellRecipe (imports ++ "operandPrefix = (1 :: Int)\n" ++ alias ++ " `seq` operandPrefix") aliasTemplate []
+              createDirectory directory
+              planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity selectedFacts)
+                reference recipe (Just selectedOperand) (directory </> "plan.cbor"))]
+              plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs) >=> finishCompletion) runBoundWorldCellPlan
+              expressionNames <- case deserialiseFromBytes decodeTerm (BL.fromStrict plan) of
+                Right (remaining,TList [TString "TPCELLPLAN6",_,_,_,_,_,_,_,_,_,TList rows]) | BL.null remaining ->
+                  forM rows $ \row -> case row of
+                    TList [TInt ordinal,TString name] -> pure (ordinal,T.unpack name)
+                    _ -> fail "operand expression plan lost its name"
+                _ -> fail "operand expression plan lost its receipt"
+              let ordinal = if null imports then 1 else 2
+              expressionName <- maybe (fail "operand expression plan lost its ordinal") pure (lookup ordinal expressionNames)
+              let slots = (if null imports then [] else [(0,PlannedPrologue 161)])
+                    ++ [(fromIntegral (ordinal-1),PlannedDeclaration 162),(fromIntegral ordinal,PlannedExpression 163 expressionName)]
+                  question = WorldCellPrepareRequest (worldInputsIdentity selectedFacts) reference recipe (Just selectedOperand)
+                    plan (BS.replicate 32 25) 161 slots directory (directory </> "prepared.cbor")
+              args <- decodeWorldArgs [WorldCellPrepare question]
+              (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
+                -- Bound request admission has already checked the plan and
+                -- captured this operand. Stages must consume that same owner.
+                removeFile descriptor
+                completed <- (prepareWorldCell request >>= either (fail . show) pure)
+                  `finally` BS.writeFile descriptor bytes
+                unless (length completed == length slots) (fail "operand expression lost a completed stage")
+                inputs <- maybe (fail "operand expression lost its input facts") pure
+                  (preparedCompilationWorldInputs (last completed))
+                unless (any ((== operandModule) . exactModule . fst) (worldCellTypeInterfaces inputs))
+                  (fail "operand expression lost its exact TYPE interface")
+                when (label == "source") $ unless (any
+                    (maybe False (isJust . worldCellSourceSelection) . preparedCompilationWorldInputs) completed)
+                  (fail "source operand history did not qualify a selected canonical source")
+                mapM_ (commitPreparedWorldDependencies request) completed
         -- Canonical TYPE dependencies remain authenticated inputs while a
         -- fresh source module crosses prologue, declaration and execution.
         let memoRoot = rootB </> "source-memo"
