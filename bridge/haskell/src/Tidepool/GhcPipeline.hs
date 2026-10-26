@@ -4236,8 +4236,13 @@ prepareImportAdmission variant target environment actual checkedValues matched@(
     found <- findImportedModule environment requested qualifier
     owner <- case found of
       Found _ owner -> pure owner
-      _ -> fail (boundedDiagnosticText 4096 ("import frontend lacks its admitted selected module: "
-        ++ moduleNameString requested ++ " (" ++ show (dependencyQualifier qualifier) ++ ")"))
+      _ -> do
+        let detail = boundedDiagnosticText 4096 ("import frontend lacks its admitted selected module: "
+              ++ moduleNameString requested ++ " (" ++ show (dependencyQualifier qualifier) ++ ")")
+        if pvWorldOnly variant then do
+          emitWorldAcquisitionRejection "world import resolution" path detail
+          throwIO WorldCellUnavailable
+        else fail detail
     when (admitsCheckedValueImport checkedValues owner) $ do
       when boot (fail "checked value import cannot select a boot interface")
       case lookupHpt (hsc_HPT environment) (moduleName owner) of
@@ -10511,7 +10516,7 @@ validateCanonicalSourceInputsWithViews interfaceViews
       sourceImports = Map.fromList [(key,imports) | (key,imports,_) <- qualifiedImports]
   -- Qualification's Finder contains cycle-owned files. Publish only the
   -- selected captured/HPT association and caller Finder, never dead views.
-  let clean = env {hsc_FC=hsc_FC initial,hsc_targets=hsc_targets initial}
+  let clean = env {hsc_FC=hsc_FC initial,hsc_targets=hsc_targets initial,hsc_mod_graph=hsc_mod_graph initial}
   closedInputs <- liftIO (restoreHydratedInterfaceEnvironment hydratedInputs clean)
   setSession (hydratedExactEnvironment closedInputs)
   pure (ValidatedOriginalSources graph current exactImports sourceImports closedInputs,selected)

@@ -65,6 +65,8 @@ import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
 import GHC.Data.ShortText qualified as PackageText
 import GHC.Unit.Env (ue_setUnits)
 import GHC.Unit.State (UnitState(..))
+import GHC.Unit.Finder (FindResult(..), findImportedModule)
+import GHC.Types.PkgQual (PkgQual(..))
 import GHC.Unit.Info (unitImportDirs, unitLibraryDirs, unitLibraryDynDirs, unitIncludeDirs)
 import GHC.Types.Unique.Map (mapUniqMap)
 import GHC.Tc.Types (tcg_mod)
@@ -2682,7 +2684,9 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
               [if line == "{{CELL_IMPORTS}}"
                 then "import qualified " ++ operandModule ++ " as FixtureOperand\n" ++ line
                 else line | line <- lines template]
-        forM_ [("matching-operand",Just matching,True)
+        forM_ [("cold-missing-operand",Nothing,False)
+              ,("cold-foreign-operand",Just foreignOperand,False)
+              ,("matching-operand",Just matching,True)
               ,("missing-operand",Nothing,False)
               ,("foreign-operand",Just foreignOperand,False)] $ \(label,operand,accepted) ->
           runScope (pure ()) $ \compiler -> do
@@ -2701,17 +2705,17 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
               (True,Left failure) -> hPutStrLn stderr diagnostics >> fail (label ++ ": " ++ show (failure :: SomeException))
               (False,Right _) -> fail (label ++ " borrowed another operand's lexical authority")
               (False,Left failure)
-                | "source graph imports unadmitted home implementation" `isInfixOf` diagnostics
+                | fromException failure == Just WorldCellUnavailable
+                    && "import frontend lacks its admitted selected module" `isInfixOf` diagnostics
                     && operandModule `isInfixOf` diagnostics ->
-                    hPutStrLn stderr (label ++ ": exact lexical authority refused")
-                | isJust (sourceFailureDiagnostics failure)
-                    && "Could not find module" `isInfixOf` diagnostics
-                    && operandModule `isInfixOf` diagnostics ->
-                    hPutStrLn stderr (label ++ ": source resolution refused before lexical admission")
-                | "import frontend lacks its admitted selected module" `isInfixOf` show failure
-                    && operandModule `isInfixOf` show failure ->
-                    hPutStrLn stderr (label ++ ": selected interface unavailable at import admission")
+                    hPutStrLn stderr (label ++ ": exact selected interface unavailable")
                 | otherwise -> hPutStrLn stderr diagnostics >> fail (label ++ ": " ++ show failure)
+            scopedRunGhc compiler $ do
+              environment <- getSession
+              found <- liftIO (findImportedModule environment (mkModuleName operandModule) NoPkgQual)
+              case found of
+                Found {} -> liftIO (fail (label ++ ": operation leaked its operand into caller Finder"))
+                _ -> pure ()
         -- The imported operand must survive name planning as well as actual
         -- compilation. Source qualification must not downsweep the generated
         -- operand/prefix imports as ordinary workspace files.
