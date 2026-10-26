@@ -10,7 +10,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , PreparedPackageTarget, projectPreparedPackageTarget
   , packageTargetName, packageTargetProgram, packageTargetConstructors, packageTargetGroups
-  , packageTargetImports, packageTargetHomeImports, packageTargetCurrentHomeGroups, packageTargetPriorHomeImports, packageTargetOriginalImports
+  , packageTargetImports, packageTargetHomeImports, packageTargetCurrentHomeGroups, packageTargetPriorHomeImports, packageTargetOriginalImports, packageTargetLocalHomeBindings
   , ProjectedPackageGroup, projectPreparedPackageGroups
   , projectedPackageModule, projectedPackageDefiningVersion, projectedPackageInterfaceSha256, projectedPackageInterfaceBody, projectedPackageEncoding
   , projectedPackageConstructors, projectedPackageYieldSites
@@ -980,6 +980,7 @@ data PreparedPackageTarget = PreparedPackageTarget
   -- These are this target's reached uses, including uses with no package leaves.
   -- The stage-wide acquisition is not an executable root for every target.
   , packageTargetOriginalImports :: Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
+  , packageTargetLocalHomeBindings :: Set SymbolIdentity
   }
 
 packageTargetCurrentHomeGroups :: PreparedPackageTarget -> Set (String, String, Word)
@@ -1110,7 +1111,8 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
         [ globalIdentity global
         | global <- programGlobals program
         , isPackageImport global ]
-  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports currentHome priorHomeImports originalImports)
+  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports currentHome priorHomeImports originalImports
+    (Set.fromList [identity | identity <- candidateBindingIdentities candidate, isHomeUnit (symbolOwner identity)]))
   where
     insertHomeImport known row@(unit,name,ordinal,identities) =
       case Map.lookup (unit,name,ordinal) known of
@@ -1160,21 +1162,16 @@ projectPreparedWithHostBindings hostBindings context modules topIdentityMap =
 
 -- The candidate keeps its entry checks paired with the exact emitted program.
 -- Package recovery may inspect globals, but cannot publish an unchecked body.
-data PreparedCandidate = PreparedCandidate WireProgram [IssuedConstructor] [ProjectionError]
+data PreparedCandidate = PreparedCandidate WireProgram [IssuedConstructor] [ProjectionError] [SymbolIdentity]
 
 candidateGlobals :: PreparedCandidate -> [GlobalDecl]
-candidateGlobals (PreparedCandidate program _ _) = programGlobals program
+candidateGlobals (PreparedCandidate program _ _ _) = programGlobals program
 
 candidateBindingIdentities :: PreparedCandidate -> [SymbolIdentity]
-candidateBindingIdentities (PreparedCandidate program _ _) =
-  [ identity | group <- programBindings program
-  , binding <- case group of
-      NonRecursive top -> [top]
-      Recursive tops -> tops
-  , TopBinding identity _ <- [binding] ]
+candidateBindingIdentities (PreparedCandidate _ _ _ bindings) = bindings
 
 finalizePreparedCandidate :: PreparedCandidate -> Either ProjectionError (WireProgram, [IssuedConstructor])
-finalizePreparedCandidate (PreparedCandidate program constructors failures) = case failures of
+finalizePreparedCandidate (PreparedCandidate program constructors failures _) = case failures of
   failure : _ -> Left failure
   [] -> Right (program, constructors)
 
@@ -1244,7 +1241,10 @@ projectPreparedCandidateWithImports packageExports hostBindings context modules 
         , programJsonLayout = programJsonLayout
         }
   pure (PreparedCandidate program (map fst (toList (constructors final)))
-    (reverse (entryContractFailures final)))
+    (reverse (entryContractFailures final))
+    [symbol | group <- bindingGroups, TopBinding symbol _ <- case group of
+      NonRecursive binding -> [binding]
+      Recursive bindings -> bindings])
   where
     admitJsonAuthority Nothing authority = pure (Just authority)
     admitJsonAuthority (Just selected) authority
