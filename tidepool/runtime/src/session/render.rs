@@ -1438,9 +1438,16 @@ pub fn render_module_with_vals(
 
     // Standard imports, then the selective prior-gen import, then any user
     // imports hoisted from decl sources (deduped against the standard set).
-    for imp in &env.imports {
-        out.push_str(&hide_session_heads(imp, &all_session_heads));
-        out.push('\n');
+    // A pure retraction shell only needs its predecessor's interface.
+    let pure_shell = this.items.is_empty()
+        && this.normalized.body.trim().is_empty()
+        && hoisted_imports.is_empty()
+        && val_modules.is_empty();
+    if !pure_shell {
+        for imp in &env.imports {
+            out.push_str(&hide_session_heads(imp, &all_session_heads));
+            out.push('\n');
+        }
     }
     if let Some(prev) = &prev_module {
         if hidden_prior.is_empty() {
@@ -2351,6 +2358,73 @@ mod tests {
             !r.source.contains("\n    findings"),
             "retracted name must not appear in the export list:\n{}",
             r.source
+        );
+        assert!(r.source.contains("    module Tidepool.Session.Lib.G2\n"));
+        assert_eq!(
+            r.source
+                .lines()
+                .filter(|line| line.starts_with("import "))
+                .collect::<Vec<_>>(),
+            ["import Tidepool.Session.Lib.G2 hiding (findings)"]
+        );
+    }
+
+    #[test]
+    fn nonempty_render_inputs_preserve_default_imports() {
+        let env = ModuleEnv::standalone_default();
+        let mut external_import = turn("", vec![]);
+        external_import.external_imports = SourceImports::from_specs(["Data.Either"]);
+        let cases = [
+            (external_import, vec![]),
+            (turn("answer = 42", vec![val("answer")]), vec![]),
+            (turn("default (Int)", vec![]), vec![]),
+            (turn("", vec![val("answer")]), vec![]),
+            (header_turn("", vec![], &[], &["import Data.Maybe"]), vec![]),
+            (turn("", vec![]), vec!["Tidepool.Session.Val.G1".to_owned()]),
+        ];
+        for (turn, values) in cases {
+            let mut log = DeclLog::new();
+            let generation = log.push(turn);
+            let rendered = render_module_with_vals(&log, generation, &env, &values);
+            for import in &env.imports {
+                assert!(
+                    rendered.source.lines().any(|line| line == import),
+                    "{}",
+                    rendered.source
+                );
+            }
+            for import in &log.turn(generation).unwrap().normalized.prologue.imports {
+                assert!(rendered.source.lines().any(|line| line == import.source));
+            }
+            for import in log
+                .turn(generation)
+                .unwrap()
+                .external_imports
+                .source_lines()
+            {
+                assert!(rendered.source.lines().any(|line| line == import));
+            }
+            for module in values {
+                assert!(rendered.source.contains(&format!("import {module}\n")));
+            }
+        }
+    }
+
+    #[test]
+    fn whitespace_retraction_shell_omits_default_imports() {
+        let mut log = DeclLog::new();
+        push_chained(&mut log, turn("answer = 42", vec![val("answer")]));
+        let mut shell = retract_turn(&["answer"]);
+        shell.normalized.body = " \n\t".into();
+        push_chained(&mut log, shell);
+        let rendered = render_module(&log, log.generation(), &ModuleEnv::standalone_default());
+        assert_eq!(
+            rendered
+                .source
+                .lines()
+                .filter(|line| line.starts_with("import "))
+                .collect::<Vec<_>>(),
+            ["import Tidepool.Session.Lib.G1 hiding (answer)"]
         );
     }
 
