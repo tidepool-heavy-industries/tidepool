@@ -88,6 +88,23 @@ async fn interrupt_during_preview_with_compiler_owner(
     }
     let handles = resident.value_handle_count();
     context.actor = fixture.actor.identity();
+    let (boot_source, source_layers) =
+        crate::resident_workbench::request_tests::generation_source_fixture(
+            &source,
+            Arc::new(_root),
+        );
+    let (selected_context, _boot_authority) = WorkbenchCompilationAuthority::admit(
+        context,
+        boot_source.clone(),
+        None,
+        Some(&source_layers),
+    )
+    .unwrap();
+    context = selected_context;
+    fixture.environment.source_inspection = Some(
+        crate::SourceInspectionServices::from_source_layers(source_layers.clone()),
+    );
+    fixture.environment.source_layers = Some(source_layers);
     let machines = Arc::new(ActorMachineRegistry::new());
     fixture.environment.runner = ResidentActorRunner::new(
         Arc::clone(&machines),
@@ -177,6 +194,11 @@ async fn interrupt_during_preview_with_compiler_owner(
     // This fixture invokes the resident method directly after configuring the
     // real owner, so retain the exact handle that production start installs.
     behavior.lifecycle = Some(fixture.kernel.lifecycle().clone());
+    behavior.spawn_source = Some(boot_source);
+    behavior
+        .select_initial_configuration(&context)
+        .await
+        .unwrap();
     behavior.policy_installed = already_installed;
     fixture.environment.actors.lock().insert(
         context.actor,
@@ -704,6 +726,23 @@ async fn native_operation_sequence_with_compiler_owner(
         drop(input);
     }
     context.actor = fixture.actor.identity();
+    let (boot_source, source_layers) =
+        crate::resident_workbench::request_tests::generation_source_fixture(
+            &source,
+            Arc::new(_source_root),
+        );
+    let (selected_context, _boot_authority) = WorkbenchCompilationAuthority::admit(
+        context,
+        boot_source.clone(),
+        None,
+        Some(&source_layers),
+    )
+    .unwrap();
+    context = selected_context;
+    fixture.environment.source_inspection = Some(
+        crate::SourceInspectionServices::from_source_layers(source_layers.clone()),
+    );
+    fixture.environment.source_layers = Some(source_layers);
     let mut descriptor = ActorDescriptor::new("native activation", context.placement);
     let durable_owner = durable.then(|| {
         let path = tidepool_repr::ActorPath::parse("root/native-activation").unwrap();
@@ -774,6 +813,11 @@ async fn native_operation_sequence_with_compiler_owner(
     );
     // Match production start's cached handle for the genuinely configured owner.
     behavior.lifecycle = Some(fixture.kernel.lifecycle().clone());
+    behavior.spawn_source = Some(boot_source);
+    behavior
+        .select_initial_configuration(&context)
+        .await
+        .unwrap();
     behavior.policy_installed = true;
     fixture.environment.actors.lock().insert(
         context.actor,

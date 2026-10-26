@@ -26228,6 +26228,47 @@ pub(crate) mod request_tests {
         }
     }
 
+    pub(crate) fn generation_source_fixture(
+        source: &ActorWorkbenchSource,
+        owner: Arc<tempfile::TempDir>,
+    ) -> (
+        crate::CheckpointSourceLayer,
+        crate::ActorSourceLayerResolver,
+    ) {
+        let roots = source.toolset_support.to_vec();
+        let (compiler_source_capsule, compiler_source_owner) =
+            world_query_test_source_files_with_support(&[], &roots);
+        let entry_storage = Arc::new(tempfile::tempdir().unwrap());
+        let issuer = crate::SourceLayerIssuer::default();
+        let source_owner = Arc::new(GenerationSource {
+            issuer: issuer.clone(),
+            inspection: crate::SourceInspectionServices::new(compiler_source_owner.clone()),
+            _owner: owner,
+            _entries: entry_storage.clone(),
+            paths: roots,
+            identities: compiler_source_capsule.identities().to_vec(),
+            evidence: crate::SourceGenerationEvidence {
+                reference: compiler_source_owner.evidence.reference.clone(),
+                configuration_digest: [0; 32],
+            },
+            entries: crate::SourceEntryStorage::FreshCompilation {
+                directory: entry_storage.path().to_owned(),
+                preparation: uuid::Uuid::new_v4(),
+            },
+            compiler_sources: compiler_source_capsule
+                .capture_compiler_sources()
+                .unwrap()
+                .unwrap(),
+        });
+        let captured = issuer.issue(source_owner.clone());
+        let layers: crate::ActorSourceLayerResolver = source_owner;
+        assert!(layers.toolset_layer_from(&compiler_source_capsule).is_err());
+        assert!(layers
+            .toolset_layer_from(&crate::CheckpointSourceLayer::default())
+            .is_err());
+        (captured, layers)
+    }
+
     async fn run_quoted_generation_fixture(
         preparation_client: crate::CompilerPreparationClient,
         generation_replacement: Option<crate::ActorPersistencePolicy>,
@@ -28775,37 +28816,7 @@ pub(crate) mod request_tests {
             recovery = Some(fixture);
         });
         let recovery = recovery.unwrap();
-        let roots = source.toolset_support.to_vec();
-        let (compiler_source_capsule, compiler_source_owner) =
-            world_query_test_source_files_with_support(&[], &roots);
-        let entry_storage = Arc::new(tempfile::tempdir().unwrap());
-        let issuer = crate::SourceLayerIssuer::default();
-        let source_owner = Arc::new(GenerationSource {
-            issuer: issuer.clone(),
-            inspection: crate::SourceInspectionServices::new(compiler_source_owner.clone()),
-            _owner: Arc::new(_root),
-            _entries: entry_storage.clone(),
-            paths: roots,
-            identities: compiler_source_capsule.identities().to_vec(),
-            evidence: crate::SourceGenerationEvidence {
-                reference: compiler_source_owner.evidence.reference.clone(),
-                configuration_digest: [0; 32],
-            },
-            entries: crate::SourceEntryStorage::FreshCompilation {
-                directory: entry_storage.path().to_owned(),
-                preparation: uuid::Uuid::new_v4(),
-            },
-            compiler_sources: compiler_source_capsule
-                .capture_compiler_sources()
-                .unwrap()
-                .unwrap(),
-        });
-        let captured = issuer.issue(source_owner.clone());
-        let layers: crate::ActorSourceLayerResolver = source_owner;
-        assert!(layers.toolset_layer_from(&compiler_source_capsule).is_err());
-        assert!(layers
-            .toolset_layer_from(&crate::CheckpointSourceLayer::default())
-            .is_err());
+        let (captured, layers) = generation_source_fixture(&source, Arc::new(_root));
         let (context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
             context,
             captured,
