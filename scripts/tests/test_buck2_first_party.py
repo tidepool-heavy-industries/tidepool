@@ -1150,6 +1150,8 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 'resident_actor::owned_workbench::publication_tests::prepared_publication_observing_a_sibling_fence_requires_recovery',
                 'resident_actor::owned_workbench::publication_tests::prepared_publication_observing_a_sibling_fence_preserves_recovery_during_cancellation',
                 'resident_workbench::display_callback_tests::retained_display_runs_after_private_admission_settles_and_current_scope_changes',
+                'resident_workbench::display_callback_tests::expansion_fences_immediate_handler_before_callback_input',
+                'resident_workbench::display_callback_tests::filesystem_errors_retain_expandable_display',
             ]
         })
         self.assertEqual(group['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],
