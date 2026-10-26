@@ -13,7 +13,7 @@ module Tidepool.CertifiedProducts
   , emptyPackageLinks, emptyPackageLinkIndex, encodePackageLinks
   , validatePackageTargetRoots
   , OriginalUseClosureFailure(..), validateOriginalUseClosure, retainedInputClosureFromWitnesses
-  , WitnessOwnerFor(..) ) where
+  , WitnessOwnerFor(..), CertifiedGroupFor(..), mergeCertifiedGroupObservations ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -292,7 +292,7 @@ data TargetCertificationContext = TargetCertificationContext
   , targetBinderAvailability :: Set.Set SymbolIdentity
   , targetNativeOwners :: Set.Set (T.Text,T.Text)
   , targetInterfaceSeals :: Map.Map (T.Text,T.Text) T.Text
-  , targetGroupWitnesses :: Map.Map BinderOwner [GlobalWitness]
+  , targetGroupWitnesses :: Map.Map BinderOwner (CertifiedGroupFor WorldOriginalReference)
   , targetPackageLinkIndex :: PackageLinkIndex
   }
 
@@ -300,13 +300,13 @@ data TargetCertificationContext = TargetCertificationContext
 data OriginalUseClosureFailure reference
   = OriginalUseMissingLocalBinding SymbolIdentity
   | OriginalUseMissingGroup BinderOwner
-  | OriginalUseSourceOwnerMismatch SymbolIdentity BinderOwner (Maybe BinderOwner)
+  | OriginalUseSourceOwnerMismatch SymbolIdentity BinderOwner
   | OriginalUseKeysDiffer Int Int [(reference,SymbolIdentity)] [(reference,SymbolIdentity)]
   deriving (Eq, Show)
 
 validateOriginalUseClosure
   :: Ord reference => Map.Map SymbolIdentity BinderOwner
-  -> Map.Map BinderOwner [GlobalWitnessFor reference]
+  -> Map.Map BinderOwner (CertifiedGroupFor reference)
   -> Set.Set SymbolIdentity
   -> [GlobalWitnessFor reference]
   -> Set.Set (reference,SymbolIdentity)
@@ -325,9 +325,9 @@ validateOriginalUseClosure binders groups localBindings witnesses declared = do
       OriginalBindingOwner reference -> visit seen (Set.insert (reference,identity) uses) pending rest
       SourceOwner unit name version ordinal -> do
         let coordinate = (unit,name,version,ordinal)
-            actualOwner = Map.lookup identity binders
-        unless (actualOwner == Just coordinate)
-          (Left (OriginalUseSourceOwnerMismatch identity coordinate actualOwner))
+        group <- maybe (Left (OriginalUseMissingGroup coordinate)) Right (Map.lookup coordinate groups)
+        unless (identity `elem` certifiedGroupBinders group)
+          (Left (OriginalUseSourceOwnerMismatch identity coordinate))
         visit seen uses (coordinate:pending) rest
       _ -> visit seen uses pending rest
     visit _ uses [] [] = Right uses
@@ -335,7 +335,7 @@ validateOriginalUseClosure binders groups localBindings witnesses declared = do
       | coordinate `Set.member` seen = visit seen uses pending []
       | otherwise = do
           imports <- maybe (Left (OriginalUseMissingGroup coordinate)) Right (Map.lookup coordinate groups)
-          visit (Set.insert coordinate seen) uses pending imports
+          visit (Set.insert coordinate seen) uses pending (certifiedGroupGlobals imports)
 
 validateTargetOriginalUses :: T.Text -> TargetCertificationContext -> Set.Set SymbolIdentity
   -> [GlobalWitness] -> Set.Set (WorldOriginalReference,SymbolIdentity) -> Either String ()
@@ -346,8 +346,8 @@ validateTargetOriginalUses target context roots witnesses declared =
     Left failure -> Left $ "Original use target " ++ take 160 (T.unpack target) ++ ": " ++ case failure of
       OriginalUseMissingLocalBinding identity -> "closure lacks local HOME binding " ++ take 320 (show identity)
       OriginalUseMissingGroup coordinate -> "closure lacks certified HOME group " ++ take 320 (show coordinate)
-      OriginalUseSourceOwnerMismatch identity expected actual -> "source dependency differs from its exact binder owner: "
-        ++ take 640 (show (identity,expected,actual))
+      OriginalUseSourceOwnerMismatch identity expected -> "source dependency is absent from its exact destination group: "
+        ++ take 640 (show (identity,expected))
       OriginalUseKeysDiffer missing extra missingSample extraSample -> "keys differ from final executable closure: missing="
         ++ show missing ++ "; extra=" ++ show extra
         ++ "; missing sample=" ++ take 640 (show missingSample)
@@ -366,9 +366,10 @@ nativeGlobalWitness global =
       Native.NativeRetainedImport _ generation -> RetainedOwner generation
       Native.NativePackageImport unit name seal _ -> PackageOwner (T.pack unit) (T.pack name) (T.pack seal)
 
-mergeGroupWitnesses :: Map.Map BinderOwner [GlobalWitness] -> Map.Map BinderOwner [GlobalWitness]
-  -> Either String (Map.Map BinderOwner [GlobalWitness])
-mergeGroupWitnesses left right = Map.foldlWithKey' insert (Right left) right
+mergeCertifiedGroupObservations :: Eq reference => Map.Map BinderOwner (CertifiedGroupFor reference)
+  -> Map.Map BinderOwner (CertifiedGroupFor reference)
+  -> Either String (Map.Map BinderOwner (CertifiedGroupFor reference))
+mergeCertifiedGroupObservations left right = Map.foldlWithKey' insert (Right left) right
   where
     insert result coordinate witnesses = do
       groups <- result
@@ -378,14 +379,17 @@ mergeGroupWitnesses left right = Map.foldlWithKey' insert (Right left) right
         _ -> Right (Map.insert coordinate witnesses groups)
 
 validateSourceWitnessOwner :: TargetCertificationContext -> SymbolIdentity -> BinderOwner -> Either String ()
-validateSourceWitnessOwner context identity coordinate =
-  unless (Map.lookup identity (targetBinderOwners context) == Just coordinate)
-    (Left ("source dependency differs from its exact certified binder owner: " ++ show (identity,coordinate)))
+validateSourceWitnessOwner context identity coordinate = do
+  group <- maybe (Left ("source dependency lacks its exact certified group: " ++ show coordinate)) Right
+    (Map.lookup coordinate (targetGroupWitnesses context))
+  unless (identity `elem` certifiedGroupBinders group)
+    (Left ("source dependency is absent from its exact certified group: " ++ show (identity,coordinate)))
 
 certifiedGroupWitnesses :: TargetCertificationContext -> BinderOwner -> Either String [GlobalWitness]
 certifiedGroupWitnesses context coordinate = do
-  witnesses <- maybe (Left ("closure lacks certified native group: " ++ show coordinate)) Right
+  group <- maybe (Left ("closure lacks certified native group: " ++ show coordinate)) Right
     (Map.lookup coordinate (targetGroupWitnesses context))
+  let witnesses = certifiedGroupGlobals group
   forM_ witnesses $ \(identity,_,_,_,owner) -> case owner of
     SourceOwner unit name version ordinal ->
       validateSourceWitnessOwner context identity (unit,name,version,ordinal)
@@ -629,6 +633,13 @@ data WitnessOwnerFor reference
 type WitnessOwner = WitnessOwnerFor WorldOriginalReference
 type GlobalWitnessFor reference = (SymbolIdentity, RuntimeRep, Maybe Signature, Bool, WitnessOwnerFor reference)
 type GlobalWitness = GlobalWitnessFor WorldOriginalReference
+
+-- The exact group owns its binding membership and ordered dependency facts
+-- together. Current symbol selection is used for roots, not historical edges.
+data CertifiedGroupFor reference = CertifiedGroup
+  { certifiedGroupBinders :: [SymbolIdentity]
+  , certifiedGroupGlobals :: [GlobalWitnessFor reference]
+  } deriving (Eq)
 
 ownerCoordinate :: WitnessOwner -> Maybe OwnerCoordinate
 ownerCoordinate (SourceOwner unit name version _) = Just (SourceCoordinate unit name version)
@@ -927,11 +938,6 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
       ++ ["native census binder disagrees with its admitted exact coordinate: " ++ show (binder,coordinate)
          | (coordinate,groupBinders,_) <- nativeObservationRows, binder <- groupBinders
          , Map.lookup binder freshOwnerMap /= Just coordinate]
-      ++ ["native census binder membership conflicts with prior certified group: " ++ show coordinate
-         | (coordinate,groupBinders,_) <- nativeObservationRows
-         , maybe False (Map.member coordinate . targetGroupWitnesses) prior
-         , Set.fromList groupBinders /= Set.fromList
-             [binder | (binder,previous) <- Map.toList priorOwners, previous == coordinate]]
       ++ map renderOriginalInventoryRefusal inventoryRefusals of
     reason : _ -> pure (Left reason)
     [] -> do
@@ -1127,7 +1133,8 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
               borrowedSeals = Map.fromList
                 [( (unit,name),sha) | product <- products, (unit,name,sha) <- productInterfaces product]
               groupWitnesses = Map.fromList
-                [((productUnit product,productModule product,productVersion product,candidateGroupOrdinal group),witnesses)
+                [((productUnit product,productModule product,productVersion product,candidateGroupOrdinal group),
+                    CertifiedGroup (candidateGroupBinders group) witnesses)
                 | (product,group,witnesses) <- moduleRows]
               makeContext completeGroups = TargetCertificationContext ownerMap originalReferences homeModules
                 (Map.union currentPackages priorPackages)
@@ -1137,11 +1144,11 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                 completeGroups
                 packageLinks
           pure $ do
-            admittedGroups <- foldM (\groups (coordinate,_,witnesses) ->
-                mergeGroupWitnesses groups (Map.singleton coordinate witnesses))
+            admittedGroups <- foldM (\groups (coordinate,groupBinders,witnesses) ->
+                mergeCertifiedGroupObservations groups (Map.singleton coordinate (CertifiedGroup groupBinders witnesses)))
               Map.empty nativeObservationRows
-            currentGroups <- mergeGroupWitnesses groupWitnesses admittedGroups
-            completeGroups <- mergeGroupWitnesses currentGroups (maybe Map.empty targetGroupWitnesses prior)
+            currentGroups <- mergeCertifiedGroupObservations groupWitnesses admittedGroups
+            completeGroups <- mergeCertifiedGroupObservations currentGroups (maybe Map.empty targetGroupWitnesses prior)
             let context = makeContext completeGroups
             -- The native writer retains every final target, including targets
             -- with no Original or package uses. The standalone DATA encoder has
@@ -1236,13 +1243,11 @@ encodeCertifiedItemProductsWithInputs env context selection = do
 
 retainedInputClosure :: TargetCertificationContext -> [GlobalWitness]
   -> Either String (Set.Set (SymbolIdentity,Word64))
-retainedInputClosure context = retainedInputClosureFromWitnesses
-  (targetBinderOwners context) (targetGroupWitnesses context)
+retainedInputClosure context = retainedInputClosureFromWitnesses (targetGroupWitnesses context)
 
-retainedInputClosureFromWitnesses :: Map.Map SymbolIdentity BinderOwner
-  -> Map.Map BinderOwner [GlobalWitnessFor reference] -> [GlobalWitnessFor reference]
+retainedInputClosureFromWitnesses :: Map.Map BinderOwner (CertifiedGroupFor reference) -> [GlobalWitnessFor reference]
   -> Either String (Set.Set (SymbolIdentity,Word64))
-retainedInputClosureFromWitnesses binders groups = visit Set.empty Set.empty
+retainedInputClosureFromWitnesses groups = visit Set.empty Set.empty
   where
     visit _ inputs [] = Right inputs
     visit seen inputs ((identity,_,_,_,owner):pending) = case owner of
@@ -1253,13 +1258,12 @@ retainedInputClosureFromWitnesses binders groups = visit Set.empty Set.empty
       OriginalBindingOwner _ -> visit seen inputs pending
       SourceOwner unit name version ordinal -> do
         let coordinate = (unit,name,version,ordinal)
-        unless (Map.lookup identity binders == Just coordinate)
-          (Left ("source dependency differs from its exact certified binder owner: " ++ show (identity,coordinate)))
+        group <- maybe (Left ("executable input demand lacks its certified native group: " ++ show coordinate))
+          Right (Map.lookup coordinate groups)
+        unless (identity `elem` certifiedGroupBinders group)
+          (Left ("source dependency is absent from its exact certified group: " ++ show (identity,coordinate)))
         if coordinate `Set.member` seen then visit seen inputs pending
-        else do
-          witnesses <- maybe (Left ("executable input demand lacks its certified native group: " ++ show coordinate))
-            Right (Map.lookup coordinate groups)
-          visit (Set.insert coordinate seen) inputs (witnesses ++ pending)
+        else visit (Set.insert coordinate seen) inputs (certifiedGroupGlobals group ++ pending)
 
 certifyItemProducts :: HscEnv -> TargetCertificationContext -> ItemPackageSelection
   -> IO (Either String (BS.ByteString,[GlobalWitness]))

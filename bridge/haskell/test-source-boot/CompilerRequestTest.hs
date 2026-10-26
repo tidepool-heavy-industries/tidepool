@@ -60,7 +60,7 @@ import Tidepool.ExactHydration (CheckedTemplateImports(..), generatedCheckingTem
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
   ( captureSelectedPackageWitnesses, encodeReceiptIdentity
-  , validatePackageTargetRoots, validateOriginalUseClosure, OriginalUseClosureFailure(..), retainedInputClosureFromWitnesses
+  , validatePackageTargetRoots, validateOriginalUseClosure, OriginalUseClosureFailure(..), retainedInputClosureFromWitnesses, CertifiedGroupFor(..), mergeCertifiedGroupObservations
   , WitnessOwnerFor(..) )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -108,10 +108,10 @@ originalUseClosureChecks = do
       source ordinal = SourceOwner (Text.pack "main") (Text.pack "Observed") Nothing ordinal
       binders = Map.fromList [(root,coordinate 0),(middle,coordinate 1),(auxiliary,coordinate 2)]
       groups = Map.fromList
-        [(coordinate 0,[witness middle (source 1)])
-        ,(coordinate 1,[witness root (source 0),witness original (OriginalBindingOwner (1 :: Int))
+        [(coordinate 0,CertifiedGroup [root] [witness middle (source 1)])
+        ,(coordinate 1,CertifiedGroup [middle] [witness root (source 0),witness original (OriginalBindingOwner (1 :: Int))
           ,witness alias (OriginalBindingOwner 1)])
-        ,(coordinate 2,[witness zero (OriginalBindingOwner 2)])]
+        ,(coordinate 2,CertifiedGroup [auxiliary] [witness zero (OriginalBindingOwner 2)])]
       globals = [witness root (source 0)]
       locals = Set.singleton auxiliary
       expected = Set.fromList [(1,original),(1,alias),(2,zero)]
@@ -134,21 +134,39 @@ originalUseClosureChecks = do
       == Left (OriginalUseMissingGroup (coordinate 1)))
   require "source edge accepted another binder's exact ordinal"
     (validateOriginalUseClosure binders groups Set.empty [witness root (source 1)] Set.empty
-      == Left (OriginalUseSourceOwnerMismatch root (coordinate 1) (Just (coordinate 0))))
+      == Left (OriginalUseSourceOwnerMismatch root (coordinate 1)))
   let foreignCoordinate = (Text.pack "main",Text.pack "Observed",Just (Text.pack "foreign-version"),0)
   require "source edge accepted a foreign version"
     (validateOriginalUseClosure binders groups Set.empty
       [witness root (SourceOwner (Text.pack "main") (Text.pack "Observed") (Just (Text.pack "foreign-version")) 0)] Set.empty
-      == Left (OriginalUseSourceOwnerMismatch root foreignCoordinate (Just (coordinate 0))))
+      == Left (OriginalUseMissingGroup foreignCoordinate))
   let retained = symbol "retainedInput"
-      captureGroups = Map.adjust (++ [witness retained (RetainedOwner 41)]) (coordinate 1)
-        (Map.adjust (++ [witness retained (RetainedOwner 42)]) (coordinate 2) groups)
+      appendGlobal global group = group {certifiedGroupGlobals=certifiedGroupGlobals group ++ [global]}
+      captureGroups = Map.adjust (appendGlobal (witness retained (RetainedOwner 41))) (coordinate 1)
+        (Map.adjust (appendGlobal (witness retained (RetainedOwner 42))) (coordinate 2) groups)
   require "native closure lost exact retained generations through a cycle"
-    (retainedInputClosureFromWitnesses binders captureGroups
+    (retainedInputClosureFromWitnesses captureGroups
       (globals ++ [witness auxiliary (source 2)]) == Right (Set.fromList [(retained,41),(retained,42)]))
   require "retained input traversal accepted a foreign source coordinate"
-    (case retainedInputClosureFromWitnesses binders captureGroups [witness root (source 1)] of
+    (case retainedInputClosureFromWitnesses captureGroups [witness root (source 1)] of
       Left _ -> True; Right _ -> False)
+  let historicalSource = SourceOwner (Text.pack "main") (Text.pack "Observed") (Just (Text.pack "foreign-version")) 0
+      historicalGroups = Map.insert foreignCoordinate
+        (CertifiedGroup [root] [witness root historicalSource,witness zero (OriginalBindingOwner 9)]) groups
+  require "recorded historical edge was rematched to current symbol selection"
+    (validateOriginalUseClosure binders historicalGroups Set.empty [witness root historicalSource]
+      (Set.singleton (9,zero)) == Right ())
+  require "identical exact group observations conflicted"
+    (mergeCertifiedGroupObservations groups groups == Right groups)
+  forM_ [CertifiedGroup [middle] [witness middle (source 1)],
+         CertifiedGroup [root] [witness middle (OriginalBindingOwner 7)],
+         CertifiedGroup [root] [(middle,Wire.LiftedRefRep,Nothing,True,source 1)]] $ \changed ->
+    require "conflicting exact group membership or full dependency observation was overwritten"
+      (case mergeCertifiedGroupObservations groups (Map.singleton (coordinate 0) changed) of
+        Left _ -> True; Right _ -> False)
+  require "distinct historical coordinates were collapsed by symbol identity"
+    (mergeCertifiedGroupObservations groups (Map.singleton foreignCoordinate (historicalGroups Map.! foreignCoordinate))
+      == Right historicalGroups)
   -- Fixed-point set expansion is an independent oracle for all root subsets,
   -- including empty selection. Root order and repeated references cannot alter it.
   forM_ [Set.fromList [i | i <- [0..2], mask `div` (2^i) `mod` 2 == (1 :: Int)]
