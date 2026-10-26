@@ -22,8 +22,8 @@ pub use source_admission::{
     ConfirmedSourcePublication, OwnSourceFenceReopened, RuntimeSourceAdmission,
     RuntimeSourceCompilerTransaction, RuntimeSourceFence, RuntimeSourceFenceTransition,
     RuntimeSourceLeaseClaim, RuntimeSourcePublicationPrerequisite, RuntimeSourcePublicationView,
-    RuntimeSourceReopen, SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase,
-    SourceFenceTransitionFailure,
+    RuntimeSourceReopen, RuntimeSourceRetirementProof, SourceAdmissionError, SourceAdmissionHook,
+    SourceAdmissionPhase, SourceFenceTransitionFailure,
 };
 mod binding_table;
 mod dialect;
@@ -101,12 +101,14 @@ pub use persistent::{
 };
 
 pub use admission::{
-    HostCarrierAdmissionFailure, PendingHostValueWrite, PrivateCellPreparation,
-    PrivateExecutionAdmission, PrivateHostCarrierPreparation, PrivatePreparationSnapshot,
-    ReservedNotebookScope, RuntimeBindingInterfaceReservation, RuntimeCellAdmission,
-    RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
-    RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
-    RuntimeOriginalSource, RuntimeWorldCellOperand, UnpublishedNotebookScope,
+    DiscardedPrivateBinding, DiscardedPrivateWrites, HostCarrierAdmissionFailure,
+    PendingHostValueWrite, PrivateCellPreparation, PrivateExecutionAdmission,
+    PrivateHostCarrierPreparation, PrivatePreparationSnapshot, ReservedNotebookScope,
+    RuntimeBindingInterfaceReservation, RuntimeCellAdmission, RuntimeCheckedItemAdmission,
+    RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot, RuntimeDurablePublicReadiness,
+    RuntimeHostBindingAdmission, RuntimeLexicalScopeLease, RuntimeOriginalSource,
+    RuntimeWorldCellOperand, SupersededCompilerProgress, SupersededPrivateExecution,
+    UnpublishedNotebookScope,
 };
 pub use paired_publication::FrozenWorldExecution;
 pub use paired_publication::{

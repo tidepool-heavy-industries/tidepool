@@ -115,6 +115,42 @@ pub enum HostCarrierAdmissionFailure {
     ItemOrder { position: usize, observed: usize },
 }
 
+/// Read-only diagnostics of private work discarded by generation replacement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscardedPrivateBinding {
+    pub id: tidepool_repr::SessionVarId,
+    pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SupersededCompilerProgress {
+    Unchanged,
+    Checked,
+    HostChanged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscardedPrivateWrites {
+    pub bindings: Vec<DiscardedPrivateBinding>,
+    pub declarations: bool,
+    pub accepted_host_mounts: u64,
+    pub compiler_progress: SupersededCompilerProgress,
+}
+
+/// Both outcomes retire only the original private scope and publish no names.
+/// Counts describe the actual synchronous scope retirement, not freed bytes;
+/// surviving external leases keep their independently owned values alive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SupersededPrivateExecution {
+    Empty {
+        retirement: super::ScopeRetirement,
+    },
+    Discarded {
+        writes: DiscardedPrivateWrites,
+        retirement: super::ScopeRetirement,
+    },
+}
+
 /// A detached lexical owner captured in the same checkout as its public base.
 /// Its scope retains exact binding and native shares through the existing
 /// binding-store owner; completion must retire that scope once.
@@ -151,6 +187,7 @@ enum PrivateExecutionPhase {
     Open,
     Freezing,
     Frozen,
+    Superseded,
 }
 
 enum PrivateAuthoredProgram {
@@ -161,6 +198,7 @@ enum PrivateAuthoredProgram {
         predecessor: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
     },
     Failed,
+    Superseded(PrivateCheckedItemProgress),
 }
 
 /// A freeze borrows its exact completed private owner. Compiler evidence alone
@@ -201,6 +239,9 @@ impl std::fmt::Debug for PrivateAuthoredProgram {
                 .field("predecessor", predecessor.logical_id())
                 .finish(),
             Self::Failed => formatter.write_str("Failed"),
+            Self::Superseded(progress) => {
+                formatter.debug_tuple("Superseded").field(progress).finish()
+            }
         }
     }
 }
@@ -1363,6 +1404,7 @@ impl PrivateExecutionAdmission {
             PrivateAuthoredProgram::Active { .. } | PrivateAuthoredProgram::Failed => {
                 PrivateCheckedItemProgress::Started
             }
+            PrivateAuthoredProgram::Superseded(progress) => *progress,
         }
     }
 
@@ -1403,7 +1445,7 @@ impl PrivateExecutionAdmission {
                     .map(|_| None)
                     .ok_or(SessionError::StaleStagedDeclaration);
             }
-            PrivateExecutionPhase::Freezing => {
+            PrivateExecutionPhase::Freezing | PrivateExecutionPhase::Superseded => {
                 return Err(SessionError::StaleStagedDeclaration);
             }
             PrivateExecutionPhase::Open => {}
@@ -2082,7 +2124,7 @@ impl RuntimeLexicalScopeLease {
                     PrivateAuthoredProgram::Active { predecessor, .. } => {
                         Arc::ptr_eq(predecessor, world)
                     }
-                    PrivateAuthoredProgram::Failed => false,
+                    PrivateAuthoredProgram::Failed | PrivateAuthoredProgram::Superseded(_) => false,
                 };
                 if !same_predecessor {
                     return Err(SessionError::StaleStagedDeclaration);
@@ -4956,6 +4998,96 @@ impl PersistentSession {
             return Err(SessionError::WorldCellPublicationBaseStale);
         }
         Ok(association)
+    }
+
+    /// Settle an execution whose actual source owner has committed retirement.
+    /// This is cleanup authority, never permission to publish or compile for A or B.
+    pub fn settle_superseded_private_execution(
+        &mut self,
+        execution: &PrivateExecutionAdmission,
+        proof: &super::RuntimeSourceRetirementProof,
+    ) -> Result<SupersededPrivateExecution, SessionError> {
+        if !Arc::ptr_eq(&execution.owner, self.admission_owner())
+            || execution.owner_epoch != self.admission_owner().epoch()
+            || !self.has_lib()
+            || execution.session() != self.lib().session_id()
+            || execution.library != self.lib().compile_view_identity
+        {
+            return Err(super::SessionTransitionReason::OwnerChanged.into());
+        }
+        // Completion/acceptance takes lifecycle exclusion before issuer locks.
+        let mut state = execution.state.lock();
+        if state.phase != PrivateExecutionPhase::Open || execution.final_intent.get().is_some() {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
+        let PrivateAuthoredProgram::Ready(frontier) = &state.authored else {
+            return Err(SessionError::WorldCellPublicationIncomplete);
+        };
+        if !state.pending_hosts.is_empty()
+            || state.accepted_visible_revision != state.applied_visible_revision
+            || !state.unapplied_visible_hosts.is_empty()
+        {
+            return Err(SessionError::WorldCellPublicationIncomplete);
+        }
+        let association = self.current_private_world_association(execution)?;
+        if !frontier.matches_world(&association.world) {
+            return Err(SessionError::WorldCellPublicationBaseStale);
+        }
+        let compiler_progress = match frontier.publication() {
+            CompletedPrivateCompilerProgress::Unchanged => SupersededCompilerProgress::Unchanged,
+            CompletedPrivateCompilerProgress::Checked(_) => SupersededCompilerProgress::Checked,
+            CompletedPrivateCompilerProgress::HostChanged(_) => {
+                SupersededCompilerProgress::HostChanged
+            }
+        };
+        let original = execution.original_source()?;
+        let owner = execution.owner.clone();
+        owner.with_source_transition(|_| {
+            // Validate canonical custody again under the exclusive issuer lock.
+            original.validate_local_source_issuer()?;
+            execution.scope_lease.validate_local_source_issuer()?;
+            if execution.owner_epoch != owner.epoch()
+                || !self.scope_tree().is_live(execution.private_scope())
+                || execution.private_scope().is_root()
+            {
+                return Err(super::SessionTransitionReason::OwnerChanged.into());
+            }
+            proof.validate_current(original.source_admission())?;
+            let mut completed = execution.completed_values.lock();
+            let empty = completed.is_empty()
+                && state.accepted_visible_revision == 0
+                && compiler_progress == SupersededCompilerProgress::Unchanged;
+            let mut bindings = completed
+                .iter()
+                .map(|(id, value)| DiscardedPrivateBinding {
+                    id: *id,
+                    name: value.name.clone(),
+                })
+                .collect::<Vec<_>>();
+            bindings.sort_by_key(|binding| binding.id.raw());
+            let writes = DiscardedPrivateWrites {
+                bindings,
+                declarations: self.lib().scope_tip(execution.private_scope())
+                    != execution.compiler_basis.admitted.declaration_tip,
+                accepted_host_mounts: state.accepted_visible_revision,
+                compiler_progress,
+            };
+            // No fallible work follows this terminal transition. Retiring the
+            // private frame uses the existing root/native ownership accounting.
+            state.phase = PrivateExecutionPhase::Superseded;
+            state.authored = PrivateAuthoredProgram::Superseded(match compiler_progress {
+                SupersededCompilerProgress::Checked => PrivateCheckedItemProgress::Completed,
+                _ => PrivateCheckedItemProgress::NotStarted,
+            });
+            let retirement = self.retire_scope_exclusive(execution.private_scope(), true);
+            completed.clear();
+            state.accepted_host_progress = None;
+            Ok(if empty {
+                SupersededPrivateExecution::Empty { retirement }
+            } else {
+                SupersededPrivateExecution::Discarded { writes, retirement }
+            })
+        })
     }
 
     pub(super) fn reconcile_private_visible_hosts(

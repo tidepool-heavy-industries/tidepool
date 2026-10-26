@@ -1373,6 +1373,15 @@ def actor_notebook_contract_test_cases(binary):
 
 # These actual World/capture cases need a resident compiler both in their
 # maintained cohorts and when selected directly through `just test-lib`.
+RUNTIME_SUPERSEDED_EXECUTION_CASES = ["session::resident::activation_input_tests::superseded_execution::" + name for name in (
+    "retired_source_settles_only_its_exact_empty_execution_once",
+    "retired_source_discards_completed_value_without_publishing",
+    "retired_source_refuses_active_execution_without_mutation",
+    "retired_source_discards_declaration_without_publishing",
+    "retired_source_requires_host_settlement_and_reconciliation",
+    "retired_source_refuses_stale_epoch_without_mutation",
+)]
+
 RUNTIME_CHECKED_CAPTURE_CASES = ["session::resident::authored_publication_tests::" + name for name in (
     "checked_interface_publication_conflict_preserves_private_prefix",
     "checked_interface_publication_write_failure_preserves_private_prefix",
@@ -2145,6 +2154,7 @@ tidepool_buildscript_run(
                     for name in [
                         "session::turn::tests::cell_program_primary_failure_keeps_its_outer_close_observation",
                         *RUNTIME_CHECKED_CAPTURE_CASES,
+                        *RUNTIME_SUPERSEDED_EXECUTION_CASES,
                         *RUNTIME_TYPED_SEGMENT_SEMANTIC_CASES,
                     ]) + "},"] if package_name == "tidepool-runtime" else []),
                 *(['    case_compiler_modes = {' + ", ".join(

@@ -5233,7 +5233,11 @@ impl PersistentSession {
         owner.with_source_transition(|_| self.retire_scope_exclusive(scope, false))
     }
 
-    fn retire_scope_exclusive(&mut self, scope: ScopeId, retire_source: bool) -> ScopeRetirement {
+    pub(super) fn retire_scope_exclusive(
+        &mut self,
+        scope: ScopeId,
+        retire_source: bool,
+    ) -> ScopeRetirement {
         let roots_before = self.persistent_roots_count();
         let doomed = self.scopes.retire(scope);
         // Lexical abandonment may already have released the scope while actual

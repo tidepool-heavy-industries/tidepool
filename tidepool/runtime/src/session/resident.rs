@@ -8123,6 +8123,21 @@ where
         self.state.parked_count()
     }
 
+    /// Complete cleanup after the exact source retirement; never publish the
+    /// private overlay into either notebook generation.
+    pub fn settle_superseded_private_execution(
+        &mut self,
+        execution: &super::PrivateExecutionAdmission,
+        proof: &super::RuntimeSourceRetirementProof,
+    ) -> Result<super::SupersededPrivateExecution, SessionError> {
+        let settled = self
+            .state
+            .settle_superseded_private_execution(execution, proof)?;
+        self.prune_binding_metadata();
+        self.advance_public_visibility(execution.private_scope());
+        Ok(settled)
+    }
+
     /// Retire `scope` and its subtree: drop their binding-store frames and
     /// release the GC roots those bindings solely owned. See
     /// [`PersistentSession::retire_scope`] for the sole-ownership rule and the

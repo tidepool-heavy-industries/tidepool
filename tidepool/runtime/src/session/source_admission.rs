@@ -458,6 +458,41 @@ pub struct RuntimeSourceFence {
     attempt: u64,
 }
 
+/// Immutable evidence issued only after the actual fence commits retirement.
+/// The actor separately binds this source fact to its exact execution/control.
+#[derive(Clone, Debug)]
+pub struct RuntimeSourceRetirementProof {
+    owner: RuntimeSourceAdmission,
+    successor: NotebookGenerationId,
+}
+
+impl RuntimeSourceRetirementProof {
+    pub fn successor(&self) -> NotebookGenerationId {
+        self.successor
+    }
+
+    pub(super) fn validate_current(
+        &self,
+        original: &RuntimeSourceAdmission,
+    ) -> Result<(), SourceAdmissionError> {
+        if !self.owner.same_owner(original) {
+            return Err(SourceAdmissionError::DifferentOriginalSource);
+        }
+        let state = self.owner.0.state.lock();
+        if state.phase
+            != (SourceAdmissionPhase::Retired {
+                successor: self.successor,
+            })
+        {
+            return Err(SourceAdmissionError::Closed {
+                scope: self.owner.0.scope,
+                phase: state.phase,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Publication may observe its exact held fence without reopening or retiring it.
 #[derive(Clone)]
 pub struct RuntimeSourcePublicationView {
@@ -833,8 +868,12 @@ impl RuntimeSourceFence {
     pub fn retire(
         self,
         successor: NotebookGenerationId,
-    ) -> Result<(), (Self, SourceAdmissionError)> {
+    ) -> Result<RuntimeSourceRetirementProof, (Self, SourceAdmissionError)> {
         self.settle(SourceAdmissionPhase::Retired { successor })
+            .map(|()| RuntimeSourceRetirementProof {
+                owner: self.owner.clone(),
+                successor,
+            })
             .map_err(|error| (self, error))
     }
     fn settle(&self, phase: SourceAdmissionPhase) -> Result<(), SourceAdmissionError> {
@@ -1598,11 +1637,28 @@ mod tests {
         assert_eq!(fence.pending_claims(), 1);
         assert!(lease.admit_source().is_err());
         drop(claim);
-        assert!(fence.retire(successor).is_ok());
+        let proof = fence
+            .retire(successor)
+            .unwrap_or_else(|(_, error)| panic!("{error:?}"));
+        assert_eq!(proof.successor(), successor);
+        assert!(proof.validate_current(lease.source_admission()).is_ok());
+        let other = session.mint_notebook_scope_with_lease(None).unwrap();
+        assert_eq!(
+            proof.validate_current(other.source_admission()),
+            Err(SourceAdmissionError::DifferentOriginalSource)
+        );
         assert_eq!(
             lease.source_admission().0.state.lock().phase,
             SourceAdmissionPhase::Retired { successor }
         );
+        session.retire_scope(lease.scope());
+        assert!(matches!(
+            proof.validate_current(lease.source_admission()),
+            Err(SourceAdmissionError::Closed {
+                phase: SourceAdmissionPhase::ScopeRetired,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1730,7 +1786,10 @@ mod tests {
                         let result = fence.retire(NotebookGenerationId::INITIAL.next().unwrap());
                         prop_assert_eq!(result.is_ok(), outstanding == 0);
                         match result {
-                            Ok(()) => phases[gate] = 2,
+                            Ok(proof) => {
+                                assert_eq!(proof.successor(), NotebookGenerationId::INITIAL.next().unwrap());
+                                phases[gate] = 2;
+                            },
                             Err((fence, _)) => fences[gate] = Some(fence),
                         }
                     },

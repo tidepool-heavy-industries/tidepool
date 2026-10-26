@@ -369,6 +369,7 @@ pub enum WorkbenchNotPublishedReason {
     Failed,
     Rejected,
     Cancelled,
+    GenerationReset,
 }
 
 impl WorkbenchPublicationOutcome {

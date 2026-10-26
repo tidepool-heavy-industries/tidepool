@@ -1,5 +1,8 @@
 //! Real parked inputs through thin original-type issuance and affine mounting.
 
+#[path = "activation_input_tests/superseded_execution.rs"]
+mod superseded_execution;
+
 #[path = "activation_input_tests/finite_source_world_history.rs"]
 mod finite_source_world_history;
 
