@@ -374,6 +374,7 @@ pub(crate) fn assert_actual_world_original_package_refusals(
     .unwrap();
     let mut controls = 0;
     let mut package_uses = 0;
+    let mut issued_items = Vec::new();
     for (index, item) in program.items().iter().enumerate() {
         if item.native_products().is_none() {
             continue;
@@ -420,6 +421,20 @@ pub(crate) fn assert_actual_world_original_package_refusals(
         let actual_packages = selection.checked_original_packages(operation).unwrap();
         assert!(!actual_packages.use_roots().is_empty());
         let packet: Value = ciborium::de::from_reader(item_bytes.as_ref()).unwrap();
+        let mut unchanged = Vec::new();
+        ciborium::ser::into_writer(&packet, &mut unchanged).unwrap();
+        assert_eq!(unchanged.as_slice(), item_bytes.as_ref());
+        let mut unchanged_cursor = cursor.clone();
+        segment
+            .originals
+            .select_item(
+                &mut unchanged_cursor,
+                decode_segment_item_with_operation(&unchanged, operation).unwrap(),
+                &artifact.bind_package_program(),
+                Some(&item_outputs),
+                &mut validation,
+            )
+            .expect("unchanged packet roundtrip retains actual item issuance");
         let mutate = |roots: Value| {
             let mut observed = packet.clone();
             let Value::Array(header) = &mut observed else {
@@ -511,6 +526,7 @@ pub(crate) fn assert_actual_world_original_package_refusals(
         controls += 1;
         let (_, _, _, retry) =
             issue(actual).expect("refusals leave the actual item issuer and cursor unchanged");
+        issued_items.push((index, retry.clone()));
         let retried = retry.checked_original_packages(operation).unwrap();
         assert_eq!(retried.use_roots(), actual_packages.use_roots());
         assert_eq!(
@@ -518,6 +534,44 @@ pub(crate) fn assert_actual_world_original_package_refusals(
             actual_packages.coordinates().collect::<Vec<_>>()
         );
     }
+    assert_eq!(issued_items.len(), 2, "both actual items use an Original");
+    let (zero_index, zero_selection) = issued_items
+        .iter()
+        .find(|(_, selection)| {
+            selection
+                .checked_original_packages(operation)
+                .unwrap()
+                .coordinates()
+                .next()
+                .is_none()
+        })
+        .expect("one selected Original has no package obligations");
+    let (other_index, _) = issued_items
+        .iter()
+        .find(|(index, _)| index != zero_index)
+        .unwrap();
+    let zero_sources = program.items()[*zero_index]
+        .native_products()
+        .unwrap()
+        .native_source_products()
+        .unwrap();
+    let other_sources = program.items()[*other_index]
+        .native_products()
+        .unwrap()
+        .native_source_products()
+        .unwrap();
+    crate::artifact_inventory::ArtifactInventory::assert_original_package_target_subset(
+        &zero_sources,
+        &other_sources,
+        &crate::artifacts::invocation_output::CapturedNativeOutput::from_world(checked),
+        segment.package_products(),
+        zero_selection.clone(),
+        segment
+            .product_admission()
+            .compiler_inputs()
+            .compiler_source_support(),
+        operation,
+    );
     assert!(
         package_uses > 0,
         "actual fixture must acquire an Original use"

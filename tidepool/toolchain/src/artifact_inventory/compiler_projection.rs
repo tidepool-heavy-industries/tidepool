@@ -911,6 +911,62 @@ impl PartialEq for AcquiredNativeClosures {
 }
 impl Eq for AcquiredNativeClosures {}
 
+#[cfg(test)]
+impl ArtifactInventory {
+    /// Cross genuine same-stage items at the final linker boundary, after
+    /// their independent item issuers have authenticated each selection.
+    pub(crate) fn assert_original_package_target_subset(
+        own: &crate::artifacts::ResolvedNativeSourceProducts<'_>,
+        other: &crate::artifacts::ResolvedNativeSourceProducts<'_>,
+        output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
+        packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
+        selection: crate::certified_products::BoundPackageSelection,
+        inherited: &CompilerSourceSupport,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) {
+        assert!(std::ptr::eq(output.operation().as_ref(), operation));
+        selection
+            .require_output_operation(output.operation())
+            .unwrap();
+        let original = selection.checked_original_packages(operation).unwrap();
+        assert!(!original.use_roots().is_empty());
+        assert_eq!(original.coordinates().count(), 0);
+        let own_groups = own
+            .groups()
+            .map(|row| row.binding())
+            .collect::<BTreeSet<_>>();
+        let other_groups = other
+            .groups()
+            .map(|row| row.binding())
+            .collect::<BTreeSet<_>>();
+        assert!(original.use_roots().is_subset(&own_groups));
+        assert!(
+            original.use_roots().is_disjoint(&other_groups),
+            "the crossed target genuinely omits the selected zero-obligation Original"
+        );
+        let link = |sources, selection| {
+            link_native_target(
+                sources,
+                output,
+                packages,
+                selection,
+                inherited.acquired_native_closures(),
+                operation,
+            )
+        };
+        link(own, selection.clone()).expect("the actual zero-obligation target links");
+        let error = link(other, selection.clone())
+            .err()
+            .expect("an acquired Original use cannot select another target's HOME roots");
+        assert!(
+            matches!(error, CompileError::ExtractFailed(ref detail)
+            if detail == "artifact inventory: Original package use exceeds selected exact HOME groups"),
+            "unexpected crossed-target refusal: {error:?}"
+        );
+        link(own, selection).expect("crossed refusal leaves the actual target usable");
+    }
+}
+
 /// Complete only this acquired target closure. Available unused HOME groups
 /// and unused captured package products do not become executable roots.
 pub(crate) fn link_native_target(

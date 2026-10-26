@@ -1176,48 +1176,47 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_package_occurrence_linkage_tests owns it"]
 fn real_cached_home_world_item_admits_its_package_roots() {
-    let home_source = include_str!("../../tests/fixtures/world-native/CachedPackageWorldHome.hs");
-    let compiled_home = crate::artifacts::test_support::compile_invocation(
-        &crate::artifacts::CompileInvocation {
-            source: home_source,
-            targets: &["cachedTextLength"],
-            include: &[],
-            fallback_module_name: "CachedPackageWorldHome",
-        },
-        |_, _, _| {},
+    let producer = test_support::compiler_input_directory().unwrap();
+    let sources = producer.path().join("sources");
+    std::fs::create_dir(&sources).unwrap();
+    std::fs::write(
+        sources.join("CachedPackageWorldHome.hs"),
+        include_str!("../../tests/fixtures/world-native/CachedPackageWorldHome.hs"),
     )
-    .expect("the cached HOME owner comes from the production compiler");
+    .unwrap();
+    let wrapper = sources.join("CachedPackageWorldEntry.hs");
+    std::fs::write(
+        &wrapper,
+        include_str!("../../tests/fixtures/world-native/CachedPackageWorldEntry.hs"),
+    )
+    .unwrap();
+    let frozen = FrozenEntrySources::capture(&[sources], &wrapper).unwrap();
+    let entry = test_support::prepare_frozen_production_entry(
+        &frozen,
+        producer.path(),
+        &producer.path().join("entry"),
+    )
+    .expect("the cached HOME owner comes from the production entry compiler");
     let owner = crate::declaration_join::ExactModuleIdentity {
         unit: "main".into(),
         module: "CachedPackageWorldHome".into(),
     };
-    // Borrow the actual output's retained compiler inputs for a protected
-    // import. Retained facts confer no completed-output or source authority.
-    let primary = Arc::new(
-        crate::declaration_context::ExactDeclarationContext::retained_execution_support_fixture(
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                &compiled_home
-                    .producer_identity
-                    .expect("the production compiler binds its producer identity"),
-            )
-            .sha256(),
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
-                compiled_home
-                    .issued_output
-                    .as_ref()
-                    .expect("fresh compiler selection")
-                    .compiler_inputs(),
-            )
-            .expect("the actual issued output closes its compiler support"),
-            vec![crate::declaration_join::ExactLexicalNode {
-                owner: owner.clone(),
-                imports: Vec::new(),
-            }],
-            owner.clone(),
-            &[owner],
+    let publication = entry
+        .products()
+        .published_source_original_selection(
+            &frozen
+                .source_revision(b"cached package World fixture")
+                .unwrap(),
+            &owner,
         )
-        .unwrap(),
+        .expect("the actual output owns its published source selection");
+    let primary = Arc::new(
+        crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())
+            .unwrap()
+            .with_published_source_originals(&publication)
+            .unwrap(),
     );
+    assert!(primary.source_scope().admits(&owner));
     let ((_endpoint, _world, _source, prepared), admission) = settle(|| {
         let (endpoint, world, source) = open_empty_world_with_primary(Some(Arc::clone(&primary)))?;
         let template = include_str!("../../tests/fixtures/world-native/PackageCellTemplate.hs")
@@ -1231,7 +1230,7 @@ fn real_cached_home_world_item_admits_its_package_roots() {
             &source,
             include_str!("../../tests/fixtures/world-native/CachedPackageWorldItem.hs").into(),
             None,
-            &[(41, "cachedWorldValue")],
+            &[(41, "cachedWorldValue"), (42, "cachedZeroValue")],
             template,
         )?;
         assert_eq!(checked.stages().len(), 1);
