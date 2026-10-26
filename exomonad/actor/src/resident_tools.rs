@@ -127,22 +127,13 @@ pub(crate) fn retain_committed_generation_operation(
     reply: &mut crate::KernelWorkbenchReply,
     operation: &tidepool_runtime::session::WorkbenchOperationReceipt,
 ) {
-    if let Err(
-        failure @ (crate::KernelInvocationFailure::ActorExited(_)
-        | crate::KernelInvocationFailure::Cancelled { .. }),
-    ) = reply
-    {
-        let actor = match failure {
-            crate::KernelInvocationFailure::ActorExited(actor)
-            | crate::KernelInvocationFailure::Cancelled { actor } => *actor,
-            _ => unreachable!(),
-        };
-        *failure = crate::KernelInvocationFailure::Failed {
-            actor,
-            detail: failure.to_string(),
-            receipts: Vec::new(),
-            diagnostic: None,
-        };
+    if let Err(failure) = reply {
+        if failure.receipts_mut().is_none() {
+            *failure = crate::KernelInvocationFailure::WithReceipts {
+                source: Box::new(failure.clone()),
+                receipts: Vec::new(),
+            };
+        }
     }
     let receipts = match reply {
         Ok(response) => &mut response.items,
@@ -168,8 +159,18 @@ fn retain_committed_generation_receipt(
             .iter_mut()
             .find(|existing| existing.id == operation.id)
         {
-            // Actual publication wins over a continuation delivery failure.
-            existing.disposition = operation.disposition;
+            // Detect inconsistent diagnostic metadata without assigning the
+            // committed disposition to a different effect's label.
+            if existing.effect != operation.effect {
+                receipt.warnings.push(format!(
+                    "operation {}:{} had conflicting effect metadata {:?}; retained publication owner supplies {:?}",
+                    operation.id.input_unit_index, operation.id.effect_ordinal,
+                    existing.effect, operation.effect,
+                ));
+                *existing = operation.clone();
+            } else {
+                existing.disposition = operation.disposition;
+            }
         } else {
             receipt.operations.push(operation.clone());
         }
@@ -3226,22 +3227,51 @@ mod generation_receipt_projection_tests {
                 diagnostic: None,
             },
             crate::KernelInvocationFailure::ActorExited(actor),
+            crate::KernelInvocationFailure::Cancelled { actor },
         ] {
-            let original_cause = failure.to_string();
+            let original_cause = failure.clone();
+            let was_cancelled = failure.is_cancelled();
             let mut reply = Err(failure);
             retain_committed_generation_operation(&mut reply, &operation);
             retain_committed_generation_operation(&mut reply, &operation);
             let failure = reply.unwrap_err();
-            assert!(
-                failure.to_string().contains(&original_cause)
-                    || original_cause.contains(&failure.to_string())
+            assert_eq!(failure.is_cancelled(), was_cancelled);
+            match &failure {
+                crate::KernelInvocationFailure::WithReceipts { source, .. } => {
+                    assert_eq!(source.as_ref(), &original_cause)
+                }
+                _ => assert_eq!(failure.to_string(), original_cause.to_string()),
+            }
+            let exit = crate::CellExit::from_reply(
+                operation.id.execution.clone(),
+                &Err(failure.clone()),
+                false,
+                false,
             );
+            assert_eq!(
+                exit.cause,
+                if was_cancelled {
+                    crate::CellExitCause::Cancelled
+                } else {
+                    crate::CellExitCause::Failed
+                }
+            );
+            assert!(!exit.cleanup_confirmed);
+            assert!(!exit.permits_context_commit());
             let receipts = failure.receipts();
             assert_eq!(receipts.len(), 1);
             assert_eq!(receipts[0].status, WorkbenchItemStatus::Stopped);
             assert_eq!(receipts[0].value, None);
             assert!(receipts[0].installed_bindings.is_empty());
             assert_eq!(receipts[0].operations, [operation.clone()]);
+            let mut conflicting = Err(failure);
+            conflicting.as_mut().unwrap_err().receipts_mut().unwrap()[0].operations[0].effect =
+                "differentEffect".into();
+            retain_committed_generation_operation(&mut conflicting, &operation);
+            let conflicting = conflicting.unwrap_err();
+            assert_eq!(conflicting.receipts()[0].operations, [operation.clone()]);
+            assert_eq!(conflicting.receipts()[0].warnings.len(), 1);
+            assert!(conflicting.receipts()[0].warnings[0].contains("conflicting effect metadata"));
         }
     }
 }
