@@ -311,8 +311,9 @@ async fn released_root_startup_already_owns_its_source_generation() {
             "restoration": &admission,
         })
     );
-    drop(boundary.source);
+    let source = boundary.source;
     if boundary.continue_host.send(()).is_err() {
+        drop(source);
         drop(judgments);
         panic!(
             "startup continuation closed: {}",
@@ -329,6 +330,7 @@ async fn released_root_startup_already_owns_its_source_generation() {
     let held = match held {
         Ok(StartupObservation::Event(Some(held))) => held,
         Ok(StartupObservation::Ended(result)) => {
+            drop(source);
             drop(judgments);
             panic!(
                 "startup ended before initializer Jev: {}",
@@ -341,6 +343,7 @@ async fn released_root_startup_already_owns_its_source_generation() {
             } else {
                 "closed"
             };
+            drop(source);
             drop(judgments);
             panic!(
                 "initializer observer {reason}: {}",
@@ -348,6 +351,30 @@ async fn released_root_startup_already_owns_its_source_generation() {
             );
         }
     };
+    // The authored initializer reaches Jev after the host installs its prompt
+    // compositor. Stage through the retained owner at that actual boundary.
+    let staged_admission = (|| -> Result<(bool, bool), String> {
+        let selected = source.freeze_toolset_layer(actor.into())?;
+        let foreign_refused = matches!(
+            source.clone().stage_reload(foreign.into(), &selected, &[]),
+            Err(exomonad_actor::SourceLayerReload::Unavailable(_))
+        );
+        let staged = source
+            .clone()
+            .stage_reload(actor.into(), &selected, &[])
+            .map_err(|error| format!("root reload staging failed: {error:?}"))?;
+        source.validate_source_authority(staged.source())?;
+        let unchanged = source
+            .freeze_toolset_layer(actor.into())?
+            .same_revision(&selected);
+        drop(staged);
+        Ok((foreign_refused, unchanged))
+    })();
+    eprintln!(
+        "startup-source-staging {}",
+        serde_json::json!({ "actor": actor, "admission": &staged_admission })
+    );
+    drop(source);
     if held.answer.send(true).is_err() {
         drop(judgments);
         panic!(
@@ -362,6 +389,7 @@ async fn released_root_startup_already_owns_its_source_generation() {
             assert!(root_owns_run);
             assert!(!foreign_owns_run);
             assert_eq!(admission.unwrap(), (true, true));
+            assert_eq!(staged_admission.unwrap(), (true, true));
             assert_eq!(held.packet["memory"], "startup-source-owner");
             let retained = observation(host).await;
             assert_eq!(retained.state, InitialContextState::Published);
