@@ -3730,6 +3730,285 @@ fn private_authored_projection_retains_exact_live_binding_before_publication() {
 }
 
 #[test]
+#[ignore = "requires the matched compiler and native authored publication"]
+fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+    let owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/original-binding-capture").unwrap(),
+        1,
+    )
+    .unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let mut lib = SessionLib::open(
+        SessionId(1005),
+        &root.path().join("compiler"),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let publication = ScalePublication::Durable {
+        owner: owner.clone(),
+        recovery,
+    };
+    assert!(matches!(
+        resident
+            .initialize_durable_public_scope(owner, public)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "live_x",
+        "x <- pure (41 :: Int)",
+        0,
+        &publication,
+    );
+    let view = resident.compile_view_in(public).unwrap();
+    assert_eq!(view.visible_values().len(), 1);
+    let binding_module = view.visible_values()[0];
+    execute_cell_with_authority_checks(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "private_dependent",
+        include_str!("fixtures/original-binding-capture-j.hs"),
+        1,
+        &publication,
+        AuthorityChecks::PrivateAuthoredLifetime(binding_module),
+    );
+
+    let j_view = resident.compile_view_in(public).unwrap();
+    let j_context = j_view.exact_declaration_context().unwrap().clone();
+    let j = j_context
+        .recovery_products()
+        .iter()
+        .find(|product| {
+            product.owner().module.starts_with("Tidepool.Session.")
+                && product.owner().module.contains(".Lib.")
+        })
+        .expect("authored J original")
+        .owner()
+        .clone();
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "original_k",
+        include_str!("fixtures/original-binding-capture-k.hs"),
+        1,
+        &publication,
+    );
+    let view = resident.compile_view_in(public).unwrap();
+    let context = view.exact_declaration_context().unwrap().clone();
+    let new_originals = context
+        .recovery_products()
+        .iter()
+        .filter(|product| {
+            !j_context
+                .recovery_products()
+                .iter()
+                .any(|prior| prior.owner() == product.owner())
+                && product.owner().module.starts_with("Tidepool.Session.Lib.")
+        })
+        .map(|product| product.owner().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(new_originals.len(), 1, "one separately issued authored K");
+    let k = new_originals[0].clone();
+    let j_artifact = context
+        .artifact_view()
+        .descriptors()
+        .into_iter()
+        .find(|descriptor| {
+            descriptor.owner.unit == j.unit
+                && descriptor.owner.module == j.module
+                && descriptor.kind
+                    == tidepool_toolchain::artifact_inventory::ArtifactKind::OriginalModule
+        })
+        .unwrap()
+        .id;
+    let j_artifact_hex = j_artifact
+        .0
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    // Inspect the actual persisted HOME witness. Raw native products do not
+    // distinguish OriginalBinding ownership from other global import kinds.
+    let artifacts = tempfile::tempdir().unwrap();
+    let references = context
+        .materialize_recovery_artifacts(
+            artifacts.path(),
+            &context.artifact_view().artifact_ids().into_iter().collect(),
+        )
+        .unwrap();
+    use ciborium::value::Value;
+    fn array(value: &Value) -> &[Value] {
+        value.as_array().expect("issued HOME array")
+    }
+    fn text(value: &Value) -> &str {
+        value.as_text().expect("issued HOME text")
+    }
+    let mut retained_x = None;
+    let mut original_j_edges = 0;
+    for reference in references {
+        let tidepool_toolchain::declaration_join::RecoveryPayloadReference::Original(reference) =
+            reference
+        else {
+            continue;
+        };
+        let bytes = std::fs::read(&reference.certification_path).unwrap();
+        assert_eq!(
+            <[u8; 32]>::from(sha2::Sha256::digest(&bytes)),
+            reference.certification_sha256
+        );
+        let witness: Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let witness = array(&witness);
+        assert_eq!(text(&witness[0]), "TPHOMEOWNERS");
+        for group in array(&witness[3]) {
+            for global in array(&array(group)[2]) {
+                let global = array(global);
+                let owner = array(&global[4]);
+                if reference.module == j.module && text(&owner[0]) == "retained" {
+                    let identity = array(&owner[1]);
+                    if text(&identity[3]) == "x" {
+                        let identity = tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: text(&identity[0]).into(),
+                            module: text(&identity[1]).into(),
+                            namespace: text(&identity[2]).into(),
+                            occurrence: text(&identity[3]).into(),
+                            record_parent: identity[4].as_text().map(str::to_owned),
+                        };
+                        let generation = u64::try_from(owner[2].as_integer().unwrap()).unwrap();
+                        assert_eq!(identity.module, binding_module.module_name());
+                        assert_eq!(generation, binding_module.gen().0);
+                        retained_x = Some((identity, generation));
+                    }
+                }
+                if reference.module == k.module
+                    && text(&owner[0]) == "original-binding"
+                    && text(&owner[1]) == j.unit
+                    && text(&owner[2]) == j.module
+                    && text(&array(&global[0])[3]) == "j"
+                {
+                    assert_eq!(text(&array(&owner[4])[0]), j_artifact_hex);
+                    original_j_edges += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        original_j_edges > 0,
+        "K must physically retain an OriginalBinding to J"
+    );
+    let retained_x = retained_x.expect("J physically captures the checked x identity/generation");
+    let imports = view.turn_imports(&SourceImports::new());
+    let include = view.include_paths(effects.include_paths());
+    let include = include
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .collect::<Vec<_>>();
+    let injected = view.injected_module_names();
+    let templates = vec![TurnTemplate {
+        kind: TemplateSelector::Expr,
+        source: assemble_expression_module(
+            &insert_preamble_imports(effects.preamble(), &imports),
+            "__result",
+            effects.row(),
+            "{{TURN}}",
+            ExpressionLift::Pure,
+        ),
+    }];
+    let original_source = resident
+        .adopt_initial_notebook_scope(public)
+        .unwrap()
+        .original_source()
+        .clone();
+    let observer = CellRequestObserver::default();
+    let (compiled, ordinary_requests) =
+        with_cell_request_capture(
+            &observer,
+            "ordinary_exact_scope",
+            "original_k_consumer",
+            "k",
+            || {
+                Ok(original_source
+                    .with_source_compiler_transaction(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        crate::CompilerTransactionCancellation::new(),
+                        None,
+                        |_| {},
+                        |_, settlement| {
+                            run_turn(
+                    TurnRequest {
+                        exact_context: Some(Arc::new(
+                            tidepool_toolchain::declaration_join::ExactCompileContext::new(context),
+                        )),
+                        session_id: Some(view.session()),
+                        turn_text: "k",
+                        templates: &templates,
+                        include: &include,
+                        session_root: view.session_root(),
+                        inject_modules: &injected,
+                        gen: view.next_value_generation().0,
+                        verdict: None,
+                        retained_imports: &[],
+                    },
+                    settlement,
+                )
+                        },
+                    )
+                    .unwrap())
+            },
+        );
+    assert!(
+        !ordinary_requests.compiler_requests.is_empty(),
+        "observe the actual ordinary compiler request"
+    );
+    let compiled = compiled.unwrap();
+    assert!(compiled.close().resources_retired());
+    let compiled = compiled.into_outcome().action.unwrap();
+    let TurnResult::Expr { compiled, .. } = compiled else {
+        panic!("ordinary K expression")
+    };
+    let certification = compiled.certification().unwrap();
+    assert!(certification.groups.iter().flat_map(|group| group.imports()).chain(certification.target_owners.iter())
+        .any(|owner| matches!(owner, tidepool_toolchain::certified_products::PendingImportOwner::Retained { identity, generation }
+            if (identity, *generation) == (&retained_x.0, retained_x.1))),
+        "ordinary compiler closure must keep J's exact retained x through K");
+    // Open retained-value programs install through checked execution; the
+    // preceding ordinary compilation independently exercises ExactScope census.
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "read_k",
+        "if k == (42 :: Int) then pure () else error \"lost transitive original capture\"",
+        0,
+        &publication,
+    );
+}
+
+#[test]
 #[ignore = "requires an admitted real compiler, retained durable workspace, and fresh native test process"]
 fn durable_mixed_originals_recover_independent_native_entry() {
     tidepool_testing::eval_harness::require_extract();
