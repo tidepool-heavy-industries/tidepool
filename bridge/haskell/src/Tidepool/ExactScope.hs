@@ -2159,7 +2159,6 @@ data WorldInputFacts = WorldInputFacts
   , worldInputsRowCharge :: !((Integer,Int))
   , worldInputsBindingRows :: !(Map.Map BS.ByteString (WorldBindingRow,BS.ByteString,Integer,Int))
   , worldInputsBindingSemanticUsers :: !(Map.Map BS.ByteString Int)
-  , worldInputsRuntimeVisibility :: !(BS.ByteString)
   , worldInputsBindingScope :: !(Word64)
   , worldInputsBindings :: !(Map.Map String WorldBinding)
   , worldInputsBindingCharge :: !((Integer,Int))
@@ -2788,7 +2787,7 @@ readWorldInputsWithOwner (ExactInputOwner _ state) path = acquire `catch` classi
             base visible dependencyFacts (worldVisibleSemantic visible) custody users verified
             (toInteger (BS.length sourceBytes),fromInteger sourceEntries) rowCharge bindingRows
             (Map.fromListWith (+) [(semantic,n) | (_,semantic,_,n) <- Map.elems bindingRows])
-            (BS.copy visibility) bindingScope bindings bindingCharge primaryFacts lexical
+            bindingScope bindings bindingCharge primaryFacts lexical
       validateWorldRetainedCharge facts
       pure facts
 
@@ -3090,12 +3089,10 @@ readWorldSuccessorWithOwner (ExactInputOwner _ state) previous path = acquire `c
         then pure (worldInputsLexicalSurface previous)
         else readWorldLexicalSurface frontier lexicalRoot primaryFacts
       let identity = SHA.hash restoration
-          visibility = toStrictByteString (E.encodeListLen 3 <> E.encodeString "TPCWBIND4"
-            <> E.encodeWord64 scope <> E.encodeBytes bindings)
           facts = WorldInputFacts (hexBytes identity) identity
             (worldCompilerIdentity domainSeal producer profile scope associations bindings lexicalRoot) producer profile (worldInputsSources previous)
             base visible dependencyFacts nextSemantic custody users verified (worldInputsSourceCharge previous) rowCharge nextRows semanticUsers
-            visibility scope nextBindings bindingCharge primaryFacts lexical
+            scope nextBindings bindingCharge primaryFacts lexical
       validateWorldRetainedCharge facts
       timing <- readTimingEnabled
       emitCount timing "world.successor.changed_aliases" (toInteger (Map.size aliasChanges))
