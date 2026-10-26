@@ -54,8 +54,6 @@ use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
-#[cfg(test)]
-use tidepool_repr::execution_schema::SymbolIdentity;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::HostCarrier;
@@ -17011,127 +17009,6 @@ where
         .with_workbench_imports(&source.workbench_imports))
 }
 
-/// Compile one fresh, payload-independent value interface. Its binder is
-/// unique to this mount, so a later request cannot replace the global slot a
-/// previously compiled closure captured.
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-fn compile_host_binding<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    binding: &str,
-    type_name: &str,
-    anchor: &str,
-    imports: SourceImports,
-    retain_text_constructor: bool,
-) -> Result<(BoundBinder, CompiledTurn, tidepool_repr::Generation), ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let view = actor_compile_view(session, context, source)?;
-    let generation = view.next_value_generation();
-    let retained = session.prepared_retained();
-    let (binder, compiled) = compile_host_binding_off_checkout(
-        &view,
-        source,
-        context.haskell_effects_alias.expression(),
-        generation,
-        binding,
-        type_name,
-        anchor,
-        imports,
-        retain_text_constructor,
-        &retained,
-    )?;
-    Ok((binder, compiled, generation))
-}
-
-/// The synchronous legacy mount fixture's compile half, against its captured view.
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-fn compile_host_binding_off_checkout(
-    view: &crate::ActorCompileView,
-    source: &ActorWorkbenchSource,
-    effects: &str,
-    generation: tidepool_repr::Generation,
-    binding: &str,
-    type_name: &str,
-    anchor: &str,
-    imports: SourceImports,
-    retain_text_constructor: bool,
-    retained_imports: &[(SymbolIdentity, u64)],
-) -> Result<(BoundBinder, CompiledTurn), ResidentActorWorkbenchError> {
-    let view = view.clone().with_workbench_imports(&imports);
-    let prepared = source.prepare(&view);
-    let templates = resident_workbench_templates(&prepared.preamble, effects, &prepared.imports);
-    let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-    let retained_anchor = format!("__tidepoolCarrierAnchor{generation}");
-    let (turn, expected_binders) = if retain_text_constructor {
-        (
-            format!(
-                "({binding}, {retained_anchor}) <- pure ((({anchor}) :: {type_name}), \
-                 (TidepoolHostJson.String (TidepoolHostText.pack \"\") :: TidepoolHostJson.Value))"
-            ),
-            vec![binding.to_owned(), retained_anchor],
-        )
-    } else {
-        (
-            format!("{binding} <- pure (({anchor}) :: {type_name})"),
-            vec![binding.to_owned()],
-        )
-    };
-    let result = tidepool_testing::with_settlement(|settlement| {
-        run_turn(
-            TurnRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session_id()),
-                turn_text: &turn,
-                templates: &templates,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &prepared.injected,
-                gen: generation.0,
-                verdict: Some(generated_binds_verdict(&expected_binders)),
-                retained_imports,
-            },
-            settlement,
-        )
-    })
-    .map_err(|failure| {
-        ResidentActorWorkbenchError::InputMount(
-            tidepool_runtime::session::render_turn_compile_error(
-                &failure.error,
-                failure.attempted_source.as_deref(),
-                &turn,
-                "<host carrier>",
-            ),
-        )
-    })?;
-    let TurnResult::Bind {
-        mut bound,
-        compiled,
-        ..
-    } = result
-    else {
-        return Err(ResidentActorWorkbenchError::InputMount(
-            "host interface did not compile as a bind".into(),
-        ));
-    };
-    if bound.len() != expected_binders.len()
-        || !bound
-            .iter()
-            .zip(&expected_binders)
-            .all(|(binder, expected)| binder.name == *expected)
-    {
-        return Err(ResidentActorWorkbenchError::InputMount(format!(
-            "host interface returned an unexpected binder shape for `{binding}`"
-        )));
-    }
-    Ok((bound.remove(0), compiled))
-}
-
 #[derive(Clone)]
 struct MountedHostInput {
     binder: BoundBinder,
@@ -17179,134 +17056,6 @@ where
                 tidepool_runtime::session::SessionError::DeadScope(scope),
             ))
         })
-}
-
-/// Mount a request's JSON input. With `carrier` cached, this is one
-/// `mount_carrier_in` call and no GHC compile; with none yet built for this
-/// workbench, it falls back to [`compile_host_binding`]'s per-mount compile.
-#[cfg(test)]
-fn mount_json_input<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    input: &serde_json::Value,
-    carrier: Option<&HostCarrier>,
-) -> Result<MountedHostInput, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let scope = context.placement.lexical_scope;
-    let binding = fresh_host_binding_name(session, scope, "Input");
-    let binder = if let Some(carrier) = carrier {
-        let session_root = carrier_mount_session_root(session, scope)?;
-        let generation = session.val_gen().next();
-        session.set_val_gen(generation);
-        tidepool_testing::with_settlement(|settlement| {
-            session.mount_carrier_in(
-                &session_root,
-                scope,
-                &binding,
-                generation,
-                carrier,
-                HostPayload::Json(input),
-                settlement,
-            )
-        })
-        .map_err(ResidentActorWorkbenchError::Resident)?
-    } else {
-        let (binder, compiled, generation) = compile_host_binding(
-            session,
-            context,
-            source,
-            &binding,
-            JSON_INPUT_TYPE_NAME,
-            JSON_INPUT_ANCHOR,
-            json_input_carrier_imports(),
-            false,
-        )?;
-        tidepool_testing::with_settlement(|settlement| {
-            session.mount_json_binding_in(
-                scope,
-                &binder,
-                generation,
-                compiled.into_code(),
-                input,
-                settlement,
-            )
-        })
-        .map_err(ResidentActorWorkbenchError::Resident)?;
-        binder
-    };
-    if let Err(error) = session.hide_host_binding_in(scope, &binder) {
-        let session_root = carrier_mount_session_root(session, scope)?;
-        session.retire_host_binding_owner(&session_root, &binder);
-        return Err(ResidentActorWorkbenchError::Resident(error));
-    }
-    Ok(MountedHostInput {
-        module: binder.module.clone(),
-        name: binder.name.clone(),
-        binder,
-        type_evidence: None,
-    })
-}
-
-/// Mount one plain text binding. With `carrier` cached, this is one
-/// `mount_carrier_in` call and no GHC compile; with none yet built for this
-/// workbench, it falls back to [`compile_host_binding`]'s per-mount compile.
-#[cfg(test)]
-fn mount_text_binding<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    binding: &str,
-    text: &str,
-    carrier: Option<&HostCarrier>,
-) -> Result<(), ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let scope = context.placement.lexical_scope;
-    if let Some(carrier) = carrier {
-        let session_root = carrier_mount_session_root(session, scope)?;
-        let generation = session.val_gen().next();
-        session.set_val_gen(generation);
-        tidepool_testing::with_settlement(|settlement| {
-            session.mount_carrier_in(
-                &session_root,
-                scope,
-                binding,
-                generation,
-                carrier,
-                HostPayload::Text(text),
-                settlement,
-            )
-        })
-        .map_err(ResidentActorWorkbenchError::Resident)?;
-        return Ok(());
-    }
-    let (binder, compiled, generation) = compile_host_binding(
-        session,
-        context,
-        source,
-        binding,
-        TEXT_BINDING_TYPE_NAME,
-        TEXT_BINDING_ANCHOR,
-        text_binding_carrier_imports(),
-        true,
-    )?;
-    tidepool_testing::with_settlement(|settlement| {
-        session.mount_text_binding_in(
-            scope,
-            &binder,
-            generation,
-            compiled.into_code(),
-            text,
-            settlement,
-        )
-    })
-    .map_err(ResidentActorWorkbenchError::Resident)
 }
 
 fn fresh_host_binding_name<H, O>(
@@ -18128,6 +17877,28 @@ pub(crate) mod request_tests {
         ActorWorkbenchSource,
         tempfile::TempDir,
     ) {
+        let (mut session, mut context, source, root) =
+            unadopted_host_mount_fixture_with_effects(configure, declarations, effects_alias);
+        let (captured, _owner) =
+            world_query_test_source_files_with_support(&[], &source.toolset_support);
+        context.source_layer = crate::ActorSourceRoots::Complete(captured);
+        context
+            .source_dependency()
+            .adopt_final_scope(&mut session, context.placement.lexical_scope)
+            .unwrap();
+        (session, context, source, root)
+    }
+
+    fn unadopted_host_mount_fixture_with_effects(
+        configure: impl FnOnce(&mut tidepool_runtime::session::SessionLib),
+        declarations: &[tidepool_mcp::EffectDecl],
+        effects_alias: &str,
+    ) -> (
+        ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        crate::ActorSessionContext,
+        ActorWorkbenchSource,
+        tempfile::TempDir,
+    ) {
         use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
         use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
@@ -18222,144 +17993,148 @@ pub(crate) mod request_tests {
         }).await
     }
 
-    /// A split compile takes its `ActorCompileView` snapshot, compiles
-    /// off-checkout, then re-derives a fresh view before installing. With no
-    /// mutation in between, the split
-    /// path must publish the compiled Text binding.
-    #[test]
-    fn text_carrier_split_compile_then_install_publishes_the_binding() {
-        let (mut session, context, source, _session_root) = host_mount_fixture();
-        let scope = context.placement.lexical_scope;
-
-        let view = actor_compile_view(&session, &context, &source).expect("compile view");
-        let generation = view.next_value_generation();
-        session.set_val_gen(generation);
-        let retained = session.prepared_retained();
-
-        let (binder, compiled) = compile_host_binding_off_checkout(
-            &view,
-            &source,
-            context.haskell_effects_alias.expression(),
-            generation,
-            "text_binding",
-            TEXT_BINDING_TYPE_NAME,
-            TEXT_BINDING_ANCHOR,
-            text_binding_carrier_imports(),
-            true,
-            &retained,
-        )
-        .expect("Text carrier compiles off-checkout");
-
-        let fresh_view = actor_compile_view(&session, &context, &source).expect("fresh view");
-        assert!(
-            fresh_view.is_current_for(&view),
-            "no mutation happened between snapshot and install: views must still match"
-        );
-
-        tidepool_testing::with_settlement(|settlement| {
-            session.mount_text_binding_in(
-                scope,
-                &binder,
-                generation,
-                compiled.into_code(),
-                "text payload",
-                settlement,
-            )
+    /// Preparing a checked carrier off-checkout preserves the captured view
+    /// until its actual private owner installs the payload.
+    #[tokio::test]
+    async fn text_carrier_split_compile_then_install_publishes_the_binding() {
+        with_test_compiler_owner(|preparation| async move {
+            let (machines, public, source, _root) = actor_registry_fixture();
+            let workbench =
+                ResidentActorWorkbench::new(machines, source.bind_preparation(preparation), None);
+            let (workbench, context) = workbench.admit_private_cell_for_test(public).await.unwrap();
+            let view = workbench
+                .access
+                .with_machine(context.clone(), |session, context, source| {
+                    actor_compile_view(session, context, source)
+                })
+                .await
+                .unwrap();
+            let (carrier, dependencies) = workbench
+                .prepare_host_input(
+                    context.clone(),
+                    HostCarrierKind::Text,
+                    Some("text_binding".into()),
+                )
+                .await
+                .expect("checked Text carrier compiles off-checkout");
+            let fresh_view = workbench
+                .access
+                .with_machine(context.clone(), |session, context, source| {
+                    actor_compile_view(session, context, source)
+                })
+                .await
+                .unwrap();
+            assert!(
+                fresh_view.is_current_for(&view),
+                "preparation without a write must preserve the captured view"
+            );
+            let mut mounted = workbench
+                .mount_prepared_host_input(
+                    context.clone(),
+                    carrier,
+                    OwnedHostPayload::Text("text payload".into()),
+                    false,
+                )
+                .await
+                .expect("checked Text carrier installs after revalidation");
+            mounted.keep_binding().unwrap();
+            drop(dependencies);
+            workbench
+                .access
+                .with_machine(context, |session, context, _| {
+                    assert!(session
+                        .binding_names_in(context.placement.lexical_scope)
+                        .contains(&"text_binding".into()));
+                    Ok(())
+                })
+                .await
+                .unwrap();
         })
-        .expect("Text carrier installs after revalidation");
-
-        assert!(session
-            .binding_names_in(scope)
-            .contains(&"text_binding".into()));
+        .await;
     }
 
-    /// A write to the same scope between a split compile's snapshot and its
-    /// re-checkout (here, another mount standing in for a concurrent
-    /// actor's install) must be detected by `is_current_for` before
-    /// installing the stale compile, and a fresh snapshot must still recover.
-    #[test]
-    fn a_mutation_between_split_checkouts_invalidates_the_snapshot_and_blocks_install() {
-        let (mut session, context, source, _session_root) = host_mount_fixture();
-        let scope = context.placement.lexical_scope;
-
-        let view = actor_compile_view(&session, &context, &source).expect("compile view");
-        let generation = view.next_value_generation();
-        session.set_val_gen(generation);
-        let retained = session.prepared_retained();
-
-        let (binder, compiled) = compile_host_binding_off_checkout(
-            &view,
-            &source,
-            context.haskell_effects_alias.expression(),
-            generation,
-            "text_binding",
-            TEXT_BINDING_TYPE_NAME,
-            TEXT_BINDING_ANCHOR,
-            text_binding_carrier_imports(),
-            true,
-            &retained,
-        )
-        .expect("Text carrier compiles off-checkout");
-
-        // Stand in for another actor writing to this exact scope while this
-        // compile ran off-checkout: mount an unrelated Text carrier, which
-        // changes `visible_values`/`shadowing`.
-        mount_text_binding(
-            &mut session,
-            &context,
-            &source,
-            "interloper",
-            "interloper text",
-            None,
-        )
-        .expect("interloping carrier mounts");
-
-        let fresh_view = actor_compile_view(&session, &context, &source).expect("fresh view");
-        assert!(
-            !fresh_view.is_current_for(&view),
-            "an interleaved mutation to the same scope must invalidate the snapshot"
-        );
-
-        // The split path must refuse to install against a stale view — the
-        // binder never reaches the persistent binding store.
-        assert!(session
-            .workbench_bindings_in(scope)
-            .into_iter()
-            .all(|binding| binding.name != "text_binding"));
-        drop((binder, compiled, generation));
-
-        // A fresh snapshot recompiles and installs cleanly.
-        let retry_view = actor_compile_view(&session, &context, &source).expect("retry view");
-        let retry_generation = retry_view.next_value_generation();
-        session.set_val_gen(retry_generation);
-        let retry_retained = session.prepared_retained();
-        let (retry_binder, retry_compiled) = compile_host_binding_off_checkout(
-            &retry_view,
-            &source,
-            context.haskell_effects_alias.expression(),
-            retry_generation,
-            "text_binding2",
-            TEXT_BINDING_TYPE_NAME,
-            TEXT_BINDING_ANCHOR,
-            text_binding_carrier_imports(),
-            true,
-            &retry_retained,
-        )
-        .expect("recompile against the fresh snapshot succeeds");
-        tidepool_testing::with_settlement(|settlement| {
-            session.mount_text_binding_in(
-                scope,
-                &retry_binder,
-                retry_generation,
-                retry_compiled.into_code(),
-                "retry text payload",
-                settlement,
-            )
+    /// A write between checked carrier preparation and installation invalidates
+    /// the old view; withdrawing that carrier and preparing afresh succeeds.
+    #[tokio::test]
+    async fn a_mutation_between_split_checkouts_invalidates_the_snapshot_and_blocks_install() {
+        with_test_compiler_owner(|preparation| async move {
+            let (machines, public, source, _root) = actor_registry_fixture();
+            let workbench =
+                ResidentActorWorkbench::new(machines, source.bind_preparation(preparation), None);
+            let (workbench, context) = workbench.admit_private_cell_for_test(public).await.unwrap();
+            let view = workbench
+                .access
+                .with_machine(context.clone(), |session, context, source| {
+                    actor_compile_view(session, context, source)
+                })
+                .await
+                .unwrap();
+            let (carrier, dependencies) = workbench
+                .prepare_host_input(
+                    context.clone(),
+                    HostCarrierKind::Text,
+                    Some("text_binding".into()),
+                )
+                .await
+                .expect("checked Text carrier compiles off-checkout");
+            workbench
+                .bind_tool_result(
+                    context.clone(),
+                    "interloper".into(),
+                    "interloper text".into(),
+                )
+                .await
+                .expect("interloping checked carrier mounts")
+                .accept()
+                .unwrap();
+            let fresh_view = workbench
+                .access
+                .with_machine(context.clone(), |session, context, source| {
+                    assert!(session
+                        .workbench_bindings_in(context.placement.lexical_scope)
+                        .into_iter()
+                        .all(|binding| binding.name != "text_binding"));
+                    actor_compile_view(session, context, source)
+                })
+                .await
+                .unwrap();
+            assert!(
+                !fresh_view.is_current_for(&view),
+                "an interleaved same-scope write must invalidate the snapshot"
+            );
+            drop((carrier, dependencies));
+            let (retry, dependencies) = workbench
+                .prepare_host_input(
+                    context.clone(),
+                    HostCarrierKind::Text,
+                    Some("text_binding2".into()),
+                )
+                .await
+                .expect("fresh checked carrier preparation succeeds");
+            let mut mounted = workbench
+                .mount_prepared_host_input(
+                    context.clone(),
+                    retry,
+                    OwnedHostPayload::Text("retry text payload".into()),
+                    false,
+                )
+                .await
+                .expect("fresh checked carrier installs");
+            mounted.keep_binding().unwrap();
+            drop(dependencies);
+            workbench
+                .access
+                .with_machine(context, |session, context, _| {
+                    let names = session.binding_names_in(context.placement.lexical_scope);
+                    assert!(names.contains(&"interloper".into()));
+                    assert!(names.contains(&"text_binding2".into()));
+                    assert!(!names.contains(&"text_binding".into()));
+                    Ok(())
+                })
+                .await
+                .unwrap();
         })
-        .expect("recompiled carrier installs");
-        assert!(session
-            .binding_names_in(scope)
-            .contains(&"text_binding2".into()));
+        .await;
     }
 
     /// Named-tool command output bindings reuse one cached Job carrier.
@@ -19171,7 +18946,56 @@ pub(crate) mod request_tests {
             })
             .await
             .unwrap();
+        let public_before = workbench
+            .access
+            .with_machine(public.clone(), |session, context, _| {
+                Ok(session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .unwrap())
+            })
+            .await
+            .unwrap();
         let execution = workbench.private_execution.as_ref().unwrap().clone();
+        let refused = match workbench_runner_for_test(&workbench)
+            .publish_private_execution(private.clone(), execution.clone())
+            .await
+        {
+            Ok(_) => panic!("a live unaccepted host write must prevent publication"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            refused,
+            ResidentActorWorkbenchError::PrivatePublication { source, .. }
+                if matches!(source.as_ref(),
+                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                        tidepool_runtime::session::SessionError::WorldCellPublicationIncomplete
+                    )))
+        ));
+        workbench
+            .access
+            .with_machine(public.clone(), move |session, context, _| {
+                assert_eq!(
+                    session
+                        .public_visibility_snapshot_in(context.placement.lexical_scope)
+                        .unwrap(),
+                    public_before,
+                    "refused freeze leaves the complete public snapshot unchanged",
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        unaccepted
+            .mounted
+            .as_mut()
+            .unwrap()
+            .retire_for_publication()
+            .await
+            .unwrap();
+        workbench
+            .wait_for_host_input_retirement_for_test(private.clone(), unaccepted_name.clone())
+            .await;
+        assert_eq!(execution.admission.pending_host_count(), 0);
         let selected = workbench_runner_for_test(&workbench)
             .publish_private_execution(private.clone(), execution)
             .await
@@ -19229,15 +19053,14 @@ pub(crate) mod request_tests {
             .execute_cell_for_test(
                 fresh,
                 &format!(
-                    "freshHost <- pure ({accepted} :: {})\nfreshNative <- pure (completedNative :: Int)",
-                    crate::resident_workbench::HostCarrierKind::Job.type_name(),
+                    "import qualified Tidepool.Command.Types as OriginalJob\nfreshHost <- pure ({accepted} :: OriginalJob.Job)\nfreshNative <- pure (completedNative :: Int)",
                 ),
             )
             .await
             .expect("fresh private execution reads the published host type and checked value");
         assert!(
             unaccepted.accept().is_err(),
-            "a sealed cell refuses late effect acceptance"
+            "a retired unaccepted write remains refused after successful publication"
         );
     }
 
@@ -19900,18 +19723,9 @@ pub(crate) mod request_tests {
                 )
                 .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
                 .await;
-                let before = workbench
-                    .access
-                    .with_machine(public.clone(), |session, context, _| {
-                        Ok(session
-                            .public_visibility_snapshot_in(context.placement.lexical_scope)
-                            .unwrap())
-                    })
-                    .await
-                    .unwrap();
                 let source = format!(
-                    "keptPrivate <- (sleep (minutes 0) >> pure (41 :: Int)) :: Eff {} Int\n(error \"later item failed\") :: Int",
-                    private.haskell_effects_alias,
+                    "keptPrivate <- (sleep (minutes 0) >> pure (41 :: Int)) :: Eff {effects} Int\nfailedPrivate <- (error \"later item failed\" :: Eff {effects} Int)",
+                    effects = private.haskell_effects_alias,
                 );
                 let (checked, prepared) = workbench
                     .prepare_cell(private.clone(), source)
@@ -19962,6 +19776,18 @@ pub(crate) mod request_tests {
                 assert!(workbench.access.with_machine(private.clone(), |session, context, _| {
                     Ok(session.current_binding_in(context.placement.lexical_scope, "keptPrivate").is_some())
                 }).await.unwrap(), "first-item runtime progress is present before starting item two");
+                let before = workbench
+                    .access
+                    .with_machine(public.clone(), |session, context, _| {
+                        assert!(session
+                            .current_binding_in(context.placement.lexical_scope, "keptPrivate")
+                            .is_none(), "first-item progress remains private");
+                        Ok(session
+                            .public_visibility_snapshot_in(context.placement.lexical_scope)
+                            .unwrap())
+                    })
+                    .await
+                    .unwrap();
                 let (index, (observed, item)) = items.next().unwrap();
                 let failure = workbench
                     .begin_prepared_cell_item(
@@ -19975,11 +19801,11 @@ pub(crate) mod request_tests {
                     )
                     .await;
                 let failure = match failure {
-                    Err(failure) => failure,
+                    Ok(ResidentWorkbenchStep::Rejected(failure)) => failure,
                     Ok(step) => panic!("second item did not fail at runtime: {}", describe_step(&step)),
+                    Err(error) => panic!("language failure escaped its rejection boundary: {error:?}"),
                 };
-                assert!(matches!(failure, ResidentActorWorkbenchError::Delivered(_)), "{failure:?}");
-                assert!(failure.to_string().contains("later item failed"), "{failure:?}");
+                assert!(failure.output.contains("later item failed"), "{failure:?}");
                 drop(dependencies);
                 assert!(
                     workbench
@@ -22021,7 +21847,10 @@ pub(crate) mod request_tests {
                         .map_err(|error| {
                             ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                         })?;
-                    assert!(admitted.needs_source_capture());
+                    assert!(
+                        !admitted.needs_source_capture(),
+                        "private admission installed the matching World"
+                    );
                     admitted.scope_bindings().map_err(|error| {
                         ResidentActorWorkbenchError::ActorProtocol(format!(
                             "scope enumeration failed: {error}"
@@ -22136,7 +21965,8 @@ pub(crate) mod request_tests {
             let first = installed_world_query(&workbench, context.clone(), captured.clone(), "WorldQuestion", StructuredInspectionKind::Info, cold.clone()).await;
             assert!(matches!(first.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { info, .. } if info.identifier.name == "known"));
             assert_eq!(cold.snapshot().get(HostWorkCounter::ColdBootstrap), 1);
-            assert!(cold.snapshot().get(HostWorkCounter::CompilerMetadataSnapshot) > 0);
+            assert_eq!(cold.snapshot().get(HostWorkCounter::CompilerMetadataSnapshot), 0,
+                "cold World bootstrap uses exact inputs without a broad metadata snapshot");
             let fingerprint = first.provenance().fingerprint.clone();
 
             {
@@ -22784,9 +22614,11 @@ pub(crate) mod request_tests {
             "no compiler invocation scope installed"
         );
         let spawns = tidepool_extract_cmd::extract_spawn_count();
+        let mut absent_context = context.clone();
+        absent_context.source_layer = crate::ActorSourceRoots::Deployment(Vec::new().into());
         let absent = workbench
             .query_scoped_world(
-                context.clone(),
+                absent_context,
                 tidepool_toolchain::compiler_world::WorldObservationQuestion::Expression(
                     "()".into(),
                 ),
@@ -23733,15 +23565,53 @@ pub(crate) mod request_tests {
                 .admit_private_cell_for_test(context)
                 .await
                 .unwrap();
+            let parent_lease = workbench
+                .private_execution
+                .as_ref()
+                .unwrap()
+                .admission
+                .retained_lexical_scope();
             let (sibling, child) = workbench
                 .access
-                .with_machine(context.clone(), |session, context, _| {
-                    Ok((
-                        session.mint_isolated_scope(),
-                        session
-                            .mint_scope(context.placement.lexical_scope)
-                            .expect("fork scope"),
-                    ))
+                .with_machine(context.clone(), move |session, context, _| {
+                    let mut sibling = context.clone();
+                    sibling.placement.lexical_scope = session.mint_isolated_scope();
+                    sibling.source_dependency =
+                        crate::ActorDescriptor::new("race sibling", sibling.placement)
+                            .admit_independent_world()
+                            .session_context(sibling.actor)
+                            .source_dependency;
+                    sibling
+                        .source_dependency()
+                        .adopt_final_scope(session, sibling.placement.lexical_scope)?;
+                    let mut child = context.clone();
+                    child.placement.lexical_scope = session
+                        .mint_scope(context.placement.lexical_scope)
+                        .expect("fork scope");
+                    child.source_dependency =
+                        crate::ActorDescriptor::new("race child", child.placement)
+                            .admit_independent_world()
+                            .session_context(child.actor)
+                            .source_dependency;
+                    let child_lease = session
+                        .adopt_initial_notebook_scope_with_source(
+                            child.placement.lexical_scope,
+                            Some(parent_lease),
+                        )
+                        .map_err(ResidentError::Session)?;
+                    let generation_admission::SourceDependency::World(owner) =
+                        child.source_dependency()
+                    else {
+                        panic!("descriptor issues the child's bootstrap World");
+                    };
+                    owner.adopt_scope(child_lease)?;
+                    assert_ne!(sibling.source_dependency(), child.source_dependency());
+                    assert_ne!(context.source_dependency(), child.source_dependency());
+                    assert!(!Arc::ptr_eq(
+                        &sibling.source_dependency().source_lease()?,
+                        &child.source_dependency().source_lease()?,
+                    ));
+                    Ok((sibling, child))
                 })
                 .await
                 .unwrap();
@@ -23767,9 +23637,7 @@ pub(crate) mod request_tests {
                     .await
                     .expect("checked execution changes the admitted scope");
             } else {
-                for scope in [sibling, child] {
-                    let mut changing = context.clone();
-                    changing.placement.lexical_scope = scope;
+                for changing in [sibling, child] {
                     let changing_workbench = ResidentActorWorkbench::new(
                         Arc::clone(&machines),
                         (source.clone()).bind_preparation(preparation_client.clone()),
@@ -31792,67 +31660,51 @@ pub(crate) mod request_tests {
         assert!(error.contains("no child-session factory"));
     }
 
-    fn child_session_with_outstanding_custody(
+    async fn child_session_with_outstanding_custody(
         preparation_client: crate::CompilerPreparationClient,
     ) -> (
         ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
         Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
         tidepool_repr::SessionId,
+        tidepool_repr::SessionId,
         RootCustody,
+        (tempfile::TempDir, tempfile::TempDir),
     ) {
-        let (machines, context, source, _root) = actor_registry_fixture();
-        let child_id = tidepool_repr::SessionId(context.placement.session.0.wrapping_add(11));
-        let (mut child_session, _child_root) = bare_session_at(child_id);
-        // `ResidentSession::retain_binding_custody` resolves a name only in
-        // `ScopeId::ROOT` (`BindingTable::resolve`'s own doc comment: "the
-        // ROOT frame"), so the binding this test mounts (and later resolves
-        // a custody token for) must live there too, not in a freshly minted
-        // scope.
-        let lexical_scope = tidepool_codegen::scope::ScopeId::ROOT;
-        let resource_scope = RealmId::fresh();
-        child_session
-            .set_actor_execution(
-                tidepool_runtime::session::SessionRunContext {
-                    lexical_scope,
-                    resource_scope,
-                    ..tidepool_runtime::session::SessionRunContext::ROOT
-                },
-                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            )
-            .expect("actor execution context");
-        let child_context = crate::ActorSessionContext {
-            placement: crate::ActorPlacement {
-                session: child_id,
-                resource_scope,
-                lexical_scope,
-            },
-            ..context.clone()
+        let (machines, parent, source, parent_root) = actor_registry_fixture();
+        let parent_id = parent.placement.session;
+        let child_id = tidepool_repr::SessionId(parent_id.0.wrapping_add(11));
+        let (mut child_session, child_root) = bare_session_at(child_id);
+        let placement = crate::ActorPlacement {
+            session: child_id,
+            resource_scope: RealmId::fresh(),
+            lexical_scope: child_session.mint_isolated_scope(),
         };
-        // A real compiled/mounted binding bootstraps the session's engine;
-        // `retain_binding_custody` then mints a `RootCustody` over it —
-        // the SAME shape a reply or retained-progress value crosses the
-        // resident-workbench boundary as — and this local variable is what
-        // "outside the session" means: it is not released until this test
-        // drops it below.
-        mount_text_binding(
-            &mut child_session,
-            &child_context,
-            &source,
-            "outstanding",
-            "still here",
-            None,
-        )
-        .expect("mount a real binding to hold a live handle");
-        let custody = child_session
-            .retain_binding_custody("outstanding")
-            .expect("retain mounted binding")
-            .expect("the mounted binding resolves to a live custody token");
+        let actor = crate::ActorRef::first(crate::ActorId(2));
+        let child = crate::ActorSessionContext {
+            actor,
+            placement,
+            source_dependency: crate::ActorDescriptor::new("custody-child", placement)
+                .admit_independent_world()
+                .session_context(actor)
+                .source_dependency,
+            ..parent.clone()
+        };
+        child
+            .source_dependency()
+            .adopt_final_scope(&mut child_session, child.placement.lexical_scope)
+            .unwrap();
+        assert_ne!(parent.source_dependency(), child.source_dependency());
+        assert!(!Arc::ptr_eq(
+            &parent.source_dependency().source_lease().unwrap(),
+            &child.source_dependency().source_lease().unwrap(),
+        ));
+        child_session
+            .set_actor_execution(child.run_context(), child.effect_policy, child.live_payload)
+            .unwrap();
         machines.insert_idle(child_id, Box::new(child_session));
-
         let runner = ResidentActorRunner::new(
             Arc::clone(&machines),
-            (source).bind_preparation(preparation_client.clone()),
+            source.bind_preparation(preparation_client),
         );
         runner
             .access
@@ -31860,7 +31712,41 @@ pub(crate) mod request_tests {
             .lock()
             .unwrap()
             .insert(child_id);
-        (runner, machines, child_id, custody)
+        let (workbench, private) = runner
+            .application_workbench()
+            .admit_private_cell_for_test(child.clone())
+            .await
+            .unwrap();
+        workbench
+            .bind_tool_result(private.clone(), "outstanding".into(), "still here".into())
+            .await
+            .unwrap()
+            .accept()
+            .unwrap();
+        workbench
+            .publish_completed_cell_for_test(private)
+            .await
+            .unwrap();
+        let custody = runner
+            .access
+            .with_machine(child, |session, context, _| {
+                let scope = context.placement.lexical_scope;
+                let binding = session.current_binding_in(scope, "outstanding").unwrap().0;
+                Ok(session
+                    .retain_binding_custody_in(scope, "outstanding", binding)?
+                    .expect("the checked child binding owns real external custody"))
+            })
+            .await
+            .unwrap();
+        drop(workbench);
+        (
+            runner,
+            machines,
+            parent_id,
+            child_id,
+            custody,
+            (parent_root, child_root),
+        )
     }
 
     fn child_session_with_binding_lease(
@@ -32130,8 +32016,10 @@ pub(crate) mod request_tests {
     async fn retiring_a_child_session_defers_then_completes_once_custody_clears_with_compiler_owner(
         preparation_client: crate::CompilerPreparationClient,
     ) {
-        let (runner, machines, child_id, custody) =
-            child_session_with_outstanding_custody(preparation_client.clone());
+        let (runner, machines, parent_id, child_id, custody, _roots) =
+            child_session_with_outstanding_custody(preparation_client.clone()).await;
+        assert_ne!(parent_id, child_id);
+        assert!(machines.kind(parent_id).is_some());
         runner
             .retire_child_session(child_id, false)
             .await
@@ -32181,6 +32069,10 @@ pub(crate) mod request_tests {
             machines.kind(child_id),
             None,
             "the deferred release completes once custody clears"
+        );
+        assert!(
+            machines.kind(parent_id).is_some(),
+            "child cleanup preserves its parent"
         );
     }
 
@@ -32349,6 +32241,19 @@ pub(crate) mod request_tests {
         let (mut session, context_a, source, root) = host_mount_fixture();
         let mut context_b = context_a.clone();
         context_b.placement.lexical_scope = session.mint_isolated_scope();
+        context_b.source_dependency = crate::ActorDescriptor::new("fixture-b", context_b.placement)
+            .admit_independent_world()
+            .session_context(context_b.actor)
+            .source_dependency;
+        context_b
+            .source_dependency()
+            .adopt_final_scope(&mut session, context_b.placement.lexical_scope)
+            .unwrap();
+        assert_ne!(context_a.source_dependency(), context_b.source_dependency());
+        assert!(!Arc::ptr_eq(
+            &context_a.source_dependency().source_lease().unwrap(),
+            &context_b.source_dependency().source_lease().unwrap(),
+        ));
         let session_id = context_a.placement.session;
         let machines = Arc::new(ActorMachineRegistry::<
             frunk::HNil,
@@ -33081,11 +32986,14 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn compiler_query_boundary_requires_an_adopted_world_scope() {
         with_test_compiler_owner(|preparation_client| async move {
-            let (session, context, source, _root) = host_mount_fixture_with_effects(
+            let (session, mut context, source, _root) = unadopted_host_mount_fixture_with_effects(
                 |_| {},
                 &[tidepool_mcp::introspection_decl()],
                 "'[Introspection]",
             );
+            let (captured, _owner) =
+                world_query_test_source_files_with_support(&[], &source.toolset_support);
+            context.source_layer = crate::ActorSourceRoots::Complete(captured);
             let machines = Arc::new(ActorMachineRegistry::new());
             machines.insert_idle(context.placement.session, Box::new(session));
             let workbench = ResidentActorWorkbench::new(
@@ -33097,12 +33005,15 @@ pub(crate) mod request_tests {
                 Ok(_) => panic!("an unadopted world scope must refuse the private cell"),
                 Err(error) => error,
             };
-            assert!(matches!(
-                refused,
-                ResidentActorWorkbenchError::SourceAdmission(
-                    generation_admission::GenerationAdmissionError::Unqualified
-                )
-            ));
+            assert!(
+                matches!(
+                    refused,
+                    ResidentActorWorkbenchError::SourceAdmission(
+                        generation_admission::GenerationAdmissionError::Unqualified
+                    )
+                ),
+                "unexpected refusal: {refused:?}"
+            );
         })
         .await;
     }
@@ -33464,7 +33375,14 @@ pub(crate) mod request_tests {
                         .finish(),
                 )
             });
-        let (_, mut context, _, _) = host_mount_fixture();
+        let (_, mut context, _, _) = unadopted_host_mount_fixture_with_effects(
+            |_| {},
+            &[
+                tidepool_mcp::notifications_decl(),
+                tidepool_mcp::sleep_decl(),
+            ],
+            "'[Exomonad.Notifications, Sleep]",
+        );
         let declarations = [
             tidepool_mcp::agent_tools_decl(),
             tidepool_mcp::agent_session_decl(),
@@ -36183,22 +36101,28 @@ pub(crate) mod request_tests {
                     })
                     .await
                     .expect("child provisional scope");
+                let parent = context.clone();
                 let mut child = context;
                 child.actor = crate::ActorRef::first(crate::ActorId(actor_id));
                 child.placement.lexical_scope = provisional;
+                child.source_dependency =
+                    crate::ActorDescriptor::new("captured LLM child", child.placement)
+                        .admit_independent_world()
+                        .session_context(child.actor)
+                        .source_dependency;
+                assert_ne!(child.source_dependency(), parent.source_dependency());
                 let custody = crate::resident_actor::child_launch::ChildPlacementCustody::new(
                     child.placement,
                 );
                 let _startup = custody.startup_guard();
                 child.placement.lexical_scope = runner
-                    .remint_checkpoint_child_scope_from_lease(
-                        child.clone(),
-                        capsule,
-                        provisional,
-                        custody,
-                    )
+                    .remint_checkpoint_child_scope_from_lease(parent, capsule, provisional, custody)
                     .await
                     .expect("released token cannot erase admitted lexical state");
+                runner
+                    .adopt_final_source_scope(child.clone())
+                    .await
+                    .expect("captured LLM child adopts its independently issued source owner");
                 (child, admitted)
             }
         };
@@ -36286,6 +36210,11 @@ pub(crate) mod request_tests {
             delayed_child(second, second_ready, 3),
             retire_original,
         );
+        assert_ne!(first.source_dependency(), second.source_dependency());
+        assert!(!Arc::ptr_eq(
+            &first.source_dependency().source_lease().unwrap(),
+            &second.source_dependency().source_lease().unwrap(),
+        ));
         drop(first_lease);
         assert!(admissions.retains_session(context.placement.session));
         workbench
@@ -36313,8 +36242,8 @@ pub(crate) mod request_tests {
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 assert!(
-                    session.compile_view_in(retained_scope).is_some(),
-                    "last lease drop queues retirement until owner entry settles it"
+                    session.compile_view_in(retained_scope).is_none(),
+                    "machine owner entry settles retirement queued by the last lease drop"
                 );
                 session.outstanding_custody();
                 assert!(session.compile_view_in(retained_scope).is_none());
@@ -36882,8 +36811,16 @@ pub(crate) mod request_tests {
     async fn actor_continuation_handoff_preserves_successor_and_aborts_other_cell_holes_with_compiler_owner(
         preparation_client: crate::CompilerPreparationClient,
     ) {
-        let (machines, mut context, source, _root) = actor_registry_fixture();
-        context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let (session, context, mut source, _root) = host_mount_fixture_with_effects(
+            |_| {},
+            &[tidepool_mcp::resource_scopes_decl()],
+            "'[ResourceScopes]",
+        );
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Scope as Scope");
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
         let workbench = ResidentActorWorkbench::new(
             Arc::clone(&machines),
             (source.clone()).bind_preparation(preparation_client.clone()),
@@ -36904,26 +36841,58 @@ pub(crate) mod request_tests {
             "test cell abandoned".into(),
         );
         let registration = cell.registration();
-        let (successor, other) = registration
+        let (successor, other_id) = registration
             .scope(async {
-                let mut outcomes: Vec<ResidentOutcome> = Vec::new();
-                for _ in 0..2 {
-                    let (block, _) = suspending_fragment();
-                    let step = workbench
-                        .begin_cell_for_test(context.clone(), block)
-                        .await
-                        .expect("real native fragment parks");
-                    let ResidentWorkbenchStep::Running { outcome, .. } = step else {
-                        panic!("expected native suspension");
-                    };
-                    outcomes.push((*outcome).into());
-                }
-                let other = outcomes.pop().unwrap();
-                (outcomes.pop().unwrap(), other)
+                let step = workbench
+                    .begin_cell_for_test(
+                        context.clone(),
+                        ParsedBlock {
+                            ordinal: 1,
+                            total: 1,
+                            source: include_str!("fixtures/scope-live-result.hs").into(),
+                        },
+                    )
+                    .await
+                    .expect("one checked program parks at its scope delimiter");
+                let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+                    panic!("scope delimiter must suspend");
+                };
+                let boundary = runner
+                    .capture_boundary(
+                        context.clone(),
+                        (*outcome).into(),
+                        context.placement.resource_scope,
+                    )
+                    .await
+                    .expect("capture the compiler-issued scope callback");
+                let ResidentActorBoundary::ScopeRun {
+                    continuation,
+                    callback,
+                } = boundary
+                else {
+                    panic!("expected scope callback");
+                };
+                let other_id = continuation.cont_id().to_owned();
+                let successor = runner
+                    .run_rooted_entry(context.clone(), callback, RealmId::fresh())
+                    .await
+                    .expect("the actual callback parks while its parent remains suspended");
+                (successor, other_id)
             })
             .await;
-        let successor_id = outcome_continuation_id(&successor).unwrap();
-        let other_id = outcome_continuation_id(&other).unwrap();
+        let successor_id = outcome_continuation_id(&successor).expect("scope callback suspends");
+        assert_ne!(successor_id, other_id);
+        let owned = registration
+            .awaiting_acknowledgement()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            owned,
+            [successor_id.clone(), other_id.clone()]
+                .into_iter()
+                .collect(),
+            "the real cell owner observes both native continuations"
+        );
         let actor = registration
             .sync_scope(|| runner.handoff_actor_continuation(context.clone(), &successor))
             .expect("actor accepts exact successor")
@@ -37159,6 +37128,14 @@ pub(crate) mod request_tests {
     ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let (unrelated_workbench, unrelated_context) = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            source.clone().bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .admit_private_cell_for_test(context.clone())
+        .await
+        .unwrap();
         let (workbench, context) = ResidentActorWorkbench::new(
             Arc::clone(&machines),
             (source).bind_preparation(preparation_client.clone()),
@@ -37169,8 +37146,8 @@ pub(crate) mod request_tests {
         .unwrap();
         let workbench = Arc::new(workbench);
         let (block, _) = suspending_fragment();
-        let unrelated = workbench
-            .begin_cell_for_test(context.clone(), block)
+        let unrelated = unrelated_workbench
+            .begin_cell_for_test(unrelated_context, block)
             .await
             .expect("unrelated whole-cell item parks");
         let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {
@@ -37203,7 +37180,8 @@ pub(crate) mod request_tests {
         let task_workbench = Arc::clone(&workbench);
         let checkout_workbench = Arc::clone(&workbench);
         let task_context = context.clone();
-        let task = tokio::spawn(async move {
+        let compiler_owner = crate::capabilities::CompilerOwnerScope::current().unwrap();
+        let task = tokio::spawn(compiler_owner.scope(async move {
             task_workbench
                 .with_exact_continuation_cleanup(
                     task_context.clone(),
@@ -37211,24 +37189,28 @@ pub(crate) mod request_tests {
                     async move {
                         checkout_workbench
                             .access
-                            .with_machine(task_context, move |session, context, _| {
-                                let PreparedCellStep { prefix, item } = item.ready;
-                                let reservation =
-                                    session.admit_checked_item(prefix, item).map_err(|error| {
-                                        ResidentActorWorkbenchError::Resident(error.into())
-                                    })?;
-                                let ready = consume_admitted_cell_item(reservation, &block)?;
-                                let CompiledBlock::Ready(ready) = ready else {
-                                    panic!("prepared whole-cell item must be executable");
-                                };
-                                let ReadyBlock {
-                                    bound,
-                                    compiled,
-                                    generation,
-                                    observation,
-                                } = *ready;
-                                let step = tidepool_testing::with_settlement(|settlement| {
-                                    begin_ready_bind_in_checkout(
+                            .with_compiler_machine(
+                                task_context,
+                                move |session, context, _, settlement| {
+                                    session
+                                        .admit_source_mutation(context.placement.lexical_scope)?;
+                                    let PreparedCellStep { prefix, item } = item.ready;
+                                    let reservation = session
+                                        .admit_checked_item(prefix, item)
+                                        .map_err(|error| {
+                                            ResidentActorWorkbenchError::Resident(error.into())
+                                        })?;
+                                    let ready = consume_admitted_cell_item(reservation, &block)?;
+                                    let CompiledBlock::Ready(ready) = ready else {
+                                        panic!("prepared whole-cell item must be executable");
+                                    };
+                                    let ReadyBlock {
+                                        bound,
+                                        compiled,
+                                        generation,
+                                        observation,
+                                    } = *ready;
+                                    let step = begin_ready_bind_in_checkout(
                                         session,
                                         context,
                                         &block,
@@ -37237,25 +37219,37 @@ pub(crate) mod request_tests {
                                         generation,
                                         observation,
                                         settlement,
-                                    )
-                                })?;
-                                let ResidentWorkbenchStep::Running { outcome, .. } = &step else {
-                                    panic!("expected late suspension")
-                                };
-                                parked_tx
-                                    .send(outcome.continuation_id().to_owned())
-                                    .expect("test waits for late hole");
-                                release_rx.recv().expect("test releases checkout");
-                                Ok(step)
-                            })
+                                    )?;
+                                    let ResidentWorkbenchStep::Running { outcome, .. } = &step
+                                    else {
+                                        panic!("expected late suspension")
+                                    };
+                                    parked_tx
+                                        .send(outcome.continuation_id().to_owned())
+                                        .expect("test waits for late hole");
+                                    release_rx.recv().expect("test releases checkout");
+                                    Ok(step)
+                                },
+                            )
                             .await
                     },
                 )
                 .await
-        });
-        let late_id = tokio::task::spawn_blocking(move || parked_rx.recv().expect("hole parked"))
+        }));
+        let late_id = match tokio::task::spawn_blocking(move || parked_rx.recv())
             .await
-            .expect("waiter joins");
+            .expect("waiter joins")
+        {
+            Ok(id) => id,
+            Err(error) => {
+                let result = match task.await {
+                    Ok(Ok(step)) => describe_step(&step),
+                    Ok(Err(failure)) => format!("{failure:?}"),
+                    Err(failure) => format!("{failure:?}"),
+                };
+                panic!("checkout closed before parking: {error}; task: {result}");
+            }
+        };
         task.abort();
         assert!(task.await.is_err_and(|error| error.is_cancelled()));
         release_tx.send(()).expect("checkout still blocked");
@@ -37301,6 +37295,14 @@ pub(crate) mod request_tests {
     ) {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
+        let (unrelated_workbench, unrelated_context) = ResidentActorWorkbench::new(
+            Arc::clone(&machines),
+            source.clone().bind_preparation(preparation_client.clone()),
+            None,
+        )
+        .admit_private_cell_for_test(context.clone())
+        .await
+        .unwrap();
         let workbench = ResidentActorWorkbench::new(
             Arc::clone(&machines),
             (source.clone()).bind_preparation(preparation_client.clone()),
@@ -37312,8 +37314,8 @@ pub(crate) mod request_tests {
             .unwrap();
         let workbench = Arc::new(workbench);
         let (block, _) = suspending_fragment();
-        let unrelated = workbench
-            .begin_cell_for_test(context.clone(), block)
+        let unrelated = unrelated_workbench
+            .begin_cell_for_test(unrelated_context, block)
             .await
             .expect("unrelated fragment parks");
         let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {

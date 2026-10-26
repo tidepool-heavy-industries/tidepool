@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tidepool_bridge::{BridgeError, FromHaskell, HaskellValue};
-use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, EffectDispatch, Response};
 use tidepool_effect::error::EffectError;
@@ -94,9 +93,12 @@ async fn admit(
     ActorSessionContext,
     Arc<ExecutionPrivateScope>,
 ) {
-    let (mut context, authority) =
-        WorkbenchCompilationAuthority::admit(public, Default::default(), None, None)
-            .unwrap_or_else(|error| panic!("owner admits compilation: {error:?}"));
+    assert!(matches!(
+        &public.source_layer,
+        crate::ActorSourceRoots::Complete(_)
+    ));
+    let authority = WorkbenchCompilationAuthority::for_test(public.clone());
+    let mut context = public;
     let execution = Arc::new(
         runner
             .begin_private_execution(context.clone(), owner, PublicationDecision::new(), None)
@@ -177,6 +179,11 @@ async fn counted_publication_history(preparation: crate::CompilerPreparationClie
     tidepool_testing::eval_harness::require_extract();
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
     let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec());
+    let (captured_source, _source_owner) =
+        crate::resident_workbench::request_tests::world_query_test_source_files_with_support(
+            &[],
+            surface.include_paths(),
+        );
     let root = tempfile::tempdir().unwrap();
     let recovery = crate::recovery::recovery_test_fixture::RecoveryFixture::create(root.path());
     let session_id = fresh_session_id();
@@ -203,7 +210,7 @@ async fn counted_publication_history(preparation: crate::CompilerPreparationClie
             let context_actor = crate::ActorRef::first(crate::ActorId(id));
             let context_placement = crate::ActorPlacement {
                 session: session_id,
-                lexical_scope: session.mint_scope(ScopeId::ROOT).unwrap(),
+                lexical_scope: session.mint_isolated_scope(),
                 resource_scope: RealmId::fresh(),
             };
             ActorSessionContext {
@@ -214,12 +221,16 @@ async fn counted_publication_history(preparation: crate::CompilerPreparationClie
                 source_imports: Default::default(),
                 haskell_effects_alias: surface.row().into(),
                 current_model: None,
-                source_layer: Vec::new().into(),
+                source_layer: crate::ActorSourceRoots::Complete(captured_source.clone()),
                 ..crate::ActorDescriptor::new("fixture", context_placement)
                     .admit_independent_world()
                     .session_context(context_actor)
             }
         };
+        context
+            .source_dependency()
+            .adopt_final_scope(&mut session, context.placement.lexical_scope)
+            .unwrap();
         let path = tidepool_repr::ActorPath::parse(&format!("root/{name}")).unwrap();
         let durable = RecoveryPublicOwner::new(&path, context.actor.incarnation.0).unwrap();
         session
@@ -392,12 +403,20 @@ async fn activation_metadata_history(preparation: crate::CompilerPreparationClie
     for name in ["activation-retry", "activation-unrelated"] {
         let path = tidepool_repr::ActorPath::parse(&format!("root/{name}")).unwrap();
         let durable = RecoveryPublicOwner::new(&path, context.actor.incarnation.0).unwrap();
-        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let scope = session.mint_isolated_scope();
         session
             .initialize_durable_public_scope(durable.clone(), scope)
             .unwrap();
         let mut public = context.clone();
         public.placement.lexical_scope = scope;
+        public.source_dependency = crate::ActorDescriptor::new(name, public.placement)
+            .admit_independent_world()
+            .session_context(public.actor)
+            .source_dependency;
+        public
+            .source_dependency()
+            .adopt_final_scope(&mut session, scope)
+            .unwrap();
         let descriptor = crate::ActorDescriptor::new(name, public.placement)
             .with_actor_path(path)
             .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
@@ -412,9 +431,12 @@ async fn activation_metadata_history(preparation: crate::CompilerPreparationClie
     machines.insert_idle(context.placement.session, Box::new(session));
     let runner =
         ResidentActorRunner::new(Arc::clone(&machines), source.bind_preparation(preparation));
-    let (mut private, authority) =
-        WorkbenchCompilationAuthority::admit(context.clone(), Default::default(), None, None)
-            .unwrap();
+    assert!(matches!(
+        &context.source_layer,
+        crate::ActorSourceRoots::Complete(_)
+    ));
+    let authority = WorkbenchCompilationAuthority::for_test(context.clone());
+    let mut private = context.clone();
     let execution = Arc::new(
         runner
             .begin_private_execution(
@@ -471,17 +493,18 @@ async fn activation_metadata_history(preparation: crate::CompilerPreparationClie
         context.actor.incarnation.0,
     )
     .unwrap();
-    let next_identity = {
+    let (next_identity, _interfering_scope) = {
         let mut checkout = machines.checkout_run(context.placement.session).unwrap();
         let session = checkout.machine();
         let next_identity = session.next_declaration_module();
-        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let lease = session.mint_notebook_scope_with_lease(None).unwrap();
+        let scope = lease.scope();
         session
             .initialize_durable_public_scope(interfering_owner.clone(), scope)
             .unwrap();
         assert_eq!(session.next_declaration_module(), next_identity);
         checkout.restore_suspended(Vec::new());
-        next_identity
+        (next_identity, lease)
     };
     let interference_surface = recovery.public_owner(&interfering_owner);
     gate.release.notify_one();
