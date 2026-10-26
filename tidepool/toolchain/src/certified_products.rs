@@ -4718,7 +4718,7 @@ impl std::io::Write for EncodingSize {
         Ok(())
     }
 }
-fn encoded_size(value: &Value) -> CertResult<usize> {
+pub(crate) fn encoded_size(value: &Value) -> CertResult<usize> {
     let mut size = EncodingSize(0);
     ciborium::ser::into_writer(value, &mut size)
         .map_err(|_| CertificationError::Receipt("encoding size"))?;
@@ -37796,8 +37796,18 @@ None,
         let producer =
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(PRODUCER)
                 .sha256();
+        let mixed_globals = fixture_root.is_some();
         let child = fixture_finalized_product(
-            original_groups_fixture("OverlayChild", vec![(7, vec![])], 1, &BTreeMap::new()),
+            original_groups_fixture(
+                "OverlayChild",
+                if mixed_globals {
+                    vec![(7, vec![]), (11, vec![])]
+                } else {
+                    vec![(7, vec![])]
+                },
+                1,
+                &BTreeMap::new(),
+            ),
             producer,
         );
         let child_entry = Arc::new(ArtifactEntry::original(producer, child.clone()).unwrap());
@@ -37806,10 +37816,13 @@ None,
             .admit_recovery_selection(
                 &inventory.empty_view(),
                 vec![Arc::clone(&child_entry)],
-                &BTreeSet::from([NativeGroupKey {
-                    artifact: child_entry.descriptor.id,
-                    original_ordinal: 7,
-                }]),
+                &std::iter::once(7)
+                    .chain(mixed_globals.then_some(11))
+                    .map(|original_ordinal| NativeGroupKey {
+                        artifact: child_entry.descriptor.id,
+                        original_ordinal,
+                    })
+                    .collect(),
             )
             .unwrap();
         let context = ExactDeclarationContext::retained_execution_fixture(
@@ -37870,16 +37883,24 @@ None,
 
         // Compiler-shaped metadata is not executable authority. The physical
         // cohort below must earn the exact child edge from the resolved input.
+        let mut pending_imports = Vec::new();
+        let prefix_binder = mixed_globals
+            .then(|| child.original_native().group(11).unwrap().group().binders()[0].clone());
+        if let Some(prefix) = &prefix_binder {
+            pending_imports.push(PendingImportOwner::Source {
+                owner: child.owner().clone(),
+                original_ordinal: 11,
+                binder: prefix.clone(),
+            });
+        }
+        pending_imports.push(PendingImportOwner::Source {
+            owner: child.owner().clone(),
+            original_ordinal: 7,
+            binder: binder.clone(),
+        });
         let draft = original_groups_fixture(
             "OverlayParent",
-            vec![(
-                13,
-                vec![PendingImportOwner::Source {
-                    owner: child.owner().clone(),
-                    original_ordinal: 7,
-                    binder: binder.clone(),
-                }],
-            )],
+            vec![(13, pending_imports)],
             2,
             &BTreeMap::new(),
         );
@@ -37890,16 +37911,36 @@ None,
         )
         .unwrap()
         .remove(0);
+        let mut references = Vec::new();
+        let mut source_metadata = HomeSourceMetadata::default();
+        if mixed_globals {
+            source_metadata
+                .record(
+                    child.owner(),
+                    11,
+                    prefix_binder.as_ref().unwrap(),
+                    &operation,
+                )
+                .unwrap();
+            references.push(ReceiptImportOwner::Source {
+                unit: child.owner().unit.clone(),
+                module: child.owner().module.clone(),
+                module_version: Some(child.owner().module_version.clone()),
+                original_ordinal: 11,
+                binder: prefix_binder.as_ref().unwrap().clone(),
+            });
+        }
+        references.push(reference.clone());
         let group = Arc::new(AuthenticatedOriginalGroup {
             origin: ProductOrigin::Fresh,
             owner: draft.owner().clone(),
             group: Arc::new(raw.groups.remove(0)),
-            imports: vec![reference.clone()].into(),
+            imports: references.into(),
         });
         let witness = issue_home_certification_with_validation(
             draft.owner(),
             &[group],
-            &HomeSourceMetadata::default(),
+            &source_metadata,
             &BTreeMap::new(),
             &BTreeMap::new(),
             None,
@@ -37918,9 +37959,11 @@ None,
             producer,
         );
         let parent_entry = Arc::new(ArtifactEntry::original(producer, parent.clone()).unwrap());
-        assert!(native_requirements_from_witness(&witness)
-            .artifact_edges
-            .is_empty());
+        if !mixed_globals {
+            assert!(native_requirements_from_witness(&witness)
+                .artifact_edges
+                .is_empty());
+        }
         assert!(
             source
                 .compiler_primary_input(&parent_entry.descriptor.owner)
@@ -37974,7 +38017,7 @@ None,
         assert_eq!(row[1], value_text(&parent.owner().module));
         assert_eq!(row[2], value_text(hex(&parent.owner().module_version.0)));
         assert_eq!(row[3], Value::Integer(13.into()));
-        assert_eq!(row[4], Value::Integer(0.into()));
+        assert_eq!(row[4], Value::Integer(u32::from(mixed_globals).into()));
         assert_eq!(row[5], value_text(&child.owner().unit));
         assert_eq!(row[6], value_text(&child.owner().module));
         let pair = |binding: crate::artifact_inventory::ArtifactBinding| {
@@ -37989,15 +38032,23 @@ None,
         assert_eq!(row[10], value_text(hex(&child.owner().module_version.0)));
         assert_eq!(row[11], Value::Integer(7.into()));
         let fixture = fixture_root.map(|root| {
+            let support = physical
+                .captured_stage()
+                .compiler_inputs()
+                .compiler_source_support();
+            let restored = crate::declaration_context::recover_fixture_compiler_support(
+                support.projection().clone(),
+                support.artifacts().clone(),
+                support.native_offers().iter().cloned(),
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap()
+            .retain_normalized_availability(support.native_availability())
+            .unwrap();
             let context = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
-                    .extend_issued_compiler_support(
-                        physical
-                            .captured_stage()
-                            .compiler_inputs()
-                            .compiler_source_support(),
-                    )
+                    .extend_issued_compiler_support(&restored)
                     .unwrap(),
             );
             context
@@ -38034,7 +38085,7 @@ None,
             .unwrap();
         assert_eq!(
             rows.len(),
-            2,
+            if mixed_globals { 3 } else { 2 },
             "the actual cohort must issue both parent and exact child rows"
         );
         let parent_binding = rows
@@ -38051,7 +38102,10 @@ None,
             SelectedOriginalGroupScope::selected(executable)
                 .children(parent_binding, &operation)
                 .unwrap(),
-            vec![child_binding]
+            rows.iter()
+                .filter(|(binding, _)| binding.binding.artifact() == child_entry.descriptor.id)
+                .map(|(binding, _)| *binding)
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             SelectedOriginalGroupScope::selected(executable)
@@ -38060,10 +38114,16 @@ None,
             (original, interface),
             "native issuance must retain the exact input pair, not reissue the child's scope"
         );
-        assert!(
-            matches!(rows.iter().find(|(binding, _)| *binding == parent_binding).unwrap().1.imports(),
-            [SelectedNativeImport::Source { binding, .. }] if *binding == child_binding)
-        );
+        let parent_imports = rows
+            .iter()
+            .find(|(binding, _)| *binding == parent_binding)
+            .unwrap()
+            .1
+            .imports();
+        assert_eq!(parent_imports.len(), if mixed_globals { 2 } else { 1 });
+        assert!(parent_imports.iter().enumerate().all(|(index, import)| matches!(import,
+            SelectedNativeImport::Source { binding, .. } if binding.binding.artifact() == child_entry.descriptor.id && binding.original_ordinal == if mixed_globals && index == 0 { 11 } else { 7 })));
+
         let graph = executable.capture_graph_selection();
         let membership =
             AvailableOriginalSources::authenticate(&[parent.clone(), child], &operation).unwrap();

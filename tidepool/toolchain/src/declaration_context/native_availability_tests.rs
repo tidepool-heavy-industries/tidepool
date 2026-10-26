@@ -208,6 +208,59 @@ fn scope(request: &ExactCompilationRequest) -> Vec<Value> {
 }
 
 #[test]
+fn census_transport_charges_projection_and_preflights_encoding() {
+    use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+    let context = native_context(&product("CensusBudget", 35));
+    let directory = tempfile::tempdir().unwrap();
+    let request = context
+        .prepare_compilation(directory.path(), PRODUCER)
+        .unwrap();
+    let operation = InventoryOperation::new(Default::default());
+    assert_eq!(
+        request
+            .compiler_inputs()
+            .native_selection
+            .original_census_resolutions(&request.transport_metadata, &operation)
+            .unwrap(),
+        Value::Array(vec![])
+    );
+    assert!(
+        operation.work_usage().unwrap().0 > 0,
+        "available groups are charged without Original references"
+    );
+    let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+        max_work: 0,
+        ..Default::default()
+    });
+    assert!(request
+        .compiler_inputs()
+        .native_selection
+        .original_census_resolutions(&request.transport_metadata, &exhausted)
+        .is_err());
+    let fields = scope(&request);
+    let encode = |resolution, operation: &InventoryOperation| {
+        encode_scope_manifest_with_published(
+            fields[..7].to_vec(),
+            None,
+            None,
+            Value::Array(vec![]),
+            Value::Array(vec![text("fresh-files")]),
+            resolution,
+            operation,
+        )
+    };
+    assert!(encode(Value::Array(vec![]), &exhausted).is_err());
+    let output_budget = InventoryOperation::new(Default::default());
+    let error = encode(text("x".repeat(EXACT_SCOPE_BYTES_LIMIT)), &output_budget).unwrap_err();
+    assert!(error.to_string().contains("limit is 4194304"));
+    assert_eq!(
+        output_budget.work_usage().unwrap().0,
+        0,
+        "oversized CBOR is refused before reserving output storage"
+    );
+}
+
+#[test]
 fn production_issued_contribution_preserves_home_owner() {
     let native = product("ContributionHome", 34);
     let owner = ExactModuleIdentity {

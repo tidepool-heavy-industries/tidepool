@@ -4814,8 +4814,10 @@ impl NativeInputSelection {
     fn original_census_resolutions(
         &self,
         metadata: &CompilerArtifactMetadata,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Value, CompileError> {
         use crate::certified_products::{PendingImportOwner, ReceiptImportOwner};
+        let budget = NativeDemandBudget(Some(operation));
         let mut resolutions = BTreeMap::new();
         for entry in metadata.entries.values() {
             let ArtifactPayload::Original(product) = &entry.payload else {
@@ -4826,26 +4828,17 @@ impl NativeInputSelection {
                 .0
                 .get(&entry.descriptor.id)
                 .ok_or_else(|| failure("transported census original lacks its availability"))?;
-            let expected = match availability.mode {
-                NativeTransportMode::Full => {
-                    crate::certified_products::original_available_groups(product)
-                        .map_err(compiler_evidence_failure)?
-                        .map(|group| group.original_ordinal())
-                        .collect()
-                }
-                NativeTransportMode::IssuedGroups => availability.issued_ordinals(),
-            };
-            let mut observed = BTreeSet::new();
+            // Normalized availability already owns complete Full coverage or
+            // exact IssuedGroups membership. Borrow those rows without reselecting.
             for contribution in availability.contributions.iter() {
                 for binding in contribution.original_groups(availability.original_artifact_id()) {
-                    crate::host_work::checkpoint()?;
+                    budget.checkpoint()?;
                     let issued = contribution.issued_group(binding)?;
                     if issued.owner() != product.owner()
                         || issued.group().original_ordinal() != binding.original_ordinal
                     {
                         return Err(failure("census row differs from its physical original"));
                     }
-                    observed.insert(binding.original_ordinal);
                     for (index, reference, resolved) in issued.original_census_resolutions() {
                         let ReceiptImportOwner::OriginalBinding {
                             unit,
@@ -4878,12 +4871,42 @@ impl NativeInputSelection {
                         let source = issued.owner();
                         let index = u32::try_from(index).map_err(failure)?;
                         let key = (
-                            source.unit.clone(),
-                            source.module.clone(),
+                            source.unit.as_str(),
+                            source.module.as_str(),
                             source.module_version.0,
                             binding.original_ordinal,
                             index,
                         );
+                        budget.checkpoint()?;
+                        if !resolutions.contains_key(&key) {
+                            if resolutions.len() >= EXACT_SCOPE_ORIGINAL_RESOLUTIONS_LIMIT {
+                                return Err(failure(format!(
+                                    "census Original resolutions require {} rows; decoder limit is {}",
+                                    resolutions.len() + 1, EXACT_SCOPE_ORIGINAL_RESOLUTIONS_LIMIT,
+                                )));
+                            }
+                            budget
+                                .reserve::<((&str, &str, [u8; 32], u32, u32), Value, [usize; 4])>(
+                                    1,
+                                )?;
+                        }
+                        // Reserve every array slot and owned string/byte copy before
+                        // rendering. Keys borrow the immutable physical issuer.
+                        budget.reserve::<Value>(12 + 4 + 5)?;
+                        for text in [
+                            source.unit.as_str(),
+                            source.module.as_str(),
+                            unit,
+                            module,
+                            &binder.unit,
+                            &binder.module,
+                            &binder.namespace,
+                            &binder.occurrence,
+                        ] {
+                            budget.strings(text.len())?;
+                        }
+                        budget.strings(binder.record_parent.as_ref().map_or(0, String::len))?;
+                        budget.strings(2 * 64 + 4 * 32)?;
                         let pair = |binding: &ArtifactBinding| {
                             Value::Array(vec![
                                 Value::Bytes(binding.artifact.0.to_vec()),
@@ -4911,22 +4934,13 @@ impl NativeInputSelection {
                                 ));
                             }
                         } else {
-                            if resolutions.len() >= 65536 {
-                                return Err(failure(
-                                    "census Original resolutions exceed 65536 rows",
-                                ));
-                            }
                             resolutions.insert(key, row);
                         }
                     }
                 }
             }
-            if observed != expected {
-                return Err(failure(
-                    "available census groups differ from their issued rows",
-                ));
-            }
         }
+        budget.reserve::<Value>(resolutions.len())?;
         Ok(Value::Array(resolutions.into_values().collect()))
     }
 
@@ -6086,6 +6100,8 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
+// Wire row-count limit shared with the ExactScope v17 decoder.
+const EXACT_SCOPE_ORIGINAL_RESOLUTIONS_LIMIT: usize = 65536;
 const EXACT_SCOPE_SCHEMA_VERSION: &str = "17";
 const EXACT_SCOPE_SCHEMA_FIELDS: usize = 12;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
@@ -6304,6 +6320,7 @@ fn encode_scope_manifest(
         Value::Array(vec![]),
         Value::Array(vec![text("fresh-files")]),
         Value::Array(vec![]),
+        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
     )
 }
 
@@ -6314,6 +6331,7 @@ fn encode_scope_manifest_with_published(
     published: Value,
     acquisition: Value,
     original_resolutions: Value,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<Vec<u8>, CompileError> {
     fields[1] = text(EXACT_SCOPE_SCHEMA_VERSION);
     fields.push(execution_scope.unwrap_or(Value::Null));
@@ -6325,11 +6343,16 @@ fn encode_scope_manifest_with_published(
         return Err(failure("invalid current exact scope field count"));
     }
     let value = Value::Array(fields);
-    let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
-    if bytes.len() > EXACT_SCOPE_BYTES_LIMIT {
-        return Err(failure("scope manifest exceeds four MiB"));
+    let size =
+        crate::certified_products::encoded_size(&value).map_err(compiler_evidence_failure)?;
+    if size > EXACT_SCOPE_BYTES_LIMIT {
+        return Err(failure(format!(
+            "scope manifest requires {size} bytes; limit is {EXACT_SCOPE_BYTES_LIMIT}"
+        )));
     }
+    NativeDemandBudget(Some(operation)).strings(size.saturating_mul(2))?;
+    let mut bytes = Vec::with_capacity(size);
+    ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
     Ok(bytes)
 }
 
@@ -17975,6 +17998,8 @@ impl PreparedNativeCompilerTransport {
         } = self;
         let context = inputs.context();
         let compiler = inputs.compiler();
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
         let metadata = &transport_metadata;
         let compiler_metadata = &compiler.metadata;
         let semantic_sha256 = context.semantic_sha256();
@@ -18227,7 +18252,8 @@ impl PreparedNativeCompilerTransport {
             acquisition,
             compiler
                 .native_selection
-                .original_census_resolutions(metadata)?,
+                .original_census_resolutions(metadata, &operation)?,
+            &operation,
         )?;
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::ScopeEncodedByte,
