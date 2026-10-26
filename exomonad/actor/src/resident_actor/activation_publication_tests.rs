@@ -1,5 +1,4 @@
 use super::*;
-use tidepool_codegen::scope::ScopeId;
 use tidepool_runtime::session::ResidentError;
 
 #[tokio::test]
@@ -51,6 +50,23 @@ async fn interrupt_during_preview(
     genuine_preparation: bool,
     durable: bool,
 ) {
+    crate::resident_workbench::with_test_compiler_owner(|_| {
+        interrupt_during_preview_with_compiler_owner(
+            already_installed,
+            interruption,
+            genuine_preparation,
+            durable,
+        )
+    })
+    .await;
+}
+
+async fn interrupt_during_preview_with_compiler_owner(
+    already_installed: bool,
+    interruption: Interruption,
+    genuine_preparation: bool,
+    durable: bool,
+) {
     let mut fixture = invocation_work::tests::Fixture::start().await;
     let mut recovery = None;
     let (mut resident, mut context, source, mut parked, _root) =
@@ -72,9 +88,23 @@ async fn interrupt_during_preview(
     }
     let handles = resident.value_handle_count();
     context.actor = fixture.actor.identity();
-    if durable {
-        context.placement.lexical_scope = resident.mint_scope(ScopeId::ROOT).unwrap();
-    }
+    let (boot_source, source_layers) =
+        crate::resident_workbench::request_tests::generation_source_fixture(
+            &source,
+            Arc::new(_root),
+        );
+    let (selected_context, _boot_authority) = WorkbenchCompilationAuthority::admit(
+        context,
+        boot_source.clone(),
+        None,
+        Some(&source_layers),
+    )
+    .unwrap();
+    context = selected_context;
+    fixture.environment.source_inspection = Some(
+        crate::SourceInspectionServices::from_source_layers(source_layers.clone()),
+    );
+    fixture.environment.source_layers = Some(source_layers);
     let machines = Arc::new(ActorMachineRegistry::new());
     fixture.environment.runner = ResidentActorRunner::new(
         Arc::clone(&machines),
@@ -164,6 +194,11 @@ async fn interrupt_during_preview(
     // This fixture invokes the resident method directly after configuring the
     // real owner, so retain the exact handle that production start installs.
     behavior.lifecycle = Some(fixture.kernel.lifecycle().clone());
+    behavior.spawn_source = Some(boot_source);
+    behavior
+        .select_initial_configuration(&context)
+        .await
+        .unwrap();
     behavior.policy_installed = already_installed;
     fixture.environment.actors.lock().insert(
         context.actor,
@@ -349,19 +384,29 @@ async fn interrupt_during_preview(
         release.send(()).unwrap();
         mounted
     };
-    let (parked, (binding, module, certificate, interface)) = tokio::join!(
-        behavior.park_interactive(
+    let (parked, (binding, module, certificate, interface)) = {
+        let park = behavior.park_interactive(
             &fixture.kernel,
             &context,
             crate::ResidentInteractiveSession {
                 request,
                 hole,
-                input
+                input,
             },
             prepared,
-        ),
-        cancellation,
-    );
+        );
+        tokio::pin!(park);
+        let mounted = tokio::select! {
+            biased;
+            mounted = cancellation => mounted,
+            early = &mut park => match early {
+                Err(error) => panic!("activation refused before preview observer: {error:?}"),
+                Ok(InteractivePark::Parked) => panic!("activation parked before preview observer"),
+                Ok(InteractivePark::Cancelled(request)) => panic!("activation cancelled before preview observer: {request:?}"),
+            },
+        };
+        (park.await, mounted)
+    };
     match interruption {
         Interruption::Cancellation => assert!(
             matches!(parked.unwrap(), InteractivePark::Cancelled(actual) if actual == request_id)
@@ -430,8 +475,26 @@ async fn interrupt_during_preview(
         );
     }
     if let Some(owner) = &durable_owner {
-        resident
-            .begin_durable_private_execution(owner, context.placement.lexical_scope)
+        let source = context.source_dependency().source_lease().unwrap();
+        let settled = resident
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |resident, _| {
+                    resident.begin_durable_private_execution(owner, context.placement.lexical_scope)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &tidepool_runtime::CompilerTransactionClose::NotStarted
+        );
+        settled
+            .into_outcome()
+            .action
             .expect("refused activation keeps the exact durable owner admissible");
     }
     assert!(resident
@@ -555,11 +618,29 @@ async fn interrupt_during_preview(
             .checkout_run(context.placement.session)
             .unwrap()
             .into_parts();
-        resident
-            .begin_durable_private_execution(
-                durable_owner.as_ref().unwrap(),
-                context.placement.lexical_scope,
+        let source = context.source_dependency().source_lease().unwrap();
+        let settled = resident
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |resident, _| {
+                    resident.begin_durable_private_execution(
+                        durable_owner.as_ref().unwrap(),
+                        context.placement.lexical_scope,
+                    )
+                },
             )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &tidepool_runtime::CompilerTransactionClose::NotStarted
+        );
+        settled
+            .into_outcome()
+            .action
             .expect("second actual activation publishes a matching durable/local public surface");
         assert!(resident
             .current_binding_in(context.placement.lexical_scope, "sessionInput")
@@ -601,7 +682,7 @@ async fn durable_statement_refusal_releases_request_fence_after_waiter_drop() {
 }
 
 #[tokio::test]
-async fn durable_commit_error_fences_provider_and_releases_request_after_waiter_drop() {
+async fn durable_commit_error_keeps_provider_and_request_fenced_after_waiter_drop() {
     native_operation_sequence(true, NativeFailure::CommitError, true).await;
 }
 
@@ -613,6 +694,17 @@ enum NativeFailure {
 }
 
 async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_waiter: bool) {
+    crate::resident_workbench::with_test_compiler_owner(|_| {
+        native_operation_sequence_with_compiler_owner(durable, failure, drop_waiter)
+    })
+    .await;
+}
+
+async fn native_operation_sequence_with_compiler_owner(
+    durable: bool,
+    failure: NativeFailure,
+    drop_waiter: bool,
+) {
     use crate::resident_workbench::ActivationPublicationObservation;
     use tidepool_runtime::session::PublicManifestCommit;
 
@@ -634,9 +726,23 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         drop(input);
     }
     context.actor = fixture.actor.identity();
-    if durable {
-        context.placement.lexical_scope = resident.mint_scope(ScopeId::ROOT).unwrap();
-    }
+    let (boot_source, source_layers) =
+        crate::resident_workbench::request_tests::generation_source_fixture(
+            &source,
+            Arc::new(_source_root),
+        );
+    let (selected_context, _boot_authority) = WorkbenchCompilationAuthority::admit(
+        context,
+        boot_source.clone(),
+        None,
+        Some(&source_layers),
+    )
+    .unwrap();
+    context = selected_context;
+    fixture.environment.source_inspection = Some(
+        crate::SourceInspectionServices::from_source_layers(source_layers.clone()),
+    );
+    fixture.environment.source_layers = Some(source_layers);
     let mut descriptor = ActorDescriptor::new("native activation", context.placement);
     let durable_owner = durable.then(|| {
         let path = tidepool_repr::ActorPath::parse("root/native-activation").unwrap();
@@ -707,6 +813,11 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     );
     // Match production start's cached handle for the genuinely configured owner.
     behavior.lifecycle = Some(fixture.kernel.lifecycle().clone());
+    behavior.spawn_source = Some(boot_source);
+    behavior
+        .select_initial_configuration(&context)
+        .await
+        .unwrap();
     behavior.policy_installed = true;
     fixture.environment.actors.lock().insert(
         context.actor,
@@ -876,16 +987,13 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                 .public_owner(Some(owner.clone()), false)
                 .await
                 .is_err());
-            let claim = fixture
-                .environment
-                .requests
-                .begin_cancellation_acknowledgement(context.actor, request_id)
-                .unwrap();
             assert_eq!(
-                claim.reason(),
-                crate::CancellationReason::RequesterCancelled
+                fixture
+                    .environment
+                    .requests
+                    .begin_cancellation_acknowledgement(context.actor, request_id),
+                Err(crate::ReplyError::UpdatePending)
             );
-            cancellation_claim = Some(claim);
         }
     }
     if !matches!(failure, NativeFailure::CommitError) {
@@ -904,11 +1012,20 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         );
     }
     drop(park);
-    fixture
-        .environment
-        .requests
-        .finish_cancellation_acknowledgement(cancellation_claim.unwrap());
+    if let Some(claim) = cancellation_claim {
+        fixture
+            .environment
+            .requests
+            .finish_cancellation_acknowledgement(claim);
+    }
     if matches!(failure, NativeFailure::CommitError) {
+        assert_eq!(
+            fixture
+                .environment
+                .requests
+                .begin_cancellation_acknowledgement(context.actor, request_id),
+            Err(crate::ReplyError::UpdatePending)
+        );
         let error = fixture
             .environment
             .runner
@@ -949,6 +1066,14 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                 .await
                 .is_ok(),
             "authenticated reopen cannot revive an old admission"
+        );
+        assert_eq!(
+            fixture
+                .environment
+                .requests
+                .begin_cancellation_acknowledgement(context.actor, request_id),
+            Err(crate::ReplyError::UpdatePending),
+            "reopening storage cannot resolve the old publication claim"
         );
     }
     // Acquire the actual next native owner entry; waiter delivery was optional.

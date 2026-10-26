@@ -51,7 +51,6 @@ async fn expansion_fences_immediate_handler_before_callback_input() {
 async fn prepare_callback_fixture(
     source: crate::BoundActorWorkbenchSource,
     cell: String,
-    private: bool,
 ) -> CallbackFixture {
     tidepool_testing::eval_harness::require_extract();
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
@@ -68,11 +67,16 @@ async fn prepare_callback_fixture(
         tidepool_runtime::DEFAULT_NURSERY_SIZE,
         Some(lib),
     );
-    let mut context = {
+    let source_lease = session.mint_notebook_scope_with_lease(None).unwrap();
+    let (captured, source_owner) = super::request_tests::world_query_test_source_files_with_support(
+        &[],
+        surface.include_paths(),
+    );
+    let context = {
         let context_actor = crate::ActorRef::first(crate::ActorId(1));
         let context_placement = crate::ActorPlacement {
             session: session_id,
-            lexical_scope: session.mint_isolated_scope(),
+            lexical_scope: source_lease.scope(),
             resource_scope: RealmId::fresh(),
         };
         crate::ActorSessionContext {
@@ -83,69 +87,78 @@ async fn prepare_callback_fixture(
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: surface.row().into(),
             current_model: None,
-            source_layer: Vec::new().into(),
+            source_layer: crate::ActorSourceRoots::Complete(captured.clone()),
             ..crate::ActorDescriptor::new("fixture", context_placement)
                 .admit_independent_world()
                 .session_context(context_actor)
         }
     };
-    let public_context = context.clone();
-    let admission = private.then(|| {
-        Arc::new(
-            session
-                .begin_ephemeral_private_execution(context.placement.lexical_scope)
-                .unwrap(),
-        )
-    });
-    if let Some(admission) = &admission {
-        context.placement.lexical_scope = admission.private_scope();
-    }
-    session
-        .set_actor_execution(
-            context.run_context(),
-            context.effect_policy,
-            context.live_payload,
-        )
-        .unwrap();
-    let view = actor_compile_view(&session, &context, source.config()).unwrap();
-    let prepared = source.config().prepare(&view);
-    let templates =
-        resident_workbench_templates(&prepared.preamble, surface.row(), &prepared.imports);
-    let include = prepared
-        .include
-        .iter()
-        .map(PathBuf::as_path)
-        .collect::<Vec<_>>();
-    let TurnResult::Bind { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
-        run_turn(
-            TurnRequest {
-                exact_context: None,
-                session_id: Some(session_id),
-                turn_text: &cell,
-                templates: &templates,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &[],
-                gen: view.next_value_generation().0,
-                verdict: None,
-                retained_imports: &[],
-            },
-            settlement,
-        )
-    })
-    .unwrap() else {
-        panic!("display callback fixture must compile as a bind");
-    };
-    let outcome = tidepool_testing::with_settlement(|settlement| {
-        session.run_with_sites("displayCallbackFixture", compiled.code(), settlement)
-    })
+    let layers: crate::ActorSourceLayerResolver = source_owner;
+    let (mut context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+        context,
+        captured,
+        None,
+        Some(&layers),
+    )
     .unwrap();
+    let public_context = context.clone();
     let machines = Arc::new(ActorMachineRegistry::<ImmediatePrintProbe, CapturedOutput>::new());
     machines.insert_idle(session_id, Box::new(session));
-    let runner = ResidentActorRunner::new(machines, source);
+    let runner = ResidentActorRunner::new(machines.clone(), source.clone());
+    runner
+        .adopt_final_source_scope(public_context.clone())
+        .await
+        .unwrap();
+    let descriptor = crate::ActorDescriptor::new("display fixture", public_context.placement);
+    let owner =
+        crate::resident_actor::WorkbenchPublicOwner::issue(&public_context, &descriptor, None)
+            .unwrap();
+    let execution = Arc::new(
+        runner
+            .begin_private_execution(
+                public_context.clone(),
+                owner,
+                tidepool_runtime::session::PublicationDecision::new(),
+                None,
+            )
+            .await
+            .unwrap(),
+    );
+    context.placement.lexical_scope = execution.private_scope;
+    let admission = Some(execution.admission.clone());
+    let workbench = runner
+        .application_workbench()
+        .with_compilation_authority(authority)
+        .with_private_execution(execution);
+    let (checked, prepared) = workbench.prepare_cell(context.clone(), cell).await.unwrap();
+    let PreparedCell {
+        mut items,
+        dependencies,
+    } = prepared;
+    assert_eq!(
+        checked.items.len(),
+        1,
+        "callback fixture is one checked binding"
+    );
+    assert_eq!(items.len(), 1);
+    let step = workbench
+        .begin_prepared_cell_item(
+            context.clone(),
+            ParsedBlock {
+                ordinal: 1,
+                total: 1,
+                source: checked.items[0].source.clone(),
+            },
+            items.pop().unwrap(),
+        )
+        .await
+        .unwrap();
+    let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+        panic!("checked callback binding must reach its display effect");
+    };
     let realm = context.placement.resource_scope;
     let boundary = runner
-        .capture_boundary(context.clone(), outcome, realm)
+        .capture_boundary(context.clone(), (*outcome).into(), realm)
         .await
         .unwrap();
     let boundary = if let ResidentActorBoundary::DisplayAllowance { continuation } = boundary {
@@ -170,13 +183,18 @@ async fn prepare_callback_fixture(
         panic!("raw DisplayWith must retain the original callback");
     };
     let identity = (1_i64, 1_i64, 1_i64);
-    assert!(matches!(
-        runner
-            .resume_value(context.clone(), continuation, identity)
-            .await
-            .unwrap(),
-        ResidentOutcome::Completed { .. }
-    ));
+    let resumed = runner
+        .resume_value(context.clone(), continuation, identity)
+        .await
+        .unwrap();
+    assert!(matches!(resumed, ResidentOutcome::Completed { .. }));
+    let settled = workbench
+        .settle_item(context.clone(), *fragment, resumed)
+        .await
+        .unwrap();
+    assert!(matches!(settled, ResidentWorkbenchStep::Committed { .. }));
+    drop(dependencies);
+    drop(workbench);
     let scope = admission
         .as_ref()
         .map(|admission| admission.retained_lexical_scope());
@@ -221,7 +239,6 @@ async fn expansion_fences_immediate_handler_with_compiler_owner(
         tidepool_testing::fixture_source(
             "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
         ),
-        false,
     )
     .await;
     let CallbackFixture {
@@ -287,22 +304,40 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
         tidepool_testing::fixture_source(
             "exomonad/actor/src/resident_workbench/display_callback_retained.hs",
         ),
-        true,
     )
     .await;
     let scope_a = fixture.execution.context.placement.lexical_scope;
     drop(fixture.admission.take());
-    let scope_b = fixture
+    let descriptor =
+        crate::ActorDescriptor::new("display fixture", fixture.public_context.placement);
+    let owner = crate::resident_actor::WorkbenchPublicOwner::issue(
+        &fixture.public_context,
+        &descriptor,
+        None,
+    )
+    .unwrap();
+    let execution_b = fixture
+        .runner
+        .begin_private_execution(
+            fixture.public_context.clone(),
+            owner,
+            tidepool_runtime::session::PublicationDecision::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let scope_b = execution_b.private_scope;
+    let mut context_b = fixture.public_context.clone();
+    context_b.placement.lexical_scope = scope_b;
+    fixture
         .runner
         .access
-        .with_machine(fixture.public_context.clone(), move |session, _, _| {
-            let scope_b = session.mint_isolated_scope();
-            // A later checkout drains completed admission leases. The callback's
-            // owner-derived lease must preserve its exact original scope.
-            let _ = session
-                .begin_ephemeral_private_execution(scope_b)
-                .map_err(ResidentError::Session)?;
-            Ok(scope_b)
+        .with_machine(context_b, |session, context, _| {
+            assert_eq!(
+                session.run_context().lexical_scope,
+                context.placement.lexical_scope
+            );
+            Ok(())
         })
         .await
         .unwrap();
@@ -326,12 +361,16 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
     fixture
         .runner
         .access
-        .with_machine(fixture.public_context.clone(), |session, context, _| {
-            let _ = session
-                .begin_ephemeral_private_execution(context.placement.lexical_scope)
-                .map_err(ResidentError::Session)?;
-            Ok(())
-        })
+        .with_compiler_world(
+            fixture.public_context.clone(),
+            None,
+            |session, context, _| {
+                let _ = session
+                    .begin_ephemeral_private_execution(context.placement.lexical_scope)
+                    .map_err(ResidentError::Session)?;
+                Ok(())
+            },
+        )
         .await
         .unwrap();
     let error = fixture
@@ -370,7 +409,6 @@ async fn filesystem_errors_retain_expandable_display_with_preparation(
         tidepool_testing::fixture_source(
             "exomonad/actor/src/resident_workbench/display_filesystem_errors.hs",
         ),
-        false,
     )
     .await;
     assert!(!errors.initial.unavailable);
