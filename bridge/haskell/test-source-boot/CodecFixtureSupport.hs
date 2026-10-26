@@ -44,6 +44,7 @@ data ScopeCodecFixture = ScopeCodecFixture
   , codecScopePurpose :: Term
   , codecScopePublished :: Term
   , codecScopeAcquisition :: Term
+  , codecScopeOriginalResolutions :: Term
   }
 
 data ScopeCodecField
@@ -53,6 +54,7 @@ data ScopeCodecField
   | ScopeCodecExecution
   | ScopeCodecPurpose
   | ScopeCodecAcquisition
+  | ScopeCodecOriginalResolutions
 
 data ScopeCodecAcquisition
   = FreshCodecInputs
@@ -64,8 +66,8 @@ readScopeCodecFixture path = do
   scope <- readExactScope path >>= either fail pure
   term <- readCodecTerm path
   fixture <- case term of
-    TList [magic,version,semantic,producer,interfaces,lexical,products,execution,purpose,published,acquisition] ->
-      pure (ScopeCodecFixture magic version semantic producer interfaces lexical products execution purpose published acquisition)
+    TList [magic,version,semantic,producer,interfaces,lexical,products,execution,purpose,published,acquisition,resolutions] ->
+      pure (ScopeCodecFixture magic version semantic producer interfaces lexical products execution purpose published acquisition resolutions)
     _ -> fail "production-admitted exact scope needs a current mutation adapter"
   pure (scope,fixture)
 
@@ -77,6 +79,7 @@ scopeCodecField field fixture = case field of
   ScopeCodecExecution -> codecScopeExecution fixture
   ScopeCodecPurpose -> codecScopePurpose fixture
   ScopeCodecAcquisition -> codecScopeAcquisition fixture
+  ScopeCodecOriginalResolutions -> codecScopeOriginalResolutions fixture
 
 replaceScopeCodecField :: ScopeCodecField -> Term -> ScopeCodecFixture -> ScopeCodecFixture
 replaceScopeCodecField field value fixture = case field of
@@ -86,6 +89,7 @@ replaceScopeCodecField field value fixture = case field of
   ScopeCodecExecution -> fixture {codecScopeExecution=value}
   ScopeCodecPurpose -> fixture {codecScopePurpose=value}
   ScopeCodecAcquisition -> fixture {codecScopeAcquisition=value}
+  ScopeCodecOriginalResolutions -> fixture {codecScopeOriginalResolutions=value}
 
 scopeCodecAcquisition :: ScopeCodecFixture -> Maybe ScopeCodecAcquisition
 scopeCodecAcquisition fixture = case codecScopeAcquisition fixture of
@@ -106,7 +110,7 @@ scopeCodecTerm fixture = TList $
   [ codecScopeMagic fixture, codecScopeVersion fixture, codecScopeSemantic fixture
   , codecScopeProducer fixture, codecScopeInterfaces fixture, codecScopeLexical fixture
   , codecScopeProducts fixture, codecScopeExecution fixture, codecScopePurpose fixture
-  , codecScopePublished fixture, codecScopeAcquisition fixture ]
+  , codecScopePublished fixture, codecScopeAcquisition fixture, codecScopeOriginalResolutions fixture ]
 
 data PurposeCodecCase
   = CodecInspectionPurpose

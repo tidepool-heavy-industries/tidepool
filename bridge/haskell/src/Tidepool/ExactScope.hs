@@ -27,7 +27,7 @@ module Tidepool.ExactScope
   , revalidateExactScopesAtWithOutputs
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
-  , scopeAvailableOriginalProducts, scopeAvailableNativeGroupObservations
+  , scopeAvailableOriginalProducts, scopeAvailableNativeGroupObservations, scopeNativeOriginalResolution
   , originalGroupFromProjected, originalGroupFromCandidate
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
@@ -118,10 +118,11 @@ import Tidepool.PackageWitness
   , revalidateAdmittedPackageImports, validateAdmittedPackageSelection )
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition)
 import Tidepool.NativeOriginalCensus
-  ( OriginalNativeCensus, readOriginalNativeCensusWith, decodeOriginalNativeCensusBody, nativeCensusOwner
+  ( OriginalNativeCensus, decodeOriginalNativeCensusBody, nativeCensusOwner
   , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups, nativeCensusSelectionMatches
   , nativeCensusRequirements, nativeCensusCanonicalCertificate
   , NativeGroupObservation, nativeCensusGroupObservations, selectNativeCensusGroupObservations )
+import Tidepool.NativeOriginalCensus qualified as Native
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedCoreBody
@@ -429,7 +430,17 @@ data NativeAvailability = FullCarrier | IssuedGroups [ExactOriginalGroup]
   deriving (Eq, Show)
 data AdmittedOriginalCensus = AdmittedOriginalCensus
   FilePath String ExactProduct OriginalNativeCensus NativeAvailability
+  (Map.Map (Word,Word) NativeOriginalResolution)
   deriving (Eq, Show)
+
+-- Rust projects this association from its issued group authority. The receiving
+-- scope checks its exact correspondence to authenticated census observations.
+data NativeOriginalResolution = NativeOriginalResolution
+  { resolutionSource :: !(String,String,String,Word,Word)
+  , resolutionImport :: !Native.NativeImportObservation
+  , resolutionBinder :: !SymbolIdentity
+  , resolutionTarget :: !(String,String,String,Word)
+  } deriving (Eq, Show)
 data AdmittedScopeInputs = AdmittedScopeInputs [InterfaceOwner]
   (Map.Map InterfaceOwner ScopeInterfaceInput) AdmittedPackageImports
   (Map.Map InterfaceOwner AdmittedOriginalCensus) (Maybe CapturedScopeInputs) deriving Show
@@ -617,7 +628,7 @@ scopeAvailableOriginalProducts :: ExactScope -> [ExactProduct]
 scopeAvailableOriginalProducts scope =
   [availableNativeProduct full availability
   | selected <- scopeProducts scope
-  , let AdmittedOriginalCensus _ _ full _ availability =
+  , let AdmittedOriginalCensus _ _ full _ availability _ =
           census Map.! (originalUnit selected,originalModule selected)]
   where AdmittedScopeInputs _ _ _ census _ = scopeInputs scope
 
@@ -629,13 +640,65 @@ scopeAvailableNativeGroupObservations scope = mapM available (scopeProducts scop
   where
     AdmittedScopeInputs _ _ _ census _ = scopeInputs scope
     available selected = do
-      AdmittedOriginalCensus _ _ full native availability <- maybe
+      AdmittedOriginalCensus _ _ full native availability _ <- maybe
         (Left "admitted scope product lacks its authenticated native census") Right
         (Map.lookup (originalUnit selected, originalModule selected) census)
       groups <- case availability of
         FullCarrier -> Right (nativeCensusGroupObservations native)
         IssuedGroups issued -> selectNativeCensusGroupObservations native (map originalOrdinal issued)
       pure (availableNativeProduct full availability, groups)
+
+scopeNativeOriginalResolution :: ExactScope -> ExactProduct -> Word -> Word
+  -> Native.NativeGlobalObservation -> Either String (String,String,String,Word)
+scopeNativeOriginalResolution scope product ordinal index global = do
+  let AdmittedScopeInputs _ _ _ census _ = scopeInputs scope
+      key = (originalUnit product,originalModule product)
+  AdmittedOriginalCensus _ _ full _ _ resolutions <- maybe
+    (Left "native Original resolution lacks its admitted source census") Right (Map.lookup key census)
+  unless (product {originalGroups=[]} == full {originalGroups=[]})
+    (Left "native Original resolution has another source carrier")
+  resolution <- maybe (Left "native Original resolution is absent") Right
+    (Map.lookup (ordinal,index) resolutions)
+  unless (resolutionBinder resolution == Native.nativeGlobalIdentity global
+      && resolutionImport resolution == Native.nativeGlobalImport global)
+    (Left "native Original resolution differs from its exact global observation")
+  pure (resolutionTarget resolution)
+
+admitNativeOriginalResolutions :: Map.Map InterfaceOwner AdmittedOriginalCensus
+  -> [NativeOriginalResolution] -> Either String (Map.Map InterfaceOwner AdmittedOriginalCensus)
+admitNativeOriginalResolutions census offered = do
+  let rows = Map.fromList [(resolutionSource row,row) | row <- offered]
+  unless (Map.size rows == length offered)
+    (Left "duplicate native Original resolution source observation")
+  observed <- fmap concat $ forM (Map.elems census) $ \(AdmittedOriginalCensus _ _ full native availability _) -> do
+    groups <- case availability of
+      FullCarrier -> Right (nativeCensusGroupObservations native)
+      IssuedGroups issued -> selectNativeCensusGroupObservations native (map originalOrdinal issued)
+    pure [((originalUnit full,originalModule full,originalVersion full,Native.nativeGroupOrdinal group,index),global)
+      | group <- groups, (index,global) <- zip [0..] (Native.nativeGroupGlobals group)
+      , Native.NativeOriginalBindingImport{} <- [Native.nativeGlobalImport global]]
+  let expected = Map.fromList observed
+  unless (Map.keysSet rows == Map.keysSet expected)
+    (Left "native Original resolutions differ from available census observations")
+  forM_ (Map.toAscList rows) $ \(source,row) -> do
+    let global = expected Map.! source
+    unless (resolutionImport row == Native.nativeGlobalImport global
+        && resolutionBinder row == Native.nativeGlobalIdentity global)
+      (Left "native Original resolution differs from its exact binding pairs or binder")
+    let (unit,name,version,ordinal) = resolutionTarget row
+    AdmittedOriginalCensus _ _ full _ availability _ <- maybe
+      (Left "native Original resolution target lacks its admitted census") Right
+      (Map.lookup (unit,name) census)
+    unless (originalVersion full == version
+        && any (\group -> originalOrdinal group == ordinal
+          && resolutionBinder row `elem` originalBinders group)
+          (originalGroups (availableNativeProduct full availability)))
+      (Left "native Original resolution target lacks its exact available group binder")
+  let byOwner = Map.fromListWith Map.union
+        [((unit,name),Map.singleton (ordinal,index) row)
+        | row <- offered, let (unit,name,_,ordinal,index) = resolutionSource row]
+  pure (Map.mapWithKey (\key (AdmittedOriginalCensus path sha full native availability _) ->
+    AdmittedOriginalCensus path sha full native availability (Map.findWithDefault Map.empty key byOwner)) census)
 
 availableNativeProduct :: ExactProduct -> NativeAvailability -> ExactProduct
 availableNativeProduct full FullCarrier = full
@@ -656,10 +719,6 @@ newtype NativeOrdinalSelection = NativeOrdinalSelection [Word]
 data OfferedNativeAvailability = OfferedFullCarrier | OfferedIssuedGroups NativeOrdinalSelection
 
 type OfferedNativeProduct = (ExactProduct, NativeOrdinalSelection, (FilePath,String), OfferedNativeAvailability, NativeInputClassification)
-
-admitOriginalCensusWith :: RequestInputReader -> String -> Map.Map InterfaceOwner ExactInterfaceEvidence
-  -> [OfferedNativeProduct] -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
-admitOriginalCensusWith readInput = admitOriginalCensusUsing (readOriginalNativeCensusWith readInput)
 
 admitOriginalCensusUsing :: (FilePath -> String -> IO OriginalNativeCensus) -> String
   -> Map.Map InterfaceOwner ExactInterfaceEvidence -> [OfferedNativeProduct]
@@ -683,13 +742,13 @@ admitOriginalCensusUsing readFacts producer evidence offered = Map.fromList <$> 
       OfferedIssuedGroups (NativeOrdinalSelection ordinals) ->
         IssuedGroups <$> either fail pure (selectNativeCensusGroups native ordinals)
     let full = selected {originalGroups=nativeCensusExactGroups native}
-    pure (key,AdmittedOriginalCensus path sha full native availability))
+    pure (key,AdmittedOriginalCensus path sha full native availability Map.empty))
 
 selectedCensusProducts :: [OfferedNativeProduct] -> Map.Map InterfaceOwner AdmittedOriginalCensus -> IO [ExactScopeOriginal]
 selectedCensusProducts offered admitted = forM offered $ \(product,NativeOrdinalSelection ordinals,_,_,classify) -> do
   let key = (originalUnit product,originalModule product)
   case Map.lookup key admitted of
-    Just (AdmittedOriginalCensus _ _ full census availability) -> do
+    Just (AdmittedOriginalCensus _ _ full census availability _) -> do
       groups <- either fail pure (selectNativeCensusGroups census ordinals)
       let selected = product {originalGroups=groups}
       validateNativeSelection selected full census availability
@@ -818,7 +877,7 @@ validateInputClosure producer inputs products = do
     unless (Map.lookup key seals == Just (originalIfaceSha256 product') && hasCore)
       (fail "exact interface evidence is incomplete or lacks native module proof")
   let AdmittedScopeInputs _ _ _ census _ = inputs
-  forM_ (Map.toAscList census) $ \(key,AdmittedOriginalCensus _ _ full native availability) ->
+  forM_ (Map.toAscList census) $ \(key,AdmittedOriginalCensus _ _ full native availability _) ->
     case [product' | product' <- products, (originalUnit product',originalModule product') == key] of
       [selected] -> validateNativeSelection selected full native availability
       _ -> fail "admitted native census lacks its unique scope product"
@@ -1419,7 +1478,7 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
        timeDetailPhase timing "exact_scope" "read" $ do
         acquisition <- try (do
           unless (isAbsolute path) (fail "exact scope path must be absolute")
-          ((bytes,(offered,descriptors,interfaceEvidence,nativeDescriptors,acquisition)),envelope) <-
+          ((bytes,(offered,descriptors,interfaceEvidence,nativeDescriptors,acquisition,resolutions)),envelope) <-
             captureRequestInputs Nothing $ \readInput -> do
               bytes <- readInput path (4 * 1024 * 1024)
               decoded <- timeDetailPhase timing "exact_scope" "decode" $ case deserialiseFromBytes decodeScope (BL.fromStrict bytes) of
@@ -1474,11 +1533,12 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = do
            forM_ products $ \product -> do
              _ <- readVerified (originalProductPath product) (64 * 1024 * 1024) (originalProductSha256 product)
              pure ()
-           census <- admitOriginalCensusUsing (\artifact sha -> do
+           observedCensus <- admitOriginalCensusUsing (\artifact sha -> do
              token <- readToken artifact (32 * 1024 * 1024)
              either fail pure (checkArtifactSeal sha token)
              memoOriginalFact counts timing "original_inputs.census" nativeState sha
                (decodeOriginalNativeCensusBody sha token)) producer evidence nativeDescriptors
+           census <- either fail pure (admitNativeOriginalResolutions observedCensus resolutions)
            selectedProducts <- selectedCensusProducts nativeDescriptors census
            roots <- extendAdmittedPackageImportsWithFacts (\(iface,artifact,sha) -> do
              payload <- readVerified artifact (4 * 1024 * 1024) sha
@@ -4134,13 +4194,43 @@ worldCounted minimumBytes item = do
   when (count > BS.length remaining `div` minimumBytes) (lift (Left "source count exceeds remaining input"))
   replicateM count item
 
+decodeNativeOriginalResolution :: Decoder s NativeOriginalResolution
+decodeNativeOriginalResolution = do
+  array 12
+  sourceUnit <- nonempty
+  sourceModule <- nonempty
+  sourceVersion <- canonicalDigest
+  sourceOrdinal <- ordinal
+  globalIndex <- ordinal
+  targetUnit <- nonempty
+  targetModule <- nonempty
+  interface <- binding
+  original <- binding
+  binder <- identity
+  targetVersion <- canonicalDigest
+  targetOrdinal <- ordinal
+  pure (NativeOriginalResolution
+    (sourceUnit,sourceModule,sourceVersion,sourceOrdinal,globalIndex)
+    (Native.NativeOriginalBindingImport targetUnit targetModule interface original)
+    binder (targetUnit,targetModule,targetVersion,targetOrdinal))
+  where
+    ordinal = do
+      value <- decodeWord
+      unless (value <= 4294967295) (fail "native Original resolution index exceeds u32")
+      pure value
+    binding = array 2 >> ((,) <$> bindingDigest <*> bindingDigest)
+    bindingDigest = do
+      value <- decodeBytes
+      unless (BS.length value == 32) (fail "native Original resolution binding digest width")
+      pure value
+
 decodeScope :: Decoder s (OfferedScope, [(String, FilePath)], [((String,String),ParsedInterfaceEvidence)],
-  [OfferedNativeProduct],InputAcquisition)
+  [OfferedNativeProduct],InputAcquisition,[NativeOriginalResolution])
 decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE" && version == "16" && count == 11)
+  unless (magic == "TPEXACTSCOPE" && version == "17" && count == 12)
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -4247,8 +4337,9 @@ decodeScope = do
     pure (root,dependencies)
   unique "published source roots" (map fst published)
   acquisition <- decodeInputAcquisition
+  resolutions <- bounded 65536 decodeNativeOriginalResolution
   pure (OfferedScope producer semantic interfaces lexical products executionOwners
-    checkedPurpose requestTypes published, descriptors, interfaceEvidence, nativeProducts,acquisition)
+    checkedPurpose requestTypes published, descriptors, interfaceEvidence, nativeProducts,acquisition,resolutions)
   where
     nativeOrdinals role = do
       ordinals <- bounded 65536 decodeWord

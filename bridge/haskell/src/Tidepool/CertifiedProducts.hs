@@ -66,7 +66,7 @@ import Tidepool.ExecutionProjection
   ( PreparedPackageTarget, packageTargetName, packageTargetProgram, packageTargetImports
   , packageTargetOriginalImports, packageTargetPriorHomeImports, packageTargetLocalHomeBindings )
 import Tidepool.ExactScope
-  ( ExactScope , scopeAvailableNativeGroupObservations, scopeProducts, scopeInterfaces, ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  ( ExactScope , scopeAvailableNativeGroupObservations, scopeNativeOriginalResolution, scopeProducts, scopeInterfaces, ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , WorldOriginalReference, worldOriginalReferenceOwner, worldOriginalReferenceBindings
   , CanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256, originalGroupFromProjected
   , canonicalInterfaceInput, canonicalProofOriginalBody )
@@ -355,15 +355,17 @@ validateTargetOriginalUses target context roots witnesses declared =
 
 -- Census observations retain every field of an authenticated native global.
 -- They add context topology only; emitted module and target rows remain local.
-nativeGlobalWitness :: Native.NativeGlobalObservation -> Either String GlobalWitness
-nativeGlobalWitness global = do
+nativeGlobalWitness :: ExactScope -> ExactProduct -> Word -> Word
+  -> Native.NativeGlobalObservation -> Either String GlobalWitness
+nativeGlobalWitness scope product ordinal index global = do
   owner <- case Native.nativeGlobalImport global of
       Native.NativeSourceImport unit name version ordinal _ ->
         Right (SourceOwner (T.pack unit) (T.pack name) (Just (T.pack version)) ordinal)
       Native.NativeRetainedImport _ generation -> Right (RetainedOwner generation)
       Native.NativePackageImport unit name seal _ -> Right (PackageOwner (T.pack unit) (T.pack name) (T.pack seal))
-      Native.NativeOriginalBindingImport{} -> Left
-        "native Original binding lacks an authenticated exact scope association"
+      Native.NativeOriginalBindingImport{} -> do
+        (unit,name,version,targetOrdinal) <- scopeNativeOriginalResolution scope product ordinal index global
+        Right (SourceOwner (T.pack unit) (T.pack name) (Just (T.pack version)) targetOrdinal)
   pure (Native.nativeGlobalIdentity global, Native.nativeGlobalRep global,
     Native.nativeGlobalSignature global, Native.nativeGlobalEvaluated global, owner)
 
@@ -868,13 +870,14 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
             ++ "; selected seals=" ++ show (maybe [] Set.toAscList missingSeals))
       Right product { productInterfaces = requirements }
   let products = [product | Right product <- sealedProducts]
-      nativeObservations = do
-        observations <- maybe (Right []) scopeAvailableNativeGroupObservations exact
+      nativeObservations = fmap concat $ forM (maybe [] pure exact) $ \scope -> do
+        observations <- scopeAvailableNativeGroupObservations scope
         forM_ observations $ \(product,_) -> unless
           (product `elem` unrecoveredExactProducts reconciled)
           (Left "native census observation leaves its reconciled exact product admission")
         forM [(product,group) | (product,groups) <- observations, group <- groups] $ \(product,group) -> do
-          globals <- mapM nativeGlobalWitness (Native.nativeGroupGlobals group)
+          globals <- forM (zip [0..] (Native.nativeGroupGlobals group)) $ \(index,global) ->
+            nativeGlobalWitness scope product (Native.nativeGroupOrdinal group) index global
           pure ((T.pack (originalUnit product), T.pack (originalModule product),
              Just (T.pack (originalVersion product)), Native.nativeGroupOrdinal group),
             Native.nativeGroupBinders group, globals)

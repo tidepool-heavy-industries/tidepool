@@ -319,9 +319,10 @@ cannot become a release event; a scope-release event is not a transport END ack.
 After index retirement, release observations belong inside the same captured
 release action as backing cleanup, so observer cancellation retains that debt.
 
-Exact-scope manifests use strict `TPEXACTSCOPE` version 16 with eleven fields. The final
+Exact-scope manifests use strict `TPEXACTSCOPE` version 17 with twelve fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
-or null, the exact published source selection roots with their issued dependency originals, and an input acquisition.
+or null, the exact published source selection roots with their issued dependency originals,
+an input acquisition, and authenticated Original-binding resolutions.
 Each publication row keeps its public root separate from dependency interface/product pairs.
 Normal requests reuse this completed selection; reload inspection still validates current source.
 Acquisition is `["fresh-files"]` or `["continue-originals", arenaDescriptors, images]`. Each arena descriptor binds a canonical absolute `/proc/<owner-pid>/fd/<fd>` endpoint and sealed extent; parts select the table index and bounded offset, with their existing positive length. Cold reads verify all four memfd seals, extent, range and SHA on the same opened FD. The host retains the actual files through compiler close; a replacement worker can capture them independently. Durable recovery and exported fixtures use authenticated files, never process endpoints. Each image
@@ -340,7 +341,7 @@ sharing captured bytes; it never reacquires a missing original from a path.
 
 Native product rows have ten fields: unit, module, version, interface SHA, native
 SHA, native path, selected ordinals, the logical path/SHA descriptor for the
-existing `TPHOMEOWNERS` version 5 certificate, closed availability, and the issuer-frozen
+existing `TPHOMEOWNERS` version 6 certificate, closed availability, and the issuer-frozen
 `compiler-original` or `private-native` classification. The matched reader rejects old
 versions and unknown classifications. Recipe owners use only compiler originals;
 physical body consumers retain both classes. Empty selected ordinals do not imply
@@ -354,6 +355,17 @@ through continuation and revalidation. Full availability with zero selected root
 remains full; a bounded dependency carrier adds no selected roots. Later checked
 demand borrows only available groups from the stored native carrier, without
 promoting that owner's Core or emitting another native product.
+
+Rust projects Original-binding resolutions from its issued native group imports.
+Each row retains the source unit/module/version/ordinal and global index, target
+unit/module, both exact artifact/selection pairs, binder, and target version/ordinal.
+Admission requires exact coverage of Original-binding globals in available census
+groups, checks every pair and binder, and verifies the resolved target's exact
+available group membership. Missing, extra or duplicate rows refuse. Only this
+checked association becomes a Source owner for context traversal; module/symbol
+lookup cannot replace it. The projection shares the existing bounded scope envelope
+and grants no new native authority. Stage ownership and emitted wire tables remain
+separate from these dependency observations.
 
 Canonical module certificates bind the compiler producer, finalized interface
 and package bytes, original source digest, exact dependency seals, optional
