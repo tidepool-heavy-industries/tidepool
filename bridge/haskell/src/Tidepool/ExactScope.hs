@@ -695,13 +695,17 @@ admitNativeOriginalResolutions census offered = do
             && resolutionBinder row == Native.nativeGlobalIdentity global)
           (Left "native Original resolution differs from its exact binding pairs or binder")
         let (unit,name,version,targetOrdinal) = resolutionTarget row
-        AdmittedOriginalCensus _ _ target _ availability _ <- maybe
+        AdmittedOriginalCensus _ _ target native availability _ <- maybe
           (Left "native Original resolution target lacks its admitted census") Right
           (Map.lookup (unit,name) census)
+        group <- case selectNativeCensusGroups native [targetOrdinal] of
+          Right [group] -> Right group
+          _ -> Left "native Original resolution target lacks its exact available group binder"
+        let available = case availability of
+              FullCarrier -> True
+              IssuedGroups issued -> any ((== targetOrdinal) . originalOrdinal) issued
         unless (originalVersion target == version
-            && any (\group -> originalOrdinal group == targetOrdinal
-              && resolutionBinder row `elem` originalBinders group)
-              (originalGroups (availableNativeProduct target availability)))
+            && available && resolutionBinder row `elem` originalBinders group)
           (Left "native Original resolution target lacks its exact available group binder")
         pure (Map.delete source rows)
       _ -> Right rows

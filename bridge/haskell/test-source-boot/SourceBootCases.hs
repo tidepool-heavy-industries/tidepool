@@ -3495,7 +3495,7 @@ nativeOriginalResolutionScopeAdmission = withScratch $ \work -> do
   target@(unit,name,version,ordinal) <- either fail pure
     (scopeNativeOriginalResolution scope parent (Native.nativeGroupOrdinal group) index global)
   unless (originalModule parent == "OverlayParent" && Native.nativeGroupOrdinal group == 13
-      && index == 0 && name == "OverlayChild" && ordinal == 7
+      && index == 1 && name == "OverlayChild" && ordinal == 7
       && any (\product -> originalUnit product == unit && originalModule product == name
         && originalVersion product == version && any (\entry -> originalOrdinal entry == ordinal
           && Native.nativeGlobalIdentity global `elem` originalBinders entry) (originalGroups product))
@@ -3536,6 +3536,7 @@ nativeOriginalResolutionScopeAdmission = withScratch $ \work -> do
     (rows [TList fields,TList (change 11 (changedIndex (fields !! 11)))])
   refused "extra-resolution" "available census observations"
     (rows [TList fields,TList (change 4 (changedIndex (fields !! 4)))])
+  refused "filtered-global-index" "available census observations" (row (change 4 (TInt 0)))
   forM_ [(0,TString "foreign"),(1,TString "Foreign"),(2,changedDigest (fields !! 2))
       ,(3,changedIndex (fields !! 3)),(4,changedIndex (fields !! 4))] $ \(position,value) ->
     refused ("source-coordinate-" ++ show position) "available census observations" (row (change position value))
