@@ -205,6 +205,96 @@ async fn exercise_durable_attachment(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn released_root_startup_already_owns_its_source_generation() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, _requests) = hosted_script_provider();
+    let (entered, mut judgments) = mpsc::unbounded_channel();
+    let (release_observer, mut released) = oneshot::channel();
+    let mut starting = Box::pin(HostedTestRuntime::start_observing_startup_release(
+        &settings,
+        &provider,
+        move |config| {
+            configure_startup(config, "agentSpec", "startup-source-owner");
+            config.jev = Some(Arc::new(StartupJevGate(entered)));
+        },
+        release_observer,
+    ));
+    let boundary = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        tokio::select! {
+            boundary = &mut released => boundary.expect("host reaches its startup release boundary"),
+            ready = &mut starting => match ready {
+                Ok(_) => panic!("host became ready before the startup release barrier"),
+                Err(error) => panic!("host failed before the startup release barrier: {error}"),
+            },
+        }
+    })
+    .await
+    .expect("host reaches startup release");
+    let actor = boundary.actor;
+    let foreign = exomonad_actor::ActorRef {
+        id: actor.id,
+        incarnation: exomonad_actor::Incarnation(actor.incarnation.0 + 1),
+    };
+    // Retain the verdict until startup completes, so even a rejected owner
+    // is reported through ordinary hosted cleanup.
+    let admission = boundary
+        .source
+        .freeze_toolset_layer(actor.into())
+        .and_then(|selected| {
+            let foreign_refused = matches!(
+                boundary
+                    .source
+                    .clone()
+                    .stage_reload(foreign.into(), &selected, &[]),
+                Err(exomonad_actor::SourceLayerReload::Unavailable(_))
+            );
+            let staged = boundary
+                .source
+                .clone()
+                .stage_reload(actor.into(), &selected, &[])
+                .map_err(|error| format!("released root source admission failed: {error:?}"))?;
+            boundary.source.validate_source_authority(staged.source())?;
+            drop(staged);
+            let unchanged = boundary
+                .source
+                .freeze_toolset_layer(actor.into())?
+                .same_revision(&selected);
+            Ok((foreign_refused, unchanged))
+        });
+    drop(boundary.source);
+    boundary.continue_host.send(()).unwrap();
+    let held = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        tokio::select! {
+            judgment = judgments.recv() => judgment.expect("root enters its real initializer"),
+            ready = &mut starting => match ready {
+                Ok(_) => panic!("host became ready before its initializer reached Jev"),
+                Err(error) => panic!("host failed before its initializer reached Jev: {error}"),
+            },
+        }
+    })
+    .await
+    .expect("initializer reaches its Jev barrier");
+    held.answer.send(true).unwrap();
+    let host = starting.await.unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            assert_eq!(host.context.actor.identity(), actor);
+            assert_eq!(admission.unwrap(), (true, true));
+            assert_eq!(held.packet["memory"], "startup-source-owner");
+            let retained = observation(host).await;
+            assert_eq!(retained.state, InitialContextState::Published);
+            assert_eq!(retained.identity.as_ref().unwrap().actor, actor);
+            assert_eq!(
+                retained.result.as_ref().unwrap().sections[0].body,
+                "startup-source-owner"
+            );
+        })
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn startup_gates_queued_input_and_refreshes_exact_reference() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);

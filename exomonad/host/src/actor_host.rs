@@ -2200,12 +2200,36 @@ async fn run_owned(
             .map_err(runtime_error)?;
         #[cfg(test)]
         embedded_recovery_tests::startup_checkpoint("bound");
+        // Install source authority for this exact root before startup can run.
+        if let Some(layers) = &source_layers {
+            layers.bind_run(root_actor.identity().into());
+        }
         forest
             .release_root_startup(release)
             .await
             .map_err(|error| runtime_error(error.to_string()))?;
         #[cfg(test)]
         embedded_recovery_tests::startup_checkpoint("released");
+        #[cfg(test)]
+        if let Some(observer) = test_hooks
+            .as_mut()
+            .and_then(|hooks| hooks.startup_released.take())
+        {
+            let source = source_layers
+                .clone()
+                .ok_or_else(|| runtime_error("startup observation requires a source owner"))?;
+            let (continue_host, continued) = tokio::sync::oneshot::channel();
+            observer
+                .send(hosted_test_context::ReleasedRootStartup {
+                    actor: root_actor.identity(),
+                    source,
+                    continue_host,
+                })
+                .map_err(|_| runtime_error("startup release observer closed"))?;
+            continued
+                .await
+                .map_err(|_| runtime_error("startup release observer abandoned the host"))?;
+        }
         service
             .runtime
             .configure_application_recovery(Arc::new(
@@ -2280,11 +2304,6 @@ async fn run_owned(
         tidepool_atomic_write::write_durable(&notice_path, notice.as_bytes())?;
     }
     worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
-    // The run's own layer belongs to the actor that owns the run, named here,
-    // before it runs anything. Every other actor is bound as it is admitted.
-    if let Some(layers) = &source_layers {
-        layers.bind_run(root_actor.identity().into());
-    }
     let provision_forest = forest.clone();
     let provision_authority = worktree_authority.clone();
     let provision_source = source_layers.clone();

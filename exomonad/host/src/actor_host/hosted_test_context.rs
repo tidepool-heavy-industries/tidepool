@@ -745,6 +745,12 @@ pub(super) type HostSourceLayersTransform = Arc<
         + Sync,
 >;
 
+pub(super) struct ReleasedRootStartup {
+    pub(super) actor: ActorRef,
+    pub(super) source: exomonad_actor::ActorSourceLayerResolver,
+    pub(super) continue_host: oneshot::Sender<()>,
+}
+
 pub(crate) struct HostTestHooks {
     pub(super) observer: HostTestObserver,
     pub(super) assembled: Option<oneshot::Sender<HostedActorContext>>,
@@ -754,6 +760,7 @@ pub(crate) struct HostTestHooks {
     pub(super) child_machines: HostedChildMachines,
     pub(super) source_layers: Option<HostSourceLayersTransform>,
     pub(super) web_transport: Option<Arc<dyn tidepool_handlers::WebTransport>>,
+    pub(super) startup_released: Option<oneshot::Sender<ReleasedRootStartup>>,
 }
 
 impl HostTestHooks {
@@ -777,6 +784,7 @@ impl HostTestHooks {
                 child_machines: HostedChildMachines::Shared,
                 source_layers: None,
                 web_transport: None,
+                startup_released: None,
             },
             stop,
             assembly,
@@ -1002,7 +1010,9 @@ impl HostedTestRuntime {
         assert_eq!(coverage.len(), 1);
         assert_eq!(
             coverage[0].requested_effects,
-            super::admitted_capabilities(Some(frozen)).unwrap().effect_keys()
+            super::admitted_capabilities(Some(frozen))
+                .unwrap()
+                .effect_keys()
         );
         let selection = installation
             .acquisition
@@ -1512,6 +1522,7 @@ impl HostedTestRuntime {
             None,
             Some(policy),
             None,
+            None,
         )
         .await
     }
@@ -1530,6 +1541,7 @@ impl HostedTestRuntime {
             false,
             None,
             HostedChildMachines::Shared,
+            None,
             None,
             None,
             None,
@@ -1557,6 +1569,7 @@ impl HostedTestRuntime {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1576,6 +1589,7 @@ impl HostedTestRuntime {
             false,
             Some(diagnostics_root),
             HostedChildMachines::Shared,
+            None,
             None,
             None,
             None,
@@ -1619,6 +1633,7 @@ impl HostedTestRuntime {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1647,6 +1662,7 @@ impl HostedTestRuntime {
             None,
             command_policy,
             None,
+            None,
         )
         .await
     }
@@ -1671,6 +1687,7 @@ impl HostedTestRuntime {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1692,6 +1709,7 @@ impl HostedTestRuntime {
             HostedChildMachines::Shared,
             None,
             Some(source_layers),
+            None,
             None,
             None,
         )
@@ -1720,6 +1738,31 @@ impl HostedTestRuntime {
             None,
             None,
             Some(web),
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn start_observing_startup_release(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        released: oneshot::Sender<ReleasedRootStartup>,
+    ) -> Result<Self, HostedStartupError> {
+        Self::start_owned(
+            true,
+            settings,
+            configure,
+            Some(Arc::clone(transport)),
+            None,
+            false,
+            None,
+            HostedChildMachines::Shared,
+            None,
+            None,
+            None,
+            None,
+            Some(released),
         )
         .await
     }
@@ -1737,6 +1780,7 @@ impl HostedTestRuntime {
         source_layers: Option<HostSourceLayersTransform>,
         command_policy: Option<exomonad_node::command_resources::CommandResourcePolicy>,
         web_transport: Option<Arc<dyn tidepool_handlers::WebTransport>>,
+        startup_released: Option<oneshot::Sender<ReleasedRootStartup>>,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::ensure_campaign_tracing();
         let startup_policy = StartupPolicy::parse(
@@ -1910,6 +1954,7 @@ impl HostedTestRuntime {
             child_machines,
             source_layers,
             web_transport,
+            startup_released,
         };
         let (ready, mut readiness) = mpsc::unbounded_channel();
         let (complete, mut outcome) = oneshot::channel();
