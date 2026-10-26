@@ -82,6 +82,14 @@ interface/original association. Only reached uses enter the active handler's nat
 demand exchange. A reply associates complete package obligations with each exact
 use; stage-wide acquisition must not widen another target's projection. Final
 package issuance checks the reply seals against the same captured interface bytes.
+Executable demand belongs to the actual target projection. Keep external globals
+distinct from emitted HOME definitions; synthesized local terms cannot invoke a
+prior Original lookup. Recovery growth replaces the projection, while stable
+finalization attaches demand to that same program. Certification compares explicit
+Original boundary uses with the final witnesses and independently captured HOME
+roots, including zero-package uses. Stage validation retains those target owners
+separately from its wire tables; it must not reconstruct validation roots from the
+use maps being checked. Rust retains authority over the hidden native closure.
 
 Staged certification retains exact GHC Name-to-symbol associations together with
 its native certification context. Same-Name conflicts refuse; native projection
