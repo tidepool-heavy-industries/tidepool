@@ -7,6 +7,7 @@ use tidepool_bridge_effects::CommandError;
 /// Effects retain owner settlement separately from their Haskell continuation.
 /// Commands additionally carry job and binding facts issued by their owner.
 pub(super) struct CommandResolution {
+    pub supersession: Option<Arc<crate::local_actor::run_control::CommittedGenerationSupersession>>,
     pub disposition: WorkbenchOperationDisposition,
     pub outcome: Result<ResidentOutcome, ResidentActorWorkbenchError>,
     /// The job id `Cmd.start` minted, when this resolution answered a
@@ -41,6 +42,7 @@ impl CommandResolution {
             outcome,
             started_job: None,
             retained_job_binding: None,
+            supersession: None,
         }
     }
 
@@ -545,6 +547,7 @@ where
         outcome,
         started_job,
         retained_job_binding: None,
+        supersession: None,
     }
 }
 

@@ -23,7 +23,7 @@ pub(crate) use generation::GenerationCompilerOwner;
 pub(crate) use generation::GenerationPopulation;
 #[cfg(test)]
 pub(crate) use generation::GenerationRetirementNativeControl;
-pub(crate) use generation::InitialGenerationPublicationError;
+pub(crate) use generation::{CommittedGenerationSupersession, InitialGenerationPublicationError};
 #[cfg(test)]
 pub(crate) use generation::{
     GenerationCollateralIdentity, GenerationLifetimeEdge, GenerationResourceIdentity,

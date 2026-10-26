@@ -3396,6 +3396,7 @@ fn workbench_invocation_failure(
 }
 
 struct WorkbenchEffectState {
+    supersession: Option<Arc<crate::local_actor::run_control::CommittedGenerationSupersession>>,
     callback_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
     issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
     lifecycle: Option<crate::LifecycleHandle>,
@@ -10918,6 +10919,13 @@ where
     {
         let cell_span = execution_state.cell_span.clone();
         let future = async move {
+            if execution_state.effects.supersession.is_none() {
+                execution_state.effects.supersession = execution_state
+                    .effects
+                    .control
+                    .as_ref()
+                    .and_then(|control| control.generation_supersession());
+            }
             let WorkbenchExecutionState {
                 effects,
                 request,
@@ -11151,6 +11159,17 @@ where
                     receipt.operations = std::mem::take(&mut cursor.unit.operations);
                     cursor.receipts.push(receipt);
                     cursor.index += 1;
+                    if effects.supersession.is_some() {
+                        return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
+                            workbench_response(
+                                WorkbenchRunStatus::Committed,
+                                std::mem::take(&mut cursor.receipts),
+                                cursor.index,
+                                request.items.len(),
+                                None,
+                            ),
+                        )));
+                    }
                     continue;
                 }
                 if cursor.after_tool.is_some() {
@@ -11563,6 +11582,18 @@ where
                                         span,
                                     });
                                     effects.after_tool_active = true;
+                                    if effects.supersession.is_some() {
+                                        cursor
+                                            .after_tool
+                                            .as_mut()
+                                            .expect("actual hook frame")
+                                            .answer =
+                                            Some(Err(ResidentActorWorkbenchError::ActorProtocol(
+                                                "generation retired before after-tool preparation"
+                                                    .into(),
+                                            )));
+                                        return Ok(WorkbenchRunAdvance::ParkAfterToolFinish);
+                                    }
                                     return Ok(WorkbenchRunAdvance::ParkAfterToolStart);
                                 }
                             }

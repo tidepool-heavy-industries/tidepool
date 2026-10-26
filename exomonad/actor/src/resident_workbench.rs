@@ -13135,6 +13135,39 @@ where
         }
     }
 
+    /// Close the original private execution after an owner-proven generation
+    /// replacement. This never enters the old source's publication/Freeze path.
+    pub(crate) async fn settle_superseded_private_execution(
+        &self,
+        context: crate::ActorSessionContext,
+        execution: Arc<ExecutionPrivateScope>,
+        supersession: Arc<crate::local_actor::run_control::CommittedGenerationSupersession>,
+        control: Arc<crate::WorkbenchExecutionControl>,
+    ) -> Result<tidepool_runtime::session::SupersededPrivateExecution, ResidentActorWorkbenchError>
+    {
+        let mut public_context = context.clone();
+        public_context.placement.lexical_scope = execution.public_scope;
+        if context.placement.lexical_scope != execution.private_scope
+            || !execution.owner.matches_context(&public_context)
+            || !supersession.matches(context.actor, &control)
+            || !Arc::ptr_eq(&execution.decision, &control.publication_decision())
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "generation supersession requires its original actor and private execution".into(),
+            ));
+        }
+        let admission = execution.admission.clone();
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .settle_superseded_private_execution(&admission, supersession.retirement())
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+    }
+
     /// Publish a fixed native execution. Every retry captures only the latest
     /// public merge baseline; accepted and rejected compiler graphs both
     /// revalidate under the owning checkout before becoming a terminal result.

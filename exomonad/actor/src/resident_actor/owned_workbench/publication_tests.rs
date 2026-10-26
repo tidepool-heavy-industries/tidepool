@@ -455,3 +455,84 @@ async fn sibling_fence_before_preflight(cancel: bool, client: crate::CompilerPre
         .collect();
     machines.settle_suspended(receipt, session, holes);
 }
+
+#[test]
+fn generation_reset_response_projection_preserves_receipts_and_rejects_trailing_work() {
+    // These are data-only response projections. Runtime owner/empty-frontier
+    // qualification is exercised by the real superseded-private-execution tests.
+    use tidepool_runtime::session::{ScopeRetirement, SupersededPrivateExecution};
+    for trailing in [false, true] {
+        let mut original = response(WorkbenchRunStatus::Committed);
+        original.items[0].installed_bindings.clear();
+        original.items[0].output = "retained committed reload receipt".into();
+        if !trailing {
+            original.total = original.next_index;
+        }
+        let expected_items = original.items.clone();
+        let result = mark_generation_reset(
+            Ok(KernelStep::Continue(original)),
+            SupersededPrivateExecution::Empty {
+                retirement: ScopeRetirement::default(),
+            },
+        );
+        let Ok(KernelStep::Continue(actual)) = result else {
+            panic!("settled response stays terminal Ok")
+        };
+        assert_eq!(actual.items, expected_items);
+        assert_eq!(actual.next_index, 1);
+        if trailing {
+            assert_eq!(actual.status, WorkbenchRunStatus::Rejected);
+            assert!(matches!(
+                actual.publication,
+                Some(WorkbenchPublicationOutcome::Rejected { .. })
+            ));
+            assert_eq!(actual.total, 2);
+        } else {
+            assert_eq!(actual.status, WorkbenchRunStatus::Committed);
+            assert_eq!(
+                actual.publication,
+                Some(WorkbenchPublicationOutcome::NotPublished {
+                    reason: WorkbenchNotPublishedReason::GenerationReset,
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn discarded_generation_writes_remain_rejected_when_continuation_fails() {
+    use tidepool_runtime::session::{
+        DiscardedPrivateWrites, ScopeRetirement, SupersededCompilerProgress,
+        SupersededPrivateExecution,
+    };
+    let failure = WorkbenchExecutionFailure {
+        receipts: vec![receipt()],
+        point: WorkbenchFailurePoint::InputUnit { index: 0 },
+        publication: None,
+        total: 1,
+        source: ResidentActorWorkbenchError::ActorProtocol("original suffix failure".into()),
+    };
+    let result = mark_generation_reset(
+        Err(failure),
+        SupersededPrivateExecution::Discarded {
+            writes: DiscardedPrivateWrites {
+                bindings: Vec::new(),
+                declarations: true,
+                accepted_host_mounts: 0,
+                compiler_progress: SupersededCompilerProgress::Checked,
+            },
+            retirement: ScopeRetirement::default(),
+        },
+    );
+    let failure = result.unwrap_err();
+    assert!(failure
+        .source
+        .to_string()
+        .contains("original suffix failure"));
+    assert_eq!(failure.receipts, [receipt()]);
+    let Some(WorkbenchPublicationOutcome::Rejected { detail }) = failure.publication else {
+        panic!("discarded declarations stay explicit even on failed suffix")
+    };
+    assert!(detail.contains("declarations: true"));
+    assert!(detail.contains("reload committed"));
+}

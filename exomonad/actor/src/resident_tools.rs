@@ -100,6 +100,8 @@ pub struct WorkbenchExecutionControl {
     pub(crate) provider_owner: std::sync::OnceLock<HostedOperationWeak>,
     pub(crate) provider_replay: std::sync::OnceLock<HostedOperationSettlement>,
     publication: Arc<PublicationDecision>,
+    generation_supersession:
+        std::sync::OnceLock<Arc<crate::local_actor::run_control::CommittedGenerationSupersession>>,
     native_cancel: Arc<std::sync::atomic::AtomicBool>,
     cancellation_cause: std::sync::OnceLock<WorkbenchCancellationCause>,
     pending_cancellation_cause: std::sync::OnceLock<WorkbenchCancellationCause>,
@@ -117,6 +119,79 @@ pub struct WorkbenchExecutionControl {
     #[cfg(test)]
     cancellation_observed: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     settlement: tokio::sync::watch::Sender<Option<crate::KernelWorkbenchReply>>,
+}
+
+/// Preserve an owner's committed effect even when its continuation or actor
+/// task has no terminal value. This projects evidence; it grants no admission.
+pub(crate) fn retain_committed_generation_operation(
+    reply: &mut crate::KernelWorkbenchReply,
+    operation: &tidepool_runtime::session::WorkbenchOperationReceipt,
+) {
+    if let Err(
+        failure @ (crate::KernelInvocationFailure::ActorExited(_)
+        | crate::KernelInvocationFailure::Cancelled { .. }),
+    ) = reply
+    {
+        let actor = match failure {
+            crate::KernelInvocationFailure::ActorExited(actor)
+            | crate::KernelInvocationFailure::Cancelled { actor } => *actor,
+            _ => unreachable!(),
+        };
+        *failure = crate::KernelInvocationFailure::Failed {
+            actor,
+            detail: failure.to_string(),
+            receipts: Vec::new(),
+            diagnostic: None,
+        };
+    }
+    let receipts = match reply {
+        Ok(response) => &mut response.items,
+        Err(failure) => match failure.receipts_mut() {
+            Some(receipts) => receipts,
+            None => return,
+        },
+    };
+    retain_committed_generation_receipt(receipts, operation);
+}
+
+fn retain_committed_generation_receipt(
+    receipts: &mut Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    operation: &tidepool_runtime::session::WorkbenchOperationReceipt,
+) {
+    use tidepool_runtime::session::{WorkbenchItemReceipt, WorkbenchItemStatus};
+    if let Some(receipt) = receipts
+        .iter_mut()
+        .find(|receipt| receipt.index == operation.id.input_unit_index)
+    {
+        if let Some(existing) = receipt
+            .operations
+            .iter_mut()
+            .find(|existing| existing.id == operation.id)
+        {
+            // Actual publication wins over a continuation delivery failure.
+            existing.disposition = operation.disposition;
+        } else {
+            receipt.operations.push(operation.clone());
+        }
+        return;
+    }
+    receipts.push(WorkbenchItemReceipt {
+        index: operation.id.input_unit_index,
+        status: WorkbenchItemStatus::Stopped,
+        output: "Reload committed; the original continuation's completion is unconfirmed.".into(),
+        operations: vec![operation.clone()],
+        presentation: None,
+        kind: None,
+        span: None,
+        source_items: Vec::new(),
+        value: None,
+        diagnostics: Vec::new(),
+        failure_layer: None,
+        warnings: Vec::new(),
+        installed_bindings: Vec::new(),
+        terminal_transfer: None,
+    });
+    receipts.sort_by_key(|receipt| receipt.index);
 }
 
 impl std::fmt::Debug for WorkbenchExecutionControl {
@@ -151,6 +226,7 @@ impl WorkbenchExecutionControl {
             provider_owner: std::sync::OnceLock::new(),
             provider_replay: std::sync::OnceLock::new(),
             publication: PublicationDecision::new(),
+            generation_supersession: std::sync::OnceLock::new(),
             native_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancellation_cause: std::sync::OnceLock::new(),
             pending_cancellation_cause: std::sync::OnceLock::new(),
@@ -169,6 +245,52 @@ impl WorkbenchExecutionControl {
             cancellation_observed: parking_lot::Mutex::new(None),
             settlement: tokio::sync::watch::channel(None).0,
         })
+    }
+
+    pub(crate) fn retain_generation_supersession(
+        &self,
+        supersession: crate::local_actor::run_control::CommittedGenerationSupersession,
+    ) {
+        // Only the generation owner can construct this capability. Its issued
+        // decision is this immutable execution's decision; no control Arc is
+        // retained by the capability, so terminal ownership forms no cycle.
+        let _terminal = self.cell_terminal.lock();
+        assert!(
+            supersession.matches_control(self),
+            "retirement belongs to this exact execution decision"
+        );
+        assert!(
+            self.generation_supersession
+                .set(Arc::new(supersession))
+                .is_ok(),
+            "one continuing generation retirement per execution"
+        );
+        // A lost task may already have reported an unconfirmed terminal. The
+        // retained owner can add its later confirmed effect evidence without
+        // changing that terminal's failure or cleanup classification.
+        let supersession = self.generation_supersession.get().expect("just retained");
+        self.settlement.send_if_modified(|terminal| {
+            let Some(reply) = terminal else {
+                return false;
+            };
+            retain_committed_generation_operation(reply, supersession.operation());
+            true
+        });
+    }
+
+    pub(crate) fn retain_generation_operations(
+        &self,
+        receipts: &mut Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    ) {
+        if let Some(supersession) = self.generation_supersession.get() {
+            retain_committed_generation_receipt(receipts, supersession.operation());
+        }
+    }
+
+    pub(crate) fn generation_supersession(
+        &self,
+    ) -> Option<Arc<crate::local_actor::run_control::CommittedGenerationSupersession>> {
+        self.generation_supersession.get().cloned()
     }
 
     pub(crate) fn publication_decision(&self) -> Arc<PublicationDecision> {
@@ -472,6 +594,9 @@ impl WorkbenchExecutionControl {
                 } else {
                     owner.freeze(&mut reply);
                 }
+            }
+            if let Some(supersession) = self.generation_supersession.get() {
+                retain_committed_generation_operation(&mut reply, supersession.operation());
             }
             *current = Some(reply.clone());
             true
@@ -3069,3 +3194,54 @@ mod tests {
 #[cfg(test)]
 #[path = "resident_tools/cancellation_history_tests.rs"]
 mod cancellation_history_tests;
+
+#[cfg(test)]
+mod generation_receipt_projection_tests {
+    use super::*;
+
+    #[test]
+    fn committed_reload_evidence_survives_failed_task_projection_without_claiming_return() {
+        use tidepool_runtime::session::{
+            WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+            WorkbenchOperationReceipt,
+        };
+        // Projection-only control: this data cannot issue supersession authority.
+        let operation = WorkbenchOperationReceipt {
+            display: None,
+            display_publication: None,
+            id: WorkbenchOperationId {
+                execution: WorkbenchExecutionId::from_digest([31; 16]),
+                input_unit_index: 2,
+                effect_ordinal: 3,
+            },
+            effect: "reloadSource".into(),
+            disposition: WorkbenchOperationDisposition::Committed,
+        };
+        let actor = crate::ActorRef::first(crate::ActorId(31));
+        for failure in [
+            crate::KernelInvocationFailure::Failed {
+                actor,
+                detail: "task panicked".into(),
+                receipts: Vec::new(),
+                diagnostic: None,
+            },
+            crate::KernelInvocationFailure::ActorExited(actor),
+        ] {
+            let original_cause = failure.to_string();
+            let mut reply = Err(failure);
+            retain_committed_generation_operation(&mut reply, &operation);
+            retain_committed_generation_operation(&mut reply, &operation);
+            let failure = reply.unwrap_err();
+            assert!(
+                failure.to_string().contains(&original_cause)
+                    || original_cause.contains(&failure.to_string())
+            );
+            let receipts = failure.receipts();
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].status, WorkbenchItemStatus::Stopped);
+            assert_eq!(receipts[0].value, None);
+            assert!(receipts[0].installed_bindings.is_empty());
+            assert_eq!(receipts[0].operations, [operation.clone()]);
+        }
+    }
+}

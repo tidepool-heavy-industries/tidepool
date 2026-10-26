@@ -13,6 +13,20 @@ struct WorkbenchExecutionRecord {
     provider_owner: Option<crate::HostedOperationSettlement>,
 }
 
+fn retain_committed_cancellation(
+    cancellation: &mut crate::WorkbenchCancellationOutcome,
+    receipt: &WorkbenchOperationReceipt,
+) {
+    match cancellation {
+        crate::WorkbenchCancellationOutcome::Cancelled { reply, .. }
+        | crate::WorkbenchCancellationOutcome::Expired { reply, .. }
+        | crate::WorkbenchCancellationOutcome::PublicationSettled { reply, .. } => {
+            crate::resident_tools::retain_committed_generation_operation(reply, receipt)
+        }
+        _ => {}
+    }
+}
+
 /// Original publication diagnostics are ordinary evidence. They retain no
 /// publication guard, source owner, compiler World, or cleanup authority.
 #[derive(Debug)]
@@ -105,6 +119,7 @@ impl RetirementDiagnosticEvidence {
 struct WorkbenchOperationDiagnosticRecord {
     operation: WorkbenchOperationId,
     evidence: Option<Arc<RetirementDiagnosticEvidence>>,
+    committed: Option<Arc<WorkbenchOperationReceipt>>,
 }
 
 /// Issued at the actual admitted effect boundary. A weak journal reference
@@ -169,6 +184,57 @@ impl RecordedRetirementDiagnosticObservation {
 impl WorkbenchOperationDiagnosticOwner {
     pub(crate) fn operation(&self) -> &WorkbenchOperationId {
         &self.operation
+    }
+
+    /// Retain the actual publication owner's operation evidence even if its
+    /// continuation terminal arrived first. This does not settle that terminal.
+    pub(crate) fn record_committed_operation(
+        &self,
+        receipt: Arc<WorkbenchOperationReceipt>,
+    ) -> Result<(), WorkbenchDiagnosticRefusal> {
+        if receipt.id != self.operation {
+            return Err(WorkbenchDiagnosticRefusal::OperationChanged);
+        }
+        let journal = self
+            .journal
+            .upgrade()
+            .ok_or(WorkbenchDiagnosticRefusal::ExecutionMissing)?;
+        let mut journal = journal.lock();
+        let record = journal
+            .0
+            .get_mut(&self.key)
+            .ok_or(WorkbenchDiagnosticRefusal::ExecutionMissing)?;
+        if record.request.execution_id() != Some(&self.operation.execution) {
+            return Err(WorkbenchDiagnosticRefusal::ExecutionChanged);
+        }
+        if !record
+            .invocation_work
+            .as_ref()
+            .is_some_and(|actual| std::ptr::eq(Arc::as_ptr(actual), self.work.as_ptr()))
+        {
+            return Err(WorkbenchDiagnosticRefusal::InvocationChanged);
+        }
+        let operation = record
+            .operation_diagnostics
+            .iter_mut()
+            .find(|entry| entry.operation == self.operation)
+            .ok_or(WorkbenchDiagnosticRefusal::OperationMissing)?;
+        if let Some(existing) = &operation.committed {
+            if !Arc::ptr_eq(existing, &receipt) {
+                return Err(WorkbenchDiagnosticRefusal::DifferentEvidence);
+            }
+        } else {
+            operation.committed = Some(receipt.clone());
+        }
+        if let WorkbenchExecutionState::Terminal {
+            reply,
+            cancellation,
+        } = &mut record.state
+        {
+            crate::resident_tools::retain_committed_generation_operation(reply, &receipt);
+            retain_committed_cancellation(cancellation, &receipt);
+        }
+        Ok(())
     }
 
     pub(crate) fn record(
@@ -413,6 +479,7 @@ impl WorkbenchExecutions {
                 .push(WorkbenchOperationDiagnosticRecord {
                     operation: operation.clone(),
                     evidence: None,
+                    committed: None,
                 });
         }
         Ok(WorkbenchOperationDiagnosticOwner {
@@ -792,8 +859,8 @@ impl WorkbenchExecutions {
         &mut self,
         execution: WorkbenchExecutionId,
         request: WorkbenchRequest,
-        reply: crate::KernelWorkbenchReply,
-        cancellation: crate::WorkbenchCancellationOutcome,
+        mut reply: crate::KernelWorkbenchReply,
+        mut cancellation: crate::WorkbenchCancellationOutcome,
         invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
     ) {
         let key = WorkbenchReplayKey::new(&execution, invocation);
@@ -827,6 +894,13 @@ impl WorkbenchExecutions {
             .get_mut(&key)
             .map(|record| std::mem::take(&mut record.operation_diagnostics))
             .unwrap_or_default();
+        for receipt in operation_diagnostics
+            .iter()
+            .filter_map(|entry| entry.committed.as_ref())
+        {
+            crate::resident_tools::retain_committed_generation_operation(&mut reply, receipt);
+            retain_committed_cancellation(&mut cancellation, receipt);
+        }
         self.0.insert(
             key,
             WorkbenchExecutionRecord {
@@ -1224,6 +1298,101 @@ pub(crate) fn assert_publication_transport_protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn committed_operation_evidence_and_failure_terminal_commute_without_reexecution() {
+        // This exercises the actual admitted diagnostic/journal owner, not
+        // generation publication or a fabricated supersession capability.
+        let fixture = invocation_work::tests::Fixture::start().await;
+        let actor = fixture.actor.identity();
+        for terminal_first in [false, true] {
+            let control = crate::WorkbenchExecutionControl::untracked();
+            let execution = control.execution_id(actor);
+            let request = WorkbenchRequest::from_cell_input("reload operation receipt ordering")
+                .with_execution_id(execution.clone());
+            let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+            let work = journal
+                .lock()
+                .begin_selecting_invocation(actor, &execution, &request, None, &control);
+            let operation = WorkbenchOperationId {
+                execution: execution.clone(),
+                input_unit_index: 0,
+                effect_ordinal: 1,
+            };
+            let owner = WorkbenchExecutions::admit_operation_diagnostic(
+                &journal,
+                operation.clone(),
+                None,
+                &work,
+            )
+            .unwrap();
+            let committed = Arc::new(WorkbenchOperationReceipt {
+                id: operation,
+                effect: "reloadSource".into(),
+                disposition: WorkbenchOperationDisposition::Committed,
+                display: None,
+                display_publication: None,
+            });
+            let failure = Err(crate::KernelInvocationFailure::Failed {
+                actor,
+                detail: "continuation task lost".into(),
+                receipts: Vec::new(),
+                diagnostic: None,
+            });
+            let terminal = || {
+                journal.lock().record(
+                    execution.clone(),
+                    request.clone(),
+                    failure.clone(),
+                    crate::WorkbenchCancellationOutcome::PublicationSettled {
+                        execution: execution.clone(),
+                        reply: failure.clone(),
+                    },
+                    None,
+                )
+            };
+            if terminal_first {
+                terminal();
+            }
+            owner.record_committed_operation(committed.clone()).unwrap();
+            if !terminal_first {
+                terminal();
+            }
+            owner.record_committed_operation(committed.clone()).unwrap();
+            let ledger = journal.lock();
+            let reply = ledger.lookup(&execution, &request, None).unwrap().unwrap();
+            let failure = reply.unwrap_err();
+            assert!(failure.to_string().contains("continuation task lost"));
+            assert_eq!(failure.receipts().len(), 1);
+            assert_eq!(failure.receipts()[0].status, WorkbenchItemStatus::Stopped);
+            assert_eq!(
+                failure.receipts()[0].operations,
+                [committed.as_ref().clone()]
+            );
+            assert!(failure.receipts()[0].value.is_none());
+            let crate::WorkbenchCancellationOutcome::PublicationSettled { reply, .. } =
+                ledger.cancellation(execution.clone(), None)
+            else {
+                panic!("original cancellation class retained")
+            };
+            assert_eq!(reply.unwrap_err().receipts(), failure.receipts());
+            assert!(Arc::ptr_eq(
+                ledger.0.get(&owner.key).unwrap().operation_diagnostics[0]
+                    .committed
+                    .as_ref()
+                    .unwrap(),
+                &committed
+            ));
+            drop(ledger);
+            let other_receipt = Arc::new(committed.as_ref().clone());
+            assert_eq!(
+                owner.record_committed_operation(other_receipt),
+                Err(WorkbenchDiagnosticRefusal::DifferentEvidence)
+            );
+            work.close();
+        }
+        fixture.finish().await;
+    }
 
     #[tokio::test]
     async fn retirement_diagnostic_write_survives_lost_receipt_and_continuation_failure() {

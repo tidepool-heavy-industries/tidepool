@@ -1076,6 +1076,7 @@ where
             state: Box::new(WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    supersession: None,
                     callback_scope: None,
                     issued_snapshot,
                     lifecycle: self.lifecycle.clone(),
@@ -2200,6 +2201,23 @@ where
                 ))
             },
             move |behavior, _kernel, mut owned, mut result| {
+                if let Some(supersession) = result.supersession.take() {
+                    if supersession.matches(
+                        owned.state.effects.context.actor,
+                        owned
+                            .state
+                            .effects
+                            .control
+                            .as_ref()
+                            .expect("admitted execution control"),
+                    ) {
+                        owned.state.effects.supersession = Some(supersession);
+                    } else {
+                        result.outcome = Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "generation supersession belongs to another execution".into(),
+                        ));
+                    }
+                }
                 let retained_binding = match result.retained_job_binding.take() {
                     Some(mut binding)
                         if !owned
@@ -2350,9 +2368,17 @@ where
     fn begin_owned_finalization(
         behavior: &mut Self,
         kernel: &KernelContext,
-        owned: OwnedExecution<H, O>,
+        mut owned: OwnedExecution<H, O>,
         mut result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure> {
+        if owned.state.effects.supersession.is_none() {
+            owned.state.effects.supersession = owned
+                .state
+                .effects
+                .control
+                .as_ref()
+                .and_then(|control| control.generation_supersession());
+        }
         // Error paths bypass response rendering, but publication requires the
         // same checked item kinds as a successful response.
         let receipts = match &mut result {
@@ -2362,6 +2388,9 @@ where
             }) => &mut response.items,
             Err(failure) => &mut failure.receipts,
         };
+        if let Some(control) = &owned.state.effects.control {
+            control.retain_generation_operations(receipts);
+        }
         annotate_workbench_receipts(
             receipts,
             owned
@@ -2371,6 +2400,17 @@ where
                 .as_ref()
                 .map(|checked| checked.items.as_slice()),
         );
+        if owned.private.is_some() && owned.state.effects.supersession.is_some() {
+            owned.state.effects.invocation_work.close();
+            return Ok(WorkbenchAdvance::Park(
+                Self::settle_superseded_execution_task(
+                    owned,
+                    behavior.environment.clone(),
+                    kernel.clone(),
+                    result,
+                ),
+            ));
+        }
         if owned.private.is_some() && private_nonpublication_reason(&result).is_none() {
             if !owned.state.effects.invocation_work.begin_publication() {
                 let failure = private_publication_rejection(
@@ -2441,6 +2481,77 @@ where
                 ))
             })
         })
+    }
+
+    fn settle_superseded_execution_task(
+        owned: OwnedExecution<H, O>,
+        environment: ResidentEnvironment<H, O>,
+        kernel: KernelContext,
+        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    ) -> OwnedWorkbenchTask<Self> {
+        let runner = environment.runner.clone();
+        Self::owned_step_task(
+            owned,
+            move |owned| {
+                let private = owned
+                    .private
+                    .as_ref()
+                    .expect("original private scope")
+                    .clone();
+                let context = owned.state.effects.context.clone();
+                let control = owned
+                    .state
+                    .effects
+                    .control
+                    .as_ref()
+                    .expect("original control")
+                    .clone();
+                let supersession = owned
+                    .state
+                    .effects
+                    .supersession
+                    .as_ref()
+                    .expect("actual retirement receipt")
+                    .clone();
+                Box::pin(async move {
+                    if let Some(dependencies) = owned.state.cursor.dependencies.as_mut() {
+                        dependencies.retire_input_for_publication().await?;
+                    }
+                    runner
+                        .settle_superseded_private_execution(
+                            context,
+                            private,
+                            supersession,
+                            control,
+                        )
+                        .await
+                })
+            },
+            move |behavior, _kernel, owned, settled| {
+                owned
+                    .state
+                    .effects
+                    .control
+                    .as_ref()
+                    .expect("original control")
+                    .publication_decision()
+                    .terminate();
+                let result = match settled {
+                    Ok(settled) => mark_generation_reset(result, settled),
+                    Err(error) => Err(private_publication_rejection(
+                        owned
+                            .state
+                            .effects
+                            .control
+                            .as_ref()
+                            .expect("original control"),
+                        result,
+                        error,
+                    )),
+                };
+                Self::settle_owned_execution(behavior, &kernel, owned, result)
+            },
+        )
     }
 
     fn publish_owned_execution_task(
@@ -2681,6 +2792,54 @@ where
     }
 }
 
+fn mark_generation_reset(
+    mut result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
+    settled: tidepool_runtime::session::SupersededPrivateExecution,
+) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
+    use tidepool_runtime::session::SupersededPrivateExecution;
+    let (writes, retirement) = match settled {
+        SupersededPrivateExecution::Empty { retirement } => (None, retirement),
+        SupersededPrivateExecution::Discarded { writes, retirement } => (Some(writes), retirement),
+    };
+    // The runtime method has completed synchronous private-scope retirement.
+    // These counts describe released roots, not outstanding external leases;
+    // ordinary execution finalization still settles the latter's owners.
+    tracing::info!(target: "exomonad_actor::workbench_phase",
+        scopes_retired = retirement.scopes_retired,
+        bindings_retired = retirement.bindings_retired,
+        roots_released = retirement.roots_released,
+        "superseded private execution retired");
+    let response = match &mut result {
+        Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
+        | Ok(KernelStep::Stop {
+            output: response, ..
+        }) => response,
+        Err(failure) => {
+            failure.publication = Some(match writes {
+                Some(writes) => WorkbenchPublicationOutcome::Rejected {
+                    detail: format!("reload committed; the original generation was retired; private writes {writes:?} were discarded after the continuation failed"),
+                },
+                None => WorkbenchPublicationOutcome::NotPublished {
+                    reason: WorkbenchNotPublishedReason::GenerationReset,
+                },
+            });
+            return result;
+        }
+    };
+    if writes.is_some() || response.next_index < response.total {
+        response.status = WorkbenchRunStatus::Rejected;
+        response.publication = Some(WorkbenchPublicationOutcome::Rejected {
+            detail: format!("reload committed; the original generation was retired; private writes {:?} were discarded and {} trailing input units were not run",
+                writes, response.total.saturating_sub(response.next_index)),
+        });
+    } else {
+        response.publication = Some(WorkbenchPublicationOutcome::NotPublished {
+            reason: WorkbenchNotPublishedReason::GenerationReset,
+        });
+    }
+    result
+}
+
 fn private_nonpublication_reason(
     result: &Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
 ) -> Option<WorkbenchNotPublishedReason> {
@@ -2842,6 +3001,7 @@ where
                 outcome,
                 started_job: None,
                 retained_job_binding,
+                supersession: None,
             };
         }
         OwnedWorkbenchWait::Drain {

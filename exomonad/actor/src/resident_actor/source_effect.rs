@@ -324,15 +324,21 @@ where
                 Ok(operation) => operation.run().await,
                 Err(error) => Err(error),
             };
+            let (answer, supersession) = match answer {
+                Ok((answer, supersession)) => (Ok(answer), supersession),
+                Err(error) => (Err(error), None),
+            };
             let disposition = reload_disposition(&answer);
             let answer = answer.map_err(|error| match error {
                 SourceError::SourceUnavailable(detail) => ReloadError::ReloadUnavailable(detail),
                 SourceError::SourceUnreadable(detail) => ReloadError::ReloadUnreadable(detail),
             });
-            resume_source_answer(answer, disposition, |answer| {
+            let mut resolution = resume_source_answer(answer, disposition, |answer| {
                 runner.resume_value(context, continuation, answer)
             })
-            .await
+            .await;
+            resolution.supersession = supersession;
+            resolution
         })
     }
 }
@@ -515,6 +521,10 @@ mod tests {
             .await;
             assert!(resolution.outcome.is_err());
             assert_eq!(resolution.disposition, expected);
+            assert!(
+                resolution.supersession.is_none(),
+                "ordinary reload answers cannot issue generation supersession"
+            );
             assert_eq!(
                 scoped_operation_disposition(
                     WorkbenchOperationDisposition::Committed,

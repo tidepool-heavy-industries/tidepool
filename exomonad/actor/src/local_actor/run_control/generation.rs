@@ -20,7 +20,69 @@ use crate::resident_workbench::{
     UnstartedRetirementSourceSettlement,
 };
 
-pub(crate) type GenerationRetirementResult = Arc<tidepool_bridge_effects::RlRetirementReceipt>;
+pub(crate) struct GenerationRetirementResult {
+    pub(crate) receipt: Arc<tidepool_bridge_effects::RlRetirementReceipt>,
+    pub(crate) supersession: Option<Arc<CommittedGenerationSupersession>>,
+}
+
+/// Issued by the actual continuing publication/retirement owner, never by a
+/// rendered reload answer or an operation disposition.
+#[derive(Clone, Debug)]
+pub(crate) struct CommittedGenerationSupersession {
+    actor: ActorRef,
+    execution: tidepool_runtime::session::WorkbenchExecutionId,
+    publication: Arc<tidepool_runtime::session::PublicationDecision>,
+    retirement: tidepool_runtime::session::RuntimeSourceRetirementProof,
+    operation: Arc<tidepool_runtime::session::WorkbenchOperationReceipt>,
+}
+
+/// The prevalidated caller identity is retained before publication starts.
+/// This is not retirement evidence and cannot authorize private settlement.
+#[derive(Clone, Debug)]
+struct ContinuingPublicationExecution {
+    actor: ActorRef,
+    execution: tidepool_runtime::session::WorkbenchExecutionId,
+    control: Arc<crate::WorkbenchExecutionControl>,
+}
+
+impl ContinuingPublicationExecution {
+    fn capture(actor: ActorRef, control: Arc<crate::WorkbenchExecutionControl>) -> Self {
+        Self {
+            actor,
+            execution: control.execution_id(actor),
+            control,
+        }
+    }
+
+    fn matches(&self, actor: ActorRef, control: &Arc<crate::WorkbenchExecutionControl>) -> bool {
+        self.actor == actor
+            && Arc::ptr_eq(&self.control, control)
+            && self.execution == control.execution_id(actor)
+    }
+}
+
+impl CommittedGenerationSupersession {
+    pub(crate) fn matches(
+        &self,
+        actor: ActorRef,
+        control: &Arc<crate::WorkbenchExecutionControl>,
+    ) -> bool {
+        self.actor == actor && self.matches_control(control)
+    }
+
+    pub(crate) fn matches_control(&self, control: &crate::WorkbenchExecutionControl) -> bool {
+        self.execution == control.execution_id(self.actor)
+            && Arc::ptr_eq(&self.publication, &control.publication_decision())
+    }
+
+    pub(crate) fn operation(&self) -> &tidepool_runtime::session::WorkbenchOperationReceipt {
+        &self.operation
+    }
+
+    pub(crate) fn retirement(&self) -> &tidepool_runtime::session::RuntimeSourceRetirementProof {
+        &self.retirement
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GenerationRetirementRequestError {
@@ -51,6 +113,7 @@ struct GenerationRetirementReplyMetadata {
     report: Arc<crate::resident_workbench::PreparedReloadReport>,
     candidate: ActorGenerationCandidateObserver,
     operation: tidepool_bridge_effects::RlOperation,
+    continuing: Option<ContinuingPublicationExecution>,
 }
 
 pub(super) struct GenerationRetirementReloadReply {
@@ -294,6 +357,7 @@ pub(super) enum GenerationRetirementCompletion {
     UnreservedRefused,
     BPublished {
         generation: tidepool_runtime::session::NotebookGenerationId,
+        retirement: tidepool_runtime::session::RuntimeSourceRetirementProof,
     },
     DefaultRefused {
         receipt: Arc<tidepool_bridge_effects::RlRetirementReceipt>,
@@ -539,6 +603,11 @@ impl KernelContext {
         if !preparation.matches_execution_control(control.as_ref()) {
             return Err(GenerationRetirementRequestError::ExecutionChanged);
         }
+        if control.as_ref().is_some_and(|control| {
+            diagnostic.operation().execution != control.execution_id(self.identity)
+        }) {
+            return Err(GenerationRetirementRequestError::ExecutionChanged);
+        }
         let report = Arc::new(
             preparation
                 .reload_report()
@@ -551,6 +620,9 @@ impl KernelContext {
             report,
             candidate: preparation.candidate_custody().identity_observer(),
             operation,
+            continuing: control
+                .clone()
+                .map(|control| ContinuingPublicationExecution::capture(self.identity, control)),
         };
         self.directory
             .request_generation_retirement(
@@ -722,7 +794,7 @@ impl GenerationRetirementReplyMetadata {
 
     fn unavailable(&self, detail: &str) -> GenerationRetirementResult {
         use tidepool_bridge_effects::{RlCause, RlCauseKind};
-        self.receipt(
+        let receipt = self.receipt(
             None,
             Vec::new(),
             Some(RlCause {
@@ -730,7 +802,11 @@ impl GenerationRetirementReplyMetadata {
                 detail: detail.into(),
             }),
             Vec::new(),
-        )
+        );
+        GenerationRetirementResult {
+            receipt,
+            supersession: None,
+        }
     }
 }
 
@@ -810,8 +886,9 @@ impl GenerationRetirementCore {
         }
     }
 
-    /// Data projection only; it never settles a source, takes a worker result,
-    /// resumes a callback, or supplies authority through an observer.
+    /// Project the report and retain any completed continuing retirement proof.
+    /// This never settles a source, takes a worker result, or resumes a callback;
+    /// only the actual BPublished completion can supply supersession authority.
     fn reply(
         &self,
         metadata: &GenerationRetirementReplyMetadata,
@@ -836,7 +913,14 @@ impl GenerationRetirementCore {
             receipt.settlement = settlement;
             receipt.secondary.extend(secondary);
         }
-        receipt
+        let supersession = metadata
+            .continuing
+            .as_ref()
+            .and_then(|execution| execution.control.generation_supersession());
+        GenerationRetirementResult {
+            receipt,
+            supersession,
+        }
     }
 
     fn operational_obligations(
@@ -1098,7 +1182,7 @@ impl GenerationRetirementCore {
     fn source_reply(
         &self,
         metadata: &GenerationRetirementReplyMetadata,
-    ) -> GenerationRetirementResult {
+    ) -> Arc<tidepool_bridge_effects::RlRetirementReceipt> {
         use tidepool_bridge_effects::{
             RlCause, RlCauseKind as Cause, RlRetirementStage as Stage, RlRetirementState as State,
         };
@@ -1143,13 +1227,15 @@ impl GenerationRetirementCore {
                 GenerationRetirementCompletion::UnreservedRefused => {
                     return metadata.unavailable(
                         "reservation was refused without an original-source settlement proof",
-                    )
+                    ).receipt
                 }
             };
             return receipt;
         }
         let Self::Replacement(attempt) = self else {
-            return metadata.unavailable("the exact admitted attempt is unavailable");
+            return metadata
+                .unavailable("the exact admitted attempt is unavailable")
+                .receipt;
         };
         let (cutoff, custody) = match &attempt.phase {
             GenerationRetirementPhase::Unstarted {
@@ -1200,7 +1286,7 @@ impl GenerationRetirementCore {
                 GenerationRetirementCutoffPhase::Captured { capture, .. }
                 | GenerationRetirementCutoffPhase::RetirementInProgress { capture }
                 | GenerationRetirementCutoffPhase::RetirementFailed { capture, .. }
-                | GenerationRetirementCutoffPhase::Retired { capture },
+                | GenerationRetirementCutoffPhase::Retired { capture, .. },
             ) => Some(capture),
             _ => None,
         };
@@ -1328,6 +1414,7 @@ impl GenerationRetirementCore {
 /// This same product remains in the reservation record or the terminal loss
 /// parcel. Publisher closures and inventory access never enter this core.
 pub(super) struct GenerationRetirementAttempt {
+    continuing: Option<ContinuingPublicationExecution>,
     actor: ActorRef,
     candidate: ActorGenerationCandidateCustody,
     expected: Arc<ActorGeneration>,
@@ -1463,6 +1550,7 @@ enum GenerationRetirementCutoffPhase {
     },
     Retired {
         capture: GenerationRetirementCapture,
+        proof: tidepool_runtime::session::RuntimeSourceRetirementProof,
     },
 }
 
@@ -1472,7 +1560,7 @@ impl GenerationRetirementCutoffPhase {
             Self::Captured { capture, .. }
             | Self::RetirementInProgress { capture }
             | Self::RetirementFailed { capture, .. }
-            | Self::Retired { capture } => Some(capture),
+            | Self::Retired { capture, .. } => Some(capture),
             _ => None,
         }
     }
@@ -2196,8 +2284,8 @@ fn retire_published_source(
         unreachable!()
     };
     match result {
-        Ok(()) => {
-            *cutoff = GenerationRetirementCutoffPhase::Retired { capture };
+        Ok(proof) => {
+            *cutoff = GenerationRetirementCutoffPhase::Retired { capture, proof };
             true
         }
         Err((fence, error)) => {
@@ -2393,11 +2481,50 @@ impl GenerationRetirementCore {
                 && *notification == preparation::PublicationNotificationObservation::Accepted)
                 .then(|| GenerationRetirementCompletion::BPublished {
                     generation: generation.id(),
+                    retirement: match cutoff {
+                        GenerationRetirementCutoffPhase::Retired { proof, .. } => proof.clone(),
+                        _ => unreachable!("successful retirement retains its actual proof"),
+                    },
                 })
         });
         let Some(completion) = completion else {
             return;
         };
+        if let (GenerationRetirementCompletion::BPublished { retirement, .. }, Some(execution)) =
+            (&completion, &attempt.continuing)
+        {
+            let diagnostic = match &attempt.diagnostic {
+                GenerationRetirementDiagnostic::Operation { owner, .. } => owner,
+                #[cfg(test)]
+                GenerationRetirementDiagnostic::CancelledComponent => {
+                    unreachable!("component controls have no continuing execution")
+                }
+            };
+            let operation = Arc::new(tidepool_runtime::session::WorkbenchOperationReceipt {
+                id: diagnostic.operation().clone(),
+                effect: "reloadSource".into(),
+                disposition: tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
+                display: None,
+                display_publication: None,
+            });
+            if let Err(refusal) = diagnostic.record_committed_operation(operation.clone()) {
+                // The control still retains the confirmed effect if its actor
+                // journal was lost. A missing journal cannot undo publication.
+                tracing::warn!(?refusal, "committed reload operation journal unavailable");
+            }
+            assert!(execution.matches(attempt.actor, &execution.control));
+            // This happens in the retained publication owner, before any reply
+            // delivery or Haskell continuation. Lost waiters cannot erase it.
+            execution
+                .control
+                .retain_generation_supersession(CommittedGenerationSupersession {
+                    actor: execution.actor,
+                    execution: execution.execution.clone(),
+                    publication: execution.control.publication_decision(),
+                    retirement: retirement.clone(),
+                    operation,
+                });
+        }
         let candidate_identity = attempt.candidate.identity_observer();
         let old = std::mem::replace(self, Self::Idle);
         let Self::Replacement(GenerationRetirementAttempt {
@@ -2407,6 +2534,7 @@ impl GenerationRetirementCore {
             diagnostic,
             report,
             phase,
+            continuing: _,
         }) = old
         else {
             unreachable!()
@@ -2743,6 +2871,9 @@ impl RunState {
                 expected,
                 diagnostic,
                 report: reply.as_ref().map(|reply| reply.metadata.report.clone()),
+                continuing: reply
+                    .as_ref()
+                    .and_then(|reply| reply.metadata.continuing.clone()),
                 phase: GenerationRetirementPhase::Preparation(prepared),
             }),
             driver: GenerationRetirementDriver {
@@ -3408,7 +3539,7 @@ impl RunState {
             return;
         };
         let (GenerationRetirementCutoffPhase::Captured { capture, .. }
-        | GenerationRetirementCutoffPhase::Retired { capture }) = cutoff
+        | GenerationRetirementCutoffPhase::Retired { capture, .. }) = cutoff
         else {
             return;
         };
@@ -4446,3 +4577,41 @@ pub(crate) enum GenerationRetirementNativeControl {
 
 #[cfg(test)]
 mod retirement_owner_tests;
+
+#[cfg(test)]
+mod supersession_execution_tests {
+    use super::*;
+
+    #[test]
+    fn continuing_publication_identity_requires_same_actor_and_control_allocation() {
+        // Exercise caller identity only. This deliberately issues no retirement
+        // proof or completed supersession capability.
+        let actor = ActorRef::first(crate::ActorId(71));
+        let invocation = exomonad_tool::ToolInvocationContext::external(
+            "thread".into(),
+            "request".into(),
+            "reload".into(),
+            None,
+            None,
+        );
+        let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation.clone()));
+        let independently_allocated =
+            crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
+        assert_eq!(
+            control.execution_id(actor),
+            independently_allocated.execution_id(actor)
+        );
+        let execution = ContinuingPublicationExecution::capture(actor, control.clone());
+        assert!(execution.matches(actor, &control.clone()));
+        assert!(
+            !execution.matches(actor, &independently_allocated),
+            "same request text is not the admitted control"
+        );
+        assert!(!execution.matches(ActorRef::first(crate::ActorId(72)), &control));
+        control.request_cancellation();
+        assert!(
+            execution.matches(actor, &control),
+            "cancellation retains the original commit identity"
+        );
+    }
+}

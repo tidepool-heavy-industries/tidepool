@@ -20,7 +20,15 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    pub(crate) async fn run(self) -> Result<SrReloadOutcome, SourceError> {
+    pub(crate) async fn run(
+        self,
+    ) -> Result<
+        (
+            SrReloadOutcome,
+            Option<Arc<crate::local_actor::run_control::CommittedGenerationSupersession>>,
+        ),
+        SourceError,
+    > {
         use crate::resident_workbench::{HasReloadPreparation, ReloadPreparationOutcome};
         async fn prepare<C: HasReloadPreparation>(
             services: &C,
@@ -35,7 +43,7 @@ where
             .await
         }
         let prepared = match prepare(&self.preparation, self.checked, self.policy).await? {
-            ReloadPreparationOutcome::Settled(outcome) => return Ok(outcome),
+            ReloadPreparationOutcome::Settled(outcome) => return Ok((outcome, None)),
             ReloadPreparationOutcome::Ready(prepared) => prepared,
         };
         let publication = self.control.as_ref().map_or_else(
@@ -62,9 +70,10 @@ where
             )
             .await
             .map_err(|error| SourceError::SourceUnavailable(error.to_string()))?;
-        Ok(SrReloadOutcome::ReloadRetirement(Arc::unwrap_or_clone(
-            receipt,
-        )))
+        Ok((
+            SrReloadOutcome::ReloadRetirement(Arc::unwrap_or_clone(receipt.receipt)),
+            receipt.supersession,
+        ))
     }
 }
 

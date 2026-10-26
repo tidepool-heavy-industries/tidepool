@@ -852,7 +852,10 @@ impl GenerationRetirementFence {
     pub(crate) fn retire(
         self,
         successor: NotebookGenerationId,
-    ) -> Result<(), (Self, GenerationRetirementFenceError)> {
+    ) -> Result<
+        tidepool_runtime::session::RuntimeSourceRetirementProof,
+        (Self, GenerationRetirementFenceError),
+    > {
         match self.state {
             GenerationRetirementFenceState::Held(fence) => fence
                 .retire(successor)
@@ -918,7 +921,10 @@ impl GenerationFence {
     pub(crate) fn retire(
         self,
         successor: NotebookGenerationId,
-    ) -> Result<(), (Self, GenerationAdmissionError)> {
+    ) -> Result<
+        tidepool_runtime::session::RuntimeSourceRetirementProof,
+        (Self, GenerationAdmissionError),
+    > {
         let Self { dependency, fence } = self;
         fence
             .retire(successor)

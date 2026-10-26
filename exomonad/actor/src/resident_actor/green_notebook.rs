@@ -12,6 +12,7 @@ pub(super) struct EffectReceipt {
 }
 
 pub(super) struct EffectCompletion {
+    supersession: Option<Arc<crate::local_actor::run_control::CommittedGenerationSupersession>>,
     receipt: EffectReceipt,
     disposition: WorkbenchOperationDisposition,
     started_job: Option<String>,
@@ -46,6 +47,7 @@ impl EffectReceipt {
         (
             result.outcome,
             EffectCompletion {
+                supersession: result.supersession,
                 receipt: self,
                 disposition: result.disposition,
                 started_job: result.started_job,
@@ -122,6 +124,22 @@ where
         current.inflight_effect = None;
         if let Some(mut attachment) = completion.attachment {
             let receipt = attachment.receipt;
+            if let Some(supersession) = attachment.supersession.take() {
+                if supersession.matches(
+                    state.effects.context.actor,
+                    state
+                        .effects
+                        .control
+                        .as_ref()
+                        .expect("admitted execution control"),
+                ) {
+                    state.effects.supersession = Some(supersession);
+                } else {
+                    outcome = Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "generation supersession belongs to another execution".into(),
+                    ));
+                }
+            }
             if let Some(mut binding) = attachment.retained_job_binding.take() {
                 if !state
                     .effects

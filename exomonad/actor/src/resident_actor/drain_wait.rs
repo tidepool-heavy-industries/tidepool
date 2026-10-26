@@ -72,6 +72,7 @@ where
                     outcome,
                     started_job: None,
                     retained_job_binding: None,
+                    supersession: None,
                 };
             }
             control.interruption_detail("drainActor")
@@ -81,7 +82,7 @@ where
             control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement);
             format!(
                 "{}; observed actor retirement: {}",
-                        control.interruption_detail("drainActor"),
+                control.interruption_detail("drainActor"),
                 terminal.summary
             )
         }
@@ -90,7 +91,7 @@ where
             control.request_cancellation_with_cause(crate::WorkbenchCancellationCause::Retirement);
             format!(
                 "{}; observed actor retirement: {}",
-                        control.interruption_detail("drainActor"),
+                control.interruption_detail("drainActor"),
                 terminal.summary
             )
         }
@@ -109,5 +110,6 @@ where
         outcome,
         started_job: None,
         retained_job_binding: None,
+        supersession: None,
     }
 }
