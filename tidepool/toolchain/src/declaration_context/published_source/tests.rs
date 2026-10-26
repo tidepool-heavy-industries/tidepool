@@ -414,23 +414,13 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     );
     assert_target_selection(&prebirth);
 
-    let (_scratch, inventory, _) =
-        super::history_properties::restored_graph_roles(&held, &held.compiler_input_roles())
-            .unwrap();
+    let (_scratch, inventory, _, recovered) =
+        super::history_properties::restored_snapshot(&held).unwrap();
     let store = fvm_ipld_blockstore::MemoryBlockstore::default();
-    let mut writer = crate::exact_context::Materializer::new(&store);
-    let written = writer.materialize_context(None, &held.snapshot()).unwrap();
-    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
-        store.put_keyed(&cid, &bytes).unwrap();
-    }
-    let decoded = crate::exact_context::hydrate_context(&store, written.root()).unwrap();
-    let recovered = inventory
-        .context_for_expected_snapshot(written.root(), &decoded)
-        .unwrap();
     assert_eq!(
         recovered.semantic_sha256(),
         held.semantic_sha256(),
-        "unchanged Context9 cold positive"
+        "unchanged recorded context cold positive"
     );
     assert!(foreign_groups.iter().all(|group| recovered
         .artifact_view()
@@ -537,7 +527,16 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
             .expect_err(
                 "a retained foreign scope cannot replace the publication's issued selection",
             );
-        eprintln!("cold publication {name} scope substitution refused: {error:?}");
+        let expected = if name == "parent" {
+            "exact declaration context: published original selection differs from its issued closure"
+        } else {
+            "artifact inventory: compiler fragment canonical pair differs from its issuing bindings"
+        };
+        assert!(
+            matches!(error, CompileError::ExtractFailed(ref detail) if detail == expected),
+            "{name} scope substitution must reach exact publication authentication: {error:?}"
+        );
+        assert_target_selection(&recovered);
     }
 }
 
@@ -930,23 +929,8 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
                     .iter()
                     .all(|edge| issued.artifact_view().binding_dependencies().contains(edge)));
                 let expected_graph = issued.artifact_view().capture_graph_selection();
-                let (_, _, restored) = super::history_properties::restored_graph_roles(
-                    &issued,
-                    &issued.compiler_input_roles(),
-                )
-                .unwrap();
-                let support = restored
-                    .compiler_source_support()
-                    .restore_snapshot_evidence(
-                        &issued.snapshot(),
-                        &BTreeMap::new(),
-                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                    )
-                    .unwrap();
-                let restored = restored
-                    .rebuild(|facts| facts.compiler_support = support)
-                    .finish()
-                    .unwrap();
+                let (_scratch, _, _, restored) =
+                    super::history_properties::restored_snapshot(&issued).unwrap();
                 assert_eq!(
                     restored.artifact_view().capture_graph_selection(),
                     expected_graph
@@ -1292,24 +1276,8 @@ fn published_native_custody_does_not_require_dependency_namespace_originals() {
         expected
     );
 
-    let (scratch, inventory, _) = super::history_properties::restored_graph_roles(
-        &continued,
-        &continued.compiler_input_roles(),
-    )
-    .unwrap();
-    let snapshot = continued.snapshot();
-    let store = fvm_ipld_blockstore::MemoryBlockstore::default();
-    let mut writer = crate::exact_context::Materializer::new(&store);
-    let written = writer.materialize_context(None, &snapshot).unwrap();
-    use fvm_ipld_blockstore::Blockstore;
-    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
-        store.put_keyed(&cid, &bytes).unwrap();
-    }
-    let decoded = crate::exact_context::hydrate_context(&store, written.root()).unwrap();
-    let recovered = inventory
-        .context_for_expected_snapshot(written.root(), &decoded)
-        .unwrap();
-    drop(scratch);
+    let (_scratch, inventory, decoded, recovered) =
+        super::history_properties::restored_snapshot(&continued).unwrap();
     assert_eq!(recovered.artifact_view(), continued.artifact_view());
     assert_eq!(
         recovered.compiler_input_roles(),
@@ -1331,7 +1299,7 @@ fn published_native_custody_does_not_require_dependency_namespace_originals() {
     missing.entries.remove(&helper.descriptor.id);
     assert!(
         missing
-            .context_for_expected_snapshot(written.root(), &decoded)
+            .context_for_expected_snapshot(decoded.root(), &decoded)
             .is_err(),
         "canonical Helper custody cannot replace the exact required native child"
     );

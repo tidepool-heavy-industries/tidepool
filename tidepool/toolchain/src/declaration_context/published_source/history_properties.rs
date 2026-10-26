@@ -194,53 +194,83 @@ fn publication_reopening_keeps_birth_when_current_roles_change() {
         .is_err());
 }
 
-pub(super) fn restored_graph_roles(
+pub(super) fn restored_snapshot(
     context: &ExactDeclarationContext,
-    roles: &[CompilerInputRole],
 ) -> Result<
     (
         tempfile::TempDir,
         RecoveredArtifactInventory,
+        crate::exact_context::DecodedContext,
         ExactDeclarationContext,
     ),
     CompileError,
 > {
-    let offer_operation = std::sync::Arc::new(
-        tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-    );
-    let mut offer_validation =
-        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(offer_operation);
+    use fvm_ipld_blockstore::Blockstore;
+
     let view = context.artifact_view();
     let scratch = tempfile::tempdir().unwrap();
     let references = context.materialize_recovery_artifacts(
         scratch.path(),
-        &context.artifact_view().artifact_ids().into_iter().collect(),
+        &view.artifact_ids().into_iter().collect(),
     )?;
-    let selection: crate::artifact_inventory::ArtifactGraphSelection =
-        serde_json::from_slice(&serde_json::to_vec(&view.capture_graph_selection()).unwrap())
-            .unwrap();
-    let edges: Vec<_> =
-        serde_json::from_slice(&serde_json::to_vec(&view.binding_dependencies()).unwrap()).unwrap();
+    let selection = view.capture_graph_selection();
     let inventory = RecoveredArtifactAcquisition::new(scratch.path())
         .capture_payloads_bound(
             &references,
             &view.descriptors(),
             &selection.bindings,
-            &edges,
+            &view.binding_dependencies(),
         )
-        .expect("history recovery: certificate acquisition");
-    let authenticated = inventory
-        .context_with_graph_selection(
-            &selection,
-            roles,
-            context.owner.facts.lexical.to_vec(),
-            &mut offer_validation,
-        )
-        .map_err(|error| {
-            eprintln!("history recovery stage=graph-role-authentication error={error:?}");
-            error
-        })?;
-    Ok((scratch, inventory, authenticated))
+        .expect("certified fixture payload acquisition");
+    let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+    let mut writer = crate::exact_context::Materializer::new(&store);
+    let snapshot = context.snapshot();
+    for (original, row) in &snapshot.native_availability {
+        for contribution in row.contributions.values() {
+            if !snapshot.offers.contains_key(&contribution.offer) {
+                let alternatives = row
+                    .contributions
+                    .values()
+                    .filter(|other| snapshot.offers.contains_key(&other.offer))
+                    .map(|other| {
+                        serde_json::json!({
+                            "offer": hex(&other.offer),
+                            "same_reachable": other.reachable == contribution.reachable,
+                            "reachable": other.reachable.iter().collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let offers = snapshot
+                    .offers
+                    .iter()
+                    .map(|(id, offer)| {
+                        serde_json::json!({
+                            "identity": hex(id), "owner": offer.owner.module,
+                            "original": offer.original,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "recorded fixture missing offer: {}",
+                    serde_json::json!({
+                        "owner": row.owner.module, "original": original,
+                        "missing_offer": hex(&contribution.offer),
+                        "reachable": contribution.reachable.iter().collect::<Vec<_>>(),
+                        "retained_contributions": alternatives, "retained_offers": offers,
+                    })
+                );
+            }
+        }
+    }
+    let written = writer
+        .materialize_context(None, &snapshot)
+        .map_err(failure)?;
+    for (cid, bytes) in writer.finish().map_err(failure)?.into_blocks() {
+        store.put_keyed(&cid, &bytes).map_err(failure)?;
+    }
+    let decoded = crate::exact_context::hydrate_context(&store, written.root()).map_err(failure)?;
+    let authenticated = inventory.context_for_expected_snapshot(written.root(), &decoded)?;
+    Ok((scratch, inventory, decoded, authenticated))
 }
 
 fn property_config() -> proptest::test_runner::Config {
@@ -285,6 +315,12 @@ fn publication_reopening_refuses_missing_type_namespace_with_retained_custody() 
             }
         );
     };
+    let (_scratch, inventory, _, restored) = restored_snapshot(&changed).unwrap();
+    assert_eq!(
+        restored.compiler_input_roles(),
+        changed.compiler_input_roles()
+    );
+    assert_eq!(restored.source_scope(), changed.source_scope());
     let mut incomplete = CompilerInputProjection::default();
     for (owner, role) in changed.compiler_input_projection().snapshot_roles() {
         if owner != &helper.descriptor.owner {
@@ -324,8 +360,6 @@ fn publication_reopening_refuses_missing_type_namespace_with_retained_custody() 
                 .finish()
         }),
     );
-    let (_scratch, inventory, _) =
-        restored_graph_roles(&changed, &changed.compiler_input_roles()).unwrap();
     let mut snapshot = changed.snapshot();
     snapshot.native_fact_owner = None;
     snapshot.roles.remove(&helper.descriptor.owner);
@@ -473,7 +507,6 @@ proptest! {
 #[test]
 #[ignore = "requires the declared rooted compiler service"]
 fn published_source_narrowing_preserves_native_dependency_custody() {
-    use fvm_ipld_blockstore::Blockstore;
     let fixture = super::tests::compiled_publication_fixture();
     let original = fixture.publication.context();
     let expected_graph = original.artifact_view().capture_graph_selection();
@@ -501,6 +534,7 @@ fn published_source_narrowing_preserves_native_dependency_custody() {
     runner
         .run(&prop::collection::vec(any::<bool>(), 1..5), |cold_steps| {
             let mut context = original.as_ref().clone();
+            let mut recovery_scratch = Vec::new();
             for cold in cold_steps {
                 let support = context
                     .compiler_source_support()
@@ -531,21 +565,9 @@ fn published_source_narrowing_preserves_native_dependency_custody() {
                     .iter()
                     .any(|role| role.interface() == canonical && role.original().is_none()));
                 if cold {
-                    let store = fvm_ipld_blockstore::MemoryBlockstore::default();
-                    let mut writer = crate::exact_context::Materializer::new(&store);
-                    let persisted = writer
-                        .materialize_context(None, &context.snapshot())
-                        .unwrap();
-                    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
-                        store.put_keyed(&cid, &bytes).unwrap();
-                    }
-                    let (scratch, inventory, _) = restored_graph_roles(&context, &roles).unwrap();
-                    let acquired =
-                        crate::exact_context::hydrate_context(&store, persisted.root()).unwrap();
-                    context = inventory
-                        .context_for_expected_snapshot(persisted.root(), &acquired)
-                        .unwrap();
-                    drop(scratch);
+                    let (scratch, _, _, restored) = restored_snapshot(&context).unwrap();
+                    recovery_scratch.push(scratch);
+                    context = restored;
                     prop_assert_eq!(context.compiler_input_roles(), roles);
                 }
                 let reopened = context.published_source_original_selections().unwrap();
