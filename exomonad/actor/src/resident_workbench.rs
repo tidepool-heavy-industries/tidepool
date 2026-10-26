@@ -24553,20 +24553,44 @@ pub(crate) mod request_tests {
             )
             .await
             .unwrap();
-        let result = match step {
-            ResidentWorkbenchStep::Running { fragment, outcome } => workbench
-                .settle_item(context, *fragment, (*outcome).into())
-                .await
-                .unwrap(),
-            step => step,
+        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+            panic!("quoted tool omitted its semantic publication boundary");
         };
+        let runner = workbench_runner_for_test(&workbench);
+        let boundary = runner
+            .capture_boundary(
+                context.clone(),
+                (*outcome).into(),
+                context.placement.resource_scope,
+            )
+            .await
+            .unwrap();
+        let ResidentActorBoundary::ToolResultPublication {
+            continuation,
+            value,
+        } = boundary
+        else {
+            panic!("quoted tool suspended on {}", boundary.operation());
+        };
+        assert_eq!(value, serde_json::json!(expected));
+        let outcome = runner
+            .resume_tool_presentation(context.clone(), continuation)
+            .await
+            .unwrap();
+        let result = workbench
+            .settle_item(context, *fragment, outcome)
+            .await
+            .unwrap();
         let ResidentWorkbenchStep::Committed { value, output, .. } = result else {
             panic!(
                 "selected installer did not execute its native tool: {}",
                 describe_step(&result)
             );
         };
-        assert_eq!(value, Some(serde_json::json!(expected)));
+        assert_eq!(
+            value, None,
+            "presentation must not duplicate the published value"
+        );
         assert_eq!(output, expected);
         assert_eq!(
             tidepool_extract_cmd::extract_spawn_count(),
@@ -34048,7 +34072,7 @@ pub(crate) mod request_tests {
         preparation_client: crate::CompilerPreparationClient,
     ) -> ActivationPublicationPhaseFixture {
         let mut recovery = None;
-        let (mut session, mut context, source, mut inputs, run_root) =
+        let (mut session, context, source, mut inputs, run_root) =
             activation_input_fixture(|lib| {
                 let fixture = crate::recovery::recovery_test_fixture::RecoveryFixture::create(
                     lib.include_dir(),
@@ -34059,7 +34083,6 @@ pub(crate) mod request_tests {
                 recovery = Some(fixture);
             });
         let recovery = recovery.unwrap();
-        context.placement.lexical_scope = session.mint_scope(ScopeId::ROOT).unwrap();
         let path = tidepool_repr::ActorPath::parse("root/activation-phases").unwrap();
         let durable =
             tidepool_runtime::session::RecoveryPublicOwner::new(&path, context.actor.incarnation.0)
@@ -34241,7 +34264,7 @@ pub(crate) mod request_tests {
         preparation_client: crate::CompilerPreparationClient,
     ) {
         let mut recovery = None;
-        let (mut session, mut context, source, inputs, _root) = activation_input_fixture(|lib| {
+        let (mut session, context, source, inputs, _root) = activation_input_fixture(|lib| {
             let fixture =
                 crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
             tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
@@ -34252,7 +34275,6 @@ pub(crate) mod request_tests {
         let durable_owner =
             tidepool_runtime::session::RecoveryPublicOwner::new(&path, context.actor.incarnation.0)
                 .unwrap();
-        context.placement.lexical_scope = session.mint_scope(ScopeId::ROOT).unwrap();
         let public_scope = context.placement.lexical_scope;
         session
             .initialize_durable_public_scope(durable_owner.clone(), public_scope)
