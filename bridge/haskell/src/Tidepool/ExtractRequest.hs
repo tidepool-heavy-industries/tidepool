@@ -970,6 +970,7 @@ validateCertificationFields fields
       HarnessProfile -> True
       BuildProductsDir _ -> True
       ModuleCandidates _ -> True
+      RetainedGeneration _ _ -> True
       CertifyHomeProducts -> True
       _ -> False
 

@@ -109,6 +109,7 @@ import Tidepool.ExtractRequest
   , StructuredInspection(..), InspectionProvenance(..)
   , InspectionRequest(..), RequestField(..), RequestShapeError(..), RequestOperation(..), WorkerRequest(..)
   , ExactNameInspection(..), StructuredNameScope(..), StructuredNameNamespace(..)
+  , RequestOptions(..), admittedRequestOptions
   , admitWorkerRequest, requestOperation, validateRequestShape, workerArgv, workerRequestFromArgv )
 import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
 import Tidepool.DependencyEvidence
@@ -1415,6 +1416,10 @@ portableOutputRequestValidation = do
   (_, mixedAccepted) <- admit (valid ++ [InspectInfo "value"])
   assertEqual "inspection cannot acquire portable output intent"
     (Left InvalidPortableOutputShape) mixedAccepted
+  let retained = RetainedGeneration (SymbolIdentity "main" "Producer" "value" "value" Nothing) 41
+  (_, retainedAccepted) <- admit (valid ++ [retained])
+  assertEqual "portable output refuses retained-generation projection"
+    (Left InvalidPortableOutputShape) retainedAccepted
   forM_ [Turn, CellPlan, CheckSource, Classify, ModuleCandidates "scope"
     , SessionArtifacts "scope", CertifyHomeProducts, InjectVal "Binding"
     , BindGen 1, SessionRoot "session", SessionIncarnation "1"] $ \conflict -> do
@@ -1448,10 +1453,32 @@ certificationRequestValidation = do
     Right (Just request) | requestCertifyHomeProducts request
       && requestModuleCandidates request == Just "/candidates.cbor" -> pure ()
     other -> fail ("home-product certification rejected authenticated candidate input: " ++ show other)
+  let identity = SymbolIdentity "main" "Producer" "value" "value" Nothing
+      retained generation = RetainedGeneration identity generation
+      decode fields = case workerRequestFromArgv (workerArgv fields) of
+        Right (Just request) -> pure request
+        other -> fail ("retained-generation request codec refused: " ++ show other)
+  forM_ [0,41,maxBound] $ \generation -> do
+    request <- decode (valid ++ [retained generation])
+    assertEqual "certification codec keeps exact retained identity and generation"
+      (Map.singleton identity generation) (requestRetainedGenerations request)
+    admitted <- either (fail . show) pure (admitWorkerRequest request)
+    assertEqual "certification remains a source operation" SourceOperation (requestOperation admitted)
+    assertEqual "certification admission preserves retained projection input"
+      (Map.singleton identity generation) (optionRetainedGenerations (admittedRequestOptions admitted))
+    case workerRequestFromArgv (workerArgv (valid ++ [retained generation,InjectVal "Val1"])) of
+      Left _ -> pure ()
+      other -> fail ("retained generation admitted injected products: " ++ show other)
+  let preview = [Input "Probe.hs",Turn,ActivationPreview,TurnOut "preview"]
+  previewRequest <- decode preview
+  assertEqual "activation-preview positive control" (Right ActivationPreviewOperation)
+    (requestOperation <$> admitWorkerRequest previewRequest)
+  retainedPreview <- decode (preview ++ [retained 41])
+  assertEqual "activation preview refuses retained-generation projection" (Left InvalidActivationPreviewShape)
+    (requestOperation <$> admitWorkerRequest retainedPreview)
   forM_ [ CellPlan, Classify, Turn, InspectType "Int", InspectTypeBatch "Batch.hs"
         , DeclarationJoin "join.cbor", BindGen 1, InjectVal "Val1"
         , ActivationPreview
-        , RetainedGeneration (SymbolIdentity "main" "Producer" "value" "value" Nothing) 1
         ] $ \field ->
     case workerRequestFromArgv (workerArgv (valid ++ [field])) of
       Left _ -> pure ()
