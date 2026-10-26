@@ -8,6 +8,11 @@ G2 remains unqualified. This tranche closes the mismatch between executable
 projection, Original demand and certification. Frozen-bundle qualification and
 live Persona deployment remain separate.
 
+Argon accepted `738fcea501` / code `ac5c020d92` without blocking findings.
+The active fixture and frozen-bundle tranche retains evidence under
+`/srv/swarm/evidence/inanna/g2-final-qualification-20261026/`. It uses the
+declared fast-dev profile and will freeze one clean integrated source revision.
+
 ## Current contract
 
 - Genuine nullary DataCon workers are local constructor objects. Lowering reuses
@@ -105,13 +110,32 @@ qualification are separate evidence.
 
 ## Remaining work
 
-1. Review the integrated candidate and its retained component, sensitivity and
-   joined evidence. No known failing gate remains in this structural tranche.
-2. Close remaining qualification fixture gaps in host root recovery, counting
+The host cold-root recovery fixture now enters through a real captured-source
+transaction and installed compiler World (`2a982bacd7`); its maintained native
+target passes 1/1, with process/compiler cleanup confirmed.
+
+Current joined findings under `g2-final-qualification-20261026`:
+
+- Ordinary activation renderer certification reaches an authenticated exact
+  `Display` HOME group absent from `targetGroupWitnesses`. The native census
+  decodes its exact dependency owners but discards them in projection. The
+  proposed repair preserves observations through the admitted census owner,
+  respecting FullCarrier/IssuedGroups availability, without manufacturing
+  witnesses or changing emitted wire rows. Argon cross-check is pending.
+- Runtime residency positives still use raw turns with mutable session imports;
+  those deliberately lack an Ordinary execution seal. Migrate the positive
+  histories to the existing checked World/cell owner and preserve incarnation,
+  retained-value and collection assertions.
+- Actor fixture repairs retain actual captured sources, adopted scopes and source
+  transactions. Pending host writes must first refuse publication, then retire
+  through their original owner before retry. Fresh consumer cells must import
+  their own type aliases. Execution of the repaired cases remains in progress.
+
+1. Close remaining qualification fixture gaps in host root recovery, counting
    publication, generic host-mount/registry setup and runtime residency through
    their real admission paths. Keep support simplification and dead-code removal
    separate from fixture repair.
-3. Assemble, freeze and qualify one exact bundle under
+2. Assemble, freeze and qualify one exact bundle under
    [the G2 contract](shared-warm-compiler/completion/g2-completion.md), including
    ordinary/uncertain-END histories, Persona startup and bounded provider smoke.
 
