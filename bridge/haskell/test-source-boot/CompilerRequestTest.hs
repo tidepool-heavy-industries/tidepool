@@ -61,7 +61,7 @@ import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
   ( captureSelectedPackageWitnesses, encodeReceiptIdentity
   , validatePackageTargetRoots, validateOriginalUseClosure, OriginalUseClosureFailure(..), retainedInputClosureFromWitnesses, CertifiedGroupFor(..), mergeCertifiedGroupObservations
-  , WitnessOwnerFor(..) )
+  , WitnessOwnerFor(..), NativeSourceSealFailure(..), mergeNativeSourceSeals, lookupNativeSourceSeal )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
 import qualified Crypto.Hash.SHA256 as SHA256
 
@@ -167,6 +167,36 @@ originalUseClosureChecks = do
   require "distinct historical coordinates were collapsed by symbol identity"
     (mergeCertifiedGroupObservations groups (Map.singleton foreignCoordinate (historicalGroups Map.! foreignCoordinate))
       == Right historicalGroups)
+  let nativeCoordinate version = (Text.pack "main",Text.pack "Observed",version)
+      raw = nativeCoordinate Nothing
+      v1 = Text.replicate 64 (Text.pack "1")
+      v2 = Text.replicate 64 (Text.pack "2")
+      iface = Text.replicate 64 (Text.pack "3")
+      native = Text.replicate 64 (Text.pack "4")
+      oldSeal = (v1,iface,native)
+      newSeal = (v2,iface,native)
+      oldNative = Map.fromList [(raw,oldSeal),(nativeCoordinate (Just v1),oldSeal)]
+      history = Map.insert (nativeCoordinate (Just v2)) newSeal oldNative
+  require "issued raw coordinate lost its finalized native version"
+    (lookupNativeSourceSeal oldNative raw == Right oldSeal)
+  require "missing carried seal borrowed another historical native version"
+    (lookupNativeSourceSeal (Map.delete raw history) raw == Left (NativeSourceSealMissing raw))
+  require "historical seal lookup ignored the exact requested version"
+    (lookupNativeSourceSeal oldNative (nativeCoordinate (Just v2))
+      == Left (NativeSourceSealMissing (nativeCoordinate (Just v2))))
+  require "historical seal lookup accepted an inconsistent final version"
+    (lookupNativeSourceSeal (Map.singleton (nativeCoordinate (Just v1)) newSeal) (nativeCoordinate (Just v1))
+      == Left (NativeSourceSealVersionMismatch (nativeCoordinate (Just v1)) v2))
+  require "identical carried native seals conflicted"
+    (mergeNativeSourceSeals oldNative oldNative == Right oldNative)
+  require "distinct exact historical seals were collapsed"
+    (mergeNativeSourceSeals oldNative (Map.singleton (nativeCoordinate (Just v2)) newSeal) == Right history)
+  forM_ [newSeal,(v1,v2,native),(v1,iface,v2)] $ \changed -> do
+    require "prior/current raw native version, interface or singleton product conflict was overwritten"
+      (mergeNativeSourceSeals oldNative (Map.singleton raw changed) == Left (NativeSourceSealConflict raw))
+    require "historical exact native version, interface or singleton product conflict was overwritten"
+      (mergeNativeSourceSeals oldNative (Map.singleton (nativeCoordinate (Just v1)) changed)
+        == Left (NativeSourceSealConflict (nativeCoordinate (Just v1))))
   -- Fixed-point set expansion is an independent oracle for all root subsets,
   -- including empty selection. Root order and repeated references cannot alter it.
   forM_ [Set.fromList [i | i <- [0..2], mask `div` (2^i) `mod` 2 == (1 :: Int)]

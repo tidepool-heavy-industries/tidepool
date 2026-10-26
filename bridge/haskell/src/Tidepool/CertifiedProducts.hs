@@ -13,7 +13,8 @@ module Tidepool.CertifiedProducts
   , emptyPackageLinks, emptyPackageLinkIndex, encodePackageLinks
   , validatePackageTargetRoots
   , OriginalUseClosureFailure(..), validateOriginalUseClosure, retainedInputClosureFromWitnesses
-  , WitnessOwnerFor(..), CertifiedGroupFor(..), mergeCertifiedGroupObservations ) where
+  , WitnessOwnerFor(..), CertifiedGroupFor(..), mergeCertifiedGroupObservations
+  , NativeSourceSealFailure(..), mergeNativeSourceSeals, lookupNativeSourceSeal ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -1224,10 +1225,10 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
             if Map.keysSet homeRoots /= expectedHomeRoots
               then Left "fresh HOME package roots were not consumed exactly"
               else Right ()
-            sourceSeals <- admittedNativeSourceSeals exact cached
+            sourceSeals <- renderNativeSourceSealResult $ admittedNativeSourceSeals exact cached
               >>= mergeNativeSourceSeals (maybe Map.empty targetNativeSourceSeals prior)
             versions <- retainedNativeVersions sourceSeals emittedSeals packages products moduleRows
-            finalizedSeals <- finalizeNativeSourceSeals sourceSeals emittedSeals versions
+            finalizedSeals <- renderNativeSourceSealResult (finalizeNativeSourceSeals sourceSeals emittedSeals versions)
             Right (certificateBytes,versions,context { targetNativeSourceSeals = finalizedSeals },packageInterfaceWrites)
   where
     internWitness :: Map.Map GlobalWitness Word -> GlobalWitness
@@ -1346,22 +1347,38 @@ encodeFullWitness (identity,rep,signature,evaluated,owner) = array
     PackageOwner unit name seal -> array [encodeString "package",encodeString unit,
       encodeString name,encodeString seal,encodeReceiptIdentity identity]]
 
--- Native identity binds the finite graph actually retained for this owner.
--- Promoted edges name nodes rather than recursively derived versions, so cycles
--- remain finite and unrelated request scope cannot change native authority.
 -- Raw staged coordinates remain Nothing in the receipt. Their issuing context
 -- associates that coordinate with the finalized native identity; historical
 -- Just coordinates always select their own exact version.
 type NativeSourceSeals = Map.Map (T.Text,T.Text,Maybe T.Text) (T.Text,T.Text,T.Text)
 
-mergeNativeSourceSeals :: NativeSourceSeals -> NativeSourceSeals -> Either String NativeSourceSeals
+-- These pure comparisons validate observations; only certification constructs
+-- the opaque context that carries them between stages.
+data NativeSourceSealFailure
+  = NativeSourceSealMissing (T.Text,T.Text,Maybe T.Text)
+  | NativeSourceSealConflict (T.Text,T.Text,Maybe T.Text)
+  | NativeSourceSealVersionMismatch (T.Text,T.Text,Maybe T.Text) T.Text
+  deriving (Eq,Show)
+
+renderNativeSourceSealResult :: Either NativeSourceSealFailure a -> Either String a
+renderNativeSourceSealResult = either (Left . show) Right
+
+lookupNativeSourceSeal :: NativeSourceSeals -> (T.Text,T.Text,Maybe T.Text)
+  -> Either NativeSourceSealFailure (T.Text,T.Text,T.Text)
+lookupNativeSourceSeal seals coordinate@(_,_,requested) = case Map.lookup coordinate seals of
+  Nothing -> Left (NativeSourceSealMissing coordinate)
+  Just seal@(version,_,_) -> case requested of
+    Just expected | expected /= version -> Left (NativeSourceSealVersionMismatch coordinate version)
+    _ -> Right seal
+
+mergeNativeSourceSeals :: NativeSourceSeals -> NativeSourceSeals -> Either NativeSourceSealFailure NativeSourceSeals
 mergeNativeSourceSeals left right = foldM insert left (Map.toAscList right)
   where
     insert known (coordinate,seal@(version,iface,native)) = version `seq` iface `seq` native `seq` case Map.lookup coordinate known of
-      Just previous | previous /= seal -> Left ("conflicting native source seals at " ++ show coordinate)
+      Just previous | previous /= seal -> Left (NativeSourceSealConflict coordinate)
       _ -> Right (Map.insert coordinate seal known)
 
-admittedNativeSourceSeals :: Maybe ExactScope -> [ModuleCandidate] -> Either String NativeSourceSeals
+admittedNativeSourceSeals :: Maybe ExactScope -> [ModuleCandidate] -> Either NativeSourceSealFailure NativeSourceSeals
 admittedNativeSourceSeals exact cached = foldM add Map.empty
   ([((T.pack (candidateUnit candidate),T.pack (candidateModule candidate)),
       (T.pack (candidateModuleVersion candidate),T.pack (candidateInterfaceSha256 candidate),
@@ -1376,7 +1393,7 @@ admittedNativeSourceSeals exact cached = foldM add Map.empty
 
 finalizeNativeSourceSeals :: NativeSourceSeals
   -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
-  -> Map.Map (String,String) String -> Either String NativeSourceSeals
+  -> Map.Map (String,String) String -> Either NativeSourceSealFailure NativeSourceSeals
 finalizeNativeSourceSeals inherited emitted versions = foldM step inherited (Map.toAscList emitted)
   where
     step known ((unit,name),(provisional,iface,native,_)) = do
@@ -1387,6 +1404,8 @@ finalizeNativeSourceSeals inherited emitted versions = foldM step inherited (Map
         mergeNativeSourceSeals known (Map.fromList
           [((unit,name,Nothing),(version,iface,native)),((unit,name,Just version),(version,iface,native))])
 
+-- Native identity binds the finite retained graph. Local promoted edges name
+-- nodes rather than recursively derived versions, so cycles remain finite.
 retainedNativeVersions
   :: NativeSourceSeals
   -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
@@ -1412,17 +1431,13 @@ retainedNativeVersions inherited emitted packages products rows = do
     groups = Map.union (Map.fromListWith Map.union
       [(key product,Map.singleton (candidateGroupOrdinal group) witnesses)
       | (product,group,witnesses) <- rows]) (Map.map (const Map.empty) promoted)
-    lookupSeal coordinate@(unit,name,version) = do
+    lookupSeal coordinate@(unit,name,version) = renderNativeSourceSealResult $ do
       let current = case (version,Map.lookup (unit,name) emitted) of
-            (Nothing,Just (final,iface,native,_)) | not (T.null final) -> Just (final,iface,native)
-            _ -> Nothing
-          priorSeal = Map.lookup coordinate inherited
-      case (current,priorSeal) of
-        (Just actual,Just previous) | actual /= previous ->
-          Left ("conflicting native source seals at " ++ show coordinate)
-        (Just actual,_) -> Right actual
-        (_,Just actual) -> Right actual
-        _ -> Left ("native demand graph lacks an actual source owner seal at " ++ show coordinate)
+            (Nothing,Just (final,iface,native,_)) | not (T.null final) ->
+              Map.singleton coordinate (final,iface,native)
+            _ -> Map.empty
+      seals <- mergeNativeSourceSeals inherited current
+      lookupNativeSourceSeal seals coordinate
     closure visited [] = Right visited
     closure visited (owner:pending)
       | owner `Set.member` visited = closure visited pending
