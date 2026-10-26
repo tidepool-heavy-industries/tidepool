@@ -11115,7 +11115,9 @@ where
             .access
             .with_compiler_machine(context.clone(), move |session, context, _, _| {
                 let private_carrier = private_execution
-                    .map(|execution| session.prepare_private_host_carrier(execution))
+                    .map(|execution| {
+                        session.prepare_private_host_carrier(execution, authority_digest)
+                    })
                     .transpose()
                     .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
                 let Some(prototype) =
