@@ -29,18 +29,12 @@ async fn fatal_original_preview_retires_input_and_staged_tool_installation() {
 
 #[tokio::test]
 async fn durable_cancellation_before_native_claim_preserves_public_owner_and_second_activation() {
-    crate::resident_workbench::with_test_compiler_owner(|_| {
-        interrupt_during_preview(true, Interruption::Cancellation, false, true)
-    })
-    .await;
+    interrupt_during_preview(true, Interruption::Cancellation, false, true).await;
 }
 
 #[tokio::test]
 async fn durable_fatal_preview_preserves_original_public_surface() {
-    crate::resident_workbench::with_test_compiler_owner(|_| {
-        interrupt_during_preview(false, Interruption::FatalPreview, true, true)
-    })
-    .await;
+    interrupt_during_preview(false, Interruption::FatalPreview, true, true).await;
 }
 
 #[derive(Clone, Copy)]
@@ -52,6 +46,23 @@ enum Interruption {
 }
 
 async fn interrupt_during_preview(
+    already_installed: bool,
+    interruption: Interruption,
+    genuine_preparation: bool,
+    durable: bool,
+) {
+    crate::resident_workbench::with_test_compiler_owner(|_| {
+        interrupt_during_preview_with_compiler_owner(
+            already_installed,
+            interruption,
+            genuine_preparation,
+            durable,
+        )
+    })
+    .await;
+}
+
+async fn interrupt_during_preview_with_compiler_owner(
     already_installed: bool,
     interruption: Interruption,
     genuine_preparation: bool,
