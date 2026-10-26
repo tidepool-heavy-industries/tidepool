@@ -430,6 +430,30 @@ class IsolatedLibtestTests(unittest.TestCase):
         (directory / 'compiler-cwd.bin').write_bytes(b'/captured/working/directory')
         return directory
 
+    def test_transaction_capture_requires_case_daemon_evidence_only_for_owned_mode(self):
+        for mode, observed in itertools.product(('direct', 'owned-resident'), (False, True)):
+            with self.subTest(compiler_mode=mode, compiler_directory_observed=observed):
+                root = Path(self.tmp.name) / f'case-daemon-{mode}-{observed}'
+                self.write_transaction_capture(root, 'completed', 'compiler_completed')
+                if observed:
+                    (root / 'compiler').mkdir()
+                record = {'compiler_cleanup_status': 'not_observed'}
+                cleanup, _, complete, _ = runner.case_artifact_evidence(root, mode, record)
+                summary = record['diagnostic_summaries']
+                self.assertEqual(summary['transaction_count'], 1)
+                self.assertEqual(summary['issues'], [])
+                requires_daemon = mode == 'owned-resident' or observed
+                self.assertEqual(len(summary['owned_compiler_roots']), int(requires_daemon))
+                self.assertEqual(complete, not requires_daemon)
+                self.assertEqual(cleanup, mode == 'direct')
+                if requires_daemon:
+                    daemon = summary['owned_compiler_roots'][0]
+                    self.assertEqual(daemon['role'], 'case_compiler')
+                    self.assertEqual(daemon['physical_compiler_timing']['data_status'], 'trace_absent')
+                    self.assertFalse(daemon['physical_compiler_timing']['complete'])
+                else:
+                    self.assertNotIn('physical_compiler_timing', summary)
+
     def test_relocated_preparation_associates_with_complete_execution_without_relabeling(self):
         for success in (True, False):
             with self.subTest(compiler_process_success=success):
@@ -437,7 +461,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                 preparation = self.write_transaction_capture(root, 'input', 'prepared')
                 execution = self.write_transaction_capture(root, 'output', 'compiler_completed',
                                                            compiler_process_success=success)
-                summary = runner.diagnostic_summaries(root)
+                summary = runner.diagnostic_summaries(root, 'owned-resident')
                 self.assertEqual(summary['issues'], [])
                 rows = {row['path']: row for row in summary['transactions']}
                 prepared = rows[str(preparation / 'transaction.json')]

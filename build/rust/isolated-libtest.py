@@ -928,7 +928,7 @@ def associate_prepared_captures(summaries):
             summaries['issues'].append(f"{row['path']}: compiler transaction capture is not completed")
 
 
-def diagnostic_summaries(artifact_root):
+def diagnostic_summaries(artifact_root, compiler_mode='direct'):
     """Keep bounded compiler outcome/timing evidence after success scratch removal."""
     def read_json(path):
         with path.open('rb') as stream:
@@ -1198,7 +1198,7 @@ def diagnostic_summaries(artifact_root):
 
     roots = []
     compiler = artifact_root / 'compiler'
-    if transactions or compiler.exists() or compiler.is_symlink():
+    if (compiler_mode == 'owned-resident' and transactions) or compiler.exists() or compiler.is_symlink():
         roots.append((compiler, 'case_compiler'))
     # The native lifecycle control creates one immediate test-data directory.
     # Only its immediate marker-bearing compiler children are considered; no
@@ -1404,7 +1404,7 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
             record[key] = ('not_observed' if not reports else
                            next(iter(statuses)) if len(statuses) == 1 else 'mixed')
         try:
-            record['diagnostic_summaries'] = diagnostic_summaries(artifact_root)
+            record['diagnostic_summaries'] = diagnostic_summaries(artifact_root, compiler_mode)
         except (OSError, ValueError, TypeError) as error:
             record['diagnostic_summaries'] = {'issues': [str(error)]}
     summaries = record.get('diagnostic_summaries', {})
