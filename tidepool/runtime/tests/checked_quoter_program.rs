@@ -8,8 +8,8 @@ use super::compiler_test_support::OwnedEnvironment;
 
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::turn::{
-    consume_cell_program_item, finish_cell_program_admitted, finish_world_cell_plan_admitted,
-    prepare_cell_program_admitted, prepare_world_cell_plan_admitted, TemplateSelector, TurnResult,
+    consume_cell_program_item, finish_cell_program_admitted, prepare_cell_program_admitted,
+    TemplateSelector, TurnResult,
 };
 use tidepool_runtime::session::{
     resident_cell_check_template, resident_workbench_templates, ModuleEnv, ResidentSession,
@@ -17,80 +17,6 @@ use tidepool_runtime::session::{
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
 use tidepool_toolchain::CompileError;
-
-fn capture_quoter_sources(
-    includes: &[std::path::PathBuf],
-    effects: &TestEffectSurface,
-) -> (
-    tidepool_runtime::session::GenerationArtifactReference,
-    Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
-) {
-    use std::io::Read;
-    use tidepool_toolchain::compiler_world::{CapturedCompilerSourceRoot, CapturedCompilerSources};
-    let owner = Arc::new(tempfile::tempdir().unwrap());
-    let mut remaining = CapturedCompilerSources::capture_byte_allowance().unwrap();
-    let mut roots = Vec::new();
-    for (ordinal, include) in includes.iter().enumerate() {
-        remaining = remaining
-            .checked_sub(4)
-            .expect("quoter source root framing fits capture allowance");
-        let files = tidepool_toolchain::cache::source_root_manifest(include).unwrap();
-        let destination = owner.path().join(format!("root-{ordinal}"));
-        std::fs::create_dir_all(&destination).unwrap();
-        let mut bodies = std::collections::BTreeMap::new();
-        for (relative, digest) in &files {
-            let input = include.join(relative);
-            let length = std::fs::metadata(&input).unwrap().len();
-            let framed = 8u64
-                .checked_add(relative.as_os_str().len() as u64)
-                .and_then(|size| size.checked_add(length))
-                .unwrap();
-            remaining = remaining
-                .checked_sub(framed)
-                .expect("quoter source bytes fit capture allowance before allocation");
-            let mut body = Vec::new();
-            std::fs::File::open(&input)
-                .unwrap()
-                .take(length.checked_add(1).unwrap())
-                .read_to_end(&mut body)
-                .unwrap();
-            assert_eq!(
-                body.len() as u64,
-                length,
-                "quoter source changed during capture"
-            );
-            assert_eq!(
-                blake3::hash(&body).to_hex().as_str(),
-                digest,
-                "quoter source differs from its observed manifest"
-            );
-            let target = destination.join(relative);
-            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-            std::fs::write(target, &body).unwrap();
-            bodies.insert(relative.clone(), Arc::<[u8]>::from(body));
-        }
-        roots.push(CapturedCompilerSourceRoot {
-            manifest: tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)
-                .unwrap(),
-            bodies,
-        });
-    }
-    let manifests = roots
-        .iter()
-        .map(|root| root.manifest.clone())
-        .collect::<Vec<_>>();
-    let identity = tidepool_toolchain::cache::source_manifests_identity(
-        b"checked-quoter-world-source",
-        &manifests,
-    );
-    let reference = tidepool_runtime::session::GenerationArtifactReference::capture(
-        serde_json::to_vec(&(effects.preamble(), effects.row(), identity)).unwrap(),
-    );
-    let captured =
-        CapturedCompilerSources::from_captured_roots(roots, Arc::from(reference.bytes()), owner)
-            .unwrap();
-    (reference, Arc::new(captured))
-}
 
 #[test]
 #[serial_test::serial]
@@ -129,29 +55,13 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
         .unwrap();
     let mut includes = effects.include_paths().to_vec();
     includes.insert(0, root.path().to_path_buf());
-    let (reference, sources) = capture_quoter_sources(&includes, &effects);
-    let admitted = session
-        .capture_inspection_world_in(public, &reference, source_owner.original_source())
-        .unwrap();
-    let settled = source_owner
-        .with_source_compiler_transaction(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            tidepool_runtime::CompilerTransactionCancellation::new(),
-            None,
-            |_| {},
-            |owner, _| {
-                tidepool_runtime::session::run_admitted_compiler_world(owner, admitted, || {
-                    Ok(Some(sources))
-                })
-            },
-        )
-        .unwrap();
-    let completed = tidepool_runtime::session::finish_admitted_compiler_world(settled).unwrap();
-    assert!(session.install_compiler_world_if_current(
-        &completed,
-        &reference,
-        source_owner.original_source()
-    ));
+    super::compiler_test_support::install_world(
+        &mut session,
+        &source_owner,
+        &includes,
+        effects.preamble(),
+        effects.row(),
+    );
     let source = include_str!("fixtures/checked-quoter-program.hs");
     for phase in ["first request", "repeated request"] {
         let settled = session
@@ -167,10 +77,8 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
         assert!(settled.close().resources_retired());
         let execution = Arc::new(settled.into_outcome().action?);
         let private = execution.private_scope();
-        let view = session.compile_view_for_execution(&execution)?;
-        let imports = view.turn_imports(&SourceImports::from_specs([
-            "qualified CheckedQuoterFacade as Q",
-        ]));
+        let imports =
+            SourceImports::from_specs(["qualified CheckedQuoterFacade as Q"]).template_text();
         let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
         let specification = Arc::new(tidepool_extract_cmd::WorldCellRecipe {
@@ -189,45 +97,12 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
                 })
                 .collect(),
         });
-        let settled = session
-            .with_source_compiler_transaction(
-                source_owner.original_source().clone(),
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                tidepool_runtime::CompilerTransactionCancellation::new(),
-                None,
-                |_| {},
-                |session, _| session.prepare_private_execution(execution.clone(), None),
-            )
-            .unwrap();
-        assert!(settled.close().resources_retired());
-        let (snapshot, operand) = settled.into_outcome().action.unwrap().into_parts();
-        assert!(operand.is_none());
-        let settled = source_owner
-            .with_source_compiler_transaction(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                tidepool_runtime::CompilerTransactionCancellation::new(),
-                None,
-                |_| {},
-                |owner, _| {
-                    prepare_world_cell_plan_admitted(owner, snapshot.world(), specification, None)
-                },
-            )
-            .unwrap();
-        let plan = finish_world_cell_plan_admitted(settled).unwrap();
-        let settled = session
-            .with_source_compiler_transaction(
-                source_owner.original_source().clone(),
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                tidepool_runtime::CompilerTransactionCancellation::new(),
-                None,
-                |_| {},
-                |session, _| {
-                    session.admit_world_planned_cell_with_snapshot(execution, snapshot, plan, None)
-                },
-            )
-            .unwrap();
-        assert!(settled.close().resources_retired());
-        let admission = settled.into_outcome().action.unwrap();
+        let admission = super::compiler_test_support::plan_checked_cell(
+            &mut session,
+            &source_owner,
+            execution,
+            specification,
+        );
         let started = std::time::Instant::now();
         let settled = source_owner
             .with_source_compiler_transaction(

@@ -2,6 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::Arc;
 
 use tidepool_toolchain::artifacts::CompiledArtifacts;
 use tidepool_toolchain::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
@@ -89,4 +90,165 @@ pub(super) fn selected_lexical_closure(
         );
     }
     lexical
+}
+
+pub(super) fn capture_world_sources(
+    includes: &[std::path::PathBuf],
+    preamble: &str,
+    row: &str,
+) -> (
+    tidepool_runtime::session::GenerationArtifactReference,
+    Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
+) {
+    use std::io::Read;
+    use tidepool_toolchain::compiler_world::{CapturedCompilerSourceRoot, CapturedCompilerSources};
+    let owner = Arc::new(tempfile::tempdir().unwrap());
+    let mut remaining = CapturedCompilerSources::capture_byte_allowance().unwrap();
+    let mut roots = Vec::new();
+    for (ordinal, include) in includes.iter().enumerate() {
+        remaining = remaining
+            .checked_sub(4)
+            .expect("compiler source root framing fits capture allowance");
+        let files = tidepool_toolchain::cache::source_root_manifest(include).unwrap();
+        let destination = owner.path().join(format!("root-{ordinal}"));
+        std::fs::create_dir_all(&destination).unwrap();
+        let mut bodies = std::collections::BTreeMap::new();
+        for (relative, digest) in &files {
+            let input = include.join(relative);
+            let length = std::fs::metadata(&input).unwrap().len();
+            let framed = 8u64
+                .checked_add(relative.as_os_str().len() as u64)
+                .and_then(|size| size.checked_add(length))
+                .unwrap();
+            remaining = remaining
+                .checked_sub(framed)
+                .expect("compiler source bytes fit capture allowance before allocation");
+            let mut body = Vec::new();
+            std::fs::File::open(&input)
+                .unwrap()
+                .take(length.checked_add(1).unwrap())
+                .read_to_end(&mut body)
+                .unwrap();
+            assert_eq!(
+                body.len() as u64,
+                length,
+                "compiler source changed during capture"
+            );
+            assert_eq!(
+                blake3::hash(&body).to_hex().as_str(),
+                digest,
+                "compiler source differs from its observed manifest"
+            );
+            let target = destination.join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, &body).unwrap();
+            bodies.insert(relative.clone(), Arc::<[u8]>::from(body));
+        }
+        roots.push(CapturedCompilerSourceRoot {
+            manifest: tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)
+                .unwrap(),
+            bodies,
+        });
+    }
+    let manifests = roots
+        .iter()
+        .map(|root| root.manifest.clone())
+        .collect::<Vec<_>>();
+    let identity = tidepool_toolchain::cache::source_manifests_identity(
+        b"integration-world-source",
+        &manifests,
+    );
+    let reference = tidepool_runtime::session::GenerationArtifactReference::capture(
+        serde_json::to_vec(&(preamble, row, identity)).unwrap(),
+    );
+    let captured =
+        CapturedCompilerSources::from_captured_roots(roots, Arc::from(reference.bytes()), owner)
+            .unwrap();
+    (reference, Arc::new(captured))
+}
+
+type FixtureSession =
+    tidepool_runtime::session::ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>;
+
+pub(super) fn install_world(
+    session: &mut FixtureSession,
+    source_owner: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    includes: &[std::path::PathBuf],
+    preamble: &str,
+    row: &str,
+) {
+    let public = source_owner.scope();
+    let (reference, sources) = capture_world_sources(includes, preamble, row);
+    let admitted = session
+        .capture_inspection_world_in(public, &reference, source_owner.original_source())
+        .unwrap();
+    let settled = source_owner
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            tidepool_runtime::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, _| {
+                tidepool_runtime::session::run_admitted_compiler_world(owner, admitted, || {
+                    Ok(Some(sources))
+                })
+            },
+        )
+        .unwrap();
+    let completed = tidepool_runtime::session::finish_admitted_compiler_world(settled).unwrap();
+    assert!(session.install_compiler_world_if_current(
+        &completed,
+        &reference,
+        source_owner.original_source()
+    ));
+}
+
+pub(super) fn plan_checked_cell(
+    session: &mut FixtureSession,
+    source_owner: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    execution: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
+    specification: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+) -> Arc<tidepool_runtime::session::RuntimeCellAdmission> {
+    use tidepool_runtime::session::turn::{
+        finish_world_cell_plan_admitted, prepare_world_cell_plan_admitted,
+    };
+    let settled = session
+        .with_source_compiler_transaction(
+            source_owner.original_source().clone(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            tidepool_runtime::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |session, _| session.prepare_private_execution(execution.clone(), None),
+        )
+        .unwrap();
+    assert!(settled.close().resources_retired());
+    let (snapshot, operand) = settled.into_outcome().action.unwrap().into_parts();
+    assert!(operand.is_none());
+    let settled = source_owner
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            tidepool_runtime::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, _| {
+                prepare_world_cell_plan_admitted(owner, snapshot.world(), specification, None)
+            },
+        )
+        .unwrap();
+    let plan = finish_world_cell_plan_admitted(settled).unwrap();
+    let settled = session
+        .with_source_compiler_transaction(
+            source_owner.original_source().clone(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            tidepool_runtime::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |session, _| {
+                session.admit_world_planned_cell_with_snapshot(execution, snapshot, plan, None)
+            },
+        )
+        .unwrap();
+    assert!(settled.close().resources_retired());
+    settled.into_outcome().action.unwrap()
 }

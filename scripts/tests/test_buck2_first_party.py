@@ -1753,6 +1753,40 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
                              "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin")
             self.assertIn("//build/package:compiler_service_deployment", rule["resources"])
 
+    def test_runtime_residency_cases_own_their_rooted_compiler_service(self):
+        metadata = json.loads(self.metadata.read_text())
+        runtime = next(package for package in metadata["packages"] if package["name"] == "tidepool-runtime")
+        runtime["targets"].extend(self.package("tidepool-runtime", "tidepool/runtime", [
+            ("session", "test", "tests/suites/session.rs"),
+        ])["targets"])
+        self.metadata.write_text(json.dumps(metadata))
+        self.write("tidepool/runtime/tests/suites/session.rs",
+                   '#[path = "../prepared_residency.rs"] mod prepared_residency;\n')
+        self.write("tidepool/runtime/tests/prepared_residency.rs", "#[test] fn resident() {}\n")
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cohort = self.rule("tidepool/runtime", "runtime_prepared_residency_admission_tests", "tidepool_rust_test_cases")
+        self.assertEqual(cohort["binary"], ":session_binary")
+        self.assertEqual(cohort["expected_count"], 9)
+        self.assertEqual(len(set(cohort["exact_tests"])), 9)
+        self.assertIn("prepared_residency::root_installation_checks_the_original_source_gate_before_mutation",
+                      cohort["exact_tests"])
+        self.assertEqual(cohort["case_compiler_modes"],
+                         dict.fromkeys(cohort["exact_tests"], "owned-resident"))
+        self.assertEqual(cohort["resource_env"]["TIDEPOOL_COMPILER_DEPLOYMENT"],
+                         "$(location //build/package:compiler_service_deployment)/compiler-deployment.json")
+        self.assertIn("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", cohort["resource_env"])
+        self.assertNotIn("LD_LIBRARY_PATH", cohort["resource_env"])
+
+        generic = self.rule("tidepool/runtime", "session", "tidepool_rust_isolated_test")
+        self.assertEqual(generic["case_compiler_modes"], {
+            **cohort["case_compiler_modes"],
+            "checked_quoter_program::fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm": "owned-resident",
+        })
+        self.assertIn("TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT", generic["resource_env"])
+        self.assertIn("TIDEPOOL_COMPILER_DEPLOYMENT", generic["resource_env"])
+        self.assertIn("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", generic["resource_env"])
+
     def test_runtime_tests_separate_native_admission_from_compiler_resources(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)

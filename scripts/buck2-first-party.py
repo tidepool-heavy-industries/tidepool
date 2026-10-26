@@ -1475,6 +1475,40 @@ def runtime_world_publication_test_cases(binary):
     ])
 
 
+RUNTIME_PREPARED_RESIDENCY_ADMISSION_CASES = ["prepared_residency::" + name for name in (
+    "structural_resume_classifies_rejection_and_consumed_failure",
+    "root_installation_checks_the_original_source_gate_before_mutation",
+    "resident_turn_carries_worker_certified_import_owners",
+    "host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each",
+    "retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang",
+    "failed_carrier_mount_leaves_no_stub_source",
+    "different_incarnations_sharing_one_root_do_not_cross_read_same_named_generations",
+    "fifty_accumulated_session_bindings_read_back_correctly_across_repeat_compiles",
+    "closing_one_realm_notifies_exact_retirement_and_preserves_sibling",
+)]
+
+
+RUNTIME_CHECKED_QUOTER_CASE = "checked_quoter_program::fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm"
+
+
+def runtime_prepared_residency_test_cases(binary):
+    tests = RUNTIME_PREPARED_RESIDENCY_ADMISSION_CASES
+    env, resources, worker = compiler_service_test_inputs("tidepool-runtime", "session", unit=False)
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "runtime_prepared_residency_admission_tests",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(tests, 8), "    ],",
+        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 600,",
+        f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
+        '    case_compiler_modes = {' + ", ".join(
+            json.dumps(test) + ': "owned-resident"' for test in tests
+        ) + "},",
+        runtime_arguments(env, resources, worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
 def runtime_test_cases(binary):
     """Admission checks use native machines but do not start a compiler worker."""
     tests = ["session::admission::tests::" + name for name in (
@@ -2704,7 +2738,13 @@ tidepool_buildscript_run(
     for target in selected_tests:
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
+        if package_name == "tidepool-runtime" and target["name"] == "session":
+            env, resources, worker = compiler_service_test_inputs(package_name, target["name"], mixed=True, unit=False)
         extra = runtime_arguments(env, resources, worker)
+        if package_name == "tidepool-runtime" and target["name"] == "session":
+            extra += '\n    case_compiler_modes = {' + ", ".join(
+                json.dumps(test) + ': "owned-resident"' for test in RUNTIME_PREPARED_RESIDENCY_ADMISSION_CASES + [RUNTIME_CHECKED_QUOTER_CASE]
+            ) + "},"
         if package_name == "exomonad-node" and target["name"] == "command_resources":
             extra += '\n    ignored = True,\n    delegated_service = True,\n    expected_count = 4,\n    jobs = 1,'
         if package_name == "exomonad-worktree" and target["name"] == "worktree":
@@ -2744,6 +2784,8 @@ tidepool_buildscript_run(
             ]))
         if package_name == "tidepool-extract-cmd" and target["name"] == "retained_fingerprint":
             NATIVE_TARGETS[package_name]["integration"][target["name"]]["execution_disposition"] = "manual_measurement"
+        if package_name == "tidepool-runtime" and target["name"] == "session":
+            rules.append(runtime_prepared_residency_test_cases(target["name"] + "_binary"))
         if package_name == "exomonad-actor" and target["name"] == "actor":
             rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary"))
     if package_name == "tidepool-extract-cmd":

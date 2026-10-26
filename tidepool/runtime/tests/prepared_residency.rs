@@ -46,6 +46,316 @@ struct Notebook {
     generation: u64,
 }
 
+fn source_action<T>(
+    session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    source: &RuntimeLexicalScopeLease,
+    action: impl FnOnce(
+        &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+    ) -> T,
+) -> T {
+    let settled = session
+        .with_source_compiler_transaction(
+            source.original_source().clone(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            tidepool_runtime::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            action,
+        )
+        .expect("admit the fixture's live source owner");
+    assert!(
+        matches!(
+            settled.close(),
+            tidepool_runtime::CompilerTransactionClose::Clean
+                | tidepool_runtime::CompilerTransactionClose::NotStarted
+        ),
+        "source transaction did not retire cleanly: {:?}",
+        settled.close()
+    );
+    settled.into_outcome().action
+}
+
+struct CheckedExecution {
+    execution: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
+    source: Arc<RuntimeLexicalScopeLease>,
+    preamble: String,
+    row: String,
+}
+
+impl CheckedExecution {
+    fn start(
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        includes: &[PathBuf],
+        preamble: &str,
+        row: &str,
+    ) -> Self {
+        use tidepool_runtime::session::SessionRunContext;
+        let source = session.mint_notebook_scope_with_lease(None).unwrap();
+        let public = source.scope();
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: public,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        super::compiler_test_support::install_world(session, &source, includes, preamble, row);
+        let execution = Arc::new(
+            source_action(session, &source, |session, _| {
+                session.begin_ephemeral_private_execution(public)
+            })
+            .unwrap(),
+        );
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        Self {
+            execution,
+            source,
+            preamble: preamble.to_owned(),
+            row: row.to_owned(),
+        }
+    }
+
+    fn specification(
+        &self,
+        text: &str,
+        extra_imports: &str,
+    ) -> Arc<tidepool_extract_cmd::WorldCellRecipe> {
+        use tidepool_runtime::session::turn::TemplateSelector;
+        use tidepool_runtime::session::{resident_cell_check_template, SourceImports};
+        let imports = SourceImports::from_specs(extra_imports.lines()).template_text();
+        let templates = resident_workbench_templates(&self.preamble, &self.row, &imports);
+        Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+            source: text.to_owned(),
+            template: resident_cell_check_template(&self.preamble, &self.row, &imports),
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    let selector = match template.kind {
+                        TemplateSelector::Decl => "decl",
+                        TemplateSelector::Bind => "bind",
+                        TemplateSelector::BindDiscard => "binddiscard",
+                        TemplateSelector::Expr => "expr",
+                    };
+                    (selector.to_owned(), template.source.clone())
+                })
+                .collect(),
+        })
+    }
+
+    fn compile(
+        &self,
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        text: &str,
+        extra_imports: &str,
+    ) -> (
+        BoundBinder,
+        CompiledTurn,
+        Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
+    ) {
+        let admission = super::compiler_test_support::plan_checked_cell(
+            session,
+            &self.source,
+            self.execution.clone(),
+            self.specification(text, extra_imports),
+        );
+        self.consume(session, admission, text)
+    }
+
+    fn consume(
+        &self,
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        admission: Arc<tidepool_runtime::session::RuntimeCellAdmission>,
+        label: &str,
+    ) -> (
+        BoundBinder,
+        CompiledTurn,
+        Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
+    ) {
+        use tidepool_runtime::session::turn::{
+            consume_cell_program_item, finish_cell_program_admitted, prepare_cell_program_admitted,
+        };
+        let settled = self
+            .source
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, report| prepare_cell_program_admitted(owner, admission, report),
+            )
+            .unwrap();
+        let (checked, program) = finish_cell_program_admitted(settled)
+            .unwrap_or_else(|error| panic!("checked fixture {label:?}: {error:?}"));
+        assert_eq!(checked.items.len(), 1, "one checked fixture item");
+        let reservation = source_action(session, &self.source, |session, _| {
+            let prefix = session.begin_cell_program(program).unwrap().unwrap();
+            session.admit_checked_item(prefix, checked.checked_item(0).unwrap())
+        })
+        .unwrap();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = consume_cell_program_item(reservation.clone()).unwrap()
+        else {
+            panic!("checked fixture produces its issued binding");
+        };
+        assert_eq!(bound.len(), 1);
+        (bound.into_iter().next().unwrap(), compiled, reservation)
+    }
+
+    fn host_carrier(
+        &self,
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        name: &str,
+        expected: tidepool_runtime::session::HostBindingType,
+        anchor: &str,
+        imports: &str,
+    ) -> tidepool_runtime::session::HostCarrier {
+        use tidepool_runtime::session::{
+            turn::{finish_world_cell_plan_admitted, prepare_world_cell_plan_admitted},
+            HostCarrier,
+        };
+        let digest = [19; 32];
+        let preparation = source_action(session, &self.source, |session, _| {
+            session.prepare_private_host_carrier(self.execution.clone())
+        })
+        .unwrap();
+        if let Some(prototype) = session.host_binding_prototype(expected, digest) {
+            let before_requests = tidepool_extract_cmd::extract_spawn_count();
+            let before_interfaces =
+                tidepool_toolchain::artifacts::host_binding_interface_request_count();
+            let admission = source_action(session, &self.source, |session, _| {
+                session.admit_private_host_binding_interface(
+                    preparation,
+                    name.to_owned(),
+                    prototype.clone(),
+                )
+            })
+            .unwrap();
+            let interface = source_action(session, &self.source, |_, report| {
+                tidepool_toolchain::artifacts::issue_host_binding_interface(
+                    prototype.compiler().clone(),
+                    admission.digest(),
+                    admission.generation().0,
+                    admission.binding(),
+                    prototype.include_paths(),
+                    report,
+                )
+            })
+            .unwrap();
+            assert!(
+                Arc::ptr_eq(
+                    &prototype,
+                    &session.host_binding_prototype(expected, digest).unwrap()
+                ),
+                "reuse the original checked constructor prototype"
+            );
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                before_requests + 1,
+                "prototype reuse issues only its new binding interface"
+            );
+            assert_eq!(
+                tidepool_toolchain::artifacts::host_binding_interface_request_count(),
+                before_interfaces + 1
+            );
+            return HostCarrier::from_interface(admission, interface).unwrap();
+        }
+        let specification = self.specification(&format!("{name} <- pure ({anchor})"), imports);
+        let settled = self
+            .source
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| {
+                    prepare_world_cell_plan_admitted(
+                        owner,
+                        preparation.world(),
+                        specification,
+                        None,
+                    )
+                },
+            )
+            .unwrap();
+        let plan = finish_world_cell_plan_admitted(settled).unwrap();
+        let admission = source_action(session, &self.source, |session, _| {
+            session.admit_world_planned_private_host_carrier(
+                preparation,
+                plan,
+                name.to_owned(),
+                expected,
+                digest,
+            )
+        })
+        .unwrap();
+        let (binder, compiled, reservation) = self.consume(session, admission, name);
+        assert!(
+            HostCarrier::from_compiled(&binder, compiled.code(), expected).is_err(),
+            "checked authority cannot become a reusable generic embedding carrier"
+        );
+        let carrier =
+            HostCarrier::from_checked(reservation, binder, compiled.into_code(), expected).unwrap();
+        session.retain_host_binding_prototype(&carrier).unwrap();
+        carrier
+    }
+
+    fn mount(
+        &self,
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        carrier: &tidepool_runtime::session::HostCarrier,
+        payload: tidepool_runtime::session::HostPayload<'_>,
+    ) -> BoundBinder {
+        let binder = carrier.binding().unwrap().clone();
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let mut lease = source_action(session, &self.source, |session, report| {
+            session.mount_private_visible_host_input(&self.execution, carrier, payload, report)
+        })
+        .unwrap();
+        lease.accept().unwrap();
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before,
+            "mounting the accepted payload consumes its issued interface without compiling"
+        );
+        binder
+    }
+
+    fn observe(
+        &self,
+        session: &mut ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+        text: &str,
+        imports: &str,
+    ) -> ResidentOutcome {
+        let (binder, compiled, reservation) = self.compile(session, text, imports);
+        let outcome = source_action(session, &self.source, |session, report| {
+            session.run_observation_with_sites(
+                compiled.code(),
+                &binder,
+                reservation.generation(),
+                reservation.item().expression_lift().unwrap()
+                    == Some(tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful),
+                report,
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            reservation
+                .prefix()
+                .snapshot()
+                .compiler_prefix()
+                .next_item(),
+            1
+        );
+        outcome
+    }
+}
+
 impl Notebook {
     fn new() -> Self {
         Self::with_effects(&[])
@@ -244,27 +554,7 @@ impl Notebook {
             &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
         ) -> T,
     ) -> T {
-        let settled = self
-            .session
-            .with_source_compiler_transaction(
-                self.source.original_source().clone(),
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                tidepool_runtime::CompilerTransactionCancellation::new(),
-                None,
-                |_| {},
-                action,
-            )
-            .expect("admit the notebook's live source owner");
-        assert!(
-            matches!(
-                settled.close(),
-                tidepool_runtime::CompilerTransactionClose::Clean
-                    | tidepool_runtime::CompilerTransactionClose::NotStarted
-            ),
-            "source transaction did not retire cleanly: {:?}",
-            settled.close()
-        );
-        settled.into_outcome().action
+        source_action(&mut self.session, &self.source, action)
     }
 
     fn bind(&mut self, text: &str) -> BoundBinder {
@@ -860,333 +1150,134 @@ fn rust_session_var_id_matches_extract_minted_bound_binder_var_id() {
 #[test]
 fn resident_turn_carries_worker_certified_import_owners() {
     let mut notebook = Notebook::new();
-    let TurnResult::Bind {
-        bound,
-        compiled: first,
-        ..
-    } = notebook.compile("source <- pure (1 :: Int)")
-    else {
-        panic!("expected a compiled first bind turn");
-    };
-    assert!(
-        first.certification().is_some(),
-        "first turn must be certified"
+
+    let checked = CheckedExecution::start(
+        &mut notebook.session,
+        &notebook.include,
+        &notebook.preamble,
+        &notebook.effect_stack,
     );
-    let [binder] = bound.as_slice() else {
-        panic!("first turn must bind one value");
-    };
-    assert!(matches!(
-        tidepool_testing::with_settlement(|settlement| notebook.session.run_bind_with_sites(
-            "certified_first_turn",
-            first.into_code(),
-            binder,
-            Generation(notebook.generation),
-            settlement
-        ))
-        .expect("first certified turn runs"),
-        ResidentOutcome::Completed { .. }
-    ));
-    notebook.injected.push(binder.module.clone());
-    let result = notebook.compile("certified <- pure (source + 1)");
-    let TurnResult::Bind {
-        bound, compiled, ..
-    } = result
-    else {
-        panic!("expected a compiled bind turn");
-    };
-    assert!(!compiled.prepared().globals().is_empty());
-    assert_eq!(
-        compiled
-            .certification()
-            .as_ref()
-            .expect("resident turn requires a certified product")
-            .target_owners
-            .len(),
-        compiled.prepared().globals().len(),
-        "every prepared global has a sealed worker owner"
-    );
-    let [binder] = bound.as_slice() else {
-        panic!("second turn must bind one value");
-    };
-    assert!(matches!(
-        tidepool_testing::with_settlement(|settlement| notebook.session.run_bind_with_sites(
-            "certified_second_turn",
-            compiled.into_code(),
-            binder,
-            Generation(notebook.generation),
-            settlement
-        ))
-        .expect("second certified turn runs"),
-        ResidentOutcome::Completed { .. }
-    ));
+    for text in [
+        "source <- pure (1 :: Int)",
+        "certified <- pure (source + 1)",
+    ] {
+        let (binder, compiled, reservation) = checked.compile(&mut notebook.session, text, "");
+        let certification = compiled.certification().expect("checked turn is certified");
+        assert_eq!(
+            certification.target_owners.len(),
+            compiled.prepared().globals().len()
+        );
+        if binder.name == "certified" {
+            assert!(
+                !compiled.prepared().globals().is_empty(),
+                "second checked turn retains the first value"
+            );
+        }
+        let outcome = source_action(&mut notebook.session, &checked.source, |session, report| {
+            session.run_bind_with_sites(
+                &binder.name,
+                compiled.code(),
+                &binder,
+                reservation.generation(),
+                report,
+            )
+        })
+        .expect("checked certified turn runs");
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+        assert_eq!(
+            reservation
+                .prefix()
+                .snapshot()
+                .compiler_prefix()
+                .next_item(),
+            1
+        );
+    }
 }
 
 #[test]
 fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
-    use tidepool_codegen::scope::ScopeId;
-    use tidepool_runtime::session::{HostBindingType, HostCarrier, HostPayload};
-
+    use tidepool_runtime::session::{HostBindingType, HostPayload};
     let mut notebook = Notebook::new();
-    // Host-carrier stub modules are hand-written source, found by GHC's
-    // ordinary downsweep on the session root -- unlike a real bind's `.hi`
-    // (injected explicitly), the root itself must be on the include path.
-    notebook.include.push(notebook.root.path().to_path_buf());
-
-    // Extra qualified imports the Text/Job anchors and their read-back
-    // turns need, beyond the default preamble.
-    let extra_imports = "qualified Data.Text as TidepoolHostText\n\
-                          qualified Data.Text.Internal as TidepoolHostTextInternal\n\
-                          qualified GHC.Exts as TidepoolHostExts\n\
-                          qualified Tidepool.Command.Types as TidepoolHostJob\n";
-
-    // Compile against the session's current value view PLUS the extra
-    // imports above -- the same shape as `Notebook::compile_in_current_value_view`,
-    // duplicated here because that helper has no hook for extra imports.
-    let compile_extra = |notebook: &mut Notebook, text: &str| -> TurnResult {
-        notebook.generation += 1;
-        let mut imports = notebook
-            .session
-            .current_val_modules()
-            .into_iter()
-            .map(|module| format!("{module}\n"))
-            .collect::<String>();
-        imports.push_str(extra_imports);
-        let templates =
-            resident_workbench_templates(&notebook.preamble, &notebook.effect_stack, &imports);
-        let include: Vec<&Path> = notebook.include.iter().map(PathBuf::as_path).collect();
-        let injected = notebook.session.inject_val_modules();
-        let retained = notebook.session.prepared_retained();
-        tidepool_testing::with_settlement(|settlement| {
-            run_turn(
-                TurnRequest {
-                    exact_context: None,
-                    session_id: None,
-                    turn_text: text,
-                    templates: &templates,
-                    include: &include,
-                    session_root: notebook.root.path(),
-                    inject_modules: &injected,
-                    gen: notebook.generation,
-                    verdict: None,
-                    retained_imports: &retained,
-                },
-                settlement,
-            )
-        })
-        .unwrap_or_else(|failure| {
-            panic!(
-                "{text:?} failed to compile: {}\n{}",
-                tidepool_runtime::classify_compile(&failure.error).message,
-                failure
-                    .attempted_source
-                    .as_deref()
-                    .unwrap_or("<no attempted source>")
-            )
-        })
-    };
-
-    // --- one anchor compile per host-binding kind ---------------------
-
-    let TurnResult::Bind {
-        bound, compiled, ..
-    } = notebook.compile_in_current_value_view(
-        "carrierAnchor <- pure (object [\"anchor\" .= toJSON [Aeson.String \"\", Aeson.Number (Aeson.scientific 0 0), Aeson.Bool True, Aeson.Null]])",
-    ) else {
-        panic!("json anchor must compile as a bind");
-    };
-    let [json_anchor_binder] = bound.as_slice() else {
-        panic!("json anchor must produce exactly one binder");
-    };
-    let mut missing_root = json_anchor_binder.clone();
-    missing_root.root_head = None;
-    assert!(HostCarrier::from_compiled(
-        &missing_root,
-        compiled.code(),
-        HostBindingType::JSON_VALUE
-    )
-    .is_err());
-    let mut wrong_root = json_anchor_binder.clone();
-    wrong_root
-        .root_head
-        .as_mut()
-        .unwrap()
-        .symbol
-        .unit
-        .push_str("-foreign");
-    assert!(
-        HostCarrier::from_compiled(&wrong_root, compiled.code(), HostBindingType::JSON_VALUE)
-            .is_err()
+    let checked = CheckedExecution::start(
+        &mut notebook.session,
+        &notebook.include,
+        &notebook.preamble,
+        &notebook.effect_stack,
     );
-    assert!(CompiledTurn::from_prepared(
-        std::sync::Arc::clone(compiled.prepared()),
-        tidepool_repr::DataConTable::new(),
-        compiled.warnings.clone(),
-        compiled.sites().to_vec(),
-    )
-    .is_err());
-    assert!(compiled.certification().is_some());
-    let json_carrier = HostCarrier::from_compiled(
-        json_anchor_binder,
-        compiled.code(),
+    let imports = "qualified Data.Text as TidepoolHostText\n\
+        qualified Data.Text.Internal as TidepoolHostTextInternal\n\
+        qualified GHC.Exts as TidepoolHostExts\n\
+        qualified Tidepool.Command.Types as TidepoolHostJob\n";
+    let json_anchor = "object [\"anchor\" .= toJSON [Aeson.String \"\", Aeson.Number (Aeson.scientific 0 0), Aeson.Bool True, Aeson.Null]]";
+    let carrier_a = checked.host_carrier(
+        &mut notebook.session,
+        "carriedA",
         HostBindingType::JSON_VALUE,
-    )
-    .expect("compiler issued a complete reusable host representation");
-
-    let TurnResult::Bind {
-        bound, compiled, ..
-    } = compile_extra(
-        &mut notebook,
-        "textAnchor <- pure (case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of \
-         TidepoolHostTextInternal.Text bytes offset length -> \
-         TidepoolHostTextInternal.Text bytes offset length)",
-    )
-    else {
-        panic!("text anchor must compile as a bind");
-    };
-    let [text_anchor_binder] = bound.as_slice() else {
-        panic!("text anchor must produce exactly one binder");
-    };
-    assert!(compiled.certification().is_some());
-    let text_carrier =
-        HostCarrier::from_compiled(text_anchor_binder, compiled.code(), HostBindingType::TEXT)
-            .expect("compiler issued a complete reusable host representation");
-
-    let TurnResult::Bind {
-        bound, compiled, ..
-    } = compile_extra(
-        &mut notebook,
-        "jobAnchor <- pure (TidepoolHostJob.Job (case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of \
-         TidepoolHostTextInternal.Text bytes offset length -> \
-         TidepoolHostTextInternal.Text bytes offset length))",
-    ) else {
-        panic!("job anchor must compile as a bind");
-    };
-    let [job_anchor_binder] = bound.as_slice() else {
-        panic!("job anchor must produce exactly one binder");
-    };
-    assert!(compiled.certification().is_some());
-    let job_carrier = HostCarrier::from_compiled(
-        job_anchor_binder,
-        compiled.code(),
+        json_anchor,
+        imports,
+    );
+    let binder_a = checked.mount(
+        &mut notebook.session,
+        &carrier_a,
+        HostPayload::Json(&serde_json::json!({"tag": "A"})),
+    );
+    // Each new binding receives its own issued interface. Reusing JSON keeps
+    // the same native constructor prototype, without recompiling that anchor.
+    let carrier_b = checked.host_carrier(
+        &mut notebook.session,
+        "carriedB",
+        HostBindingType::JSON_VALUE,
+        json_anchor,
+        imports,
+    );
+    let binder_b = checked.mount(
+        &mut notebook.session,
+        &carrier_b,
+        HostPayload::Json(&serde_json::json!({"tag": "B"})),
+    );
+    assert_ne!(binder_a.module, binder_b.module);
+    let text_carrier = checked.host_carrier(&mut notebook.session, "carriedText", HostBindingType::TEXT,
+        "case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length", imports);
+    let binder_text = checked.mount(
+        &mut notebook.session,
+        &text_carrier,
+        HostPayload::Text("hello-carrier-text"),
+    );
+    let job_carrier = checked.host_carrier(
+        &mut notebook.session,
+        "carriedJob",
         HostBindingType::COMMAND_JOB,
-    )
-    .expect("compiler issued a complete reusable host representation");
-
-    // --- mount TWO json payloads through the SAME carrier, plus one text
-    // and one job payload, all with NO further GHC compile -------------
-
-    let gen_a = tidepool_repr::Generation(notebook.generation);
-    let binder_a = tidepool_testing::with_settlement(|settlement| {
-        notebook.session.mount_carrier_in(
-            notebook.root.path(),
-            ScopeId::ROOT,
-            "carriedA",
-            gen_a,
-            &json_carrier,
-            HostPayload::Json(&serde_json::json!({"tag": "A"})),
-            settlement,
-        )
-    })
-    .expect("mount first carrier payload");
-    notebook.injected.push(binder_a.module.clone());
-
-    notebook.generation += 1;
-    let gen_b = tidepool_repr::Generation(notebook.generation);
-    let binder_b = tidepool_testing::with_settlement(|settlement| {
-        notebook.session.mount_carrier_in(
-            notebook.root.path(),
-            ScopeId::ROOT,
-            "carriedB",
-            gen_b,
-            &json_carrier,
-            HostPayload::Json(&serde_json::json!({"tag": "B"})),
-            settlement,
-        )
-    })
-    .expect("mount second carrier payload");
-    notebook.injected.push(binder_b.module.clone());
-
-    notebook.generation += 1;
-    let gen_text = tidepool_repr::Generation(notebook.generation);
-    let binder_text = tidepool_testing::with_settlement(|settlement| {
-        notebook.session.mount_carrier_in(
-            notebook.root.path(),
-            ScopeId::ROOT,
-            "carriedText",
-            gen_text,
-            &text_carrier,
-            HostPayload::Text("hello-carrier-text"),
-            settlement,
-        )
-    })
-    .expect("mount text carrier payload");
-    notebook.injected.push(binder_text.module.clone());
-
-    notebook.generation += 1;
-    let gen_job = tidepool_repr::Generation(notebook.generation);
-    let binder_job = tidepool_testing::with_settlement(|settlement| {
-        notebook.session.mount_carrier_in(
-            notebook.root.path(),
-            ScopeId::ROOT,
-            "carriedJob",
-            gen_job,
-            &job_carrier,
-            HostPayload::Job("job-command"),
-            settlement,
-        )
-    })
-    .expect("mount job carrier payload");
-    notebook.injected.push(binder_job.module.clone());
-
-    // Every stub generation must never be offered as --inject-val (no .hi
-    // exists for any of them) -- the whole point of a stub mount.
-    let injected = notebook.session.inject_val_modules();
-    assert!(!injected.contains(&binder_a.module));
-    assert!(!injected.contains(&binder_b.module));
-    assert!(!injected.contains(&binder_text.module));
-    assert!(!injected.contains(&binder_job.module));
-
-    // A later turn reads all four mounted values back through their
-    // hand-written stub modules, with NO further GHC compile for any of
-    // the four mounts above -- and, crucially, by PATTERN MATCHING their
-    // constructors (the `GHC.Magic.lazy`-wrapped stub body must not earn a
-    // bottoming strictness signature that would collapse these cases; see
-    // `HostCarrier::stub_source`'s doc comment for the failure this guards
-    // against). The case and if force every payload predicate before unit
-    // can complete; the workbench's opaque result token is not the assertion.
-    let TurnResult::Expr { compiled, .. } = compile_extra(
-        &mut notebook,
-        "case (carriedA, carriedB, carriedText, carriedJob) of \
+        "TidepoolHostJob.Job (TidepoolHostText.pack \"\")",
+        imports,
+    );
+    let binder_job = checked.mount(
+        &mut notebook.session,
+        &job_carrier,
+        HostPayload::Job("job-command"),
+    );
+    let visible = notebook
+        .session
+        .public_visibility_snapshot_in(checked.execution.private_scope())
+        .unwrap();
+    for binder in [&binder_a, &binder_b, &binder_text, &binder_job] {
+        assert!(visible
+            .bindings
+            .iter()
+            .any(|(name, id)| name == &binder.name
+                && *id == tidepool_repr::SessionVarId::from_extract(binder.var_id)));
+    }
+    let outcome = checked.observe(&mut notebook.session, "case (carriedA, carriedB, carriedText, carriedJob) of \
          { (Aeson.Object a, Aeson.Object b, TidepoolHostTextInternal.Text _ _ _, TidepoolHostJob.Job jobText) -> \
          if Map.lookup \"tag\" a == Just (Aeson.String \"A\") \
             && Map.lookup \"tag\" b == Just (Aeson.String \"B\") \
             && carriedText == TidepoolHostText.pack \"hello-carrier-text\" \
             && jobText == TidepoolHostText.pack \"job-command\" \
          then () else error \"carrier payload mismatch\"; \
-         _ -> error \"carrier constructor mismatch\" }",
-    ) else {
-        panic!("reading all four carried values must compile as an expression");
-    };
-    let outcome = tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .run_with_sites("read_all_carried", compiled.into_code(), settlement)
-    })
-    .expect("read all carried values");
-    assert!(
-        matches!(outcome, ResidentOutcome::Completed { .. }),
-        "all four payload and constructor assertions must complete: {outcome:?}"
-    );
+         _ -> error \"carrier constructor mismatch\" }", imports);
+    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
 }
 
-/// HIGH regression: retiring a carrier-mounted binding after a declaration
-/// captured its name must delete the binding's `Val.G<g>` stub source (not
-/// just stop excluding it from `--inject-val`), so a later turn that still
-/// imports it through the declaration module fails to find the module
-/// instead of silently compiling and evaluating the stub's own
-/// self-referential body. Bounded by a timeout: a regression here is an
-/// infinite loop at evaluation time, and this test must fail loudly rather
-/// than hang the suite.
 #[test]
 fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
     use std::sync::mpsc;
@@ -1213,17 +1304,21 @@ fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
 
     notebook.generation += 1;
     let gen = Generation(notebook.generation);
-    let binder = tidepool_testing::with_settlement(|settlement| {
-        notebook.session.mount_carrier_in(
-            notebook.root.path(),
-            ScopeId::ROOT,
-            "capturedCarrier",
-            gen,
-            &carrier,
-            HostPayload::Json(&serde_json::json!({"tag": "captured"})),
-            settlement,
-        )
-    })
+    let binder = source_action(
+        &mut notebook.session,
+        &notebook.source,
+        |session, settlement| {
+            session.mount_carrier_in(
+                notebook.root.path(),
+                ScopeId::ROOT,
+                "capturedCarrier",
+                gen,
+                &carrier,
+                HostPayload::Json(&serde_json::json!({"tag": "captured"})),
+                settlement,
+            )
+        },
+    )
     .expect("mount carrier binding");
     notebook.injected.push(binder.module.clone());
 
@@ -1236,11 +1331,11 @@ fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
     // A declaration captures the carrier binding by name -- `define_scoped`
     // auto-imports every currently-visible value's exact `Val.G<g>` module,
     // so the committed `Lib.G<g>` source now names this stub generation.
-    tidepool_testing::with_settlement(|settlement| {
-        notebook
-            .session
-            .define_scoped(&["capturedUse = capturedCarrier"], settlement)
-    })
+    source_action(
+        &mut notebook.session,
+        &notebook.source,
+        |session, settlement| session.define_scoped(&["capturedUse = capturedCarrier"], settlement),
+    )
     .expect("declaration captures the carrier binding");
 
     // Retire the carrier binding: it must both stop being excluded from
@@ -1305,6 +1400,34 @@ fn failed_carrier_mount_leaves_no_stub_source() {
     let [anchor_binder] = bound.as_slice() else {
         panic!("anchor must produce exactly one binder");
     };
+    let mut missing_root = anchor_binder.clone();
+    missing_root.root_head = None;
+    assert!(HostCarrier::from_compiled(
+        &missing_root,
+        compiled.code(),
+        HostBindingType::JSON_VALUE
+    )
+    .is_err());
+    let mut wrong_root = anchor_binder.clone();
+    wrong_root
+        .root_head
+        .as_mut()
+        .unwrap()
+        .symbol
+        .unit
+        .push_str("-foreign");
+    assert!(
+        HostCarrier::from_compiled(&wrong_root, compiled.code(), HostBindingType::JSON_VALUE)
+            .is_err()
+    );
+    assert!(CompiledTurn::from_prepared(
+        std::sync::Arc::clone(compiled.prepared()),
+        tidepool_repr::DataConTable::new(),
+        compiled.warnings.clone(),
+        compiled.sites().to_vec(),
+    )
+    .is_err());
+    assert!(compiled.certification().is_some());
     let carrier =
         HostCarrier::from_compiled(anchor_binder, compiled.code(), HostBindingType::JSON_VALUE)
             .expect("compiler issued a complete reusable host representation");
@@ -1393,6 +1516,7 @@ fn reopening_session_root_removes_stale_stub_sources() {
 /// two behave identically except for `id`/`root`.
 struct Incarnation {
     session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    source: Arc<RuntimeLexicalScopeLease>,
     preamble: String,
     effect_stack: String,
     include: Vec<PathBuf>,
@@ -1417,14 +1541,18 @@ impl Incarnation {
             .with_validation_include(vec![eval_harness::prelude_path()]);
         include.push(lib.include_dir().to_path_buf());
         include.push(root.to_path_buf());
-        let session = ResidentSession::unbootstrapped(
+        let mut session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
+        let source = session
+            .mint_isolated_scope_with_lease()
+            .expect("issue the incarnation's source owner");
         Self {
             session,
+            source,
             preamble,
             effect_stack,
             include,
@@ -1487,8 +1615,8 @@ impl Incarnation {
         use tidepool_runtime::session::HostPayload;
         self.generation += 1;
         let gen = tidepool_repr::Generation(self.generation);
-        let binder = tidepool_testing::with_settlement(|settlement| {
-            self.session.mount_carrier_in(
+        let binder = source_action(&mut self.session, &self.source, |session, settlement| {
+            session.mount_carrier_in(
                 &self.root,
                 ScopeId::ROOT,
                 name,
@@ -1568,91 +1696,84 @@ fn stub_growth_admission_compile_time() {
     }
 }
 
-/// HIGH: the resident worker's `GutsMemo` is process-lifetime, shared by
-/// every session a warm daemon serves. `Val.G<g>` generation numbers are
-/// per-incarnation-local (a fresh incarnation at the SAME session root
-/// resets `val_gen` back to 0 -- exactly what a process restart does), so
-/// two unrelated incarnations can mint the exact same module name
-/// (`Tidepool.Session.Val.G1`) with GENUINELY DIFFERENT content. Before the
-/// `ssIncarnation`/`memoIncarnation` check, a warm daemon serving both
-/// incarnations back to back risked the second incarnation's compile
-/// silently reusing the first's cached guts for that name. This test opens
-/// TWO incarnations at ONE session root (mirroring a restart), mounts a
-/// same-named, DIFFERENT-content carrier binding in each, and asserts the
-/// second incarnation's read-back sees its OWN value -- never the first's.
+/// Independent session issuers may reuse a module generation at the same disk
+/// root. Their accepted values and compiler Worlds must remain disjoint.
+struct CheckedIncarnation {
+    inner: Incarnation,
+    checked: CheckedExecution,
+}
+
+impl CheckedIncarnation {
+    fn open(id: tidepool_repr::SessionId, root: &Path) -> Self {
+        let mut inner = Incarnation::open(id, root);
+        let checked = CheckedExecution::start(
+            &mut inner.session,
+            &inner.include,
+            &inner.preamble,
+            &inner.effect_stack,
+        );
+        Self { inner, checked }
+    }
+
+    fn mount_json(&mut self, name: &str, value: &serde_json::Value) -> BoundBinder {
+        let carrier = self.checked.host_carrier(
+            &mut self.inner.session,
+            name,
+            tidepool_runtime::session::HostBindingType::JSON_VALUE,
+            "object [\"anchor\" .= toJSON [Aeson.String \"\"]]",
+            "",
+        );
+        self.checked.mount(
+            &mut self.inner.session,
+            &carrier,
+            tidepool_runtime::session::HostPayload::Json(value),
+        )
+    }
+
+    fn observe(&mut self, source: &str) -> ResidentOutcome {
+        self.checked.observe(&mut self.inner.session, source, "")
+    }
+}
+
 #[test]
 fn different_incarnations_sharing_one_root_do_not_cross_read_same_named_generations() {
     eval_harness::require_extract();
     let root = tempfile::tempdir().expect("shared session root");
-
-    let mut first = Incarnation::open(tidepool_repr::SessionId(910_001), root.path());
-    let first_carrier = first.json_anchor();
-    let first_binder = first.mount_json(
-        &first_carrier,
-        "carried",
-        &serde_json::json!({"who": "first"}),
-    );
-
-    // A fresh incarnation at the SAME root: `SessionLib::open` sweeps the
-    // first incarnation's stub sources (existing behavior), and `val_gen`
-    // restarts at 0, so this mount reissues the exact SAME generation
-    // number the first incarnation used.
-    let mut second = Incarnation::open(tidepool_repr::SessionId(910_002), root.path());
-    let second_carrier = second.json_anchor();
-    let second_binder = second.mount_json(
-        &second_carrier,
-        "carried",
-        &serde_json::json!({"who": "second"}),
-    );
+    let mut first = CheckedIncarnation::open(tidepool_repr::SessionId(910_001), root.path());
+    let first_binder = first.mount_json("carried", &serde_json::json!({"who": "first"}));
+    let mut second = CheckedIncarnation::open(tidepool_repr::SessionId(910_002), root.path());
+    let second_binder = second.mount_json("carried", &serde_json::json!({"who": "second"}));
     assert_eq!(
         first_binder.module, second_binder.module,
-        "the second incarnation must reissue the first's generation number (same module name) \
-         for this test to exercise a real same-name collision"
+        "independent issuers exercise the same module name with different values"
     );
-
-    let TurnResult::Expr { compiled, .. } = second.compile_in_current_value_view(
-        "case carried of { Aeson.Object o -> \
+    assert_eq!(first_binder.name, second_binder.name);
+    for _ in 0..2 {
+        let outcome = second.observe(
+            "case carried of { Aeson.Object o -> \
          if Map.lookup \"who\" o == Just (Aeson.String \"second\") \
          then () else error \"cross-incarnation payload mismatch\"; \
          _ -> error \"cross-incarnation constructor mismatch\" }",
-    ) else {
-        panic!("reading the carried value must compile as an expression");
-    };
-    let outcome = tidepool_testing::with_settlement(|settlement| {
-        second
-            .session
-            .run_with_sites("read_second_incarnation", compiled.into_code(), settlement)
-    })
-    .expect("read second incarnation's carried value");
-    assert!(
-        matches!(outcome, ResidentOutcome::Completed { .. }),
-        "the second incarnation's own payload assertion must complete: {outcome:?}"
-    );
+        );
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+        let outcome = first.observe("case carried of { Aeson.Object o -> if Map.lookup \"who\" o == Just (Aeson.String \"first\") then () else error \"first incarnation payload mismatch\"; _ -> error \"first constructor mismatch\" }");
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+    }
 }
 
-/// MEDIUM: within ONE incarnation, a `Val.G<g>` carrier stub is written
-/// once and never rewritten (`Generation::next`'s monotonic contract), so
-/// its `GutsMemo` entry may now legitimately outlive the transaction that
-/// produced it. This mounts 50 JSON carrier payloads under one incarnation
-/// and reads all of them back in two SEPARATE compiles (two transactions),
-/// asserting both give the same, correct answer -- the correctness half of
-/// the narrowed eviction. (Asserting the SECOND compile actually took the
-/// memo-hit path, not just the correct-answer path, needs the worker's
-/// `TIDEPOOL_TIMING=1` stderr captured back to the caller, which `run_turn`
-/// does not yet expose; the admission-compile-time measurement in
-/// `plans/` is the intended stand-in until that plumbing exists.)
+/// Fifty distinct issued interfaces share one native JSON constructor prototype.
+/// Two separately checked readbacks must retain every ordered accepted value.
 #[test]
-fn fifty_accumulated_session_stubs_read_back_correctly_across_repeat_compiles() {
+fn fifty_accumulated_session_bindings_read_back_correctly_across_repeat_compiles() {
     eval_harness::require_extract();
     let root = tempfile::tempdir().expect("session root");
-    let mut incarnation = Incarnation::open(tidepool_repr::SessionId(920_001), root.path());
-    let carrier = incarnation.json_anchor();
+    let mut incarnation = CheckedIncarnation::open(tidepool_repr::SessionId(920_001), root.path());
 
     const COUNT: usize = 50;
     let mut names = Vec::with_capacity(COUNT);
     for i in 0..COUNT {
         let name = format!("carried{i}");
-        incarnation.mount_json(&carrier, &name, &serde_json::json!({"tag": i}));
+        incarnation.mount_json(&name, &serde_json::json!({"tag": i}));
         names.push(name);
     }
 
@@ -1665,19 +1786,7 @@ fn fifty_accumulated_session_stubs_read_back_correctly_across_repeat_compiles() 
     );
 
     for attempt in 0..2 {
-        let TurnResult::Expr { compiled, .. } =
-            incarnation.compile_in_current_value_view(&read_back_expr)
-        else {
-            panic!("reading all 50 carried values must compile as an expression");
-        };
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            incarnation.session.run_with_sites(
-                "read_fifty_carried",
-                compiled.into_code(),
-                settlement,
-            )
-        })
-        .unwrap_or_else(|error| panic!("attempt {attempt}: read all 50 values: {error}"));
+        let outcome = incarnation.observe(&read_back_expr);
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
             "attempt {attempt}: all 50 ordered payload assertions must complete: {outcome:?}"
@@ -1715,7 +1824,7 @@ fn closing_one_realm_notifies_exact_retirement_and_preserves_sibling() {
         let outcome = notebook
             .session
             .with_continuation_observer(observer.clone(), |session| {
-                tidepool_testing::with_settlement(|settlement| {
+                source_action(session, &notebook.source, |session, settlement| {
                     session.run_with_sites("realm_observation", compiled.code(), settlement)
                 })
                 .unwrap()
