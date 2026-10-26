@@ -28769,23 +28769,28 @@ pub(crate) mod request_tests {
         preparation_client: crate::CompilerPreparationClient,
     ) {
         let mut recovery = None;
-        let (mut session, context, source, _root) = host_mount_fixture_with_lib(|lib| {
+        let (session, context, source, _root) = host_mount_fixture_with_lib(|lib| {
             let fixture =
                 crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
             tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
             recovery = Some(fixture);
         });
         let recovery = recovery.unwrap();
+        let (captured, source_owner) =
+            world_query_test_source_files_with_support(&[], &source.base_include);
+        let layers: crate::ActorSourceLayerResolver = source_owner;
+        let (context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+            context,
+            captured,
+            None,
+            Some(&layers),
+        )
+        .unwrap();
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/installer-child").unwrap(),
             context.actor.incarnation.0,
         )
         .unwrap();
-        // Durable children publish their inherited view before native boot
-        // installs tools. The installer must preserve that admitted surface.
-        session
-            .initialize_durable_public_scope(owner.clone(), context.placement.lexical_scope)
-            .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
         let workbench = ResidentActorWorkbench::new(
@@ -28793,9 +28798,27 @@ pub(crate) mod request_tests {
             (source.clone()).bind_preparation(preparation_client.clone()),
             None,
         )
-        .with_compilation_authority(
-            crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
-        );
+        .with_compilation_authority(authority);
+        workbench_runner_for_test(&workbench)
+            .adopt_final_source_scope(context.clone())
+            .await
+            .unwrap();
+        // Durable children publish their inherited view before native boot
+        // installs tools. Source adoption does not boot the machine.
+        let initialize_owner = owner.clone();
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                session
+                    .initialize_durable_public_scope(
+                        initialize_owner,
+                        context.placement.lexical_scope,
+                    )
+                    .map_err(ResidentError::Session)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let before = workbench
             .access
             .with_machine(context.clone(), |session, context, _| {

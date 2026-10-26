@@ -250,35 +250,72 @@ fn publication_error_termination_prevents_a_later_cancellation_from_reclassifyin
         .load(std::sync::atomic::Ordering::Acquire));
 }
 
-#[test]
-fn prepared_publication_observing_a_sibling_fence_requires_recovery() {
-    sibling_fence_before_preflight(false);
+#[tokio::test]
+async fn prepared_publication_observing_a_sibling_fence_requires_recovery() {
+    crate::resident_workbench::with_test_compiler_owner(|client| {
+        sibling_fence_before_preflight(false, client)
+    })
+    .await;
 }
 
-#[test]
-fn prepared_publication_observing_a_sibling_fence_preserves_recovery_during_cancellation() {
-    sibling_fence_before_preflight(true);
+#[tokio::test]
+async fn prepared_publication_observing_a_sibling_fence_preserves_recovery_during_cancellation() {
+    crate::resident_workbench::with_test_compiler_owner(|client| {
+        sibling_fence_before_preflight(true, client)
+    })
+    .await;
 }
 
-fn sibling_fence_before_preflight(cancel: bool) {
+async fn sibling_fence_before_preflight(cancel: bool, client: crate::CompilerPreparationClient) {
     use crate::recovery::recovery_test_fixture::RecoveryFixture;
     use tidepool_runtime::session::{
-        fresh_session_id, ModuleEnv, PersistentSession, RecoveryDomainId, RecoveryPublicOwner,
-        SessionError, SessionLib, StoreErrorKind,
+        fresh_session_id, ModuleEnv, RecoveryDomainId, RecoveryPublicOwner, SessionError,
+        SessionLib, StoreErrorKind,
     };
 
     let root = tempfile::tempdir().unwrap();
     let recovery = RecoveryFixture::create(root.path());
+    let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let session_id = fresh_session_id();
     let mut lib = SessionLib::open(
-        fresh_session_id(),
+        session_id,
         root.path().join("machine-a"),
         ModuleEnv::standalone_default(),
     )
-    .unwrap();
+    .unwrap()
+    .with_validation_include(surface.include_paths().to_vec());
     tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement));
-    let mut session = PersistentSession::new(Some(lib), 1024);
-    let scope = session.mint_isolated_scope();
-    let owner = RecoveryPublicOwner::new(&crate::ActorPath::parse("root/a").unwrap(), 1).unwrap();
+    let mut session = tidepool_runtime::session::ResidentSession::unbootstrapped(
+        frunk::HNil,
+        tidepool_mcp::CapturedOutput::new(),
+        1024,
+        Some(lib),
+    );
+    let source_lease = session.mint_notebook_scope_with_lease(None).unwrap();
+    let scope = source_lease.scope();
+    let path = crate::ActorPath::parse("root/a").unwrap();
+    let owner = RecoveryPublicOwner::new(&path, 1).unwrap();
+    let descriptor = crate::ActorDescriptor::new(
+        "sibling fence",
+        crate::ActorPlacement {
+            session: session_id,
+            lexical_scope: scope,
+            resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
+        },
+    )
+    .with_actor_path(path)
+    .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+    let mut context = descriptor
+        .clone()
+        .admit_independent_world()
+        .session_context(crate::ActorRef::first(crate::ActorId(1)));
+    let (source, _source_owner) =
+        crate::resident_workbench::request_tests::world_query_test_source_files_with_support(
+            &[],
+            surface.include_paths(),
+        );
+    context.source_layer = crate::ActorSourceRoots::Complete(source);
+    context.haskell_effects_alias = surface.row().into();
     assert!(matches!(
         session
             .initialize_durable_public_scope(owner.clone(), scope)
@@ -286,10 +323,32 @@ fn sibling_fence_before_preflight(cancel: bool) {
         tidepool_runtime::session::PublicManifestCommit::Durable
     ));
     let confirmed = recovery.public_owner(&owner);
-    let admitted = session
-        .begin_durable_private_execution(&owner, scope)
+    let readiness = session.durable_public_readiness(&owner, scope).unwrap();
+    let public_owner = WorkbenchPublicOwner::issue(&context, &descriptor, Some(readiness)).unwrap();
+    let machines = Arc::new(ActorMachineRegistry::new());
+    machines.insert_idle(session_id, Box::new(session));
+    let runner = ResidentActorRunner::new(
+        machines.clone(),
+        ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec())
+            .bind_preparation(client),
+    );
+    runner
+        .adopt_final_source_scope(context.clone())
+        .await
         .unwrap();
-    let prepared = session.freeze_private_execution(&admitted).unwrap();
+    let admitted = runner
+        .begin_private_execution(
+            context.clone(),
+            public_owner,
+            tidepool_runtime::session::PublicationDecision::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let (mut session, receipt) = machines.checkout_run(session_id).unwrap().into_parts();
+    let prepared = session
+        .freeze_private_execution(&admitted.admission)
+        .unwrap();
     let before = session.public_visibility_snapshot_in(scope).unwrap();
 
     let sibling_id = fresh_session_id();
@@ -389,4 +448,10 @@ fn sibling_fence_before_preflight(cancel: bool) {
             .load(std::sync::atomic::Ordering::Acquire),
         cancel
     );
+    let holes = session
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    machines.settle_suspended(receipt, session, holes);
 }

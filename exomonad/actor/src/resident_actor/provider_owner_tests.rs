@@ -269,9 +269,22 @@ async fn requested_retirement_refuses_provider_before_terminal_publication() {
 
 #[tokio::test]
 async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reopen() {
+    crate::resident_workbench::with_test_compiler_owner(|_| async {
+        commit_error_fences_provider_and_sibling_owners_with_source().await
+    })
+    .await;
+}
+
+async fn commit_error_fences_provider_and_sibling_owners_with_source() {
     use tidepool_runtime::session::{
         PublicManifestCommit, PublicationDecision, RecoveryPublicOwner,
     };
+    let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let (captured, source_owner) =
+        crate::resident_workbench::request_tests::world_query_test_source_files_with_support(
+            &[],
+            surface.include_paths(),
+        );
     let root = tempfile::tempdir().unwrap();
     let session = tidepool_runtime::session::fresh_session_id();
     let recovery = crate::recovery::recovery_test_fixture::RecoveryFixture::create(root.path());
@@ -280,7 +293,8 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
         root.path().join("compiler"),
         ModuleEnv::standalone_default(),
     )
-    .unwrap();
+    .unwrap()
+    .with_validation_include(surface.include_paths().to_vec());
     tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut library, settlement));
     let machine = ResidentSession::unbootstrapped(
         frunk::HNil,
@@ -289,7 +303,7 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
         Some(library),
     );
     let (forest, _deployments) = ResidentForest::new(
-        ActorWorkbenchSource::new("", Vec::new()),
+        ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec()),
         session,
         machine,
         None,
@@ -297,7 +311,46 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
     )
     .await
     .unwrap();
-    let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Durable).await;
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(session)
+        .await
+        .unwrap();
+    let descriptor = ActorDescriptor::new("owner fixture", placement)
+        .with_actor_path(crate::ActorPath::parse("root").unwrap())
+        .with_persistence_policy(crate::ActorPersistencePolicy::Durable)
+        .admit_independent_world();
+    let behavior = ResidentKernelBehavior::with_boot(
+        descriptor,
+        forest.environment.clone(),
+        ResidentBoot::Workbench,
+        Vec::new(),
+    );
+    let actor = crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        behavior,
+        forest.incarnation,
+        forest.directory.clone(),
+    )
+    .await
+    .unwrap()
+    .0;
+    let context = forest
+        .directory
+        .session_context(actor.identity())
+        .await
+        .unwrap()
+        .unwrap();
+    let layers: crate::ActorSourceLayerResolver = source_owner;
+    let (context, _source_authority) =
+        WorkbenchCompilationAuthority::admit(context, captured, None, Some(&layers)).unwrap();
+    forest
+        .environment
+        .runner
+        .adopt_final_source_scope(context.clone())
+        .await
+        .unwrap();
     let confirmed = forest
         .bind_durable_root_public_owner(actor.identity())
         .await
@@ -311,12 +364,6 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
     let admission = actor.lifecycle().transaction().await.unwrap();
     provider_entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     drop(admission);
-    let context = forest
-        .directory
-        .session_context(actor.identity())
-        .await
-        .unwrap()
-        .unwrap();
     let owner = provider.owner.durable().unwrap().clone();
     let machines = forest.environment.runner.machines_for_test().clone();
     let (mut resident, receipt) = machines.checkout_run(session).unwrap().into_parts();
@@ -346,10 +393,27 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
         .unwrap()
         .descriptor
         .clone();
-    let private = resident
-        .begin_durable_private_execution(&owner, context.placement.lexical_scope)
+    let holes = resident
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    machines.settle_suspended(receipt, resident, holes);
+    let private = forest
+        .environment
+        .runner
+        .begin_private_execution(
+            context.clone(),
+            provider.owner.clone(),
+            PublicationDecision::new(),
+            None,
+        )
+        .await
         .unwrap();
-    let intent = resident.freeze_private_execution(&private).unwrap();
+    let (mut resident, receipt) = machines.checkout_run(session).unwrap().into_parts();
+    let intent = resident
+        .freeze_private_execution(&private.admission)
+        .unwrap();
     let tidepool_runtime::session::ExecutionPublication::Bindings(base) = resident
         .restage_execution_publication(owner.clone(), intent)
         .unwrap()

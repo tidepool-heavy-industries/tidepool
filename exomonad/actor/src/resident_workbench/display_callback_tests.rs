@@ -68,11 +68,17 @@ async fn prepare_callback_fixture(
         tidepool_runtime::DEFAULT_NURSERY_SIZE,
         Some(lib),
     );
+    let source_lease = session.mint_notebook_scope_with_lease(None).unwrap();
+    let (captured, _source_owner) =
+        super::request_tests::world_query_test_source_files_with_support(
+            &[],
+            surface.include_paths(),
+        );
     let mut context = {
         let context_actor = crate::ActorRef::first(crate::ActorId(1));
         let context_placement = crate::ActorPlacement {
             session: session_id,
-            lexical_scope: session.mint_isolated_scope(),
+            lexical_scope: source_lease.scope(),
             resource_scope: RealmId::fresh(),
         };
         crate::ActorSessionContext {
@@ -83,23 +89,42 @@ async fn prepare_callback_fixture(
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: surface.row().into(),
             current_model: None,
-            source_layer: Vec::new().into(),
+            source_layer: crate::ActorSourceRoots::Complete(captured),
             ..crate::ActorDescriptor::new("fixture", context_placement)
                 .admit_independent_world()
                 .session_context(context_actor)
         }
     };
     let public_context = context.clone();
-    let admission = private.then(|| {
-        Arc::new(
-            session
-                .begin_ephemeral_private_execution(context.placement.lexical_scope)
-                .unwrap(),
-        )
-    });
+    let machines = Arc::new(ActorMachineRegistry::<ImmediatePrintProbe, CapturedOutput>::new());
+    machines.insert_idle(session_id, Box::new(session));
+    let runner = ResidentActorRunner::new(machines.clone(), source.clone());
+    runner
+        .adopt_final_source_scope(public_context.clone())
+        .await
+        .unwrap();
+    let admission = if private {
+        let descriptor = crate::ActorDescriptor::new("display fixture", public_context.placement);
+        let owner =
+            crate::resident_actor::WorkbenchPublicOwner::issue(&public_context, &descriptor, None)
+                .unwrap();
+        let execution = runner
+            .begin_private_execution(
+                public_context.clone(),
+                owner,
+                tidepool_runtime::session::PublicationDecision::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        Some(execution.admission.clone())
+    } else {
+        None
+    };
     if let Some(admission) = &admission {
         context.placement.lexical_scope = admission.private_scope();
     }
+    let (mut session, receipt) = machines.checkout_run(session_id).unwrap().into_parts();
     session
         .set_actor_execution(
             context.run_context(),
@@ -140,9 +165,12 @@ async fn prepare_callback_fixture(
         session.run_with_sites("displayCallbackFixture", compiled.code(), settlement)
     })
     .unwrap();
-    let machines = Arc::new(ActorMachineRegistry::<ImmediatePrintProbe, CapturedOutput>::new());
-    machines.insert_idle(session_id, Box::new(session));
-    let runner = ResidentActorRunner::new(machines, source);
+    let holes = session
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    machines.settle_suspended(receipt, session, holes);
     let realm = context.placement.resource_scope;
     let boundary = runner
         .capture_boundary(context.clone(), outcome, realm)
@@ -292,17 +320,36 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
     .await;
     let scope_a = fixture.execution.context.placement.lexical_scope;
     drop(fixture.admission.take());
-    let scope_b = fixture
+    let descriptor =
+        crate::ActorDescriptor::new("display fixture", fixture.public_context.placement);
+    let owner = crate::resident_actor::WorkbenchPublicOwner::issue(
+        &fixture.public_context,
+        &descriptor,
+        None,
+    )
+    .unwrap();
+    let execution_b = fixture
+        .runner
+        .begin_private_execution(
+            fixture.public_context.clone(),
+            owner,
+            tidepool_runtime::session::PublicationDecision::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let scope_b = execution_b.private_scope;
+    let mut context_b = fixture.public_context.clone();
+    context_b.placement.lexical_scope = scope_b;
+    fixture
         .runner
         .access
-        .with_machine(fixture.public_context.clone(), move |session, _, _| {
-            let scope_b = session.mint_isolated_scope();
-            // A later checkout drains completed admission leases. The callback's
-            // owner-derived lease must preserve its exact original scope.
-            let _ = session
-                .begin_ephemeral_private_execution(scope_b)
-                .map_err(ResidentError::Session)?;
-            Ok(scope_b)
+        .with_machine(context_b, |session, context, _| {
+            assert_eq!(
+                session.run_context().lexical_scope,
+                context.placement.lexical_scope
+            );
+            Ok(())
         })
         .await
         .unwrap();
@@ -326,12 +373,16 @@ async fn retained_display_runs_after_private_admission_settles_and_current_scope
     fixture
         .runner
         .access
-        .with_machine(fixture.public_context.clone(), |session, context, _| {
-            let _ = session
-                .begin_ephemeral_private_execution(context.placement.lexical_scope)
-                .map_err(ResidentError::Session)?;
-            Ok(())
-        })
+        .with_compiler_world(
+            fixture.public_context.clone(),
+            None,
+            |session, context, _| {
+                let _ = session
+                    .begin_ephemeral_private_execution(context.placement.lexical_scope)
+                    .map_err(ResidentError::Session)?;
+                Ok(())
+            },
+        )
         .await
         .unwrap();
     let error = fixture

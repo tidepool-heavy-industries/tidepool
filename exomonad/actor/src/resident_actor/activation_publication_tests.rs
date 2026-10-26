@@ -72,9 +72,6 @@ async fn interrupt_during_preview(
     }
     let handles = resident.value_handle_count();
     context.actor = fixture.actor.identity();
-    if durable {
-        context.placement.lexical_scope = resident.mint_scope(ScopeId::ROOT).unwrap();
-    }
     let machines = Arc::new(ActorMachineRegistry::new());
     fixture.environment.runner = ResidentActorRunner::new(
         Arc::clone(&machines),
@@ -430,8 +427,26 @@ async fn interrupt_during_preview(
         );
     }
     if let Some(owner) = &durable_owner {
-        resident
-            .begin_durable_private_execution(owner, context.placement.lexical_scope)
+        let source = context.source_dependency().source_lease().unwrap();
+        let settled = resident
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |resident, _| {
+                    resident.begin_durable_private_execution(owner, context.placement.lexical_scope)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &tidepool_runtime::CompilerTransactionClose::NotStarted
+        );
+        settled
+            .into_outcome()
+            .action
             .expect("refused activation keeps the exact durable owner admissible");
     }
     assert!(resident
@@ -555,11 +570,29 @@ async fn interrupt_during_preview(
             .checkout_run(context.placement.session)
             .unwrap()
             .into_parts();
-        resident
-            .begin_durable_private_execution(
-                durable_owner.as_ref().unwrap(),
-                context.placement.lexical_scope,
+        let source = context.source_dependency().source_lease().unwrap();
+        let settled = resident
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |resident, _| {
+                    resident.begin_durable_private_execution(
+                        durable_owner.as_ref().unwrap(),
+                        context.placement.lexical_scope,
+                    )
+                },
             )
+            .unwrap();
+        assert_eq!(
+            settled.close(),
+            &tidepool_runtime::CompilerTransactionClose::NotStarted
+        );
+        settled
+            .into_outcome()
+            .action
             .expect("second actual activation publishes a matching durable/local public surface");
         assert!(resident
             .current_binding_in(context.placement.lexical_scope, "sessionInput")
