@@ -207,6 +207,13 @@ async fn exercise_durable_attachment(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn released_root_startup_already_owns_its_source_generation() {
+    use exomonad_actor::ActorSourceLayers;
+
+    enum StartupObservation<T> {
+        Event(Option<T>),
+        Ended(Result<HostedTestRuntime, super::hosted_test_context::HostedStartupError>),
+    }
+
     async fn settled_startup(
         result: Result<HostedTestRuntime, super::hosted_test_context::HostedStartupError>,
     ) -> String {
@@ -237,68 +244,123 @@ async fn released_root_startup_already_owns_its_source_generation() {
     ));
     let boundary = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
         tokio::select! {
-            boundary = &mut released => match boundary {
-                Ok(boundary) => boundary,
-                Err(_) => panic!("startup release observer closed: {}", settled_startup(starting.as_mut().await).await),
-            },
-            ready = &mut starting => panic!("startup ended before the release barrier: {}", settled_startup(ready).await),
+            boundary = &mut released => StartupObservation::Event(boundary.ok()),
+            ready = &mut starting => StartupObservation::Ended(ready),
         }
     })
-    .await
-    .expect("host reaches startup release");
+    .await;
+    let boundary = match boundary {
+        Ok(StartupObservation::Event(Some(boundary))) => boundary,
+        Ok(StartupObservation::Ended(result)) => {
+            drop(released);
+            drop(judgments);
+            panic!(
+                "startup ended before release: {}",
+                settled_startup(result).await
+            );
+        }
+        unavailable => {
+            let reason = if unavailable.is_err() {
+                "timed out"
+            } else {
+                "closed"
+            };
+            drop(released);
+            drop(judgments);
+            panic!(
+                "startup release observer {reason}: {}",
+                settled_startup(starting.await).await
+            );
+        }
+    };
     let actor = boundary.actor;
     let foreign = exomonad_actor::ActorRef {
         id: actor.id,
         incarnation: exomonad_actor::Incarnation(actor.incarnation.0 + 1),
     };
+    let root_owns_run = boundary.source.is_registered_run_owner(actor.into());
+    let foreign_owns_run = boundary.source.is_registered_run_owner(foreign.into());
     // Retain the verdict until startup completes, so even a rejected owner
     // is reported through ordinary hosted cleanup.
     let admission = boundary
         .source
         .freeze_toolset_layer(actor.into())
         .and_then(|selected| {
-            let foreign_refused = matches!(
-                boundary
-                    .source
-                    .clone()
-                    .stage_reload(foreign.into(), &selected, &[]),
-                Err(exomonad_actor::SourceLayerReload::Unavailable(_))
-            );
-            let staged = boundary
-                .source
-                .clone()
-                .stage_reload(actor.into(), &selected, &[])
-                .map_err(|error| format!("released root source admission failed: {error:?}"))?;
-            boundary.source.validate_source_authority(staged.source())?;
-            drop(staged);
+            let restored = boundary.source.fresh_toolset_layer_from(&selected)?;
+            boundary.source.validate_source_authority(&restored)?;
+            let same_reference = selected
+                .generation_evidence()
+                .ok_or("selected source has no generation evidence")?
+                .reference
+                == restored
+                    .generation_evidence()
+                    .ok_or("restored source has no generation evidence")?
+                    .reference;
             let unchanged = boundary
                 .source
                 .freeze_toolset_layer(actor.into())?
                 .same_revision(&selected);
-            Ok((foreign_refused, unchanged))
+            Ok((same_reference, unchanged))
         });
     eprintln!(
         "startup-source-admission {}",
-        serde_json::json!({ "actor": actor, "admission": &admission })
+        serde_json::json!({
+            "actor": actor,
+            "registered_run_owner": root_owns_run,
+            "foreign_registered_run_owner": foreign_owns_run,
+            "restoration": &admission,
+        })
     );
     drop(boundary.source);
-    boundary.continue_host.send(()).unwrap();
+    if boundary.continue_host.send(()).is_err() {
+        drop(judgments);
+        panic!(
+            "startup continuation closed: {}",
+            settled_startup(starting.await).await
+        );
+    }
     let held = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
         tokio::select! {
-            judgment = judgments.recv() => match judgment {
-                Some(judgment) => judgment,
-                None => panic!("initializer observer closed: {}", settled_startup(starting.as_mut().await).await),
-            },
-            ready = &mut starting => panic!("startup ended before initializer Jev: {}", settled_startup(ready).await),
+            judgment = judgments.recv() => StartupObservation::Event(judgment),
+            ready = &mut starting => StartupObservation::Ended(ready),
         }
     })
-    .await
-    .expect("initializer reaches its Jev barrier");
-    held.answer.send(true).unwrap();
+    .await;
+    let held = match held {
+        Ok(StartupObservation::Event(Some(held))) => held,
+        Ok(StartupObservation::Ended(result)) => {
+            drop(judgments);
+            panic!(
+                "startup ended before initializer Jev: {}",
+                settled_startup(result).await
+            );
+        }
+        unavailable => {
+            let reason = if unavailable.is_err() {
+                "timed out"
+            } else {
+                "closed"
+            };
+            drop(judgments);
+            panic!(
+                "initializer observer {reason}: {}",
+                settled_startup(starting.await).await
+            );
+        }
+    };
+    if held.answer.send(true).is_err() {
+        drop(judgments);
+        panic!(
+            "initializer continuation closed: {}",
+            settled_startup(starting.await).await
+        );
+    }
     let host = starting.await.unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
             assert_eq!(host.context.actor.identity(), actor);
+            assert!(root_owns_run);
+            assert!(!foreign_owns_run);
             assert_eq!(admission.unwrap(), (true, true));
             assert_eq!(held.packet["memory"], "startup-source-owner");
             let retained = observation(host).await;

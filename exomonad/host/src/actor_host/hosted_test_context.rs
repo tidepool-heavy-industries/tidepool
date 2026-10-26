@@ -747,7 +747,7 @@ pub(super) type HostSourceLayersTransform = Arc<
 
 pub(super) struct ReleasedRootStartup {
     pub(super) actor: ActorRef,
-    pub(super) source: exomonad_actor::ActorSourceLayerResolver,
+    pub(super) source: Arc<crate::exomonad::source::ExomonadSourceReload>,
     pub(super) continue_host: oneshot::Sender<()>,
 }
 

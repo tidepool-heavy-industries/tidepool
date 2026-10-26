@@ -1105,6 +1105,11 @@ impl ExomonadSourceReload {
         self.bind_helper_branch(actor, "run");
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_registered_run_owner(&self, actor: PrincipalId) -> bool {
+        matches!(self.scopes.read().get(&actor), Some(ActorSourceScope::Run))
+    }
+
     /// What `caller`'s own source calls reach.
     ///
     /// An actor the host never bound gets the run's layer read-only: it can
