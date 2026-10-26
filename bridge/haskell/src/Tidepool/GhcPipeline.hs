@@ -1646,8 +1646,8 @@ hydrateWorldImportBasis private basis environment = do
 -- admitted interfaces there, while keeping lexical instance reachability on
 -- the exact source-import graph rather than the broader TYPE requirement set.
 restoreWorldImportBasis :: CycleInterfaceViews -> SourceGraphObservation -> HydratedExactInterfaces
-  -> WorldImportBasis -> HscEnv -> IO HscEnv
-restoreWorldImportBasis views observation previous basis@(WorldImportBasis _ lexical) environment
+  -> CheckedValueImportAuthority -> WorldImportBasis -> HscEnv -> IO HscEnv
+restoreWorldImportBasis views observation previous checkedValues basis@(WorldImportBasis _ lexical) environment
   | null lexical = pure environment
   | otherwise = do
       let graph = worldLexicalImportGraph lexical
@@ -1662,7 +1662,7 @@ restoreWorldImportBasis views observation previous basis@(WorldImportBasis _ lex
           ordinary _ = True
       installed <- installLexicalInterfaces views hydrated
         (ExactLexicalInputs observation (mkModuleGraph (filter ordinary nodes)) graph
-          noCheckedValueImports noGeneratedScaffoldImports)
+          checkedValues noGeneratedScaffoldImports)
         >>= either (throwIO . WorldInputsFailure WorldInputsCorrupt) pure
       pure (installedLexicalEnvironment installed)
 
@@ -3001,6 +3001,8 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     WorldCellSource _ _ (WorldCellPrefix _ (PrefixHomeInterfaces _ captures) _ _ _ _ _ _) _ _ _ -> pure captures
     _ -> pure emptyHydratedInterfaceClosure
   (operandOwner,operandProjection) <- liftIO (hydrateWorldCellOperand priorInputs initial operand)
+  operandImports <- either fail pure (checkedValueImportAuthorityFromCaptures
+    [capture | WorldCellOperandProjection _ _ capture _ <- maybe [] pure operandProjection])
   let withOperand = hydratedExactEnvironment operandOwner
   operandInputs <- either (liftIO . throwIO) pure
     (mergeHydratedInterfaceClosures [priorInputs,hydratedExactInputs operandOwner])
@@ -3187,7 +3189,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               WorldObservationSource {} -> pure environment {hsc_mod_graph=graph}
               WorldCellNameSource {} -> pure environment {hsc_mod_graph=graph}
             ready <- liftIO $ do
-              imported <- restoreWorldImportBasis directory observation importHydrated importBasis prefixEnvironment `catch` importFailure
+              imported <- restoreWorldImportBasis directory observation importHydrated operandImports importBasis prefixEnvironment `catch` importFailure
               restoreWorldCellOperandFor directory observation operandProjection imported
             setSession ready
             planned <- pvPlan variant directory enabled target observation exact matched
@@ -3210,7 +3212,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                     WorldCellNameSource {} -> pure ()
                   environment <- getSession
                   ready <- liftIO $ do
-                    imported <- restoreWorldImportBasis directory observation importHydrated importBasis environment `catch` importFailure
+                    imported <- restoreWorldImportBasis directory observation importHydrated operandImports importBasis environment `catch` importFailure
                     restoreWorldCellOperandFor directory observation operandProjection imported
                   setSession ready
               , cpBeforeModule = \phaseInputs summary -> do
@@ -3224,7 +3226,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                     WorldCellNameSource {} -> pure ()
                   environment <- getSession
                   ready <- liftIO $ do
-                    imported <- restoreWorldImportBasis directory observation importHydrated importBasis environment `catch` importFailure
+                    imported <- restoreWorldImportBasis directory observation importHydrated operandImports importBasis environment `catch` importFailure
                     restoreWorldCellOperandFor directory observation operandProjection imported
                   setSession ready
                   when (ms_mod_name summary == target) $ do

@@ -117,7 +117,7 @@ import Tidepool.ExactScope
   , worldSourceRoots, worldSourceFiles, worldOriginalReferenceFor
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
   , readWorldBindingInputs, worldBindingRow, worldBindingRowFactCID, worldBindingRowInterface
-  , readWorldCellOperandWithOwner, worldCellOperandTypes, worldCellOperandBinding, mergeWorldTypeInputs
+  , readWorldCellOperandWithOwner, worldCellOperandInterface, worldCellOperandTypes, worldCellOperandBinding, mergeWorldTypeInputs
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedPrimary, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readPackageInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation
@@ -126,7 +126,7 @@ import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, r
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import Tidepool.ExtractRequest
   ( AdmittedWorkerRequest, admitWorkerRequest, WorkerRequest, ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
-  , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
+  , WorldCellRecipe(..), WorldCellOperandRequest(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), WorldObservationQuery(..)
   , StructuredInspection(..), StructuredNameScope(..), StructuredNameNamespace(..), InspectionProvenance(..)
   , RequestField(..), workerArgv, workerRequestFromArgv )
@@ -2605,6 +2605,34 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
     unless (all (\root -> all (\name -> not (Map.member (name ++ ".hs") (worldSourceFiles root))) names)
         (worldSourceRoots (worldInputsSources facts)))
       (fail "source-less World import fixture accidentally captured producer sources")
+    operandPacket <- newPacketDirectory work "carried-operand-fixture"
+    BS.writeFile (operandPacket </> "request.cbor")
+      (encode (TList [TString "TPSOURCEBOOTHISTORICALVALUETYPE1"]))
+    operandCompletion <- runPacketProducer WorldValueTypeProducer operandPacket
+    operandBytes <- completedPacketOutput operandCompletion (operandPacket </> "world-value-types.cbor")
+    operandTerms <- worldFixtureTerm operandBytes >>= \term -> case term of
+      TList [TString "TPCWHISTORICALTYPEFIXTURE1",_,first,second] -> pure [first,second]
+      _ -> fail "carried operand fixture omitted genuine historical selections"
+    operands <- forM (zip [601,603 :: Int] operandTerms) $ \(generation,term) -> do
+      sealed <- sealWorldValueDescriptor handles term
+      let operandPath = rootB </> ("operand-" ++ show generation ++ ".cbor")
+          body = encode sealed
+          digest = SHA.hash body
+      BS.writeFile operandPath body
+      admitted <- readWorldCellOperandWithOwner owner (prHscEnv (pprPipelineResult original)) facts operandPath digest
+      let artifact = worldCellOperandInterface admitted
+          leaf = (exactUnit artifact,exactModule artifact)
+          types = worldCellOperandTypes admitted
+      unless (leaf == ("main","Tidepool.Session.Val.G" ++ show generation)
+          && Map.keysSet types == Set.fromList [leaf,("main","Module")])
+        (fail "carried operand control lost its exact leaf or passive nominal TYPE dependency")
+      dependency <- maybe (fail "carried operand omitted nominal dependency") pure (Map.lookup ("main","Module") types)
+      pure (WorldCellOperandRequest operandPath digest,artifact,worldTypeEntryArtifact dependency)
+    (matching,foreignOperand,operandModule) <- case operands of
+      [(first,firstLeaf,firstDependency),(second,secondLeaf,secondDependency)]
+        | firstLeaf /= secondLeaf, firstDependency /= secondDependency ->
+            pure (first,second,exactModule firstLeaf)
+      _ -> fail "carried operand controls collapsed distinct issued leaves or historical TYPE versions"
     rooted <- canonicalizePath rootB
     withRootedCompilerEnvironment rooted $ withQuietStdout $
       withResidentCompilerScopes [] $ \runScope -> do
@@ -2627,7 +2655,7 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
           forM_ typeOnlyCounters $ \counter ->
             unless (fmap sum (capturedDiagnosticCounterValues counterEvidence counter) == Just 0)
               (fail ("TYPE-only carried import demanded Core or lacked complete evidence: " ++ counter))
-          completed <- compileDeclaration compiler facts reference rootB template "nominal" 121
+          completed <- compileDeclaration compiler facts reference rootB template Nothing "nominal" 121
             "retainedCall local = CanonicalPartialFacadeAgain.usePartial local"
           completion <- maybe (fail "carried import lost its World completion") pure
             (completedCompilerWorldCompletion completed)
@@ -2648,6 +2676,34 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
             _ -> fail "finalized imported global lost its exact Name/Original reference"
           unless (all ((/= "local") . occNameString . nameOccName) (Map.keys bindings))
             (fail "nominal external-reference recorder retained a locally bound variable")
+        -- Checked operand authority crosses the carried lexical projection;
+        -- each selected operand also carries its distinct nominal TYPE dependency.
+        let operandTemplate = unlines
+              [if line == "{{CELL_IMPORTS}}"
+                then "import qualified " ++ operandModule ++ " as FixtureOperand\n" ++ line
+                else line | line <- lines template]
+        forM_ [("matching-operand",Just matching,True)
+              ,("missing-operand",Nothing,False)
+              ,("foreign-operand",Just foreignOperand,False)] $ \(label,operand,accepted) ->
+          runScope (pure ()) $ \compiler -> do
+            reference <- scopedEnsureWorld compiler
+              (ExactInputsRequest (worldInputsIdentity facts) (CompleteExactInputs packetPath)) >>= requireReady
+            (outcome,diagnostics) <- captureDiagnostics $ try $
+              compileDeclaration compiler facts reference rootB operandTemplate operand label 151
+                "operandProbe = (1 :: Int)"
+            case (accepted,outcome) of
+              (True,Right _) -> pure ()
+              (True,Left failure) -> hPutStrLn stderr diagnostics >> throwIO (failure :: SomeException)
+              (False,Right _) -> fail (label ++ " borrowed another operand's lexical authority")
+              (False,Left failure)
+                | "source graph imports unadmitted home implementation" `isInfixOf` diagnostics
+                    && operandModule `isInfixOf` diagnostics ->
+                    hPutStrLn stderr (label ++ ": exact lexical authority refused")
+                | isJust (sourceFailureDiagnostics failure)
+                    && "Could not find module" `isInfixOf` diagnostics
+                    && operandModule `isInfixOf` diagnostics ->
+                    hPutStrLn stderr (label ++ ": source resolution refused before lexical admission")
+                | otherwise -> hPutStrLn stderr diagnostics >> throwIO failure
         -- Canonical TYPE dependencies remain authenticated inputs while a
         -- fresh source module crosses prologue, declaration and execution.
         let memoRoot = rootB </> "source-memo"
@@ -2701,7 +2757,7 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
           authoredReference <- scopedEnsureWorld compiler
             (ExactInputsRequest (worldInputsIdentity authoredFacts) (CompleteExactInputs authoredPath)) >>= requireReady
           (refused,sourceDiagnostics) <- captureDiagnostics $ try $ compileDeclaration compiler authoredFacts authoredReference
-            authoredRoot template "current" 131 (carriedLine ++ "\nretainedCall local = CanonicalPartialFacadeAgain.usePartial local")
+            authoredRoot template Nothing "current" 131 (carriedLine ++ "\nretainedCall local = CanonicalPartialFacadeAgain.usePartial local")
           case refused of
             Left failure
               | (case fromException failure of Just WorldCellUnsupported -> True; _ -> False)
@@ -2713,11 +2769,11 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
   where
     requireReady (ExactInputsReady _ reference _) = pure reference
     requireReady other = fail ("carried-import fixture could not acquire its actual World: " ++ show other)
-    compileDeclaration compiler facts reference root template label generation source = do
+    compileDeclaration compiler facts reference root template operand label generation source = do
       let directory = root </> label
           recipe = WorldCellRecipe source template []
       createDirectory directory
-      planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity facts) reference recipe Nothing (directory </> "plan.cbor"))]
+      planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity facts) reference recipe operand (directory </> "plan.cbor"))]
       plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs) >=> finishCompletion) runBoundWorldCellPlan
       slots <- scopedRunGhc compiler $ do
         environment <- getSession
@@ -2729,7 +2785,7 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
               then PlannedPrologue (generation+fromIntegral ordinal)
               else PlannedDeclaration (generation+fromIntegral ordinal))
             else fail "nominal TYPE probe unexpectedly contains an executable item"
-      let question = WorldCellPrepareRequest (worldInputsIdentity facts) reference recipe Nothing plan
+      let question = WorldCellPrepareRequest (worldInputsIdentity facts) reference recipe operand plan
             (BS.replicate 32 23) generation slots directory (directory </> "prepared.cbor")
       args <- decodeWorldArgs [WorldCellPrepare question]
       (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
