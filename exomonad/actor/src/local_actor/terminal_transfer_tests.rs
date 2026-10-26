@@ -83,6 +83,7 @@ impl KernelBehavior for CompletionProbe {
                         }
                     } else {
                         KernelInvocationFailure::CleanupUnconfirmed {
+                            source: None,
                             publication: None,
                             receipts: Vec::new(),
                             actor,

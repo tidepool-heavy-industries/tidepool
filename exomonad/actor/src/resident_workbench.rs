@@ -8364,6 +8364,14 @@ fn admit_explicit_effects(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    /// Publication/cleanup failed after an independently failed continuation.
+    /// Neither failure replaces the other or changes the original execution kind.
+    #[error("{primary}; subsequent finalization failure: {secondary}")]
+    FinalizationAfterFailure {
+        #[source]
+        primary: Box<ResidentActorWorkbenchError>,
+        secondary: Box<ResidentActorWorkbenchError>,
+    },
     #[error("initial publication: {source}")]
     InitialPublication {
         source: Box<crate::local_actor::run_control::InitialGenerationPublicationError>,
@@ -8550,6 +8558,7 @@ impl ResidentActorWorkbenchError {
     pub(crate) fn publication_failure_cause(&self) -> ActorPublicationFailureCause {
         use ActorPublicationFailureCause as Cause;
         match self {
+            Self::FinalizationAfterFailure { primary, .. } => primary.publication_failure_cause(),
             Self::SourceAdmission(source) => Cause::SourceAdmission(source.clone()),
             Self::OperationDiagnostic(refusal) => Cause::OperationDiagnostic(*refusal),
             Self::RequestReplyRefused { .. } => Cause::RequestAdmission,
@@ -8665,10 +8674,29 @@ fn publication_session_failure_cause(
 }
 
 impl ResidentActorWorkbenchError {
+    pub(crate) fn request_reply_refusal(
+        &self,
+    ) -> Option<(crate::RequestId, crate::RequestReplyAdmissionError)> {
+        match self {
+            Self::RequestReplyRefused { request, refusal } => Some((*request, refusal.clone())),
+            Self::FinalizationAfterFailure { primary, .. } => primary.request_reply_refusal(),
+            Self::PrivatePublication { source, .. }
+            | Self::ActivationBindingCommitted { source, .. } => source.request_reply_refusal(),
+            Self::PublicationSettlement { failure } => failure
+                .outcome
+                .as_ref()
+                .as_ref()
+                .err()
+                .and_then(|source| source.request_reply_refusal()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn execution_failure_kind(
         &self,
     ) -> Option<tidepool_runtime::session::PreparedFailureKind> {
         match self {
+            Self::FinalizationAfterFailure { primary, .. } => primary.execution_failure_kind(),
             Self::InvocationCancelled => {
                 Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
             }
@@ -8709,6 +8737,9 @@ impl ResidentActorWorkbenchError {
     /// The run owner must stop admission and recover before any further execution.
     pub fn requires_recovery(&self) -> bool {
         match self {
+            Self::FinalizationAfterFailure { primary, secondary } => {
+                primary.requires_recovery() || secondary.requires_recovery()
+            }
             Self::PublicationSettlement { .. } => true,
             Self::InitialPublication { source } => source.requires_recovery(),
             Self::PrivatePublication { source, .. }
@@ -8747,6 +8778,7 @@ impl ResidentActorWorkbenchError {
 
     pub(crate) fn recovered_bindings(&self) -> &[String] {
         match self {
+            Self::FinalizationAfterFailure { primary, .. } => primary.recovered_bindings(),
             Self::CompletedResultObservation {
                 recovered_bindings, ..
             } => recovered_bindings,
@@ -8758,6 +8790,7 @@ impl ResidentActorWorkbenchError {
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
         match self {
+            Self::FinalizationAfterFailure { primary, .. } => primary.failure_diagnostic(),
             Self::InvocationCancelled => None,
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.failure_diagnostic(),

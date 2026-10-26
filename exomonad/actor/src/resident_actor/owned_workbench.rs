@@ -721,6 +721,7 @@ where
     if !failures.is_empty() {
         control.mark_unconfirmed();
         return Err(KernelInvocationFailure::CleanupUnconfirmed {
+            source: None,
             publication: None,
             receipts: Vec::new(),
             actor: owned.state.effects.context.actor,
@@ -765,18 +766,23 @@ pub(super) fn retain_cleanup_failure(
     mut detail: String,
     finalized: WorkbenchFinalizationResult,
 ) -> WorkbenchFinalizationResult {
-    let (receipts, publication) = match finalized.result {
+    let (receipts, publication, source) = match finalized.result {
         Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response))
         | Ok(KernelStep::Stop {
             output: response, ..
-        }) => (response.items, response.publication),
+        }) => (response.items, response.publication, None),
         Err(error) => {
             detail.push_str(&format!("; workbench finalization: {error}"));
-            (error.receipts().to_vec(), error.publication().cloned())
+            (
+                error.receipts().to_vec(),
+                error.publication().cloned(),
+                Some(Box::new(error)),
+            )
         }
     };
     WorkbenchFinalizationResult {
         result: Err(KernelInvocationFailure::CleanupUnconfirmed {
+            source,
             publication,
             actor,
             detail,
@@ -2341,9 +2347,8 @@ where
                     Ok(true) => Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned))),
                     Ok(false) => Ok(WorkbenchAdvance::Park(behavior.owned_green_task(owned))),
                     Err(error) => {
-                        let failure = workbench_failure(
-                            &owned.state.cursor.receipts,
-                            owned.state.cursor.index,
+                        let failure = workbench_failure_from_active_unit(
+                            &mut owned.state.cursor,
                             owned.state.request.items.len(),
                             error,
                         );
@@ -2514,6 +2519,22 @@ where
                     .expect("actual retirement receipt")
                     .clone();
                 Box::pin(async move {
+                    // No remaining frontier may resume in the retired generation.
+                    // Await the exact hole owner's acknowledgement before asking
+                    // runtime to settle its private checked execution.
+                    if let Some(running) = owned.state.cursor.running.as_mut() {
+                        running.execution.cancel_parent();
+                    }
+                    owned
+                        .workbench
+                        .as_ref()
+                        .expect("native cleanup owner")
+                        .abort_owned_continuations(
+                            context.clone(),
+                            owned.cleanup.registration(),
+                            "source generation superseded before settlement".into(),
+                        )
+                        .await?;
                     if let Some(dependencies) = owned.state.cursor.dependencies.as_mut() {
                         dependencies.retire_input_for_publication().await?;
                     }
@@ -2952,7 +2973,10 @@ fn private_publication_failure(
             source,
         },
         Err(failure) => WorkbenchExecutionFailure {
-            source,
+            source: ResidentActorWorkbenchError::FinalizationAfterFailure {
+                primary: Box::new(failure.source),
+                secondary: Box::new(source),
+            },
             publication: Some(publication),
             ..failure
         },

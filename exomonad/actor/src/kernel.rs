@@ -174,6 +174,7 @@ pub enum KernelInvocationFailure {
     },
     #[error("actor {actor} invocation cleanup remains unconfirmed: {detail}")]
     CleanupUnconfirmed {
+        source: Option<Box<KernelInvocationFailure>>,
         publication: Option<tidepool_runtime::session::WorkbenchPublicationOutcome>,
         actor: ActorRef,
         detail: String,
@@ -195,6 +196,9 @@ impl KernelInvocationFailure {
     pub(crate) fn is_cancelled(&self) -> bool {
         match self {
             Self::Cancelled { .. } => true,
+            Self::CleanupUnconfirmed { source, .. } => {
+                source.as_ref().is_some_and(|source| source.is_cancelled())
+            }
             Self::Workbench(failure) => {
                 failure.execution_failure_kind
                     == Some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
@@ -210,6 +214,9 @@ impl KernelInvocationFailure {
         &self,
     ) -> Option<(crate::RequestId, &crate::RequestReplyAdmissionError)> {
         match self {
+            Self::CleanupUnconfirmed { source, .. } => source
+                .as_ref()
+                .and_then(|source| source.request_reply_refusal()),
             Self::RequestReplyRefused {
                 request, refusal, ..
             } => Some((*request, refusal)),
@@ -221,6 +228,9 @@ impl KernelInvocationFailure {
     }
     pub fn failure_diagnostic(&self) -> Option<&tidepool_toolchain::failclass::FailureEnvelope> {
         match self {
+            Self::CleanupUnconfirmed { source, .. } => source
+                .as_ref()
+                .and_then(|source| source.failure_diagnostic()),
             Self::Failed { diagnostic, .. } | Self::Rejected { diagnostic, .. } => {
                 diagnostic.as_ref()
             }
@@ -1087,6 +1097,7 @@ impl LocalActorRef {
             KernelInvocationFailure::ActorExited(self.identity)
         } else {
             KernelInvocationFailure::CleanupUnconfirmed {
+                source: None,
                 publication: None,
                 actor: self.identity,
                 detail: detail.into(),

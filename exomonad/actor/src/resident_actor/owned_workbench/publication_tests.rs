@@ -548,3 +548,114 @@ fn discarded_generation_writes_remain_rejected_when_continuation_fails() {
     assert!(detail.contains("declarations: true"));
     assert!(detail.contains("reload committed"));
 }
+
+#[test]
+fn active_unit_failure_keeps_receipts_and_typed_cause_through_publication_failure() {
+    for cancelled in [false, true] {
+        let mut cursor = WorkbenchCursor::default();
+        cursor.receipts.push(receipt());
+        cursor.index = 1;
+        cursor.unit.recovered_bindings = vec!["retained".into(), "retained".into()];
+        let operation = WorkbenchOperationReceipt {
+            display_publication: None,
+            display: None,
+            id: WorkbenchOperationId {
+                execution: WorkbenchExecutionId::from_digest([31; 16]),
+                input_unit_index: 1,
+                effect_ordinal: 0,
+            },
+            effect: "reloadSource".into(),
+            disposition: WorkbenchOperationDisposition::Committed,
+        };
+        cursor.unit.operations.push(operation.clone());
+        let source = if cancelled {
+            ResidentActorWorkbenchError::InvocationCancelled
+        } else {
+            ResidentActorWorkbenchError::ActorProtocol("suffix failed".into())
+        };
+        let original = workbench_failure_from_active_unit(&mut cursor, 3, source);
+        assert!(cursor.unit.operations.is_empty());
+        assert_eq!(original.receipts.len(), 2);
+        assert_eq!(original.receipts[0], receipt());
+        assert_eq!(original.receipts[1].operations, [operation]);
+        assert_eq!(original.receipts[1].installed_bindings, ["retained"]);
+        let expected = original.receipts.clone();
+        let failure = private_publication_failure(
+            Err(original),
+            ResidentActorWorkbenchError::ActorProtocol("cleanup refused".into()),
+            WorkbenchPublicationOutcome::Rejected {
+                detail: "cleanup refused".into(),
+            },
+        );
+        assert_eq!(failure.receipts, expected);
+        assert_eq!(failure.total, 3);
+        assert!(matches!(
+            failure.point,
+            WorkbenchFailurePoint::InputUnit { index: 1 }
+        ));
+        assert_eq!(
+            failure.source.execution_failure_kind(),
+            cancelled.then_some(tidepool_runtime::session::PreparedFailureKind::Cancelled)
+        );
+        let ResidentActorWorkbenchError::FinalizationAfterFailure { primary, secondary } =
+            failure.source
+        else {
+            panic!("both typed causes retained")
+        };
+        assert!(
+            matches!(*secondary, ResidentActorWorkbenchError::ActorProtocol(ref text) if text == "cleanup refused")
+        );
+        if cancelled {
+            assert!(matches!(
+                *primary,
+                ResidentActorWorkbenchError::InvocationCancelled
+            ));
+        } else {
+            assert!(
+                matches!(*primary, ResidentActorWorkbenchError::ActorProtocol(ref text) if text == "suffix failed")
+            );
+        }
+    }
+}
+
+#[test]
+fn cleanup_uncertainty_keeps_typed_cancellation_and_original_receipts() {
+    let actor = ActorRef::first(crate::ActorId(71));
+    let original = private_publication_failure(
+        Err(WorkbenchExecutionFailure {
+            receipts: vec![receipt()],
+            point: WorkbenchFailurePoint::InputUnit { index: 0 },
+            publication: None,
+            total: 2,
+            source: ResidentActorWorkbenchError::InvocationCancelled,
+        }),
+        ResidentActorWorkbenchError::ActorProtocol("publication refused".into()),
+        WorkbenchPublicationOutcome::Rejected {
+            detail: "publication refused".into(),
+        },
+    );
+    let finalized = WorkbenchFinalizationResult {
+        result: Err(workbench_invocation_failure(actor, original)),
+        cleanup_confirmed: true,
+    };
+    let finalized = retain_cleanup_failure(actor, "native cleanup unconfirmed".into(), finalized);
+    assert!(!finalized.cleanup_confirmed);
+    let error = finalized.result.as_ref().unwrap_err();
+    assert!(error.is_cancelled());
+    assert_eq!(error.receipts(), [receipt()]);
+    assert!(matches!(
+        error,
+        KernelInvocationFailure::CleanupUnconfirmed {
+            source: Some(_),
+            ..
+        }
+    ));
+    let exit = crate::CellExit::from_reply(
+        WorkbenchExecutionId::from_digest([72; 16]),
+        &finalized.result,
+        false,
+        false,
+    );
+    assert_eq!(exit.cause, crate::CellExitCause::Cancelled);
+    assert!(!exit.permits_context_commit());
+}

@@ -1319,6 +1319,7 @@ mod artifact_tests {
                 output: reference,
             });
         let cleanup = invocation_error(KernelInvocationFailure::CleanupUnconfirmed {
+            source: None,
             actor: failure.actor,
             detail: "cleanup remains unconfirmed".into(),
             receipts: cleanup_receipts,

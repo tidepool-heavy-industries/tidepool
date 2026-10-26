@@ -1881,6 +1881,7 @@ async fn handle_executor_message<B: KernelBehavior>(
                 }
                 if let Some(reply) = pending.reply.take() {
                     let _ = reply.send(Err(crate::KernelInvocationFailure::CleanupUnconfirmed {
+                        source: None,
                         receipts:Vec::new(),actor:state.context.identity,publication:None,
                         detail:"replacement ingress adoption was not confirmed; retained custody requires cleanup".into(),
                     }));
@@ -1896,6 +1897,7 @@ async fn handle_executor_message<B: KernelBehavior>(
             {
                 if let Some(reply) = pending.reply.take() {
                     let _ = reply.send(Err(crate::KernelInvocationFailure::CleanupUnconfirmed {
+                        source: None,
                         receipts:Vec::new(),actor:state.context.identity,publication:None,
                         detail:"replacement activation was not confirmed; successor retains transferred custody".into(),
                     }));

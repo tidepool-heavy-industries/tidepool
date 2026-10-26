@@ -2765,6 +2765,35 @@ fn workbench_failure_after_unit(
     failure
 }
 
+/// Freeze one failing active unit's evidence before its cursor is released.
+/// Serial and Green failures consume the same operation buffer exactly once.
+fn workbench_failure_from_active_unit(
+    cursor: &mut WorkbenchCursor,
+    total: usize,
+    source: ResidentActorWorkbenchError,
+) -> WorkbenchExecutionFailure {
+    let mut failure = workbench_failure_after_unit(
+        &cursor.receipts,
+        cursor.index,
+        total,
+        source,
+        std::mem::take(&mut cursor.unit.operations),
+        &cursor.unit.recovered_bindings,
+    );
+    if let Some(receipt) = failure
+        .receipts
+        .last_mut()
+        .filter(|receipt| receipt.index == cursor.index)
+    {
+        receipt.output = format!(
+            "{}\n{}",
+            render_effect_output(&cursor.unit.effect_output),
+            receipt.output
+        );
+    }
+    failure
+}
+
 fn merge_retained_bindings(receipt: &mut WorkbenchItemReceipt, bindings: &[String]) {
     for binding in bindings {
         if !receipt.installed_bindings.contains(binding) {
@@ -2833,6 +2862,9 @@ fn resident_actor_failure_layer(
     error: &ResidentActorWorkbenchError,
 ) -> Option<WorkbenchFailureLayer> {
     match error {
+        ResidentActorWorkbenchError::FinalizationAfterFailure { primary, .. } => {
+            resident_actor_failure_layer(primary)
+        }
         ResidentActorWorkbenchError::Compile(_)
         | ResidentActorWorkbenchError::CellCheck(_)
         | ResidentActorWorkbenchError::InputCompilation { .. }
@@ -3297,8 +3329,7 @@ where
             .runner
             .retire_context_scopes(context.clone(), scopes)
             .await
-            .err()
-            .map(|failure| format!("failed checkpoint cleanup: {failure}")),
+            .err(),
         None => None,
     };
     let cleanup_confirmed = cleanup_confirmed && checkpoint_cleanup_failure.is_none();
@@ -3320,12 +3351,7 @@ where
     let reply_refusal = result
         .as_ref()
         .err()
-        .and_then(|failure| match &failure.source {
-            ResidentActorWorkbenchError::RequestReplyRefused { request, refusal } => {
-                Some((*request, refusal.clone()))
-            }
-            _ => None,
-        });
+        .and_then(|failure| failure.source.request_reply_refusal());
     let result = match (result, checkpoint_cleanup_failure) {
         (result, None) => result,
         (Err(failure), Some(cleanup)) => Err(WorkbenchExecutionFailure {
@@ -3333,10 +3359,10 @@ where
             point: failure.point,
             publication: failure.publication,
             total: failure.total,
-            source: ResidentActorWorkbenchError::ActorProtocol(format!(
-                "{}; {cleanup}",
-                failure.source
-            )),
+            source: ResidentActorWorkbenchError::FinalizationAfterFailure {
+                primary: Box::new(failure.source),
+                secondary: Box::new(cleanup),
+            },
         }),
         (
             Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)),
@@ -3347,7 +3373,10 @@ where
                 output: response, ..
             }),
             Some(cleanup),
-        ) => Err(failed_checkpoint_cleanup_response(response, cleanup)),
+        ) => Err(failed_checkpoint_cleanup_response(
+            response,
+            cleanup.to_string(),
+        )),
     };
     let result = result.map_err(|failure| workbench_invocation_failure(context.actor, failure));
     let result = result.map_err(|source| match reply_refusal {
@@ -11443,26 +11472,11 @@ where
                                 }
                             }
                             Err(source) => {
-                                let mut failure = workbench_failure_after_unit(
-                                    &cursor.receipts,
-                                    cursor.index,
+                                return Err(workbench_failure_from_active_unit(
+                                    cursor,
                                     request.items.len(),
                                     source,
-                                    std::mem::take(&mut cursor.unit.operations),
-                                    &cursor.unit.recovered_bindings,
-                                );
-                                if let Some(receipt) = failure
-                                    .receipts
-                                    .last_mut()
-                                    .filter(|receipt| receipt.index == cursor.index)
-                                {
-                                    receipt.output = format!(
-                                        "{}\n{}",
-                                        render_effect_output(&cursor.unit.effect_output),
-                                        receipt.output
-                                    );
-                                }
-                                return Err(failure);
+                                ));
                             }
                         },
                     );
@@ -12979,11 +12993,12 @@ where
                 if let Some(detail) = cleanup.uncertainty() {
                     result = Err(KernelInvocationFailure::CleanupUnconfirmed {
                         actor,
-                        publication: None,
-                        receipts: Vec::new(),
+                        publication: result.as_ref().err().and_then(|error| error.publication()).cloned(),
+                        receipts: result.as_ref().err().map(|error| error.receipts().to_vec()).unwrap_or_default(),
                         detail: format!(
                             "tool resource cleanup unconfirmed: {detail}; original outcome: {result:?}"
                         ),
+                        source: result.err().map(Box::new),
                     });
                 }
                 let standing_can_transfer = !control
@@ -13017,11 +13032,12 @@ where
                     Err(error) => {
                         result = Err(KernelInvocationFailure::CleanupUnconfirmed {
                             actor,
-                            publication: None,
-                            receipts: Vec::new(),
+                            publication: result.as_ref().err().and_then(|error| error.publication()).cloned(),
+                            receipts: result.as_ref().err().map(|error| error.receipts().to_vec()).unwrap_or_default(),
                             detail: format!(
                                 "tool continuation cleanup unconfirmed: {error}; original outcome: {result:?}"
                             ),
+                            source: result.err().map(Box::new),
                         });
                     }
                 }

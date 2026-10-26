@@ -2493,6 +2493,7 @@ mod tests {
             assert!(control.request_cancellation());
             control.acknowledge_cancellation();
             let failure = Err(crate::KernelInvocationFailure::CleanupUnconfirmed {
+                source: None,
                 publication: None,
                 receipts: Vec::new(),
                 actor: crate::ActorRef::first(crate::ActorId(1)),

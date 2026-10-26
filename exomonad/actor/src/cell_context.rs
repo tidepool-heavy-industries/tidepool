@@ -41,7 +41,17 @@ impl CellExit {
         cancelled: bool,
     ) -> Self {
         use tidepool_runtime::session::WorkbenchRunStatus;
-        let cause = if cancelled {
+        let settled_generation_reset = cleanup_confirmed
+            && matches!(result,
+            Ok(crate::KernelStep::Continue(response) | crate::KernelStep::ContinueLater(response)
+                | crate::KernelStep::Stop { output: response, .. })
+            if response.status == WorkbenchRunStatus::Committed
+                && response.next_index == response.total
+                && matches!(response.publication,
+                    Some(tidepool_runtime::session::WorkbenchPublicationOutcome::NotPublished {
+                        reason: tidepool_runtime::session::WorkbenchNotPublishedReason::GenerationReset,
+                    })));
+        let cause = if cancelled && !settled_generation_reset {
             CellExitCause::Cancelled
         } else {
             match result {
@@ -242,6 +252,52 @@ mod tests {
                 );
                 assert_eq!(exit.cleanup_confirmed, cleanup_confirmed);
                 assert!(!exit.permits_context_commit());
+            }
+        }
+    }
+    #[test]
+    fn settled_generation_reset_beats_late_cancellation_only_after_full_return() {
+        use tidepool_runtime::session::{WorkbenchNotPublishedReason, WorkbenchPublicationOutcome};
+        for status in [
+            WorkbenchRunStatus::Committed,
+            WorkbenchRunStatus::Rejected,
+            WorkbenchRunStatus::RequestCancelled,
+        ] {
+            for cleanup in [false, true] {
+                for next_index in [1, 2] {
+                    for reason in [
+                        WorkbenchNotPublishedReason::GenerationReset,
+                        WorkbenchNotPublishedReason::Rejected,
+                    ] {
+                        let reply = Ok(crate::KernelStep::Continue(WorkbenchResponse {
+                            publication: Some(WorkbenchPublicationOutcome::NotPublished { reason }),
+                            status,
+                            summary: None,
+                            items: Vec::new(),
+                            next_index,
+                            total: 2,
+                        }));
+                        let exit = CellExit::from_reply(
+                            WorkbenchExecutionId::from_digest([8; 16]),
+                            &reply,
+                            cleanup,
+                            true,
+                        );
+                        let returned = status == WorkbenchRunStatus::Committed
+                            && cleanup
+                            && next_index == 2
+                            && reason == WorkbenchNotPublishedReason::GenerationReset;
+                        assert_eq!(
+                            exit.cause,
+                            if returned {
+                                CellExitCause::FullReturn
+                            } else {
+                                CellExitCause::Cancelled
+                            }
+                        );
+                        assert_eq!(exit.permits_context_commit(), returned);
+                    }
+                }
             }
         }
     }
