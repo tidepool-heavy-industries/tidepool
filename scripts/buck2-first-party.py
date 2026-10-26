@@ -2185,6 +2185,7 @@ tidepool_buildscript_run(
                     "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions",
                     "session::resident::activation_input_tests::active_world_item_freeze_refusal_preserves_completion_and_publication",
                     "session::resident::activation_input_tests::abandoned_private_mount_after_epoch_change_settles_only_after_scope_retirement",
+                    "session::resident::activation_input_tests::private_host_preparation_preserves_active_frontier_across_hidden_refusal_and_retirement",
                     "session::resident::activation_input_tests::checked_declaration_cancellation_after_reservation_preserves_prefix",
                     "session::resident::activation_input_tests::crossed_world_declarations_refuse_foreign_checked_prefixes_then_both_publish",
                 ]

@@ -6353,6 +6353,303 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
     assert!(prototype_lease.upgrade().is_none());
 }
 
+fn checked_text_host_carrier(
+    resident: &mut TestSession,
+    recipe: &InputRecipe,
+    execution: &Arc<crate::session::PrivateExecutionAdmission>,
+    name: &str,
+) -> HostCarrier {
+    let preparation = source_action(resident, |resident, _| {
+        resident.prepare_private_host_carrier(execution.clone(), [19; 32])
+    })
+    .unwrap();
+    let imports = SourceImports::from_specs([
+        "qualified Data.Text as TidepoolHostText",
+        "qualified Data.Text.Internal as TidepoolHostTextInternal",
+        "qualified GHC.Exts as TidepoolHostExts",
+        "qualified Tidepool.Aeson as TidepoolHostJson",
+    ]);
+    let specification = fixture_cell_recipe(
+        recipe,
+        &format!("{name} <- pure ((case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length) :: TidepoolHostText.Text)"),
+        &imports,
+    );
+    let plan = parse_fixture_cell(resident, preparation.world(), specification);
+    let admission = source_action(resident, |resident, _| {
+        resident.admit_world_planned_private_host_carrier(
+            preparation,
+            plan,
+            name.to_owned(),
+            HostBindingType::TEXT,
+            [19; 32],
+        )
+    })
+    .unwrap();
+    let original = resident.public_source.original_source().clone();
+    let prepared = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, settlement| turn::prepare_cell_program_admitted(owner, admission, settlement),
+        )
+        .unwrap();
+    let (checked, program) = turn::finish_cell_program_admitted(prepared).unwrap();
+    let prefix = resident.begin_cell_program(program).unwrap().unwrap();
+    let fixture = CheckedFixtureCell { checked, prefix };
+    let (bound, compiled, item) = fixture.compile_binding(resident, 0);
+    let [binder] = bound.as_slice() else {
+        panic!("the checked cleanup carrier has one original binder");
+    };
+    let carrier = HostCarrier::from_checked(
+        item,
+        binder.clone(),
+        compiled.into_code(),
+        HostBindingType::TEXT,
+    )
+    .unwrap();
+    carrier
+}
+
+#[test]
+fn private_host_preparation_preserves_active_frontier_across_hidden_refusal_and_retirement() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let library = SessionLib::open(
+        SessionId(1745),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident.bootstrap_world(&recipe);
+    let execution = begin_fixture_execution(&mut resident);
+    let private = execution.private_scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: private,
+            ..resident.public_context()
+        })
+        .unwrap();
+    let world = |resident: &TestSession| {
+        resident.state.lib().tips[&private]
+            .inspection_world
+            .as_ref()
+            .unwrap()
+            .world
+            .clone()
+    };
+    let carrier = checked_text_host_carrier(&mut resident, &recipe, &execution, "acceptedHost");
+    resident.retain_host_binding_prototype(&carrier).unwrap();
+    let prototype = resident
+        .host_binding_prototype(HostBindingType::TEXT, [19; 32])
+        .unwrap();
+    let before_ready = world(&resident);
+    let mut accepted = source_action(&mut resident, |resident, settlement| {
+        resident.mount_private_visible_host_input(
+            &execution,
+            &carrier,
+            HostPayload::Text("visible"),
+            settlement,
+        )
+    })
+    .unwrap();
+    accepted.accept().unwrap();
+    assert!(Arc::ptr_eq(&before_ready, &world(&resident)));
+    source_action(&mut resident, |resident, _| {
+        resident.prepare_private_host_carrier(execution.clone(), [19; 32])
+    })
+    .unwrap();
+    assert!(
+        !Arc::ptr_eq(&before_ready, &world(&resident)),
+        "Ready preparation reconciles the accepted host"
+    );
+
+    let (bound, compiled, reservation) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        "pendingPrivate <- pure (41 :: Int)",
+        execution.clone(),
+    );
+    let active_world = world(&resident);
+    let preparation = source_action(&mut resident, |resident, _| {
+        resident.prepare_private_host_carrier(execution.clone(), [19; 32])
+    })
+    .unwrap();
+    let repeated = source_action(&mut resident, |resident, _| {
+        resident.prepare_private_host_carrier(execution.clone(), [19; 32])
+    })
+    .unwrap();
+    assert!(
+        Arc::ptr_eq(&active_world, &world(&resident)),
+        "Active preparation preserves the parked predecessor"
+    );
+    assert_eq!(
+        preparation.world().logical_id(),
+        repeated.world().logical_id()
+    );
+    assert!(Arc::ptr_eq(
+        &prototype,
+        &resident
+            .host_binding_prototype(HostBindingType::TEXT, [19; 32])
+            .unwrap()
+    ));
+
+    let wrong_authority = source_action(&mut resident, |resident, _| {
+        resident.prepare_private_host_carrier(execution.clone(), [20; 32])
+    })
+    .unwrap();
+    let generation = resident.state.val_gen();
+    let error = source_action(&mut resident, |resident, _| {
+        resident.admit_private_host_binding_interface(
+            wrong_authority,
+            "wrongAuthority".into(),
+            prototype.clone(),
+        )
+    })
+    .err()
+    .expect("a prototype cannot cross the preparation authority");
+    assert!(matches!(
+        error,
+        ResidentError::Session(SessionError::StaleStagedDeclaration)
+    ));
+    assert_eq!(
+        resident.state.val_gen(),
+        generation,
+        "refusal cannot allocate a value generation"
+    );
+    assert!(Arc::ptr_eq(&active_world, &world(&resident)));
+
+    let admission = source_action(&mut resident, |resident, _| {
+        resident.admit_private_host_binding_interface(
+            preparation.clone(),
+            "hiddenHost".into(),
+            prototype.clone(),
+        )
+    })
+    .unwrap();
+    let interface = source_action(&mut resident, |_, settlement| {
+        tidepool_toolchain::artifacts::issue_host_binding_interface(
+            prototype.compiler().clone(),
+            admission.digest(),
+            admission.generation().0,
+            admission.binding(),
+            prototype.include_paths(),
+            settlement,
+        )
+    })
+    .unwrap();
+    let certificate = interface.value_interface_certificate();
+    let hidden = HostCarrier::from_interface(admission, interface).unwrap();
+    let visibility = resident.public_visibility_snapshot_in(private).unwrap();
+    let key = resident.state.compile_view_key_in(private).unwrap();
+    let original = resident.public_source.original_source().clone();
+    let error = resident
+        .with_invocation_cancel(
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            |resident| {
+                source_action_with_original(resident, original, |resident, settlement| {
+                    resident.mount_private_hidden_host_input(
+                        &execution,
+                        &hidden,
+                        HostPayload::Text("hidden"),
+                        settlement,
+                    )
+                })
+            },
+        )
+        .err()
+        .expect("cancelled hidden mount refuses before consuming its reservation");
+    assert!(matches!(
+        error,
+        ResidentError::Prepared(PreparedRuntimeError::Cancelled)
+    ));
+    assert_eq!(
+        resident.public_visibility_snapshot_in(private),
+        Some(visibility.clone())
+    );
+    assert_eq!(resident.state.compile_view_key_in(private), Some(key));
+    assert!(Arc::ptr_eq(&active_world, &world(&resident)));
+    assert_eq!(execution.pending_host_count(), 0);
+    assert!(resident
+        .state
+        .retained_checked_value_artifact(certificate.owner())
+        .is_none());
+
+    let mut mounted = source_action(&mut resident, |resident, settlement| {
+        resident.mount_private_hidden_host_input(
+            &execution,
+            &hidden,
+            HostPayload::Text("hidden"),
+            settlement,
+        )
+    })
+    .expect("the same interface reservation remains usable after cancellation");
+    assert_eq!(execution.pending_host_count(), 1);
+    assert!(!resident
+        .binding_names_in(private)
+        .iter()
+        .any(|name| name == "hiddenHost"));
+    assert!(
+        resident
+            .public_visibility_snapshot_in(private)
+            .unwrap()
+            .bindings
+            .iter()
+            .any(|(name, _)| name == "hiddenHost"),
+        "publication identity retains hidden custody independently of name visibility"
+    );
+    assert!(Arc::ptr_eq(&active_world, &world(&resident)));
+    source_action(&mut resident, |resident, _| {
+        resident.prepare_private_host_carrier(execution.clone(), [19; 32])
+    })
+    .unwrap();
+    resident
+        .retire_private_host_binding_lease(&mut mounted)
+        .unwrap();
+    assert_eq!(execution.pending_host_count(), 0);
+    assert!(Arc::ptr_eq(&active_world, &world(&resident)));
+    let outcome = source_action(&mut resident, |resident, settlement| {
+        resident.run_bind_with_sites(
+            "pendingPrivate",
+            compiled.code(),
+            &bound[0],
+            reservation.generation(),
+            settlement,
+        )
+    })
+    .expect("the original Active prefix survives hidden mount refusal, reuse and retirement");
+    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+    let generation = resident.state.val_gen();
+    assert!(
+        source_action(&mut resident, |resident, _| {
+            resident.admit_private_host_binding_interface(
+                preparation,
+                "staleActive".into(),
+                prototype,
+            )
+        })
+        .is_err(),
+        "completion fences the earlier Active preparation"
+    );
+    assert_eq!(resident.state.val_gen(), generation);
+    publish_checked_fixture(&mut resident, &execution, 2);
+    original_value_probe(&mut resident, &recipe, "pendingPrivate + 1", 42);
+}
+
 #[test]
 fn abandoned_private_mount_after_epoch_change_settles_only_after_scope_retirement() {
     tidepool_testing::eval_harness::require_extract();
@@ -6385,57 +6682,8 @@ fn abandoned_private_mount_after_epoch_change_settles_only_after_scope_retiremen
             ..resident.public_context()
         })
         .unwrap();
-    let preparation = source_action(&mut resident, |resident, _| {
-        resident.prepare_private_host_carrier(execution.clone(), [19; 32])
-    })
-    .unwrap();
-    let imports = SourceImports::from_specs([
-        "qualified Data.Text as TidepoolHostText",
-        "qualified Data.Text.Internal as TidepoolHostTextInternal",
-        "qualified GHC.Exts as TidepoolHostExts",
-        "qualified Tidepool.Aeson as TidepoolHostJson",
-    ]);
-    let specification = fixture_cell_recipe(
-        &recipe,
-        "cleanupInput <- pure ((case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length) :: TidepoolHostText.Text)",
-        &imports,
-    );
-    let plan = parse_fixture_cell(&mut resident, preparation.world(), specification);
-    let admission = source_action(&mut resident, |resident, _| {
-        resident.admit_world_planned_private_host_carrier(
-            preparation,
-            plan,
-            "cleanupInput".to_owned(),
-            HostBindingType::TEXT,
-            [19; 32],
-        )
-    })
-    .unwrap();
-    let original = resident.public_source.original_source().clone();
-    let prepared = original
-        .with_source_compiler_transaction(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            crate::CompilerTransactionCancellation::new(),
-            None,
-            |_| {},
-            |owner, settlement| turn::prepare_cell_program_admitted(owner, admission, settlement),
-        )
-        .unwrap();
-    let (checked, program) = turn::finish_cell_program_admitted(prepared).unwrap();
-    let prefix = resident.begin_cell_program(program).unwrap().unwrap();
-    let fixture = CheckedFixtureCell { checked, prefix };
-    let (bound, compiled, item) = fixture.compile_binding(&mut resident, 0);
-    let [binder] = bound.as_slice() else {
-        panic!("the checked cleanup carrier has one original binder");
-    };
-    let binding = SessionVarId::from_extract(binder.var_id);
-    let carrier = HostCarrier::from_checked(
-        item,
-        binder.clone(),
-        compiled.into_code(),
-        HostBindingType::TEXT,
-    )
-    .unwrap();
+    let carrier = checked_text_host_carrier(&mut resident, &recipe, &execution, "cleanupInput");
+    let binding = SessionVarId::from_extract(carrier.binding().unwrap().var_id);
     let lease = source_action(&mut resident, |resident, settlement| {
         resident.mount_private_visible_host_input(
             &execution,
