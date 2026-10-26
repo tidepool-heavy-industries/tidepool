@@ -3,7 +3,7 @@ module Main (main, tests) where
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
 import Test.Tasty (withResource)
 import SourceBootCases
-import CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, completedRequestOwnerBoundaries, completedRequestScopeRelease, checkedRequestOwnerBoundaries, compilerScopeCleanupFailure)
+import CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, originalUseClosureChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, completedRequestOwnerBoundaries, completedRequestScopeRelease, checkedRequestOwnerBoundaries, compilerScopeCleanupFailure)
 import CompilerRequestTest (checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries)
@@ -26,6 +26,7 @@ tests = testGroup "source-boot"
   , testCase "compiler receipt symbol parents use null or text" nativeReceiptIdentityChecks
   , testCase "finite native output separates package products with captured interfaces" nativePackageOutputChecks
   , testCase "target package roots are unchanged after stage issuance" packageTargetRootDriftRefusal
+  , testCase "Original use certification follows actual witness and local HOME closure" originalUseClosureChecks
   , testCase "native output requires admitted provenance and portable stays explicit" nativeOutputProvenanceChecks
   , testCase "completed compiler request histories" completedRequestHistories
   , testCase "compiler service boot admission boundaries" compilerServiceBootBoundaries

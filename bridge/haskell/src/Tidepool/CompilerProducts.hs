@@ -574,10 +574,10 @@ data PreparedProductContext = PreparedProductContext
 
 data PreparedPackageOutputs = PreparedPackageOutputs
   ![(FilePath,BS.ByteString)] !(Map.Map (T.Text,T.Text) (FilePath,ArtifactBytes))
-  !PackageLinkIndex
+  !PackageLinkIndex ![PreparedPackageTarget]
 
 emptyPreparedPackageOutputs :: PreparedPackageOutputs
-emptyPreparedPackageOutputs = PreparedPackageOutputs [] Map.empty emptyPackageLinkIndex
+emptyPreparedPackageOutputs = PreparedPackageOutputs [] Map.empty emptyPackageLinkIndex []
 
 -- The active stage supplies deployment provenance; the paired projection and
 -- its captured interfaces supply code and byte custody. The writer only copies
@@ -670,7 +670,7 @@ retainPreparedPackageTargets provenance targets captures context = do
     links <- either fail pure
       (issuePackageLinkIndex occurrenceFacts ownersByTarget targetRoots
         homeRoots expectedHomeRoots priorHomeGroups originalRoots products)
-    pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces links}
+    pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces links targets}
   where
     insertOwner owners (binder,occurrence)
       | Map.member binder owners = fail ("package target repeats an exported binder: " ++ show binder)
@@ -1383,7 +1383,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
     let hscEnv = prHscEnv (pprPipelineResult prepared)
     timing <- readTimingEnabled
     issued <- traverse (admitCurrentOriginalProducts originalInterfaces outDir prepared) productContext
-    let PreparedPackageOutputs packageWrites packageInterfaces packageLinks =
+    let PreparedPackageOutputs packageWrites packageInterfaces packageLinks validationTargets =
           maybe emptyPreparedPackageOutputs preparedPackageOutputs issued
         capturedPackages = Map.map (\(path,body) -> (outDir </> path,body)) packageInterfaces
     forM_ packageWrites $ \(relative,bytes) -> do
@@ -1473,7 +1473,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         [(preparedCandidateOriginal admission,preparedCandidateRoots admission)
         | admission <- pprCandidateAdmissions prepared]
         (compilationScope <$> preparedExactCompilation prepared)
-        (map moduleProductInput freshProducts) targets
+        (map moduleProductInput freshProducts) targets validationTargets
         finalDependencies productBytes evidenceBytes
       case certified of
         Right (bytes,versions,context,writes) -> do

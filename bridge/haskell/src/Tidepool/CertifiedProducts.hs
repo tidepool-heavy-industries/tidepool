@@ -11,7 +11,9 @@ module Tidepool.CertifiedProducts
   , resolvePackageGlobal, captureSelectedPackageWitnesses, homeInterfaceUsageOwners, readyNativeProductSourceSha256
   , PackageOccurrence, PackageLinks, PackageLinkIndex
   , emptyPackageLinks, emptyPackageLinkIndex, encodePackageLinks
-  , validatePackageTargetRoots ) where
+  , validatePackageTargetRoots
+  , OriginalUseClosureFailure(..), validateOriginalUseClosure
+  , WitnessOwnerFor(..) ) where
 
 import Prelude hiding (product)
 import Codec.CBOR.Encoding
@@ -62,7 +64,7 @@ import Tidepool.ExecutionSchema
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection
   ( PreparedPackageTarget, packageTargetName, packageTargetProgram, packageTargetImports
-  , packageTargetOriginalImports, packageTargetPriorHomeImports )
+  , packageTargetOriginalImports, packageTargetPriorHomeImports, packageTargetLocalHomeBindings )
 import Tidepool.ExactScope
   ( ExactScope , scopeProducts, scopeInterfaces, ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , WorldOriginalReference, worldOriginalReferenceOwner, worldOriginalReferenceBindings
@@ -293,6 +295,55 @@ data TargetCertificationContext = TargetCertificationContext
   , targetPackageLinkIndex :: PackageLinkIndex
   }
 
+-- These are observations, not a source of compilation or certificate authority.
+data OriginalUseClosureFailure reference
+  = OriginalUseMissingLocalBinding SymbolIdentity
+  | OriginalUseMissingGroup BinderOwner
+  | OriginalUseKeysDiffer Int Int [(reference,SymbolIdentity)] [(reference,SymbolIdentity)]
+  deriving (Eq, Show)
+
+validateOriginalUseClosure
+  :: Ord reference => Map.Map SymbolIdentity BinderOwner
+  -> Map.Map BinderOwner [GlobalWitnessFor reference]
+  -> Set.Set SymbolIdentity
+  -> [GlobalWitnessFor reference]
+  -> Set.Set (reference,SymbolIdentity)
+  -> Either (OriginalUseClosureFailure reference) ()
+validateOriginalUseClosure binders groups localBindings witnesses declared = do
+  roots <- forM (Set.toAscList localBindings) $ \identity ->
+    maybe (Left (OriginalUseMissingLocalBinding identity)) Right (Map.lookup identity binders)
+  actual <- visit Set.empty Set.empty roots witnesses
+  unless (actual == declared)
+    (Left (OriginalUseKeysDiffer (Set.size (actual `Set.difference` declared))
+      (Set.size (declared `Set.difference` actual))
+      (take 3 (Set.toAscList (actual `Set.difference` declared)))
+      (take 3 (Set.toAscList (declared `Set.difference` actual)))))
+  where
+    visit seen uses pending ((identity,_,_,_,owner):rest) = case owner of
+      OriginalBindingOwner reference -> visit seen (Set.insert (reference,identity) uses) pending rest
+      SourceOwner unit name version ordinal -> visit seen uses ((unit,name,version,ordinal):pending) rest
+      _ -> visit seen uses pending rest
+    visit _ uses [] [] = Right uses
+    visit seen uses (coordinate:pending) []
+      | coordinate `Set.member` seen = visit seen uses pending []
+      | otherwise = do
+          imports <- maybe (Left (OriginalUseMissingGroup coordinate)) Right (Map.lookup coordinate groups)
+          visit (Set.insert coordinate seen) uses pending imports
+
+validateTargetOriginalUses :: T.Text -> TargetCertificationContext -> Set.Set SymbolIdentity
+  -> [GlobalWitness] -> Set.Set (WorldOriginalReference,SymbolIdentity) -> Either String ()
+validateTargetOriginalUses target context roots witnesses declared =
+  case validateOriginalUseClosure (targetBinderOwners context) (targetGroupWitnesses context)
+      roots witnesses declared of
+    Right () -> Right ()
+    Left failure -> Left $ "Original use target " ++ take 160 (T.unpack target) ++ ": " ++ case failure of
+      OriginalUseMissingLocalBinding identity -> "closure lacks local HOME binding " ++ take 320 (show identity)
+      OriginalUseMissingGroup coordinate -> "closure lacks certified HOME group " ++ take 320 (show coordinate)
+      OriginalUseKeysDiffer missing extra missingSample extraSample -> "keys differ from final executable closure: missing="
+        ++ show missing ++ "; extra=" ++ show extra
+        ++ "; missing sample=" ++ take 640 (show missingSample)
+        ++ "; extra sample=" ++ take 640 (show extraSample)
+
 -- A checked item's exact program and selected roots, bound to the immutable
 -- stage certificate that owns the occurrence table. The item does not copy that
 -- table; consumers authenticate this reference before selecting its closure.
@@ -302,6 +353,7 @@ data ItemPackageSelection = ItemPackageSelection
   , itemSelectionTarget :: !T.Text
   , itemSelectionTargetRoots :: [Word32]
   , itemSelectionHomeRoots :: Map.Map (T.Text,T.Text,T.Text,Word) [Word32]
+  , itemSelectionLocalHomeBindings :: Set.Set SymbolIdentity
   , itemSelectionOriginalRoots :: Map.Map (T.Text,WorldOriginalReference,SymbolIdentity) [(SymbolIdentity,Word32)]
   }
 
@@ -336,6 +388,7 @@ selectItemPackage context target = do
         | ((homeTarget,unit,moduleName,original), roots) <-
             Map.toAscList (packageLinkIndexHomeRoots index)
         , homeTarget == name ]
+    , itemSelectionLocalHomeBindings = packageTargetLocalHomeBindings target
     , itemSelectionOriginalRoots = originalRoots
     }
 
@@ -522,14 +575,16 @@ data OwnerCoordinate
   | OriginalBindingCoordinate WorldOriginalReference
   deriving (Eq, Ord)
 
-data WitnessOwner
+data WitnessOwnerFor reference
   = SourceOwner T.Text T.Text (Maybe T.Text) Word
   | RetainedOwner Word64
-  | OriginalBindingOwner WorldOriginalReference
+  | OriginalBindingOwner reference
   | PackageOwner T.Text T.Text T.Text
   deriving (Eq, Ord)
 
-type GlobalWitness = (SymbolIdentity, RuntimeRep, Maybe Signature, Bool, WitnessOwner)
+type WitnessOwner = WitnessOwnerFor WorldOriginalReference
+type GlobalWitnessFor reference = (SymbolIdentity, RuntimeRep, Maybe Signature, Bool, WitnessOwnerFor reference)
+type GlobalWitness = GlobalWitnessFor WorldOriginalReference
 
 ownerCoordinate :: WitnessOwner -> Maybe OwnerCoordinate
 ownerCoordinate (SourceOwner unit name version _) = Just (SourceCoordinate unit name version)
@@ -627,7 +682,7 @@ encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env source
         Left reason -> pure (Left reason)
         Right captured -> fmap (fmap (\(bytes,versions,context,_) -> (bytes,versions,context))) $
           encodeCertifiedOriginalProductsWithCapture Nothing Nothing Nothing [] Map.empty issued Map.empty kind retained emittedSeals reconciled env sourceRecipe
-            interfaces finalized captured exact fresh targets evidence productBytes evidenceBytes
+            interfaces finalized captured exact fresh targets DataOnlyTargets evidence productBytes evidenceBytes
 
 -- Prior facts come from this same issuer's completed stage. They add imported
 -- group coordinates and retained type seals, never newly emitted module rows.
@@ -641,10 +696,15 @@ encodeCertifiedOriginalProductsWithPrior
   -> ReconciledOriginalProducts
   -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [(ModuleCandidate,PackageImportEvidence)] -> Maybe ExactScope
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
-  -> [(String, WireProgram)]
+  -> [(String, WireProgram)] -> [PreparedPackageTarget]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext, [(FilePath,BS.ByteString)]))
-encodeCertifiedOriginalProductsWithPrior outDir = encodeCertifiedOriginalProductsWithCapture (Just outDir)
+encodeCertifiedOriginalProductsWithPrior outDir prior originalInterfaces packageProducts capturedPackages packageLinks currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets validationTargets =
+  encodeCertifiedOriginalProductsWithCapture (Just outDir) prior originalInterfaces packageProducts capturedPackages packageLinks currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets (NativeTargets validationTargets)
+
+-- Only the standalone DATA wrapper can select this mode. Native certification
+-- always retains the opaque final package targets, independent of output paths.
+data TargetValidation = DataOnlyTargets | NativeTargets [PreparedPackageTarget]
 
 encodeCertifiedOriginalProductsWithCapture
   :: Maybe FilePath -> Maybe TargetCertificationContext -> Maybe OriginalInterfaceArtifacts
@@ -656,10 +716,13 @@ encodeCertifiedOriginalProductsWithCapture
   -> ReconciledOriginalProducts
   -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [(ModuleCandidate,PackageImportEvidence)] -> Maybe ExactScope
   -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
-  -> [(String, WireProgram)]
+  -> [(String, WireProgram)] -> TargetValidation
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext, [(FilePath,BS.ByteString)]))
-encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces packageProducts capturedPackages packageLinks currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cachedWithPackages exact fresh targets evidence productBytes evidenceBytes = do
+encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces packageProducts capturedPackages packageLinks currentReferences kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cachedWithPackages exact fresh targets validation evidence productBytes evidenceBytes = do
+  let validationTargets = case validation of
+        DataOnlyTargets -> []
+        NativeTargets retainedTargets -> retainedTargets
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolveGlobal, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -825,6 +888,18 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
               at (programSignatures program) (fromIntegral index))
             (globalRequiredEvaluated global) (globalRequiredGeneration global)
         pure (target, sequence globals)
+      -- Validation-only segment targets must not add observations to the wire
+      -- package table or interned witness rows.
+      validationPackageRef <- newIORef []
+      validationRows <- forM validationTargets $ \target -> do
+        let program = packageTargetProgram target
+        globals <- forM (programGlobals program) $ \global ->
+          encodeGlobalWitness env resolvePackage validationPackageRef originalReferences ownerMap homeModules
+            (globalIdentity global) (globalRep global)
+            (globalEntrySignature global >>= \(SignatureId index) ->
+              at (programSignatures program) (fromIntegral index))
+            (globalRequiredEvaluated global) (globalRequiredGeneration global)
+        pure (target, sequence globals)
       certifyLocalPackageExports env resolvePackage packageRef (map snd targets)
       observedPackages <- readIORef packageRef
       -- Canonical sidecars also own direct TYPE-only and reexport-facade
@@ -880,6 +955,7 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
             ++ [reason | Left reason <- retainedPackages]
             ++ [errorText | (_, _, Left errorText) <- modules]
             ++ [errorText | (_, Left errorText) <- targetRows]
+            ++ [errorText | (_, Left errorText) <- validationRows]
             ++ ["package interface changed during certification" | not packagesValid]
             ++ ["package owner selected more than one interface" |
                 any ((/= 1) . Set.size) (Map.elems packages)]
@@ -997,6 +1073,52 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                 (Map.union groupWitnesses (maybe Map.empty targetGroupWitnesses prior))
                 packageLinks
           pure $ do
+            -- The native writer retains every final target, including targets
+            -- with no Original or package uses. The standalone DATA encoder has
+            -- no native target owner and keeps its separate empty-link contract.
+            case validation of
+              DataOnlyTargets -> do
+                unless (Map.null originalReferences && null (packageLinkIndexOccurrences packageLinks)
+                    && Map.null (packageLinkIndexOriginalRoots packageLinks)
+                    && maybe True (const False) prior)
+                  (Left "DATA-only certification received native Original or package authority")
+                forM_ targetRowsReady $ \(name,witnesses) ->
+                  validateTargetOriginalUses (T.pack name) context Set.empty witnesses Set.empty
+              NativeTargets _ -> do
+                let retainedNames = Set.fromList (map packageTargetName validationTargets)
+                    requiredNames = Set.unions
+                      [Map.keysSet (packageLinkIndexTargetRoots packageLinks)
+                      ,Map.keysSet (packageLinkIndexTargetOwners packageLinks)
+                      ,Set.fromList [name | (name,_,_,_) <- Map.keys (packageLinkIndexHomeRoots packageLinks)]
+                      ,Map.keysSet (packageLinkIndexPriorHomeGroups packageLinks)
+                      ,Set.fromList [name | (name,_,_) <- Map.keys (packageLinkIndexOriginalRoots packageLinks)]]
+                unless (length validationTargets == Set.size retainedNames && retainedNames == requiredNames)
+                  (Left "final validation target census differs from issued package targets")
+                case kind of
+                  SegmentOriginalFacts -> Right ()
+                  OrdinaryProductFacts -> do
+                    let actualPrograms = Map.fromList [(T.pack name,encodeWireProgram program) | (name,program) <- targets]
+                        retainedPrograms = Map.fromList [(packageTargetName target,encodeWireProgram (packageTargetProgram target))
+                          | target <- validationTargets]
+                    unless (length targets == Map.size actualPrograms && actualPrograms == retainedPrograms)
+                      (Left "serialized ordinary targets differ from retained final targets")
+            forM_ validationRows $ \(target,result) -> do
+              witnesses <- result
+              validateTargetOriginalUses (packageTargetName target) context (packageTargetLocalHomeBindings target)
+                witnesses (Map.keysSet (packageTargetOriginalImports target))
+              let name = packageTargetName target
+                  declared = Map.fromList
+                    [((reference,binder),map fst roots)
+                    | ((targetName,reference,binder),roots) <- Map.toAscList (packageLinkIndexOriginalRoots packageLinks)
+                    , targetName == name]
+              unless (declared == packageTargetOriginalImports target)
+                (Left "Original use package roots differ from final target")
+              roots <- forM [identity | (identity,_,_,_,PackageOwner _ _ _) <- witnesses] $ \identity ->
+                maybe (Left "validation target package import lacks its occurrence") Right
+                  (Map.lookup identity (Map.findWithDefault Map.empty name (packageLinkIndexTargetOwners packageLinks)))
+              validatePackageTargetRoots
+                (Map.singleton name (Map.findWithDefault [] name (packageLinkIndexTargetRoots packageLinks)))
+                (Map.singleton name roots)
             forM_ (Map.elems (packageLinkIndexPriorHomeGroups packageLinks)) $ \groups ->
               if Map.null groups then Right () else case prior of
                 Nothing -> Left "prior HOME package root lacks its immediate predecessor"
@@ -1095,6 +1217,8 @@ certifyItemProducts env context selection = do
   pure $ do
     witnesses <- sequence globals
     additions <- catMaybes <$> sequence validated
+    validateTargetOriginalUses (itemSelectionTarget selection) context (itemSelectionLocalHomeBindings selection) witnesses
+      (Set.fromList [(reference,binder) | (_,reference,binder) <- Map.keys (itemSelectionOriginalRoots selection)])
     let bytes = toStrictByteString $ array [encodeString "TPCERT",encodeWord 13,
           array [encodeString "segment-item",list encodeFullWitness witnesses,
             list (\((unit,name),path,seal) -> array [encodeString unit,encodeString name,

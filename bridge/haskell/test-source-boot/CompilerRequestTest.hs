@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, completedRequestOwnerBoundaries, completedRequestScopeRelease, checkedRequestOwnerBoundaries, compilerScopeCleanupFailure, checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries) where
+module CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, originalUseClosureChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, completedRequestOwnerBoundaries, completedRequestScopeRelease, checkedRequestOwnerBoundaries, compilerScopeCleanupFailure, checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -45,7 +45,7 @@ import System.FilePath ((</>), takeFileName, takeDirectory)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
   ( prepareCompilerProjectionContext, prepareOriginalProducts, newPreparedOriginalInterfaceArtifacts
-  , retainPreparedPackageTargets, writeCertifiedSegmentProducts
+  , retainPreparedPackageTargets, writeCertifiedSegmentProducts, publishStagedOriginalProducts
   , writeCertifiedSegmentItemProductsWithInputs )
 import Tidepool.CompilerRequest
 import Tidepool.ExtractRequest
@@ -60,7 +60,8 @@ import Tidepool.ExactHydration (CheckedTemplateImports(..), generatedCheckingTem
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
   ( captureSelectedPackageWitnesses, encodeReceiptIdentity
-  , validatePackageTargetRoots )
+  , validatePackageTargetRoots, validateOriginalUseClosure, OriginalUseClosureFailure(..)
+  , WitnessOwnerFor(..) )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
 import qualified Crypto.Hash.SHA256 as SHA256
 
@@ -89,6 +90,62 @@ packageTargetRootDriftRefusal = do
     Left reason
       | "target package roots changed" `isInfixOf` reason -> pure ()
     other -> fail ("target root mutation was not refused: " ++ show other)
+
+-- Symbolic references test the pure observation graph; they cannot construct a
+-- production World reference, certification context, or executable target.
+originalUseClosureChecks :: IO ()
+originalUseClosureChecks = do
+  let symbol name = SymbolIdentity (Text.pack "main") (Text.pack "Observed")
+        (Text.pack "value") (Text.pack name) Nothing
+      root = symbol "root"
+      auxiliary = symbol "auxiliary"
+      original = symbol "original"
+      alias = symbol "alias"
+      zero = symbol "zeroPackageLeaves"
+      coordinate ordinal = (Text.pack "main",Text.pack "Observed",Nothing,ordinal)
+      witness identity owner = (identity,Wire.LiftedRefRep,Nothing,False,owner)
+      source ordinal = SourceOwner (Text.pack "main") (Text.pack "Observed") Nothing ordinal
+      binders = Map.fromList [(root,coordinate 0),(auxiliary,coordinate 2)]
+      groups = Map.fromList
+        [(coordinate 0,[witness root (source 1)])
+        ,(coordinate 1,[witness root (source 0),witness original (OriginalBindingOwner (1 :: Int))
+          ,witness alias (OriginalBindingOwner 1)])
+        ,(coordinate 2,[witness zero (OriginalBindingOwner 2)])]
+      globals = [witness root (source 0)]
+      locals = Set.singleton auxiliary
+      expected = Set.fromList [(1,original),(1,alias),(2,zero)]
+      check = validateOriginalUseClosure binders groups locals globals
+      require label value = unless value (fail label)
+  require "cycle/alias/auxiliary HOME/zero-leaf closure refused" (check expected == Right ())
+  require "missing Original use accepted" (check (Set.delete (1,alias) expected)
+    == Left (OriginalUseKeysDiffer 1 0 [(1,alias)] []))
+  require "extra Original use accepted" (check (Set.insert (3,original) expected)
+    == Left (OriginalUseKeysDiffer 0 1 [] [(3,original)]))
+  require "crossed Original reference accepted" (check (Set.insert (3,zero) (Set.delete (2,zero) expected))
+    == Left (OriginalUseKeysDiffer 1 1 [(2,zero)] [(3,zero)]))
+  require "zero-package-leaf Original use was dropped" (check (Set.delete (2,zero) expected)
+    == Left (OriginalUseKeysDiffer 1 0 [(2,zero)] []))
+  require "missing independent local binding accepted"
+    (validateOriginalUseClosure Map.empty groups locals globals expected
+      == Left (OriginalUseMissingLocalBinding auxiliary))
+  require "missing transitive HOME group accepted"
+    (validateOriginalUseClosure binders (Map.delete (coordinate 1) groups) locals globals expected
+      == Left (OriginalUseMissingGroup (coordinate 1)))
+  -- Fixed-point set expansion is an independent oracle for all root subsets,
+  -- including empty selection. Root order and repeated references cannot alter it.
+  forM_ [Set.fromList [i | i <- [0..2], mask `div` (2^i) `mod` 2 == (1 :: Int)]
+        | mask <- [0..7 :: Int]] $ \seeds -> do
+    let edges = Map.fromList [(0,Set.singleton 1),(1,Set.singleton 0),(2,Set.empty)]
+        expand reached = Set.union reached (Set.unions
+          [Map.findWithDefault Set.empty i edges | i <- Set.toList reached])
+        closure = until (\reached -> expand reached == reached) expand seeds
+        oracle = Set.unions
+          [if i == 1 then Set.fromList [(1,original),(1,alias)]
+           else if i == 2 then Set.singleton (2,zero) else Set.empty
+          | i <- Set.toList closure]
+        observed = [witness root (source i) | i <- Set.toList seeds]
+    require "Original-use reachability differs from independent fixed point"
+      (validateOriginalUseClosure binders groups Set.empty (observed ++ reverse observed) oracle == Right ())
 
 worldRequestSlotBoundaries :: IO ()
 worldRequestSlotBoundaries = do
@@ -975,6 +1032,20 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
                 provenance <- scopedNativeProductProvenance scope
                 stageProducts <- retainPreparedPackageTargets provenance packageTargets captures referenceProducts
                 staged <- writeCertifiedSegmentProducts [work] originalInterfaces segmentDirectory prepared stageProducts
+                void (publishStagedOriginalProducts prepared staged)
+                stageCertificate <- BS.readFile (segmentDirectory </> "certified-products.cbor")
+                case deserialiseFromBytes decodeTerm (BL.fromStrict stageCertificate) of
+                  Right (rest,TList [TString "TPCERT",TInt 13,TList
+                    [TString "segment-originals",TList modules,_,TList witnesses,_,_,_,_,_]])
+                    | BL.null rest -> do
+                      let references = Set.fromList
+                            [index | TList fields <- modules
+                            , TList groups <- take 1 (drop 8 fields)
+                            , TList [_,TList globals] <- groups
+                            , TInt index <- globals]
+                      unless (references == Set.fromList [0 .. length witnesses - 1])
+                        (fail "stage validation added witnesses outside emitted HOME groups")
+                  _ -> fail "stage validation changed the original-only certificate shape"
                 packageTarget <- maybe (fail "native artifact lost its paired package projection") pure
                   (paPackageTarget artifact)
                 createDirectory itemDirectory
