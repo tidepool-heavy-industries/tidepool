@@ -682,7 +682,7 @@ async fn durable_statement_refusal_releases_request_fence_after_waiter_drop() {
 }
 
 #[tokio::test]
-async fn durable_commit_error_fences_provider_and_releases_request_after_waiter_drop() {
+async fn durable_commit_error_keeps_provider_and_request_fenced_after_waiter_drop() {
     native_operation_sequence(true, NativeFailure::CommitError, true).await;
 }
 
@@ -987,16 +987,13 @@ async fn native_operation_sequence_with_compiler_owner(
                 .public_owner(Some(owner.clone()), false)
                 .await
                 .is_err());
-            let claim = fixture
-                .environment
-                .requests
-                .begin_cancellation_acknowledgement(context.actor, request_id)
-                .unwrap();
             assert_eq!(
-                claim.reason(),
-                crate::CancellationReason::RequesterCancelled
+                fixture
+                    .environment
+                    .requests
+                    .begin_cancellation_acknowledgement(context.actor, request_id),
+                Err(crate::ReplyError::UpdatePending)
             );
-            cancellation_claim = Some(claim);
         }
     }
     if !matches!(failure, NativeFailure::CommitError) {
@@ -1015,11 +1012,20 @@ async fn native_operation_sequence_with_compiler_owner(
         );
     }
     drop(park);
-    fixture
-        .environment
-        .requests
-        .finish_cancellation_acknowledgement(cancellation_claim.unwrap());
+    if let Some(claim) = cancellation_claim {
+        fixture
+            .environment
+            .requests
+            .finish_cancellation_acknowledgement(claim);
+    }
     if matches!(failure, NativeFailure::CommitError) {
+        assert_eq!(
+            fixture
+                .environment
+                .requests
+                .begin_cancellation_acknowledgement(context.actor, request_id),
+            Err(crate::ReplyError::UpdatePending)
+        );
         let error = fixture
             .environment
             .runner
@@ -1060,6 +1066,14 @@ async fn native_operation_sequence_with_compiler_owner(
                 .await
                 .is_ok(),
             "authenticated reopen cannot revive an old admission"
+        );
+        assert_eq!(
+            fixture
+                .environment
+                .requests
+                .begin_cancellation_acknowledgement(context.actor, request_id),
+            Err(crate::ReplyError::UpdatePending),
+            "reopening storage cannot resolve the old publication claim"
         );
     }
     // Acquire the actual next native owner entry; waiter delivery was optional.

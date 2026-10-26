@@ -1145,7 +1145,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 'resident_actor::activation_publication_tests::durable_waiter_drop_settles_native_request_before_join_delivery',
                 'resident_actor::activation_publication_tests::ephemeral_waiter_drop_settles_native_request_before_join_delivery',
                 'resident_actor::activation_publication_tests::durable_statement_refusal_releases_request_fence_after_waiter_drop',
-                'resident_actor::activation_publication_tests::durable_commit_error_fences_provider_and_releases_request_after_waiter_drop',
+                'resident_actor::activation_publication_tests::durable_commit_error_keeps_provider_and_request_fenced_after_waiter_drop',
                 'resident_actor::provider_owner_tests::commit_error_fences_provider_and_sibling_owners_until_authenticated_reopen',
                 'resident_actor::owned_workbench::publication_tests::prepared_publication_observing_a_sibling_fence_requires_recovery',
                 'resident_actor::owned_workbench::publication_tests::prepared_publication_observing_a_sibling_fence_preserves_recovery_during_cancellation',

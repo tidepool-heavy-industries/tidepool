@@ -381,16 +381,30 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
         ],
         18 => vec![
             claim,
+            op(0, Cancel),
             op(0, LoseWaiter),
             op(0, FenceOwner),
             op(0, ObserveOwner),
             op(0, Finish(NativeOutcome::Committed)),
+            op(0, BeginAck),
+            op(0, CancelNative),
             op(0, Deliver),
             op(0, Reconcile),
             op(0, BeginReply),
-            op(0, Cancel),
             op(0, BeginAck),
             op(1, Claim(true)),
+        ],
+        19 => vec![
+            claim,
+            op(0, Cancel),
+            op(0, LoseWaiter),
+            op(0, Decide(NativeOutcome::RecoveryRequired)),
+            op(0, BeginAck),
+            op(0, DropNativeLease),
+            op(0, Reconcile),
+            op(0, ObserveOwner),
+            op(0, CancelNative),
+            op(0, BeginAck),
         ],
         _ => unreachable!("bounded guided mode"),
     };
@@ -407,7 +421,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
 
 fn histories(with_fences: bool) -> impl Strategy<Value = Vec<Operation>> {
     let arbitrary = proptest::collection::vec(operations(with_fences), 1..65);
-    let guided = (0u8..if with_fences { 19 } else { 17 }, any::<bool>()).prop_flat_map(
+    let guided = (0u8..if with_fences { 20 } else { 17 }, any::<bool>()).prop_flat_map(
         move |(mode, cancel_native)| {
             let core = guided(mode, cancel_native);
             (
@@ -507,7 +521,7 @@ impl NativeFacts {
         match self.decision() {
             Some((_, NativeOutcome::Committed)) => ExpectedNative::Committed,
             Some((_, NativeOutcome::Refused)) => ExpectedNative::Refused,
-            Some((_, NativeOutcome::RecoveryRequired)) => ExpectedNative::Refused,
+            Some((_, NativeOutcome::RecoveryRequired)) => ExpectedNative::Unknown,
             None if self
                 .accepted
                 .iter()
@@ -534,7 +548,7 @@ impl NativeFacts {
                 NativeFact::Reconciled => true,
                 _ => false,
             });
-            if terminal {
+            if terminal && !matches!(outcome, NativeOutcome::RecoveryRequired) {
                 return if outcome.committed() {
                     ExpectedCache::Published
                 } else {
@@ -703,6 +717,8 @@ struct Coverage {
     deliveries_to_lost_waiter: usize,
     unknown_with_ready_owner: usize,
     unknown_with_fenced_owner: usize,
+    uncertain_after_reconcile: usize,
+    uncertain_after_lease_loss: usize,
     fenced_replies: usize,
     fenced_acknowledgements: usize,
     native_finishes: BTreeMap<&'static str, usize>,
@@ -908,7 +924,7 @@ fn run_history(
                             claim.before_rename_failure();
                         }
                         NativeOutcome::RecoveryRequired => {
-                            claim.before_rename_failure();
+                            drop(claim);
                         }
                     }
                     model.native.accepted.push(NativeFact::Decided(outcome));
@@ -979,10 +995,12 @@ fn run_history(
                         Some((_, NativeOutcome::Committed)) => {
                             PublicationCancellation::AlreadyPublished
                         }
-                        Some((_, NativeOutcome::Refused | NativeOutcome::RecoveryRequired)) => {
+                        Some((_, NativeOutcome::Refused)) => {
                             PublicationCancellation::AlreadyTerminated
                         }
-                        None => PublicationCancellation::PendingCommitOutcome,
+                        Some((_, NativeOutcome::RecoveryRequired)) | None => {
+                            PublicationCancellation::PendingCommitOutcome
+                        }
                     };
                     prop_assert_eq!(cap.decision.request_cancellation(), expected);
                     coverage.native_cancellations += 1;
@@ -1296,15 +1314,15 @@ fn run_history(
             let model = &facts[cap.request].native;
             let expected = match model.decision() {
                 Some((_, NativeOutcome::Committed)) => PublicationPhase::Published,
-                Some((_, NativeOutcome::Refused | NativeOutcome::RecoveryRequired)) => {
-                    PublicationPhase::Terminated
+                Some((_, NativeOutcome::Refused)) => PublicationPhase::Terminated,
+                Some((_, NativeOutcome::RecoveryRequired)) | None => {
+                    PublicationPhase::CommitClaimed {
+                        cancellation_pending: model
+                            .accepted
+                            .iter()
+                            .any(|fact| matches!(fact, NativeFact::CancellationRequested)),
+                    }
                 }
-                None => PublicationPhase::CommitClaimed {
-                    cancellation_pending: model
-                        .accepted
-                        .iter()
-                        .any(|fact| matches!(fact, NativeFact::CancellationRequested)),
-                },
             };
             prop_assert_eq!(
                 cap.resources.phase(),
@@ -1366,6 +1384,25 @@ fn run_history(
                         step,
                         operation,
                         key
+                    );
+                }
+                if matches!(
+                    model.native.decision(),
+                    Some((_, NativeOutcome::RecoveryRequired))
+                ) {
+                    coverage.uncertain_after_reconcile += usize::from(
+                        model
+                            .native
+                            .accepted
+                            .iter()
+                            .any(|fact| matches!(fact, NativeFact::Reconciled)),
+                    );
+                    coverage.uncertain_after_lease_loss += usize::from(
+                        model
+                            .native
+                            .accepted
+                            .iter()
+                            .any(|fact| matches!(fact, NativeFact::LeaseLost)),
                     );
                 }
                 coverage.unknown_with_ready_owner +=
@@ -1561,6 +1598,7 @@ async fn request_activation_phase_support_covers_contract_partitions() {
         (true, 5, false),
         (false, 18, false),
         (false, 18, true),
+        (false, 19, false),
         (false, 17, false),
         (false, 17, true),
     ] {
@@ -1585,6 +1623,7 @@ async fn request_activation_phase_support_covers_contract_partitions() {
     assert!(coverage.confirmations_after_lost_waiter > 0 && coverage.deliveries_to_lost_waiter > 0);
     assert!(coverage.unknown_with_ready_owner > 0 && coverage.unknown_with_fenced_owner > 0);
     assert!(coverage.fenced_replies > 0 && coverage.fenced_acknowledgements > 0);
+    assert!(coverage.uncertain_after_reconcile > 0 && coverage.uncertain_after_lease_loss > 0);
     assert!(coverage.owner_observations > 0 && coverage.provider_publications > 0);
     assert!(coverage.native_cancellations > 0);
     assert!(coverage.owner_fences > 0 && coverage.tentative_claims_after_fence > 0);
