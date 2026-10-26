@@ -86,6 +86,7 @@ tests = testGroup "source-boot"
   , testCase "original package projection" $ originalPackageProjection
   , testCase "original product projection" $ originalProjectionProducts
   , testCase "native Original binding census decoding" nativeOriginalBindingCensusDecoding
+  , testCase "authenticated Original resolution scope admission" nativeOriginalResolutionScopeAdmission
   , testCase "native graph scheduling equality" nativeGraphSchedulingEquality
   , testCase "candidate compact inventory" $ candidateCompactInventory
   , testCase "candidate GHC load" $ candidateGhcLoad

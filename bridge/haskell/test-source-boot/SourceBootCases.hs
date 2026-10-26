@@ -24,7 +24,7 @@ import SourceBootFixtureSupport
 
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import CodecFixtureSupport
-import Tidepool.Test.CandidateCodec (writeInspectionPurposeCodecFixture)
+import Tidepool.Test.CandidateCodec (writeInspectionPurposeCodecFixture, writeOriginalResolutionScopeCodecFixture)
 import Tidepool.Test.GenuineCandidate
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
   , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope
@@ -248,7 +248,7 @@ import Tidepool.ImportAdmission
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
   , scopeLexical, scopeSourceSelectedOwners, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
-  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeAvailableNativeGroupObservations, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..)
+  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeAvailableNativeGroupObservations, scopeNativeOriginalResolution, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..)
   , scopeValueInterfaces, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, readScopedInterfaceClosure, validateExactScopeEnvironment
   , ExactScopeRequestFailure(..)
   , CanonicalOrigin(..), canonicalOrigin, isSourceOriginal
@@ -3473,6 +3473,103 @@ nativeOriginalBindingCensusDecoding = do
     refused [if i == index then pair else part | (i,part) <- zip [0::Int ..] owner]
   refused [TString "original-binding",TString "other",TString "Decl.J",binding 1 2,binding 3 4]
   refused [TString "original-binding",TString "main",TString "Decl.X",binding 1 2,binding 3 4]
+
+nativeOriginalResolutionScopeAdmission :: IO ()
+nativeOriginalResolutionScopeAdmission = withScratch $ \work -> do
+  path <- writeOriginalResolutionScopeCodecFixture work
+  (scope,fixture) <- readScopeCodecFixture path
+  original <- BS.readFile path
+  unless (toStrictByteString (encodeTerm (scopeCodecTerm fixture)) == original) $
+    fail "unmodified issued resolution scope did not decode and reencode identically"
+  fields <- case scopeCodecField ScopeCodecOriginalResolutions fixture of
+    TList [TList values] | length values == 12 -> pure values
+    _ -> fail "issued resolution fixture lacks its unique complete Original binding row"
+  observations <- either fail pure (scopeAvailableNativeGroupObservations scope)
+  let references = [(product,group,index,global)
+        | (product,groups) <- observations, group <- groups
+        , (index,global) <- zip [0..] (Native.nativeGroupGlobals group)
+        , Native.NativeOriginalBindingImport{} <- [Native.nativeGlobalImport global]]
+  (parent,group,index,global) <- case references of
+    [reference] -> pure reference
+    _ -> fail "issued resolution fixture lacks its unique authenticated Original use"
+  target@(unit,name,version,ordinal) <- either fail pure
+    (scopeNativeOriginalResolution scope parent (Native.nativeGroupOrdinal group) index global)
+  unless (originalModule parent == "OverlayParent" && Native.nativeGroupOrdinal group == 13
+      && index == 0 && name == "OverlayChild" && ordinal == 7
+      && any (\product -> originalUnit product == unit && originalModule product == name
+        && originalVersion product == version && any (\entry -> originalOrdinal entry == ordinal
+          && Native.nativeGlobalIdentity global `elem` originalBinders entry) (originalGroups product))
+          (scopeAvailableOriginalProducts scope)) $
+    fail ("issued Original resolution lost its exact parent or child group: " ++ show target)
+  let rows values = replaceScopeCodecField ScopeCodecOriginalResolutions (TList values) fixture
+      row values = rows [TList values]
+      change position value = [if i == position then value else field | (i,field) <- zip [0::Int ..] fields]
+      readChanged label changed = do
+        let candidate = work </> (label ++ ".scope.cbor")
+        BS.writeFile candidate (toStrictByteString (encodeTerm (scopeCodecTerm changed)))
+        readExactScope candidate
+      refused label expected changed = readChanged label changed >>= \case
+        Left reason | expected `isInfixOf` reason -> pure ()
+        Left reason -> fail (label ++ " reached another refusal: " ++ reason)
+        Right _ -> fail (label ++ " changed an authenticated Original resolution")
+      changedDigest (TString value) = TString $ case T.uncons value of
+        Just ('0',rest) -> T.cons '1' rest
+        Just (_,rest) -> T.cons '0' rest
+        Nothing -> T.replicate 64 "1"
+      changedDigest other = other
+      changedIndex (TInt value) = TInt (value + 1)
+      changedIndex (TInteger value) = TInteger (value + 1)
+      changedIndex _ = TInteger 4294967296
+  refused "missing-resolution" "available census observations" (rows [])
+  refused "duplicate-resolution" "duplicate native Original resolution" (rows [TList fields,TList fields])
+  refused "conflicting-resolution" "duplicate native Original resolution"
+    (rows [TList fields,TList (change 11 (changedIndex (fields !! 11)))])
+  refused "extra-resolution" "available census observations"
+    (rows [TList fields,TList (change 4 (changedIndex (fields !! 4)))])
+  forM_ [(0,TString "foreign"),(1,TString "Foreign"),(2,changedDigest (fields !! 2))
+      ,(3,changedIndex (fields !! 3)),(4,changedIndex (fields !! 4))] $ \(position,value) ->
+    refused ("source-coordinate-" ++ show position) "available census observations" (row (change position value))
+  forM_ [7,8] $ \position -> do
+    pair <- case fields !! position of
+      TList values | length values == 2 -> pure values
+      _ -> fail "issued resolution fixture lost its artifact/selection pair"
+    forM_ [0,1] $ \component -> do
+      bytes <- case pair !! component of
+        TBytes bytes | BS.length bytes == 32 -> pure bytes
+        _ -> fail "issued resolution pair lacks a 32-byte digest"
+      let replace value = TList [if i == component then value else field | (i,field) <- zip [0::Int ..] pair]
+          changed = BS.cons (BS.head bytes `xor` 1) (BS.tail bytes)
+          label = "exact-pair-" ++ show (position,component)
+      refused label "exact binding pairs or binder" (row (change position (replace (TBytes changed))))
+      refused (label ++ "-width") "binding digest width" (row (change position (replace (TBytes (BS.take 31 bytes)))))
+    refused ("pair-arity-" ++ show position) "invalid exact scope row" (row (change position (TList (pair ++ [TNull]))))
+  forM_ [(5,TString "foreign"),(6,TString "Foreign")] $ \(position,value) ->
+    refused ("target-owner-" ++ show position) "exact binding pairs or binder" (row (change position value))
+  binder <- case fields !! 9 of
+    TList [a,b,c,_,e] -> pure (TList [a,b,c,TString "foreign",e])
+    _ -> fail "issued resolution fixture lost its exact binder"
+  refused "binder" "exact binding pairs or binder" (row (change 9 binder))
+  refused "target-version" "exact available group binder" (row (change 10 (changedDigest (fields !! 10))))
+  refused "target-ordinal" "exact available group binder" (row (change 11 (changedIndex (fields !! 11))))
+  forM_ [3,4,11] $ \position ->
+    refused ("index-overflow-" ++ show position) "index exceeds u32" (row (change position (TInteger 4294967296)))
+  refused "old-scope-version" "unsupported exact scope"
+    (replaceScopeCodecField ScopeCodecVersion (TString "16") fixture)
+  let withoutGroups owner = case scopeCodecField ScopeCodecNativeProducts fixture of
+        TList entries -> replaceScopeCodecField ScopeCodecNativeProducts (TList
+          [case entry of
+            TList values@(TString u:TString m:_) | (T.unpack u,T.unpack m) == owner -> TList
+              [case i of 6 -> TList []; 8 -> TList [TString "issued-groups",TList []]; _ -> value
+                | (i,value) <- zip [0::Int ..] values]
+            _ -> entry | entry <- entries]) fixture
+        _ -> fixture
+  refused "unavailable-target" "exact available group binder" (withoutGroups (unit,name))
+  let unavailableParent = replaceScopeCodecField ScopeCodecOriginalResolutions (TList [])
+        (withoutGroups (originalUnit parent,originalModule parent))
+  narrowed <- readChanged "unavailable-source" unavailableParent >>= either fail pure
+  narrowedGroups <- either fail pure (scopeAvailableNativeGroupObservations narrowed)
+  unless (all (\(product,groups) -> originalModule product /= originalModule parent || null groups) narrowedGroups) $
+    fail "unavailable source retained native dependency observations"
 
 originalProjectionProducts :: IO ()
 originalProjectionProducts = withScratch $ \work ->

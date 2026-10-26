@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- Typed structural candidate inputs from the production codec. These packets
--- carry no compiler capture, protected grant, or executable authority.
+-- Typed fixture requests consumed by production codecs and certifiers.
 module Tidepool.Test.CandidateCodec
   ( CandidateCodecCase(..), writeCandidateCodecFixture
-  , writeEmptyScopeCodecFixture, writeInspectionPurposeCodecFixture ) where
+  , writeEmptyScopeCodecFixture, writeInspectionPurposeCodecFixture
+  , writeOriginalResolutionScopeCodecFixture ) where
 
 import Codec.CBOR.Term (Term(..), encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
@@ -34,6 +34,13 @@ writeEmptyScopeCodecFixture :: FilePath -> IO FilePath
 writeEmptyScopeCodecFixture work = do
   issueCodecFixturePacket work ("scope" </> "exact-declaration-scope.cbor") (toStrictByteString (encodeTerm
     (TList [TString "TPCODECFIXTURE1", TString "scope_empty", TList []])))
+
+-- Actual Rust certifier issuance supplies scope-admission facts. This fixture
+-- does not establish GHC interface hydration or executable retained captures.
+writeOriginalResolutionScopeCodecFixture :: FilePath -> IO FilePath
+writeOriginalResolutionScopeCodecFixture work =
+  issueCodecFixturePacket work ("scope" </> "exact-declaration-scope.cbor") (toStrictByteString (encodeTerm
+    (TList [TString "TPCODECFIXTURE1", TString "scope-original-resolutions", TList []])))
 
 -- The fixture protocol carries typed inputs, rather than a purpose wire array.
 -- Rust's inspection and search serializers own the emitted authorization.
