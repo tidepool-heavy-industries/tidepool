@@ -194,7 +194,8 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitInspectionScope, counterValues)
 import CodecFixtureSupport
-  ( readCodecTerm, readScopeCodecFixture, scopeCodecField, scopeCodecAcquisition
+  ( CodecImportOwner(..), CertificateCodecFacts(..), readCertificateCodecFacts
+  , readCodecTerm, readScopeCodecFixture, scopeCodecField, scopeCodecAcquisition
   , ScopeCodecField(..), ScopeCodecAcquisition(..), replaceScopeCodecAcquisition, scopeCodecTerm )
 import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics, captureDiagnosticsWithCounters, capturedDiagnosticCounterValues
   , CapturedDiagnosticCounters, DiagnosticCounterCaptureFailure(..), requireUserError
@@ -3000,6 +3001,9 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
         warmBridge <- observed warmEvidence "world.cell.source_frontends.main:FreshCanonicalBridge"
         unless (sum firstBridge == 1 && sum warmBridge == 0)
           (fail "canonical dependency replayed its completed source importer across stages or requests")
+        (sequential,_,sequentialDiagnostics) <- captureDiagnosticsWithCounters nativeCounters
+          (prepareWith True compiler identity reference rootB "native-sequential" 121)
+        requireProducts expected sequential `onException` hPutStrLn stderr sequentialDiagnostics
         freshInterface first
       -- A distinct universe has no body cache or previous HPT to lend this request.
       withQuietStdout $ withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> do
@@ -3098,7 +3102,8 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
             _ -> pure Nothing
           pure (Map.fromList [entry | Just entry <- rows])
         _ -> fail "canonical original fixture lost its actual native product inventory"
-    prepare compiler identity reference root label generation = do
+    prepare = prepareWith False
+    prepareWith sequential compiler identity reference root label generation = do
       let template = unlines
             ["{-# LANGUAGE DataKinds, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, StandaloneDeriving #-}"
             ,"{{CELL_PRAGMAS}}","module CellCheck where","import Prelude"
@@ -3107,15 +3112,21 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
             ,"__tidepoolInEffectRow = id","{{CELL_DECLS}}"
             ,"__tidepool_cell_check :: Eff '[] ()"
             ,"__tidepool_cell_check = do { {{CELL_BODY}} ; pure () }"]
-          source = unlines ["import qualified FreshCanonicalBridge","readRetained :: Int -> Int"
-            ,"readRetained value = FreshCanonicalBridge.bridge value","let answer = readRetained 7"]
+          source = if sequential then unlines
+            ["import qualified CanonicalPartial", "import qualified CanonicalPartialConsumer"
+            ,"let early = CanonicalPartial.partial (Just 7)","readRetained :: Int -> Int"
+            ,"readRetained value = CanonicalPartialConsumer.usePartial value","let answer = readRetained 7"]
+            else unlines ["import qualified FreshCanonicalBridge","readRetained :: Int -> Int"
+              ,"readRetained value = FreshCanonicalBridge.bridge value","let answer = readRetained 7"]
           recipe = WorldCellRecipe source template []
           directory = root </> label
           planRequest = WorldCellPlanRequest identity reference recipe Nothing (directory </> "plan.cbor")
       createDirectory directory
       planArgs <- decodeWorldArgs [WorldCellPlan planRequest]
       plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs) >=> finishCompletion) runBoundWorldCellPlan
-      let slots = [(0,PlannedPrologue generation),(1,PlannedDeclaration (generation+1)),(2,PlannedBind (generation+2))]
+      let slots = if sequential then [(0,PlannedPrologue generation),(1,PlannedBind (generation+1))
+              ,(2,PlannedDeclaration (generation+2)),(3,PlannedBind (generation+3))]
+            else [(0,PlannedPrologue generation),(1,PlannedDeclaration (generation+1)),(2,PlannedBind (generation+2))]
           question = WorldCellPrepareRequest identity reference recipe Nothing plan (BS.replicate 32 29)
             generation slots directory (directory </> "prepared.cbor")
       args <- decodeWorldArgs [WorldCellPrepare question]
@@ -3124,8 +3135,24 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
         case completions of
           Left refusal -> pure (Left refusal)
           Right completed -> do
-            unless (length completed == 3) (fail "canonical World fixture lost its ordered three stages")
-            rows <- forM [0..2 :: Int] $ \ordinal ->
+            unless (length completed == length slots) (fail "canonical World fixture lost its ordered stages")
+            when sequential $ do
+              mapM_ (createDirectoryIfMissing True . (directory </>)) ["first-facts","second-facts"]
+              first <- readCertificateCodecFacts (directory </> "first-facts")
+                (directory </> "stage-1" </> "certified-products.cbor")
+              second <- readCertificateCodecFacts (directory </> "second-facts")
+                (directory </> "stage-2" </> "certified-products.cbor")
+              let firstGroups = [groups | ("main","CanonicalPartial",groups) <- codecCertificateModules first]
+                  laterOwners = [(unit,name) | (unit,name,_) <- codecCertificateModules second]
+                  priorEdges = [(ordinal,binder) | CodecSourceOwner "main" "CanonicalPartial" Nothing ordinal binder
+                    <- codecCertificateOwners second]
+              unless (not (null firstGroups) && ("main","CanonicalPartialConsumer") `elem` laterOwners
+                  && ("main","CanonicalPartial") `notElem` laterOwners
+                  && any (\(ordinal,binder) -> ordinal `elem` concat firstGroups
+                    && symbolOccurrence binder == "partial") priorEdges)
+                (fail "sequential World history did not consume its prior exact native source owner")
+              putStrLn "sequential native seals: retained Partial at stage1, distinct Consumer at stage2, exact prior Source edge"
+            rows <- forM [0..length slots-1] $ \ordinal ->
               nativeRows ["CanonicalPartial","CanonicalPartialConsumer","FreshCanonicalBridge"]
                 (directory </> ("stage-" ++ show ordinal) </> "module-products.cbor")
             mapM_ (commitPreparedWorldDependencies request) completed

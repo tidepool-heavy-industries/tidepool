@@ -6,7 +6,7 @@
 module Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
   , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces, newPreparedOriginalInterfaceArtifacts
-  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts, prepareOriginalProductsWithExecutor
+  , certifiedRetainedOriginals, PreparedProductContext, prepareOriginalProducts, prepareOriginalProductsWithExecutor
   , requireOriginalExecutableGlobals, retainPreparedPackageTargets
   , writeCertifiedProductsKeepingWithOriginals
   , PendingWorldProducts, stageWorldProducts, pendingWorldNative
@@ -244,7 +244,6 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   , certifiedFinalizedArtifacts :: FinalizedModuleArtifacts
   , certifiedExecutionSource :: WorkerExecutionSource
   , certifiedRetainedOriginals :: Map.Map (String,String) CanonicalInterfaceProof
-  , certifiedRetainedNativeVersions :: Map.Map (String,String) String
   , certifiedTargetContext :: Maybe TargetCertificationContext
   , certifiedNameBindings :: !CertifiedNameBindings
   -- Final output readiness belongs to this certification, not the earlier
@@ -1446,7 +1445,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         BS.writeFile (outDir </> "execution-source.cbor") bytes
         pure [(outDir </> "execution-source.cbor",bytes)]
       _ -> pure []
-    (retainedVersions,targetContext,certificateBytes,packageInterfaceWrites) <- timeDetailPhase timing "module_products" "certify" $ do
+    (targetContext,certificateBytes,packageInterfaceWrites) <- timeDetailPhase timing "module_products" "certify" $ do
       let emittedSeals = Map.fromList
             [((unit,name),(version,T.pack (shaHex iface),T.pack (shaHex native),T.pack (shaHex packages)))
             | product <- freshProducts
@@ -1476,8 +1475,8 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         (map moduleProductInput freshProducts) targets validationTargets
         finalDependencies productBytes evidenceBytes
       case certified of
-        Right (bytes,versions,context,writes) -> do
-          pure (versions,case kind of OrdinaryProductFacts -> Nothing; SegmentOriginalFacts -> Just context,bytes,writes)
+        Right (bytes,_,context,writes) -> do
+          pure (case kind of OrdinaryProductFacts -> Nothing; SegmentOriginalFacts -> Just context,bytes,writes)
         Left reason -> do
           hPutStrLn stderr ("product certification unavailable: " ++ reason)
           fail ("native product certification failed: " ++ reason)
@@ -1530,7 +1529,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         Nothing -> do
           revalidateExactScopesAtWithOutputs RetainedProductsPublication hscEnv [] outputSeals >>= either fail pure
           publishCertificate
-    pure (CertifiedOriginalProducts freshProducts sourceCaptures finalized sourceRecipe retainedProofs retainedVersions targetContext nameBindings freshDependencies, certificateBytes, outputSeals)
+    pure (CertifiedOriginalProducts freshProducts sourceCaptures finalized sourceRecipe retainedProofs targetContext nameBindings freshDependencies, certificateBytes, outputSeals)
 
 
 -- An immutable original product needs captured finalized Core as well as its

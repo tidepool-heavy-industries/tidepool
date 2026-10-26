@@ -293,6 +293,7 @@ data TargetCertificationContext = TargetCertificationContext
   , targetNativeOwners :: Set.Set (T.Text,T.Text)
   , targetInterfaceSeals :: Map.Map (T.Text,T.Text) T.Text
   , targetGroupWitnesses :: Map.Map BinderOwner (CertifiedGroupFor WorldOriginalReference)
+  , targetNativeSourceSeals :: NativeSourceSeals
   , targetPackageLinkIndex :: PackageLinkIndex
   }
 
@@ -1146,6 +1147,7 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                 (Set.union nativeOwners (maybe Set.empty targetNativeOwners prior))
                 (Map.union borrowedSeals (Map.union (Map.map Set.findMin interfaceSeals) previousSeals))
                 completeGroups
+                Map.empty
                 packageLinks
           pure $ do
             admittedGroups <- foldM (\groups (coordinate,groupBinders,witnesses) ->
@@ -1222,8 +1224,11 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
             if Map.keysSet homeRoots /= expectedHomeRoots
               then Left "fresh HOME package roots were not consumed exactly"
               else Right ()
-            versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
-            Right (certificateBytes,versions,context,packageInterfaceWrites)
+            sourceSeals <- admittedNativeSourceSeals exact cached
+              >>= mergeNativeSourceSeals (maybe Map.empty targetNativeSourceSeals prior)
+            versions <- retainedNativeVersions sourceSeals emittedSeals packages products moduleRows
+            finalizedSeals <- finalizeNativeSourceSeals sourceSeals emittedSeals versions
+            Right (certificateBytes,versions,context { targetNativeSourceSeals = finalizedSeals },packageInterfaceWrites)
   where
     internWitness :: Map.Map GlobalWitness Word -> GlobalWitness
       -> (Map.Map GlobalWitness Word, Word)
@@ -1344,13 +1349,51 @@ encodeFullWitness (identity,rep,signature,evaluated,owner) = array
 -- Native identity binds the finite graph actually retained for this owner.
 -- Promoted edges name nodes rather than recursively derived versions, so cycles
 -- remain finite and unrelated request scope cannot change native authority.
+-- Raw staged coordinates remain Nothing in the receipt. Their issuing context
+-- associates that coordinate with the finalized native identity; historical
+-- Just coordinates always select their own exact version.
+type NativeSourceSeals = Map.Map (T.Text,T.Text,Maybe T.Text) (T.Text,T.Text,T.Text)
+
+mergeNativeSourceSeals :: NativeSourceSeals -> NativeSourceSeals -> Either String NativeSourceSeals
+mergeNativeSourceSeals left right = foldM insert left (Map.toAscList right)
+  where
+    insert known (coordinate,seal@(version,iface,native)) = version `seq` iface `seq` native `seq` case Map.lookup coordinate known of
+      Just previous | previous /= seal -> Left ("conflicting native source seals at " ++ show coordinate)
+      _ -> Right (Map.insert coordinate seal known)
+
+admittedNativeSourceSeals :: Maybe ExactScope -> [ModuleCandidate] -> Either String NativeSourceSeals
+admittedNativeSourceSeals exact cached = foldM add Map.empty
+  ([((T.pack (candidateUnit candidate),T.pack (candidateModule candidate)),
+      (T.pack (candidateModuleVersion candidate),T.pack (candidateInterfaceSha256 candidate),
+       T.pack (candidateProductSha256 candidate))) | candidate <- cached]
+   ++ [((T.pack (originalUnit product),T.pack (originalModule product)),
+      (T.pack (originalVersion product),T.pack (originalIfaceSha256 product),
+       T.pack (originalProductSha256 product)))
+      | scope <- maybe [] pure exact, product <- scopeProducts scope])
+  where
+    add known ((unit,name),seal@(version,_,_)) =
+      mergeNativeSourceSeals known (Map.singleton (unit,name,Just version) seal)
+
+finalizeNativeSourceSeals :: NativeSourceSeals
+  -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
+  -> Map.Map (String,String) String -> Either String NativeSourceSeals
+finalizeNativeSourceSeals inherited emitted versions = foldM step inherited (Map.toAscList emitted)
+  where
+    step known ((unit,name),(provisional,iface,native,_)) = do
+      let version = maybe provisional T.pack (Map.lookup (T.unpack unit,T.unpack name) versions)
+      -- Non-exact fresh World products have no finalized version here. They
+      -- cannot become external native graph evidence through a guessed seal.
+      if T.null version then Right known else
+        mergeNativeSourceSeals known (Map.fromList
+          [((unit,name,Nothing),(version,iface,native)),((unit,name,Just version),(version,iface,native))])
+
 retainedNativeVersions
-  :: Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
-  -> Maybe ExactScope -> [ModuleCandidate]
+  :: NativeSourceSeals
+  -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
   -> Map.Map (T.Text,T.Text) (Set.Set (FilePath,T.Text))
   -> [Product] -> [(Product,CandidateGroup,[GlobalWitness])]
   -> Either String (Map.Map (String,String) String)
-retainedNativeVersions emitted exact cached packages products rows = do
+retainedNativeVersions inherited emitted packages products rows = do
   versions <- forM (Map.keys promoted) $ \root -> do
     reachable <- closure Set.empty [root]
     nodes <- traverse encodeNode (Set.toAscList reachable)
@@ -1369,27 +1412,29 @@ retainedNativeVersions emitted exact cached packages products rows = do
     groups = Map.union (Map.fromListWith Map.union
       [(key product,Map.singleton (candidateGroupOrdinal group) witnesses)
       | (product,group,witnesses) <- rows]) (Map.map (const Map.empty) promoted)
-    seals = Map.unions [emitted,Map.fromList
-      [((T.pack (candidateUnit candidate),T.pack (candidateModule candidate)),
-        (T.pack (candidateModuleVersion candidate),T.pack (candidateInterfaceSha256 candidate),
-         T.pack (candidateProductSha256 candidate),T.pack (candidatePackageImportsSha256 candidate)))
-      | candidate <- cached],Map.fromList
-      [((T.pack (originalUnit product),T.pack (originalModule product)),
-        (T.pack (originalVersion product),T.pack (originalIfaceSha256 product),
-         T.pack (originalProductSha256 product),""))
-      | scope <- maybe [] pure exact,product <- scopeProducts scope]]
-    lookupSeal owner = maybe (Left "native demand graph lacks an actual source owner seal") Right (Map.lookup owner seals)
+    lookupSeal coordinate@(unit,name,version) = do
+      let current = case (version,Map.lookup (unit,name) emitted) of
+            (Nothing,Just (final,iface,native,_)) | not (T.null final) -> Just (final,iface,native)
+            _ -> Nothing
+          priorSeal = Map.lookup coordinate inherited
+      case (current,priorSeal) of
+        (Just actual,Just previous) | actual /= previous ->
+          Left ("conflicting native source seals at " ++ show coordinate)
+        (Just actual,_) -> Right actual
+        (_,Just actual) -> Right actual
+        _ -> Left ("native demand graph lacks an actual source owner seal at " ++ show coordinate)
     closure visited [] = Right visited
     closure visited (owner:pending)
       | owner `Set.member` visited = closure visited pending
       | otherwise = case Map.lookup owner groups of
           Nothing -> Left "native demand graph lacks a promoted group inventory"
           Just owned -> closure (Set.insert owner visited)
-            ([dependency | witnesses <- Map.elems owned,(_,_,_,_,SourceOwner unit name _ _) <- witnesses
+            ([dependency | witnesses <- Map.elems owned,(_,_,_,_,SourceOwner unit name Nothing _) <- witnesses
               , let dependency = (unit,name),Map.member dependency promoted] ++ pending)
     encodeNode owner@(unit,name) = do
       product <- maybe (Left "native demand graph lacks a promoted canonical proof") Right (Map.lookup owner promoted)
-      (_,_,nativeSha,packageSha) <- lookupSeal owner
+      (_,_,nativeSha,packageSha) <- maybe
+        (Left ("native demand graph lacks emitted promoted seals at " ++ show owner)) Right (Map.lookup owner emitted)
       owned <- maybe (Left "native demand graph lacks retained groups") Right (Map.lookup owner groups)
       encodedGroups <- forM (Map.toAscList owned) $ \(ordinal,witnesses) -> do
         edges <- traverse encodeEdge witnesses
@@ -1397,12 +1442,12 @@ retainedNativeVersions emitted exact cached packages products rows = do
       pure (array [encodeString unit,encodeString name,encodeString (productEvidenceSha product),
         encodeString nativeSha,encodeString packageSha,list id encodedGroups])
     encodeEdge (identity,_,_,_,owner) = case owner of
-      SourceOwner unit name _ ordinal
-        | Map.member (unit,name) promoted -> Right (array
+      SourceOwner unit name version ordinal
+        | version == Nothing && Map.member (unit,name) promoted -> Right (array
             [encodeString "local-source",encodeString unit,encodeString name,encodeWord ordinal,encodeReceiptIdentity identity])
         | otherwise -> do
-            (version,ifaceSha,nativeSha,_) <- lookupSeal (unit,name)
-            pure (array [encodeString "source",array (map encodeString [unit,name,version,ifaceSha,nativeSha]),
+            (finalVersion,ifaceSha,nativeSha) <- lookupSeal (unit,name,version)
+            pure (array [encodeString "source",array (map encodeString [unit,name,finalVersion,ifaceSha,nativeSha]),
               encodeWord ordinal,encodeReceiptIdentity identity])
       RetainedOwner generation -> Right (array
         [encodeString "retained",encodeReceiptIdentity identity,encodeWord64 generation])
