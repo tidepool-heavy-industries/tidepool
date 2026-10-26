@@ -10255,14 +10255,22 @@ captureHeldWorldSourceSelection owner facts accumulated imported (WorldPrefixLex
           | node <- modules,edge <- dependencyModuleImports node]
           `Set.union` Set.fromList [(qualifier,name,boot) | (_,edges) <- imports
             ,(qualifier,name,boot,unit) <- edges, (unit,name) `Set.member` selectedKeys]
-        relevant resolution = (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,
-          dependencyResolutionBoot resolution) `Set.member`
-            (relevantImports `Set.difference` validatedOriginalExactImports validation)
+        resolutionKey resolution = (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,
+          dependencyResolutionBoot resolution)
+        requiredResolutions = relevantImports `Set.difference` validatedOriginalExactImports validation
+        resolutions = filter ((`Set.member` requiredResolutions) . resolutionKey) (dependencyResolutions current)
+        observedResolutions = Set.fromList (map resolutionKey resolutions)
+    unless (observedResolutions == requiredResolutions && length resolutions == Set.size observedResolutions) $ liftIO $ do
+      emitWorldAcquisitionRejection "world source import" "<held source selection>"
+        ("source resolution projection is incomplete or duplicated; required=" ++ show (Set.size requiredResolutions)
+          ++ "; emitted=" ++ show (length resolutions) ++ "; missing(first 16)="
+          ++ show (take 16 (Set.toAscList (requiredResolutions `Set.difference` observedResolutions))))
+      throwIO (ExecutionSourceIncomplete (ownerKey (ms_mod (pm_mod_summary driverRoot))))
     (sources,complete) <- liftIO (captureDependencySources selectedGraph)
     unless complete (liftIO (throwIO WorldCellUnavailable))
     let evidence = current
           {dependencyCacheSafe=True,dependencySelectionComplete=True,dependencySources=sources,dependencyModules=modules
-          ,dependencyResolutions=filter relevant (dependencyResolutions current)
+          ,dependencyResolutions=resolutions
           ,dependencyPackages=Set.toAscList (Set.fromList
             [dependencyImportName edge | node <- modules,edge <- dependencyModuleImports node
             ,isNothing (dependencyImportSelected edge)
@@ -10396,8 +10404,24 @@ validateCanonicalSourceInputsWithViews interfaceViews
   graph <- if worldOnly then admitWorldQuoteFreeModuleGraph False Nothing driverRoot swept else pure swept
   when worldOnly $ forM_ [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary -> liftIO $ do
     requireWorldHeaderPolicy WorldCanonicalGraph (ms_hspp_file summary) (hsc_dflags initial) (ms_hspp_opts summary)
+  let summaries = Map.fromList [(ownerKey (ms_mod summary),summary)
+        | ModuleNode _ summary <- mgModSummaries' graph, ms_hsc_src summary == HsSrcFile]
+      callerSummaries = Map.fromList [(ownerKey (ms_mod summary),summary)
+        | ModuleNode _ summary <- mgModSummaries' sourceGraph,ms_hsc_src summary == HsSrcFile]
+  forM_ (Map.toList callerSummaries) $ \(key,old) -> forM_ (Map.lookup key summaries) $ \now -> do
+    oldPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location old)))
+    nowPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location now)))
+    unless (ms_mod old == ms_mod now && oldPath == nowPath && ms_hs_hash old == ms_hs_hash now) $
+      liftIO (throwIO (ExecutionSourceIncomplete key))
+  -- Canonical qualification checks only its own roots. The already-admitted
+  -- caller graph still owns incoming source-resolution witnesses, including
+  -- a selected root that no canonical dependency imports.
+  let evidenceGraph = mkModuleGraph (mgModSummaries' graph ++
+        [node | node@(ModuleNode _ summary) <- mgModSummaries' sourceGraph
+          , ms_hsc_src summary == HsSrcFile
+          , Map.notMember (ownerKey (ms_mod summary)) summaries])
   sourceEnvironment <- getSession
-  current <- liftIO (dependencyEvidenceFor sourceEnvironment ([],True) graph [])
+  current <- liftIO (dependencyEvidenceFor sourceEnvironment ([],True) evidenceGraph [])
   let modules = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node)
         | node <- dependencyModules current, not (dependencyModuleBoot node)]
       selectedClosure selectedOwners =
@@ -10449,16 +10473,6 @@ validateCanonicalSourceInputsWithViews interfaceViews
     >>= either (liftIO . fail) pure
   let installedEnvironment = installedLexicalEnvironment compatibility
   setSession installedEnvironment
-  let summaries = Map.fromList [(ownerKey (ms_mod summary),summary)
-        | ModuleNode _ summary <- mgModSummaries' graph, ms_hsc_src summary == HsSrcFile]
-      fresh = Map.fromList [(ownerKey (ms_mod summary),summary)
-        | ModuleNode _ summary <- mgModSummaries' sourceGraph,ms_hsc_src summary == HsSrcFile
-        , Map.notMember (ownerKey (ms_mod summary)) originals]
-  forM_ (Map.toList fresh) $ \(key,old) -> forM_ (Map.lookup key summaries) $ \now -> do
-    oldPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location old)))
-    nowPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location now)))
-    unless (ms_mod old == ms_mod now && oldPath == nowPath && ms_hs_hash old == ms_hs_hash now) $
-      liftIO (throwIO (ExecutionSourceIncomplete key))
   let nativeEnv = env {hsc_mod_graph=mapMG (\summary -> summary
         {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)}) graph}
   qualifiedImports <- forM (Set.toAscList selected) $ \key -> do

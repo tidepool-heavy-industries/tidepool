@@ -97,7 +97,7 @@ import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, prologueImports
   , prepareTypedSegmentSource, preparedTypedSegmentPlan, preparedTypedSegmentSource, preparedTypedSegmentOperations
   , preparedTypedSegmentTemplate, preparedTypedSegmentLineOffset, preparedTypedSegmentImports)
 import Tidepool.DependencyEvidence
-  ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..) )
+  ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..), DependencyModule(..) )
 import Tidepool.ExactHydration (emptyHydratedInterfaceClosure, ExactIfaceArtifact(..), hydrateExactScope
   , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , generatedTypedSegmentRecipeWithImportRendering)
@@ -2776,9 +2776,36 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
                   (preparedCompilationWorldInputs (last completed))
                 unless (any ((== operandModule) . exactModule . fst) (worldCellTypeInterfaces inputs))
                   (fail "operand expression lost its exact TYPE interface")
-                when (label == "source") $ unless (any
-                    (maybe False (isJust . worldCellSourceSelection) . preparedCompilationWorldInputs) completed)
-                  (fail "source operand history did not qualify a selected canonical source")
+                when (label == "source") $ do
+                  selections <- forM completed $ \completion -> do
+                    current <- maybe (fail "source stage lost its input facts") pure
+                      (preparedCompilationWorldInputs completion)
+                    case worldCellSourceSelection current of
+                      Nothing -> pure []
+                      Just selection -> do
+                        let evidence = selectedOriginalEvidence selection
+                            selectedOwners = Set.fromList [key | (key,_,_,_) <- selectedOriginalRows selection]
+                            incoming = [(qualifier,name,boot,unit)
+                              | ((sourceUnit,source,_),edges) <- worldCellExactImports current
+                              , (sourceUnit,source) `Set.notMember` selectedOwners
+                              , (qualifier,name,boot,unit) <- edges
+                              , (unit,name) `Set.member` selectedOwners]
+                        forM_ incoming $ \(qualifier,name,boot,unit) -> do
+                          source <- case [dependencyModuleSource node | node <- dependencyModules evidence
+                              , dependencyModuleUnit node == unit,dependencyModuleName node == name
+                              , dependencyModuleBoot node == boot] of
+                            [path] -> pure path
+                            _ -> fail "incoming canonical import lost its unique source owner"
+                          case [resolution | resolution <- dependencyResolutions evidence
+                              , dependencyResolutionQualifier resolution == qualifier
+                              , dependencyResolutionModule resolution == name
+                              , dependencyResolutionBoot resolution == boot] of
+                            [resolution] | dependencyResolutionSelected resolution == Just source
+                              , source `elem` dependencyResolutionCandidates resolution -> pure ()
+                            _ -> fail ("incoming canonical import omitted its resolution witness: " ++ name)
+                        pure incoming
+                  unless (any (any (\(_,name,_,_) -> name == "CanonicalPartialFacadeAgain")) selections)
+                    (fail "source history omitted its standalone canonical root")
                 mapM_ (commitPreparedWorldDependencies request) completed
         -- Canonical TYPE dependencies remain authenticated inputs while a
         -- fresh source module crosses prologue, declaration and execution.
