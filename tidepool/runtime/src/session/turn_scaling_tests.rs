@@ -3840,10 +3840,11 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
         j_import, j.module,
         "native J is carried through its lexical facade"
     );
-    let k_source = format!(
-        "import {} (j)\n{}",
-        j_import,
-        include_str!("fixtures/original-binding-capture-k.hs")
+    assert!(
+        j_view
+            .turn_imports(&SourceImports::new())
+            .contains(&j_import),
+        "the published lexical facade supplies the automatic prefix import"
     );
     execute_cell(
         &mut resident,
@@ -3852,8 +3853,8 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
         &images,
         (0, 0),
         "original_k",
-        &k_source,
-        2,
+        include_str!("fixtures/original-binding-capture-k.hs"),
+        1,
         &publication,
     );
     let view = resident.compile_view_in(public).unwrap();
@@ -3884,11 +3885,6 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
         })
         .unwrap()
         .id;
-    let j_artifact_hex = j_artifact
-        .0
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
     // Inspect the actual persisted HOME witness. Raw native products do not
     // distinguish OriginalBinding ownership from other global import kinds.
     let artifacts = tempfile::tempdir().unwrap();
@@ -3913,7 +3909,7 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
         else {
             continue;
         };
-        let bytes = std::fs::read(&reference.certification_path).unwrap();
+        let bytes = std::fs::read(artifacts.path().join(&reference.certification_path)).unwrap();
         assert_eq!(
             <[u8; 32]>::from(sha2::Sha256::digest(&bytes)),
             reference.certification_sha256
@@ -3947,7 +3943,10 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
                     && text(&owner[2]) == j.module
                     && text(&array(&global[0])[3]) == "j"
                 {
-                    assert_eq!(text(&array(&owner[4])[0]), j_artifact_hex);
+                    assert_eq!(
+                        array(&owner[4])[0].as_bytes().unwrap().as_slice(),
+                        &j_artifact.0
+                    );
                     original_j_edges += 1;
                 }
             }
@@ -3958,21 +3957,22 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
         "K must physically retain an OriginalBinding to J"
     );
     let retained_x = retained_x.expect("J physically captures the checked x identity/generation");
-    let imports = view.turn_imports(&SourceImports::new());
     let include = view.include_paths(effects.include_paths());
     let include = include
         .iter()
         .map(std::path::PathBuf::as_path)
         .collect::<Vec<_>>();
     let injected = view.injected_module_names();
+    let ordinary_preamble = format!(
+        "{{-# LANGUAGE DataKinds #-}}\nmodule Expr where\nimport Control.Monad.Freer (Eff)\nimport {} (k)\n",
+        view.library_import_module().expect("K lexical facade"),
+    );
     let templates = vec![TurnTemplate {
         kind: TemplateSelector::Expr,
-        source: assemble_expression_module(
-            &insert_preamble_imports(effects.preamble(), &imports),
-            "__result",
-            effects.row(),
-            "{{TURN}}",
-            ExpressionLift::Pure,
+        source: format!(
+            "{}\n__result :: Eff '[] Int\n__result = pure ({{{{TURN}}}})\n{}",
+            with_resume_import(&ordinary_preamble),
+            prepared_scaffold_binding("__result")
         ),
     }];
     let original_source = resident
@@ -4042,19 +4042,12 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
             tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         )
         .unwrap();
-    let observed = original_source
-        .with_source_compiler_transaction(
-            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            crate::CompilerTransactionCancellation::new(),
-            None,
-            |_| {},
-            |_, settlement| resident.run_with_sites("ordinary_k", compiled.code(), settlement),
-        )
-        .unwrap();
-    assert!(observed.close().resources_retired());
-    let crate::session::ResidentOutcome::Completed { result, .. } =
-        observed.into_outcome().action.unwrap()
-    else {
+    let observed = crate::session::world_cell_test_support::source_action_with_original(
+        &mut resident,
+        original_source,
+        |resident, settlement| resident.run_with_sites("ordinary_k", compiled.code(), settlement),
+    );
+    let crate::session::ResidentOutcome::Completed { result, .. } = observed.unwrap() else {
         panic!("ordinary K must complete through its retained native closure");
     };
     assert_eq!(result.to_json(), serde_json::json!(42));
