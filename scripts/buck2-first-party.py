@@ -106,6 +106,13 @@ TOOLCHAIN_COMPILER_FREE_TESTS = [
     "artifact_inventory::tests::metadata_snapshot_preserves_canonical_typed_edges_in_one_closure",
     "artifact_inventory::view_read_properties::persistent_payload_history_releases_ancestors_and_shares_immutable_entries",
     "artifact_inventory::view_read_properties::persistent_captures_share_payload_and_scope_owners",
+    "exact_context::tests::publication_native_offer_references_refuse_dangling_transitions_before_encoding",
+    "exact_context::tests::publication_native_offer_reference_histories_match_full_recomputation",
+    "exact_context::tests::publication_native_offer_reference_work_ignores_unchanged_rows_and_checks_projection",
+    "declaration_context::native_availability_tests::source_support_preserves_distinct_root_dependency_subsets",
+    "declaration_context::native_availability_tests::source_support_retains_every_original_in_a_shared_native_contribution",
+    "declaration_context::native_availability_tests::matching_native_offer_role_preserves_issuance_without_rewalking_proof",
+    "artifact_inventory::native_availability::normalized_dependency_tests::contribution_restriction_shares_only_unchanged_closed_membership",
 ]
 unsupported = selected - SUPPORTED_PACKAGES
 if unsupported:

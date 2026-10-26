@@ -508,20 +508,181 @@ proptest! {
 #[ignore = "requires the declared rooted compiler service"]
 fn published_source_narrowing_preserves_native_dependency_custody() {
     let fixture = super::tests::compiled_publication_fixture();
-    let original = fixture.publication.context();
+    // A separate physical cohort adds a genuinely distinct second source root;
+    // the common fixture's published root is itself SourceOriginalSupport.
+    std::fs::write(
+        fixture.includes[0].join("SourceOriginalSupport.hs"),
+        include_str!(
+            "../../../tests/fixtures/sealed-publication/NarrowingSourceOriginalSupport.hs"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.includes[0].join("NarrowingSupport.hs"),
+        include_str!("../../../tests/fixtures/sealed-publication/NarrowingSupport.hs"),
+    )
+    .unwrap();
+    let frozen = crate::artifacts::FrozenEntrySources::capture(
+        &fixture.includes,
+        &fixture.includes[0].join("PublicationTarget.hs"),
+    )
+    .unwrap();
+    let directory = fixture.includes[0].parent().unwrap();
+    let entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+        &frozen,
+        directory,
+        &directory.join("two-source-roots"),
+    )
+    .unwrap();
+    let produced = entry.products().original_execution_context().unwrap();
+    let original_entry = |module: &str| {
+        produced
+            .artifact_view()
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                entry.descriptor.owner.module == module
+                    && matches!(
+                        entry.payload,
+                        crate::artifact_inventory::ArtifactPayload::Original(_)
+                    )
+            })
+            .unwrap()
+    };
+    let root = original_entry("SourceOriginalSupport");
+    let helper = original_entry("PublicationHelper");
+    let second_root = original_entry("NarrowingSupport");
+    let publication = entry
+        .products()
+        .published_source_original_selection("two-root-history", &root.descriptor.owner)
+        .unwrap();
+    let original = publication.context();
     let expected_graph = original.artifact_view().capture_graph_selection();
     let expected_edges = original.artifact_view().binding_dependencies();
-    let root_owner = &fixture.root.descriptor.owner;
-    let helper_owner = &fixture.helper.descriptor.owner;
+    let root_owner = &root.descriptor.owner;
+    let helper_owner = &helper.descriptor.owner;
     let expected_role = original.compiler_input_projection().snapshot_roles()[root_owner].clone();
     let canonical = original.compiler_input_projection().snapshot_roles()[helper_owner].interface();
     assert!(
         expected_graph
             .native_groups
             .iter()
-            .any(|group| group.binding.artifact() == fixture.helper.descriptor.id),
+            .any(|group| group.binding.artifact() == helper.descriptor.id),
         "the real second export depends on its captured Helper native body"
     );
+    let initial_offers = original.compiler_source_support().native_offers().to_vec();
+    assert_eq!(
+        initial_offers.len(),
+        4,
+        "fixture must start with four independent offers, including wrapper"
+    );
+    let mut context = original.as_ref().clone();
+    let mut recovery_scratch = Vec::new();
+    // PublicationTarget is an actual wrapper ancestor supplying the published
+    // SourceOriginalSupport root. Its offer remains relevant beside that root.
+    for owners in [
+        BTreeSet::from([root_owner.clone(), second_root.descriptor.owner.clone()]),
+        BTreeSet::from([root_owner.clone()]),
+    ] {
+        let previous = context.compiler_source_support().native_offers().to_vec();
+        let narrowed = context
+            .compiler_source_support()
+            .source_support(&owners)
+            .unwrap();
+        let expected_offers = initial_offers
+            .iter()
+            .filter(|offer| {
+                let owner = &offer.original_acquisition().descriptor.owner;
+                *owner != *helper_owner
+                    && (*owner != second_root.descriptor.owner || owners.contains(owner))
+            })
+            .map(|offer| offer.snapshot_identity().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            narrowed
+                .native_offers()
+                .iter()
+                .map(|offer| offer.snapshot_identity().unwrap())
+                .collect::<BTreeSet<_>>(),
+            expected_offers
+        );
+        assert!(narrowed
+            .native_offers()
+            .iter()
+            .all(|offer| previous.iter().any(|prior| prior.same_issuance(offer))));
+        context = context
+            .rebuild(|facts| facts.compiler_support = narrowed)
+            .finish()
+            .unwrap();
+        for cold in [false, true] {
+            let before = context
+                .compiler_source_support()
+                .native_availability()
+                .clone();
+            if cold {
+                let (scratch, _, _, restored) = restored_snapshot(&context).unwrap();
+                recovery_scratch.push(scratch);
+                context = restored;
+                assert!(context
+                    .compiler_source_support()
+                    .native_availability()
+                    .same_recorded_facts(&before));
+            }
+            assert!(
+                context.compiler_input_projection().snapshot_roles()[helper_owner]
+                    .original()
+                    .is_none()
+            );
+            let availability = context.compiler_source_support().native_availability();
+            let helper_row = availability.issued_row(helper.descriptor.id).unwrap();
+            assert_eq!(
+                helper_row.mode,
+                crate::declaration_context::NativeTransportMode::IssuedGroups
+            );
+            assert!(!helper_row.issued_ordinals().is_empty());
+            let unused = helper
+                .native_group_ordinals
+                .iter()
+                .find(|ordinal| !helper_row.permits(**ordinal))
+                .expect("real Helper has an unused group alongside the required body");
+            assert!(!helper_row.permits(*unused));
+            let snapshot = context.snapshot();
+            assert_eq!(
+                snapshot.offers.keys().copied().collect::<BTreeSet<_>>(),
+                expected_offers
+            );
+            assert!(snapshot.native_availability.values().all(|row| row
+                .contributions
+                .values()
+                .all(|contribution| expected_offers.contains(&contribution.offer))));
+            let reopened = context.published_source_original_selections().unwrap();
+            assert_eq!(reopened.len(), 1);
+            assert_eq!(
+                reopened[0]
+                    .context()
+                    .compiler_source_support()
+                    .publication_birth_support(root_owner)
+                    .unwrap()
+                    .artifacts()
+                    .capture_graph_selection(),
+                expected_graph
+            );
+            let directory = tempfile::tempdir().unwrap();
+            let request = ExactCompileContext::new(Arc::new(context.clone()))
+                .prepare_compilation(directory.path(), &fixture.producer_bytes)
+                .unwrap();
+            let consumed_availability = request.compiler_inputs().private_native_availability();
+            let consumed = consumed_availability
+                .issued_row(helper.descriptor.id)
+                .unwrap();
+            assert_eq!(
+                consumed.mode,
+                crate::declaration_context::NativeTransportMode::IssuedGroups
+            );
+            assert!(!consumed.permits(*unused));
+            assert_eq!(consumed.issued_ordinals(), helper_row.issued_ordinals());
+        }
+    }
     // One sealed producer owns the seed. Each generated history receives fresh
     // retained facts and may only narrow, transfer, or restore that issuance.
     let mut config = proptest::test_runner::contextualize_config(property_config());

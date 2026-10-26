@@ -1930,6 +1930,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     drop(base);
     drop(entries);
     drop(recovered);
+    drop(receiving);
     assert!(
         unrelated_payload.upgrade().is_none(),
         "a B receipt must release unrelated C payload ownership"
@@ -3994,7 +3995,7 @@ fn direct_native_advertisement_uses_descendant_contribution_without_sibling_cust
                 &validation.inventory,
             )
             .map_err(compiler_evidence_failure)?;
-        CapturedCompilerStage::issue(&mut selection, &artifacts, Vec::new(), &mut validation)
+        CapturedCompilerStage::issue(&mut selection, &artifacts, entries.clone(), &mut validation)
             .map(|stage| stage.compiler_inputs().as_ref().clone())
     })()
     .unwrap();
@@ -8524,6 +8525,58 @@ fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
         .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut offer_validation)
         .unwrap();
     assert!(full.is_full());
+    let normalized = fixture_support_with_issued_offers(
+        projection.clone(),
+        artifacts.clone(),
+        [full.clone()],
+        &mut offer_validation,
+    )
+    .unwrap();
+    let before = normalized.native_availability();
+    let (narrowed_offers, narrowed_rows) = before
+        .within_assembly(
+            &[full.clone()],
+            projection.role_view(),
+            &inventory.empty_view(),
+        )
+        .unwrap();
+    assert_eq!(narrowed_offers.len(), 1);
+    assert!(!narrowed_offers[0].is_full());
+    assert!(!narrowed_offers[0].same_issuance(&full));
+    let narrowed_row = narrowed_rows.issued_row(entry.descriptor.id).unwrap();
+    assert_eq!(narrowed_row.mode, NativeTransportMode::IssuedGroups);
+    assert_eq!(
+        narrowed_row
+            .contributions
+            .iter()
+            .flat_map(|contribution| contribution.original_groups(entry.descriptor.id))
+            .collect::<BTreeSet<_>>(),
+        before
+            .issued_row(entry.descriptor.id)
+            .unwrap()
+            .contributions
+            .iter()
+            .flat_map(|contribution| contribution.original_groups(entry.descriptor.id))
+            .collect()
+    );
+    assert!(narrowed_row
+        .contributions
+        .iter()
+        .all(|contribution| contribution.offer().same_issuance(&narrowed_offers[0])));
+    let (again_offers, again_rows) = narrowed_rows
+        .within_assembly(&narrowed_offers, projection.role_view(), &artifacts)
+        .unwrap();
+    assert!(again_offers[0].same_issuance(&narrowed_offers[0]));
+    assert!(again_rows.same_acquisition(&narrowed_rows));
+    let (absent_offers, absent_rows) = before
+        .within_assembly(
+            &[full.clone()],
+            CompilerInputProjection::default().role_view(),
+            &artifacts,
+        )
+        .unwrap();
+    assert!(absent_offers.is_empty());
+    assert!(absent_rows.rows().next().is_none());
     let partial = full
         .within_assembly(projection.role_view(), &inventory.empty_view())
         .unwrap()
@@ -12348,6 +12401,168 @@ pub(super) fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDec
 }
 
 #[test]
+fn source_support_preserves_distinct_root_dependency_subsets() {
+    use crate::artifact_inventory::NativeOriginalRequirement;
+    let operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+        Default::default(),
+    ));
+    let mut validation =
+        crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(operation);
+    let helper = product("CoupledHelper", 101);
+    let left = dependent_product(
+        "CoupledLeft",
+        102,
+        vec![(7, vec![source_import(&helper, 7)])],
+    );
+    let right = dependent_product(
+        "CoupledRight",
+        103,
+        vec![(7, vec![source_import(&helper, 9001)])],
+    );
+    let recovered = recovered_witness_fixtures(&[left, right, helper]);
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let entries = recovered
+        .iter()
+        .map(|row| {
+            Arc::new(ArtifactEntry::original(producer.sha256(), row.product.clone()).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory
+        .admit_shared(&inventory.empty_view(), entries.clone())
+        .unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+    let issuer = fixture_compiler_support(projection.clone(), artifacts.clone(), &mut validation);
+    let offers = entries
+        .iter()
+        .map(|entry| {
+            let proof =
+                NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &artifacts)
+                    .unwrap()
+                    .unwrap();
+            issuer
+                .issue_native_offer(&entry.descriptor.owner, Some(proof), &mut validation)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(offers.iter().all(|offer| offer.is_full()));
+    let mut support =
+        fixture_support_with_issued_offers(projection, artifacts, offers.clone(), &mut validation)
+            .unwrap();
+    let helper_id = entries[2].descriptor.id;
+    // A prior permission row can be narrower than a still-held root offer.
+    // Projection must intersect that prior row, never reconstruct its missing
+    // right-hand group from the broader direct supplier. Actual demand remains
+    // responsible for refusing a root whose required permission is absent.
+    let prior = RequestNativeAvailability::from_issued_rows(
+        support.native_availability().rows().map(|row| {
+            if row.original_artifact_id() != helper_id {
+                return Arc::clone(row);
+            }
+            let mut narrowed = (**row).clone();
+            narrowed.mode = NativeTransportMode::IssuedGroups;
+            narrowed.contributions = row
+                .contributions
+                .iter()
+                .filter_map(|contribution| {
+                    let roots = contribution
+                        .original_groups(helper_id)
+                        .filter(|group| group.original_ordinal == 7)
+                        .collect::<BTreeSet<_>>();
+                    (!roots.is_empty()).then(|| contribution.for_groups(&roots).unwrap())
+                })
+                .collect::<Vec<_>>()
+                .into();
+            Arc::new(narrowed)
+        }),
+    )
+    .unwrap();
+    let monotone = prior
+        .for_compiler_roots(
+            support.compiler_roles(),
+            support.artifacts(),
+            &BTreeSet::from([entries[0].descriptor.id, entries[1].descriptor.id]),
+            NativeDemandBudget(None),
+            &mut DemandNativeInputsWork::default(),
+        )
+        .unwrap();
+    let helper = monotone.issued_row(helper_id).unwrap();
+    assert!(helper.permits(7));
+    assert!(
+        !helper.permits(9001),
+        "narrowing cannot restore a group absent from its prior dependency row"
+    );
+    assert!(helper
+        .contributions
+        .iter()
+        .all(|contribution| contribution.offer().same_issuance(&offers[0])));
+    for roots in [vec![0, 1], vec![0]] {
+        let owners = roots
+            .iter()
+            .map(|index| entries[*index].descriptor.owner.clone())
+            .collect();
+        support = support.source_support(&owners).unwrap();
+        let row = support.native_availability().issued_row(helper_id).unwrap();
+        assert_eq!(row.mode, NativeTransportMode::IssuedGroups);
+        assert!(row.permits(7));
+        assert_eq!(row.permits(9001), roots.len() == 2);
+        let expected = roots
+            .iter()
+            .map(|index| offers[*index].snapshot_identity().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            support
+                .native_offers()
+                .iter()
+                .map(|offer| offer.snapshot_identity().unwrap())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        for contribution in row.contributions.iter() {
+            let source = offers
+                .iter()
+                .position(|offer| {
+                    offer.snapshot_identity().unwrap()
+                        == contribution.offer().snapshot_identity().unwrap()
+                })
+                .unwrap();
+            assert!(roots.contains(&source));
+            let ordinals = contribution
+                .original_groups(helper_id)
+                .map(|group| group.original_ordinal)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                ordinals,
+                BTreeSet::from([if source == 0 { 7 } else { 9001 }])
+            );
+        }
+        let context = ExactDeclarationContext::empty()
+            .extend_issued_compiler_support(&support)
+            .unwrap();
+        let restored =
+            restore_fixture_support_in_view(&context, support.artifacts().clone()).unwrap();
+        assert!(restored
+            .native_availability()
+            .same_recorded_facts(support.native_availability()));
+        for current in [&support, &restored] {
+            let context = ExactDeclarationContext::empty()
+                .extend_issued_compiler_support(current)
+                .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let request = ExactCompileContext::new(Arc::new(context))
+                .prepare_compilation(directory.path(), PRODUCER)
+                .unwrap();
+            let available = request.compiler_inputs().private_native_availability();
+            let helper = available.issued_row(helper_id).unwrap();
+            assert!(helper.permits(7));
+            assert_eq!(helper.permits(9001), roots.len() == 2);
+        }
+        // The next narrowing consumes the newly authenticated cold owner.
+        support = restored;
+    }
+}
+
+#[test]
 #[ignore = "requires the declared rooted compiler service"]
 fn source_support_demotes_only_standalone_dependency_availability() {
     let fixture = crate::artifacts::test_support::prepare_source_publication_entry_fixture()
@@ -12639,7 +12854,7 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
     .unwrap();
     let offer = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&entries).unwrap(),
-        ArtifactView::clone(&root_view),
+        ArtifactView::clone(&artifacts),
         &mut offer_validation,
     )
     .issue_native_offer(
@@ -12697,10 +12912,16 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
             entries[1].descriptor.owner.clone(),
         ]))
         .unwrap();
-    assert!(
-        narrowed.native_offers().is_empty(),
-        "the removed root offer must not independently retain the required child custody"
-    );
+    assert_eq!(narrowed.native_offers().len(), 1);
+    assert!(!narrowed.native_offers()[0].is_full());
+    assert_eq!(narrowed.native_offers()[0].original(), *root_id);
+    let repeated = narrowed
+        .source_support(&BTreeSet::from([
+            entries[0].descriptor.owner.clone(),
+            entries[1].descriptor.owner.clone(),
+        ]))
+        .unwrap();
+    assert!(repeated.native_offers()[0].same_issuance(&narrowed.native_offers()[0]));
     let contributions = narrowed.native_availability().custody_contributions();
     assert_eq!(contributions.len(), 2);
     assert_eq!(
@@ -12716,17 +12937,21 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
     );
     let retained = narrowed.artifacts();
     let captured = retained.capture_graph_selection();
+    let offered_groups = contributions
+        .iter()
+        .flat_map(|(id, contribution)| contribution.original_groups(*id))
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        captured
-            .native_groups
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>(),
+        offered_groups,
         shared
             .original_groups(*left_id)
             .chain(shared.original_groups(*right_id))
             .collect(),
-        "narrowing retains exactly the two required issued Group closures"
+        "narrowing retains exactly the two required private Group permissions"
+    );
+    assert!(
+        captured.native_groups.is_empty(),
+        "TYPE-only private availability does not select executable groups"
     );
     for (id, owner) in [
         (*left_id, &entries[0].descriptor.owner),
@@ -12738,7 +12963,7 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
         );
         let group = shared.original_groups(id).next().unwrap();
         assert!(
-            captured.native_groups.contains(&group),
+            offered_groups.contains(&group),
             "both shared-contribution rows retain their exact Group closure"
         );
         assert!(
@@ -12767,6 +12992,52 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
         "the unrelated sibling also gains no compiler role"
     );
 
+    let root_type = support
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(vec![entries[3].descriptor.owner.clone()])
+        .unwrap();
+    let narrowed = narrowed
+        .extend_interfaces(&root_type.selected_interfaces().unwrap())
+        .unwrap();
+    assert!(
+        narrowed.projection().snapshot_roles()[&entries[3].descriptor.owner]
+            .original()
+            .is_none()
+    );
+    assert!(narrowed
+        .native_offers()
+        .iter()
+        .all(|offer| !offer.is_full()));
+    assert!(narrowed
+        .native_availability()
+        .issued_row(*root_id)
+        .is_none());
+    let warm = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+        producer,
+        compiler_support: narrowed.clone(),
+        lexical: Default::default(),
+        source_scope: Default::default(),
+        template_imports: None,
+    });
+    let restored = restore_fixture_support_in_view(&warm, narrowed.artifacts().clone()).unwrap();
+    assert!(restored
+        .native_availability()
+        .same_recorded_facts(narrowed.native_availability()));
+    assert!(restored
+        .native_offers()
+        .iter()
+        .all(|offer| !offer.is_full()));
+    let directory = tempfile::tempdir().unwrap();
+    let warm_request = ExactCompileContext::new(Arc::new(warm))
+        .prepare_compilation(directory.path(), PRODUCER)
+        .unwrap();
+    assert!(warm_request
+        .compiler_inputs()
+        .private_native_availability()
+        .issued_row(*root_id)
+        .is_none());
+    let narrowed = restored;
     // The actual request consumer must retain both exact dependency bindings
     // without restoring the parent's unrelated acquired payload.
     let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
@@ -12827,30 +13098,37 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
         .is_none());
     let consumed = request.compiler_inputs().artifacts();
     assert!(!consumed.artifact_ids().contains(sibling_id));
-    let graph = consumed.capture_graph_selection();
-    let edges = consumed.binding_dependencies();
-    let restored_inventory = ArtifactInventory::default();
-    let restored = restored_inventory
-        .recover_selection(
-            &restored_inventory.empty_view(),
-            consumed.entries(),
-            &graph,
-            &edges,
-        )
-        .unwrap();
-    assert_eq!(restored.capture_graph_selection(), graph);
-    assert_eq!(restored.binding_dependencies(), edges);
-    for view in [consumed, &restored] {
-        for id in [*left_id, *right_id] {
-            let ordinal = shared.original_groups(id).next().unwrap().original_ordinal;
-            view.native_requirements_from_roots(&[
-                crate::artifact_inventory::NativeRequirementRoot::Group {
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    for (id, product) in [(*left_id, &products[0]), (*right_id, &products[1])] {
+        let expected = shared.original_groups(id).next().unwrap();
+        let row = permissions.issued_row(id).unwrap();
+        let chosen = row
+            .choose_group(
+                request.compiler_inputs().compiler_source_support(),
+                NativeGroupKey {
                     artifact: id,
-                    original_ordinal: ordinal,
+                    original_ordinal: expected.original_ordinal,
                 },
-            ])
-            .expect("the native consumer resolves each required exact child after narrowing");
-        }
+                NativeGroupChoiceIdentity::CompilerRole(row.canonical),
+                product.owner(),
+                &operation,
+            )
+            .unwrap()
+            .expect("the actual dependency consumer resolves its carried exact child");
+        assert_eq!(chosen.binding(), expected);
+        assert!(chosen.issued_group().is_ok());
+        let scope = crate::artifact_inventory::SelectedOriginalGroupScope::contribution(
+            chosen.contribution(),
+        );
+        assert!(scope.group_payload(expected).is_ok());
+        assert!(scope
+            .children(
+                expected,
+                &Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                    Default::default()
+                ))
+            )
+            .is_ok());
     }
 }
 
