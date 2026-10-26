@@ -1,7 +1,7 @@
 # G2 fixture closure and Persona admission
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
-Current integrated code: `d56aedc271`.
+Current integrated code: `e04edfaca7`.
 Active evidence: `/srv/swarm/evidence/inanna/g2-final-qualification-20261026/`.
 
 G2 remains unqualified. Executable projection, Original demand and certification
@@ -117,7 +117,9 @@ Current component evidence under `g2-final-qualification-20261026`:
 | World source identity | `06e17ebbf1`: worker/test compilation and 2/2 controls pass. Logical parser coordinates preserve physical evidence paths, raw hashes and authored LINE directives. |
 | Prepared marker census | `0b4420d595`: compilation, 2/2 focused cases and one corpus program pass. Joined default reload at `1c3d3ff5ca` passes startup and commits reload, then fails publication of the retired original continuation; see the open settlement boundary below. |
 | Runtime host preparation | `62b6d2fd95` with `06e17ebbf1`: residency 9/9 and a separate retirement control 1/1 pass. TYPE borrowing is request-local; runtime checks retain the original World/frontier. Integrated follow-up `e4d7a344db` passes 2/2 Active/hidden and abandonment controls at its worker pin. |
-| Live TYPE reuse | Integrated `9921dfc28f` (worker `052d4b1aec`): production/test compilation and three focused controls pass. Joined Job still refuses: the candidate filter considers executable module rows but omits finalized source-closure canonical rows. The follow-up retains the same exact ArtifactId, liveness and primary-precedence guards while correcting that input set. |
+| Live TYPE reuse | `6f7293e247` includes actual finalized source-closure canonical rows, with exact ArtifactId, liveness and primary-precedence guards. Worker production/test compilation and four controls pass. Joined Job passes initial host use, publication and private readmission, then exposes a generated companion alias collision. `bacf4ecf74` reserves inherited namespaces during both planning and re-admission; component compilation, recovery/refusal and World-admission controls pass. Joined Job rerun remains required. |
+| Prior native seals | `232cf9bed4` and `9b68f3cf77` carry the prior issuer's finalized native seal under exact raw/historical coordinates. Five focused controls and eight corpus programs pass; removing prior carry reproduces the refusal. Actual JSON now passes Haskell certification and exposes a separate Rust predecessor-product lookup gap. |
+| Reload supersession | `3cfea77099..034f9a58b1` carries actual source-retirement proof through the exact execution control, settles private publication and preserves committed operation evidence across terminal ordering. Runtime controls pass 7/7; actor production/test/binary compilation and six controls pass at their worker pins. Source review accepted. Hosted consumer checks, actual reload/replay histories and postcommit cancellation remain pending; task-destruction cleanup remains unconfirmed. |
 | Actor fixtures | `541008587d`: 51 distinct selectors passed at recorded checkpoints; 49/76 shared-fixture selectors passed. All 89 terminal reports confirm process/compiler cleanup. This is not a joined 76-case pass. |
 | Uncertain END | Source-owned checkpoint `49dc365af3` passes the maintained physical-response-without-END control 1/1 with confirmed process/compiler cleanup. Frozen-bundle acceptance remains separate. |
 
@@ -125,20 +127,27 @@ Implementation work still open:
 
 1. Finish the real authored K-to-J retained-capture control through an ordinary
    ExactScope consumer, separately from the passing decoder mutation controls.
-   Its initial World route refuses native-authored J as lacking SOURCE import
-   provenance before reaching census admission. Preserve that separate finding;
-   do not weaken the SOURCE guard or treat compile-only closure evidence as
-   runtime execution evidence.
-2. Close the JSON/Job joined carrier boundaries. At `1c3d3ff5ca`, JSON reaches
-   native demand graph certification but lacks a source-owner seal; Job reports
-   competing exact TYPE bindings. The same two controls are running at
-   `9921dfc28f` and both still fail. JSON's exact edge is current Display group
-   178/global 5 to prior Scientific group 57. Carry the prior issuer's finalized
-   native seal with its exact raw/historical coordinate; do not reconstruct it
-   from TYPE evidence. Job omits Aeson's source-closure canonical from live TYPE
-   reuse despite identical finalized bytes. Both repairs require actual carrier
-   reruns after component controls.
-3. Resolve default reload settlement. The generation owner commits B and retires
+   Argon's retained stderr corrects the initial World diagnosis: failure is in
+   current source qualification, not lexical closure. The test helper captured
+   the generated session root through view.include_paths, causing J's native
+   declaration to appear as a disk SOURCE module. Capture only workspace/effects
+   roots, preserve recipe identity and use the published LexicalJoin facade.
+   The isolated ordinary ExactScope attempt separately carries legitimate
+   CertifyHomeProducts and RetainedGeneration(x,1); add tag 38 to that mode's
+   allowlist while retaining injected-product, portable-output and activation
+   refusals. The compiler path already consumes retained generations. Combine
+   both repairs with the full World history and final runtime result 42; do not
+   omit retained evidence or weaken NativeAuthoredDeclaration/SOURCE guards.
+   Failed reproducers remain retained; no K-to-J execution pass is claimed.
+2. Close the JSON/Job joined carrier boundaries. At `232cf9bed4`, JSON's Display
+   group 178/global 5 reaches prior Scientific group 57 and passes Haskell
+   certification, but Rust cannot find the prior physical native product through
+   SOURCE adjacency. The actual completed native receipt already belongs to
+   WorldStageNativeProducts; carry that authority for nominal lookup without
+   widening SOURCE or execution selection. Preserve raw unversioned coordinates
+   and reject competing proofs at the exact lookup boundary. Run Job again with
+   `bacf4ecf74`'s companion alias repair, then JSON with the native carry repair.
+3. Qualify default reload settlement. The generation owner commits B and retires
    A before A's original notebook continuation completes. Ordinary publication
    correctly refuses A. Carry an owner-issued settlement outcome; do not infer
    publication authority from a generic committed effect or rebind A's intent
@@ -148,13 +157,22 @@ Implementation work still open:
    Discarded staged writes or trailing units are Rejected with rejected
    publication. Both retain committed operation receipts and cache a terminal
    response; retries must never rerun reload. The runtime retires private scope
-   custody and reports its actual cleanup outcome.
-4. Implement held-World Bash literal quotations through authenticated demand and
+   custody and reports its actual cleanup outcome. Hosted staged-write controls
+   must omit trailing units, so they independently detect a false Empty result;
+   the bindingless trailing-unit control separately checks NotRun and no effect.
+   Actual task destruction is distinct from external waiter loss and cooperative
+   cancellation: retained committed evidence does not establish private cleanup.
+4. Finish and integrate held-World Bash literal quotations through authenticated demand and
    lowering before typechecking. Resolve lexical/import shadowing twice, before
    demand and after alias refinement, and authenticate the selected shipped
    Bash/Command/Text implementations. Keep arbitrary quoters, non-expression
    quotations and splices refused; do not execute TH during demand or lowering.
    Preserve the existing exact-session quoter route and shipped command surface.
+   Runtime scope/literal and same-named-provider refusal controls pass, as does
+   the legacy exact-session positive. Separate the retained Bash cold/warm test
+   from the existing full-library operand history before its final counted run.
+   The unchanged quoter recovery test now compiles its quotation but fails a
+   recovery-inventory fixture premise; retain that finding separately.
 5. Rerun the full prepared corpus after the compiler changes, then assemble,
    freeze and qualify one exact bundle under
    [the G2 contract](shared-warm-compiler/completion/g2-completion.md), including
@@ -178,3 +196,12 @@ retained without relabeling those flags.
 activation-metadata renderer pass. Matched transport evidence is in
 `census-transport/handoff.json` and `authenticated-resolution/result.json`;
 source review is `review/exactscope-v17.md`.
+
+Latest carrier evidence: `actor/joined-6f7-outcome.json` (Job progression and alias
+failure), `actor/joined-232-outcome.json` (JSON Rust predecessor failure).
+Seal evidence: `json-source-seal/result.json`; source reviews:
+`review/json-source-seal-381.md`, `review/json-prior-source-version.md`.
+Companion evidence: `review/companion-handoff.txt` and
+`review/companion-4d676d5-source-review.md`.
+Reload evidence: `reload-settlement-runtime/result.json`,
+`actor/reload-99b-outcome.json`, and `review/reload-supersession.md`.
