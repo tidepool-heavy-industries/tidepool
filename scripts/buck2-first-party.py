@@ -2110,6 +2110,15 @@ tidepool_buildscript_run(
                     for name in [
                         "resident_actor::child_launch::tests::child_factory_requires_clean_uncancelled_preparation_before_runtime_adoption",
                         "resident_workbench::request_tests::durable_sleep_binding_observes_real_retraction_request_and_clean_end",
+                        "resident_workbench::request_tests::tool_installation_preserves_durable_child_private_admission",
+                        "request::activation::phase_properties::generated_run_fences_preserve_publication_receipts",
+                        "request::activation::phase_properties::request_activation_phase_support_covers_contract_partitions",
+                        "resident_actor::activation_publication_tests::durable_cancellation_before_native_claim_preserves_public_owner_and_second_activation",
+                        "resident_actor::activation_publication_tests::durable_fatal_preview_preserves_original_public_surface",
+                        "resident_actor::provider_owner_tests::commit_error_fences_provider_and_sibling_owners_until_authenticated_reopen",
+                        "resident_actor::owned_workbench::publication_tests::prepared_publication_observing_a_sibling_fence_requires_recovery",
+                        "resident_actor::owned_workbench::publication_tests::prepared_publication_observing_a_sibling_fence_preserves_recovery_during_cancellation",
+                        "resident_workbench::display_callback_tests::retained_display_runs_after_private_admission_settles_and_current_scope_changes",
                     ]) + "},"] if package_name == "exomonad-actor" else []),
                 '    visibility = ["PUBLIC"],', ")", ""]))
             if package_name == "tidepool-runtime":
