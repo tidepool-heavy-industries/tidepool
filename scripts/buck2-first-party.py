@@ -1648,6 +1648,9 @@ def facade_test_cases(binary):
                                + ["//bridge/atomic-write:directory_fault_shared", "toolchains//:rustc", "toolchains//:cc"]))
     prefix = "actor_host::m1_host_tests::"
     groups = [
+        ("facade_root_declaration_recovery_test", [
+            "actor_host::root_declaration_recovery::tests::cold_root_readback_requires_the_exact_persisted_actor_incarnation",
+        ], host_env, service_host_paths, service_host_resources, True, False, 900),
         ("facade_root_startup_source_test", [
             "actor_host::startup_context_acceptance_tests::released_root_startup_already_owns_its_source_generation",
         ], host_env, service_host_paths, service_host_resources, True, False, 900),
@@ -1828,6 +1831,7 @@ def facade_test_cases(binary):
                           f"    expected_count = {len(tests)},"])
         if name in (
             "facade_root_startup_source_test",
+            "facade_root_declaration_recovery_test",
             "facade_introspection_service_test",
             "facade_ordinary_demand_history_test",
             "facade_reload_default_publication_test",

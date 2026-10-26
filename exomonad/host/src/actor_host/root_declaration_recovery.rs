@@ -527,7 +527,13 @@ mod tests {
     }
     #[test]
     fn cold_root_readback_requires_the_exact_persisted_actor_incarnation() {
-        use tidepool_runtime::session::{PersistentSession, PublicManifestCommit};
+        use tidepool_runtime::session::{
+            finish_admitted_compiler_world, run_admitted_compiler_world,
+            GenerationArtifactReference, PersistentSession, PublicManifestCommit, ResidentSession,
+        };
+        use tidepool_toolchain::compiler_world::{
+            CapturedCompilerSourceRoot, CapturedCompilerSources,
+        };
         let run = tempfile::tempdir().unwrap();
         let first_lease = Arc::new(
             HostIncarnationLease::claim(
@@ -547,16 +553,78 @@ mod tests {
             )
         })
         .unwrap();
-        let mut first = PersistentSession::new(Some(first_library), 1024);
-        let public = first.mint_isolated_scope();
+        let mut first = ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            1024,
+            Some(first_library),
+        );
+        let source = first.mint_notebook_scope_with_lease(None).unwrap();
+        let public = source.scope();
         assert!(matches!(
             first
                 .initialize_durable_public_scope(first_owner.clone(), public)
                 .unwrap(),
             PublicManifestCommit::Durable,
         ));
-        let private = first.begin_private_execution(public).unwrap();
-        let intent = first.freeze_private_execution(&private).unwrap();
+        // Even an empty public namespace needs its real compiler World before
+        // private admission can freeze a publication intent.
+        let captured_root = Arc::new(tempfile::tempdir().unwrap());
+        let manifest =
+            tidepool_toolchain::cache::source_root_manifest(captured_root.path()).unwrap();
+        assert!(manifest.is_empty());
+        let reference =
+            GenerationArtifactReference::capture(serde_json::to_vec(&manifest).unwrap());
+        let captured = Arc::new(
+            CapturedCompilerSources::from_captured_roots(
+                vec![CapturedCompilerSourceRoot {
+                    manifest: tidepool_toolchain::cache::SourceRootManifest::from_file_digests(
+                        manifest,
+                    )
+                    .unwrap(),
+                    bodies: Default::default(),
+                }],
+                Arc::from(reference.bytes()),
+                captured_root,
+            )
+            .unwrap(),
+        );
+        let admitted = first
+            .capture_inspection_world_in(public, &reference, source.original_source())
+            .unwrap();
+        let settled = source
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| run_admitted_compiler_world(owner, admitted, || Ok(Some(captured))),
+            )
+            .unwrap();
+        assert!(settled.close().resources_retired());
+        let completed = finish_admitted_compiler_world(settled).unwrap();
+        assert!(first.install_compiler_world_if_current(
+            &completed,
+            &reference,
+            source.original_source()
+        ));
+        drop(completed);
+        let settled = first
+            .with_source_compiler_transaction(
+                source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |first, _| {
+                    let private = first.begin_private_execution(public).unwrap();
+                    first.freeze_private_execution(&private).unwrap()
+                },
+            )
+            .unwrap();
+        assert!(settled.close().resources_retired());
+        let intent = settled.into_outcome().action;
+        drop(source);
         drop(first);
         drop(first_lease);
 
