@@ -1,7 +1,7 @@
 # G2 fixture closure and Persona admission
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
-Current integrated code: `9921dfc28f`.
+Current integrated code: `d56aedc271`.
 Active evidence: `/srv/swarm/evidence/inanna/g2-final-qualification-20261026/`.
 
 G2 remains unqualified. Executable projection, Original demand and certification
@@ -112,41 +112,51 @@ Current component evidence under `g2-final-qualification-20261026`:
 | Boundary | Evidence and remaining limitation |
 |---|---|
 | Admitted native census | `a7f90b60f312`: worker/test compilation and 2/2 controls pass; independent source review accepted. Exact destination groups own both binders and globals. FullCarrier/IssuedGroups availability does not widen stage ownership. Six actual activation histories and the counting history pass in the joined eight-case run at `1c3d3ff5ca`. |
-| Original-binding decoding | `63701786b9`: 2/2 controls and eight corpus programs pass. Both exact pairs are retained, but conversion deliberately refuses without authenticated resolution. The new Rust/Haskell transport is not yet integrated. |
+| Original-binding transport | Integrated `24fabf915a..d56aedc271`: Rust projects its already-authenticated group resolution into ExactScope v17; Haskell matches both binding pairs, source coordinate/global index, binder and available destination group. Matched worker Rust controls pass 4/4 plus codec producer 1/1; Haskell controls pass 3/3 plus eight corpus programs. Independent source review accepted. The joined activation-metadata renderer passes 1/1 on the exact integration; the separate K-to-J retained-capture history remains pending. |
 | Alias shadowing | `fc2e84da42`: worker compilation and one producer test with 38 requests pass, including selectors, qualified names and NoFieldSelectors. The actual distinct-private-program actor history passes at `1c3d3ff5ca`. |
 | World source identity | `06e17ebbf1`: worker/test compilation and 2/2 controls pass. Logical parser coordinates preserve physical evidence paths, raw hashes and authored LINE directives. |
 | Prepared marker census | `0b4420d595`: compilation, 2/2 focused cases and one corpus program pass. Joined default reload at `1c3d3ff5ca` passes startup and commits reload, then fails publication of the retired original continuation; see the open settlement boundary below. |
 | Runtime host preparation | `62b6d2fd95` with `06e17ebbf1`: residency 9/9 and a separate retirement control 1/1 pass. TYPE borrowing is request-local; runtime checks retain the original World/frontier. Integrated follow-up `e4d7a344db` passes 2/2 Active/hidden and abandonment controls at its worker pin. |
-| Live TYPE reuse | Integrated `9921dfc28f` (worker `052d4b1aec`): production/test compilation and three focused controls pass, including independent canonical allocations, alias/removal/replacement, and historical versions. Exact finalized ArtifactId and live binding identity govern reuse; primary/demanded selections retain precedence. Actual JSON/Job rerun is pending. |
+| Live TYPE reuse | Integrated `9921dfc28f` (worker `052d4b1aec`): production/test compilation and three focused controls pass. Joined Job still refuses: the candidate filter considers executable module rows but omits finalized source-closure canonical rows. The follow-up retains the same exact ArtifactId, liveness and primary-precedence guards while correcting that input set. |
 | Actor fixtures | `541008587d`: 51 distinct selectors passed at recorded checkpoints; 49/76 shared-fixture selectors passed. All 89 terminal reports confirm process/compiler cleanup. This is not a joined 76-case pass. |
 | Uncertain END | Source-owned checkpoint `49dc365af3` passes the maintained physical-response-without-END control 1/1 with confirmed process/compiler cleanup. Frozen-bundle acceptance remains separate. |
 
 Implementation work still open:
 
-1. Transport the existing Rust-certified OriginalBinding-to-Source resolution
-   into versioned ExactScope input. Correlate the source group/global index,
-   both exact binding pairs and binder before resolving the admitted target
-   group. Do not replace this proof with an owner/name lookup. Exercise a real
-   authored K-to-J chain carrying a retained checked value through an ordinary
-   ExactScope consumer, separately from decoder mutation controls.
+1. Finish the real authored K-to-J retained-capture control through an ordinary
+   ExactScope consumer, separately from the passing decoder mutation controls.
+   Its initial World route refuses native-authored J as lacking SOURCE import
+   provenance before reaching census admission. Preserve that separate finding;
+   do not weaken the SOURCE guard or treat compile-only closure evidence as
+   runtime execution evidence.
 2. Close the JSON/Job joined carrier boundaries. At `1c3d3ff5ca`, JSON reaches
    native demand graph certification but lacks a source-owner seal; Job reports
    competing exact TYPE bindings. The same two controls are running at
-   `9921dfc28f`; preserve their earlier failures and identify the actual missing
-   seal independently of the ExactScope transport repair.
+   `9921dfc28f` and both still fail. JSON's exact edge is current Display group
+   178/global 5 to prior Scientific group 57. Carry the prior issuer's finalized
+   native seal with its exact raw/historical coordinate; do not reconstruct it
+   from TYPE evidence. Job omits Aeson's source-closure canonical from live TYPE
+   reuse despite identical finalized bytes. Both repairs require actual carrier
+   reruns after component controls.
 3. Resolve default reload settlement. The generation owner commits B and retires
    A before A's original notebook continuation completes. Ordinary publication
    correctly refuses A. Carry an owner-issued settlement outcome; do not infer
    publication authority from a generic committed effect or rebind A's intent
-   to B. Argon is reviewing whether old private writes must be discarded or
-   produce explicit partial settlement. Committed effects must never rerun.
+   to B. The accepted contract combines actual generation-retirement proof with
+   exact actor/execution/control identity and runtime-proven emptiness. Empty
+   settlement with no trailing units is Committed/NotPublished(GenerationReset).
+   Discarded staged writes or trailing units are Rejected with rejected
+   publication. Both retain committed operation receipts and cache a terminal
+   response; retries must never rerun reload. The runtime retires private scope
+   custody and reports its actual cleanup outcome.
 4. Implement held-World Bash literal quotations through authenticated demand and
    lowering before typechecking. Resolve lexical/import shadowing twice, before
    demand and after alias refinement, and authenticate the selected shipped
    Bash/Command/Text implementations. Keep arbitrary quoters, non-expression
    quotations and splices refused; do not execute TH during demand or lowering.
    Preserve the existing exact-session quoter route and shipped command surface.
-5. Assemble, freeze and qualify one exact bundle under
+5. Rerun the full prepared corpus after the compiler changes, then assemble,
+   freeze and qualify one exact bundle under
    [the G2 contract](shared-warm-compiler/completion/g2-completion.md), including
    ordinary/uncertain-END histories, Persona startup and bounded provider smoke.
 
@@ -162,3 +172,9 @@ publication refusal. All terminal process/compiler cleanup is confirmed, and
 hosted cleanup is confirmed for reload. Bounded diagnostic summaries remain
 marked incomplete where applicable; the raw capture and cleanup evidence is
 retained without relabeling those flags.
+
+`actor/joined-992-outcome.json` records the unchanged carrier failures.
+`actor/joined-d56-outcome.json` records exact integrated compilation and the
+activation-metadata renderer pass. Matched transport evidence is in
+`census-transport/handoff.json` and `authenticated-resolution/result.json`;
+source review is `review/exactscope-v17.md`.
