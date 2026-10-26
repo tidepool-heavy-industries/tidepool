@@ -37798,7 +37798,7 @@ None,
                 .sha256();
         let mixed_globals = fixture_root.is_some();
         let child = fixture_finalized_product(
-            original_groups_fixture(
+            original_groups_fixture_with_interface(
                 "OverlayChild",
                 if mixed_globals {
                     vec![(7, vec![]), (11, vec![])]
@@ -37807,6 +37807,7 @@ None,
                 },
                 1,
                 &BTreeMap::new(),
+                b"OverlayChild interface".to_vec(),
             ),
             producer,
         );
@@ -37837,12 +37838,21 @@ None,
             &[],
         )
         .unwrap();
+        let context = Arc::new(context);
         let directory = tempfile::tempdir().unwrap();
-        let request = ExactCompileContext::new(Arc::new(context))
-            .prepare_compilation(directory.path(), PRODUCER)
+        let request = (!mixed_globals).then(|| {
+            ExactCompileContext::new(Arc::clone(&context))
+                .prepare_compilation(directory.path(), PRODUCER)
+                .unwrap()
+        });
+        let fixture_inputs = mixed_globals.then(|| context.fixture_compiler_inputs().unwrap());
+        let compiler_inputs = request
+            .as_ref()
+            .map(|request| request.compiler_inputs())
+            .or(fixture_inputs.as_ref())
             .unwrap();
-        let request_inventory = request.compiler_inputs().artifacts().inventory();
-        let source = request.compiler_inputs().shared_compiler_source_support();
+        let request_inventory = compiler_inputs.artifacts().inventory();
+        let source = compiler_inputs.shared_compiler_source_support();
         let primary = source
             .compiler_primary_input(&child_entry.descriptor.owner)
             .unwrap()
@@ -37872,7 +37882,7 @@ None,
             [&reference],
         )
         .unwrap();
-        let inputs = ProductCompilerInputs::from_exact(request.compiler_inputs())
+        let inputs = ProductCompilerInputs::from_exact(compiler_inputs)
             .with_original_bindings(
                 OriginalBindingSelection::from_resolved(resolved),
                 &operation,
@@ -37898,11 +37908,12 @@ None,
             original_ordinal: 7,
             binder: binder.clone(),
         });
-        let draft = original_groups_fixture(
+        let draft = original_groups_fixture_with_interface(
             "OverlayParent",
             vec![(13, pending_imports)],
             2,
             &BTreeMap::new(),
+            b"OverlayParent interface".to_vec(),
         );
         let mut raw = parse_module_products(
             draft.product_bytes(),
@@ -37987,16 +37998,32 @@ None,
         let mut validation = PackageInterfaceValidation::with_inventory(Arc::clone(&operation));
         let physical = request_inventory
             .bind_segment(
-                request.compiler_inputs().artifacts(),
+                compiler_inputs.artifacts(),
                 vec![Arc::clone(&parent_entry)],
                 &selection,
                 &mut validation,
             )
             .unwrap();
+        let fixture = fixture_root.map(|root| {
+            let support = physical
+                .captured_stage()
+                .compiler_inputs()
+                .compiler_source_support();
+            let context = Arc::new(
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_issued_compiler_support(support)
+                    .unwrap(),
+            );
+            context
+                .prepare_fixture_compilation(root, PRODUCER)
+                .unwrap()
+                .manifest
+        });
         // The next ordinary request observes available physical globals even
         // before this parent is selected as executable demand.
         let next_directory = tempfile::tempdir().unwrap();
-        let next = ExactCompileContext::new(Arc::clone(request.context()))
+        let next = ExactCompileContext::new(Arc::clone(&context))
             .prepare_compilation_with_private_input(
                 next_directory.path(),
                 PRODUCER,
@@ -38031,31 +38058,6 @@ None,
         assert_eq!(row[9], value_identity(&binder));
         assert_eq!(row[10], value_text(hex(&child.owner().module_version.0)));
         assert_eq!(row[11], Value::Integer(7.into()));
-        let fixture = fixture_root.map(|root| {
-            let support = physical
-                .captured_stage()
-                .compiler_inputs()
-                .compiler_source_support();
-            let restored = crate::declaration_context::recover_fixture_compiler_support(
-                support.projection().clone(),
-                support.artifacts().clone(),
-                support.native_offers().iter().cloned(),
-                &mut PackageInterfaceValidation::default(),
-            )
-            .unwrap()
-            .retain_normalized_availability(support.native_availability())
-            .unwrap();
-            let context = Arc::new(
-                ExactDeclarationContext::new(&[], &[], vec![])
-                    .unwrap()
-                    .extend_issued_compiler_support(&restored)
-                    .unwrap(),
-            );
-            context
-                .prepare_fixture_compilation(root, PRODUCER)
-                .unwrap()
-                .manifest
-        });
         let observations = source_target_observations(&[(&parent, 13)]);
         let prepared = prepared_target_fixture(&observations);
         let observed =

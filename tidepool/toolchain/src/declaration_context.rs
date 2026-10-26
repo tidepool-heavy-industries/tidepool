@@ -17580,6 +17580,15 @@ impl ExactDeclarationContext {
         self.prepare_compilation_with_authorization(root, producer, None)
     }
 
+    /// Fixture composition may inspect the issued compiler selection before
+    /// choosing the packet's durable materialization owner.
+    #[cfg(test)]
+    pub(crate) fn fixture_compiler_inputs(
+        self: &Arc<Self>,
+    ) -> Result<RequestCompilerInputs, CompileError> {
+        ProtectedScaffoldRequirements::default().compiler_inputs(self, None)
+    }
+
     /// The fixture adapter exits before its Haskell consumer runs. Its packet
     /// directory therefore owns the complete issued resource until consumption
     /// and cleanup, rather than borrowing the adapter process's temporary files.
