@@ -223,7 +223,7 @@ import Data.Foldable (toList)
 import Data.Unique qualified as RequestUnique
 import Data.Word (Word64)
 import Tidepool.CborEncode (encodeCellOut)
-import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CellSourceSpan(..), PreparedTypedSegmentSource(..), prepareTypedSegmentSourceAvoiding, renderCellCheckSourceWithImports, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedPragma(..), LocatedImport, ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
+import Tidepool.Binders (analyzeOrderedCellWithFlags, analyzeOrderedCellWithImports, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CellSourceSpan(..), PreparedTypedSegmentSource(..), prepareTypedSegmentSourceAvoiding, renderCellCheckSourceWithImports, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedPragma(..), LocatedImport, ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, nativeParsedModule, nativeImportSyntax, mapNativeModule, typecheckNativeModuleWithDiagnostics
   , resolveNativeAnnotations, annotateNativeModule)
@@ -2644,9 +2644,11 @@ data WorldCellPlanning result where
   CheckWorldCellPlan :: WorldCellPrepareRequest
     -> WorldCellPlanning (Either WorldCellRefusal HeldWorldCellPlan)
 
-parseWorldCellPlan :: DynFlags -> WorldCellRecipe -> IO CellSourcePlan
-parseWorldCellPlan flags recipe = analyzeOrderedCellWithFlags flags (worldCellTemplate recipe) (worldCellSource recipe)
-  >>= either (throwIO . SourceRejection . renderCellSplitError) pure
+parseWorldCellPlan :: DynFlags -> WorldInputFacts -> WorldCellRecipe -> IO CellSourcePlan
+parseWorldCellPlan flags facts recipe = do
+  inherited <- worldCellInheritedImports flags facts recipe
+  analyzeOrderedCellWithImports inherited flags (worldCellTemplate recipe) (worldCellSource recipe)
+    >>= either (throwIO . SourceRejection . renderCellSplitError) pure
 
 allocateWorldExpressionNames :: WorldCellRecipe -> CellSourcePlan -> WorldCellNameScope -> [(Int,String)]
 allocateWorldExpressionNames recipe plan (WorldCellNameScope lexical) = snd (foldl' allocate (lexical,[]) expressions)
@@ -2722,7 +2724,7 @@ runHeldWorldCellPlanning producer universe baseEnv timing attempt
   liftIO (emitCount timing (case operation of
     IssueWorldCellPlan {} -> "world.cell.plan_parses"
     CheckWorldCellPlan {} -> "world.cell.admission_parses") 1)
-  plan <- liftIO (parseWorldCellPlan (hsc_dflags baseEnv) recipe)
+  plan <- liftIO (parseWorldCellPlan (hsc_dflags baseEnv) facts recipe)
   (scope,pending) <- if any ((== KExpr) . sbKind . cellAnalysisVerdict) (cellPlanItems plan)
     then do
       stage <- liftIO (prepareWorldCellNameStage baseEnv world recipe plan)

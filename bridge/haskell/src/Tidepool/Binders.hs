@@ -46,7 +46,7 @@ module Tidepool.Binders
   , CellAnalysisSourceItem(..)
   , analyzeCellWithFlags
   , analyzeCell
-  , analyzeOrderedCell, analyzeOrderedCellWithFlags
+  , analyzeOrderedCell, analyzeOrderedCellWithFlags, analyzeOrderedCellWithImports
   , defaultParserDynFlags, templateParserFlags, sourceModuleFlags
   , renderCellCheckSource, renderCellCheckSourceWithLineOffset
   , renderCellCheckSourceWithImports
@@ -604,11 +604,11 @@ analyzeCellWithFlags
   -> String
   -> String
   -> IO (Either CellSplitError CellSourcePlan)
-analyzeCellWithFlags = analyzeCellWithGrouping False
+analyzeCellWithFlags = analyzeCellWithGrouping False []
 
 analyzeCellWithGrouping
-  :: Bool -> DynFlags -> String -> String -> IO (Either CellSplitError CellSourcePlan)
-analyzeCellWithGrouping ordered dflags template source = do
+  :: Bool -> [LocatedImport] -> DynFlags -> String -> String -> IO (Either CellSplitError CellSourcePlan)
+analyzeCellWithGrouping ordered inherited dflags template source = do
   flags <- cellEffectiveFlags dflags template source
   pure $ do
     effective <- flags
@@ -652,8 +652,10 @@ analyzeCellWithGrouping ordered dflags template source = do
       else installCellStructuralDisplayDeclarations (concatMap (structuralDisplayInstance displayAlias) targets) plan)
   where
     freshAlias candidate authoredSource
-      | candidate `isInfixOf` authoredSource = freshAlias (candidate ++ "X") authoredSource
+      | mkModuleName candidate `Set.member` inheritedNamespaces
+          || candidate `isInfixOf` authoredSource = freshAlias (candidate ++ "X") authoredSource
       | otherwise = candidate
+    inheritedNamespaces = Set.fromList (concatMap locatedImportNamespaces inherited)
     -- A KExpr item is spliced into a synthesized left section by
     -- 'renderExecutable' (wrapped as @(\x -> ...) (\n <item> \n)@), so a
     -- trailing dangling operator that would otherwise be a clear syntax
@@ -883,14 +885,21 @@ analyzeOrderedCell :: String -> String -> IO (Either CellSplitError CellSourcePl
 analyzeOrderedCell = analyzeCellUsing True
 
 analyzeOrderedCellWithFlags :: DynFlags -> String -> String -> IO (Either CellSplitError CellSourcePlan)
-analyzeOrderedCellWithFlags = analyzeCellWithGrouping True
+analyzeOrderedCellWithFlags = analyzeOrderedCellWithImports []
+
+-- | Inherited imports reserve their parsed namespaces without becoming fresh
+-- authored or protected imports in this plan. Issuance and re-admission must
+-- supply the same held lexical surface before compiler companions are named.
+analyzeOrderedCellWithImports :: [LocatedImport] -> DynFlags -> String -> String
+  -> IO (Either CellSplitError CellSourcePlan)
+analyzeOrderedCellWithImports = analyzeCellWithGrouping True
 
 analyzeCellUsing :: Bool -> String -> String -> IO (Either CellSplitError CellSourcePlan)
 analyzeCellUsing ordered template source = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    liftIO (analyzeCellWithGrouping ordered dflags template source)
+    liftIO (analyzeCellWithGrouping ordered [] dflags template source)
 
 -- | Obtain the parser defaults for one request. Parse-only operations need
 -- 'DynFlags', not a live compiler session; request owners can share this value

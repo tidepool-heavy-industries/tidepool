@@ -7,6 +7,7 @@ import Control.Monad (forM, forM_, unless, void, when)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (AsyncException(ThreadKilled), SomeException, bracket, bracket_, displayException, evaluate, finally, fromException, throwIO, try)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, tails)
@@ -2845,6 +2846,29 @@ structuralDisplayCompilation OrdinaryDisplayTest effectsRoot = bracket structura
     unless (not ("Text.pack" `isInfixOf` generated)) $
       fail "structural companions must not generate eager text conversion"
     _ <- compile accepted
+    -- Carry the actual first plan's companion imports into a later plan. The
+    -- second check exercises the generated-class singleton and GHC identity
+    -- recovery with both old and new companion namespaces present.
+    flags <- defaultParserDynFlags
+    first <- analyzeOrderedCellWithImports [] flags template "data FirstPublication = FirstPublication Bool"
+      >>= either (fail . renderCellSplitError) pure
+    let inherited = prologueImports (cellPlanPrologue first)
+    second <- analyzeOrderedCellWithImports inherited flags template "data SecondPublication = SecondPublication Bool"
+      >>= either (fail . renderCellSplitError) pure
+    let compose current previous = current {cellPlanPrologue=(cellPlanPrologue current)
+          {prologueImports=previous ++ prologueImports (cellPlanPrologue current)}}
+        check current = case cellInferenceSegments current of
+          [segment] -> checkCellInstances compile segment
+          _ -> fail "companion history did not produce one declaration stage"
+    _ <- check first
+    _ <- check (compose second inherited)
+    shadow <- analyzeOrderedCellWithFlags flags template
+      "import qualified CellDisplayExternal as TidepoolCompilerDisplayX\nimport qualified CellDisplayExternal as TidepoolCompilerGenericX"
+      >>= either (fail . renderCellSplitError) pure
+    let collision = inherited ++ prologueImports (cellPlanPrologue shadow)
+    third <- analyzeOrderedCellWithImports collision flags template "data ThirdPublication = ThirdPublication Bool"
+      >>= either (fail . renderCellSplitError) pure
+    _ <- check (compose third collision)
     invalidSource <- readFile "test-cell-splitter/ExplicitInvalidGeneric.cell.hs"
     invalidPlan <- analyzeCell template invalidSource >>= either (fail . renderCellSplitError) pure
     invalid <- try (checkCellInstances compile invalidPlan)
@@ -3482,6 +3506,7 @@ automaticGenericPlans flags = do
         assertContains "check source carries generated declaration"
           "deriving instance TidepoolCompilerGeneric.Generic (Packet a)" checked
       [] -> fail "automatic Generic cell omitted declaration item"
+  inheritedCompanionNamespaces flags
   parsedImportOriginChecks flags
   where
     source = unlines
@@ -3496,12 +3521,40 @@ automaticGenericPlans flags = do
       , "data Hidden a = forall b. Hidden b"
       ]
 
+-- Repeated planning preserves prior import provenance and reserves every
+-- parsed namespace, including aliases belonging to unrelated modules.
+inheritedCompanionNamespaces :: DynFlags -> IO ()
+inheritedCompanionNamespaces flags = do
+  let template = "{-# LANGUAGE UndecidableInstances #-}\n" ++ checkTemplate
+  first <- analyzeOrderedCellWithFlags flags template "data First = First Bool"
+    >>= either (fail . renderCellSplitError) pure
+  shadow <- analyzeOrderedCellWithFlags flags template
+    "import qualified Data.List as TidepoolCompilerDisplayX\nimport qualified Data.Maybe as TidepoolCompilerGenericX"
+    >>= either (fail . renderCellSplitError) pure
+  let inherited = prologueImports (cellPlanPrologue first) ++ prologueImports (cellPlanPrologue shadow)
+      source = "import qualified Data.Either as TidepoolCompilerDisplayXX\ndata Next = Next Bool"
+      issue = analyzeOrderedCellWithImports inherited flags template source
+        >>= either (fail . renderCellSplitError) pure
+      reserved = Set.fromList (concatMap locatedImportNamespaces inherited)
+  next <- issue
+  readmitted <- issue
+  assertEqual "plan issuance and readmission choose the same companions" next readmitted
+  let fresh = filter ((== ProtectedCompilerImport) . locatedImportIntent)
+        (prologueImports (cellPlanPrologue next))
+      aliases = [last (locatedImportNamespaces imported) | imported <- fresh]
+  unless (length aliases == 2 && all (`Set.notMember` reserved) aliases) $
+    fail ("compiler companion namespaces overlap inherited imports: " ++ show (map moduleNameString aliases, map moduleNameString (Set.toList reserved), map locatedImportSource fresh))
+  assertEqual "authored alias also remains reserved" False
+    (cellPlanStructuralDisplayAlias next == "TidepoolCompilerDisplayXX")
+  assertEqual "inherited imports are not reissued in the new plan" 3
+    (length (prologueImports (cellPlanPrologue next)))
+
 -- These are parser/renderer observations, not executable source grants. Each
 -- variation uses the same actual recipe/captured-byte census as World demand.
 parsedImportOriginChecks :: DynFlags -> IO ()
 parsedImportOriginChecks flags = bracket temporary removeDirectoryRecursive $ \directory -> do
   let source = "import qualified Data.List\n  as AuthoredList\ndata RoleMarker = RoleMarker\n"
-      templates = [checkTemplate
+      templates = map ("{-# LANGUAGE UndecidableInstances #-}\n" ++) [checkTemplate
         , "-- π λ before the header\n" ++ checkTemplate
         , Text.unpack (Text.replace "import GHC.Generics (Generic)"
             "import GHC.Generics\n  (Generic)" (Text.pack checkTemplate))
