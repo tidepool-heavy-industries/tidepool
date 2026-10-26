@@ -1,14 +1,15 @@
 # G2 fixture closure and Persona admission
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
-Current integrated code: `1c3d3ff5ca`.
+Current integrated code: `9921dfc28f`.
 Active evidence: `/srv/swarm/evidence/inanna/g2-final-qualification-20261026/`.
 
 G2 remains unqualified. Executable projection, Original demand and certification
 share one product boundary. The current integration adds admitted native census
 observations, notebook alias shadowing, stable World parser coordinates,
 prepared-marker dependency projection, issued fixture admission and request-local
-host prototype TYPE borrowing. Frozen-bundle qualification and live Persona
+host prototype TYPE borrowing, and reuse of matching live TYPE issuers during
+fresh source output certification. Frozen-bundle qualification and live Persona
 deployment remain separate.
 
 Argon accepted `738fcea501` / code `ac5c020d92` without blocking findings.
@@ -77,21 +78,6 @@ entry publication flow. Its previous DATA-only fixture fails on the unchanged
 base before reaching the new assertion; that calibration is retained in
 `rust/`. No production SOURCE guard was changed to accommodate the fixture.
 
-## Joined failure that motivated this tranche
-
-At `beccb4ab96`, the JSON-to-Text actor carrier passes 1/1 with confirmed
-cleanup. Hosted startup at identical-tree `ae8e284346` passes early exact Run
-ownership and capsule restoration, then refuses before initializer Jev:
-`Original package use exceeds selected exact HOME groups`.
-
-The retained target includes `Value.Null` in Original-use roots although it was
-lowered to a local constructor and is absent from final globals. The legitimate
-`Scientific.stripZeros` root remains selected. Demand formerly combined
-synthesized local bindings with external imports and then attached that discovery
-result to a second projection. The current contract eliminates both paths.
-Prior failure inputs and source traces remain in
-`/srv/swarm/evidence/inanna/g2-persona-20261026/startup/`.
-
 ## Accepted foundation and evidence
 
 - Coupled offer/availability projection, monotone same-issuance narrowing,
@@ -125,12 +111,13 @@ Current component evidence under `g2-final-qualification-20261026`:
 
 | Boundary | Evidence and remaining limitation |
 |---|---|
-| Admitted native census | `a7f90b60f312`: worker/test compilation and 2/2 controls pass; independent source review accepted. Exact destination groups own both binders and globals. FullCarrier/IssuedGroups availability does not widen stage ownership. Actual activation histories are running on the integration. |
+| Admitted native census | `a7f90b60f312`: worker/test compilation and 2/2 controls pass; independent source review accepted. Exact destination groups own both binders and globals. FullCarrier/IssuedGroups availability does not widen stage ownership. Six actual activation histories and the counting history pass in the joined eight-case run at `1c3d3ff5ca`. |
 | Original-binding decoding | `63701786b9`: 2/2 controls and eight corpus programs pass. Both exact pairs are retained, but conversion deliberately refuses without authenticated resolution. The new Rust/Haskell transport is not yet integrated. |
-| Alias shadowing | `fc2e84da42`: worker compilation and one producer test with 38 requests pass, including selectors, qualified names and NoFieldSelectors. Actual actor history is running. |
+| Alias shadowing | `fc2e84da42`: worker compilation and one producer test with 38 requests pass, including selectors, qualified names and NoFieldSelectors. The actual distinct-private-program actor history passes at `1c3d3ff5ca`. |
 | World source identity | `06e17ebbf1`: worker/test compilation and 2/2 controls pass. Logical parser coordinates preserve physical evidence paths, raw hashes and authored LINE directives. |
-| Prepared marker census | `0b4420d595`: compilation, 2/2 focused cases and one corpus program pass. Dependency capture uses actual executable sibling IDs. Hosted default reload is running on the integration. |
-| Runtime host preparation | `62b6d2fd95` with `06e17ebbf1`: residency 9/9 and a separate retirement control 1/1 pass. TYPE borrowing is request-local; runtime checks retain the original World/frontier. Follow-up `b0a68a0ac3` passes 2/2 Active/hidden and abandonment controls; integration is pending. |
+| Prepared marker census | `0b4420d595`: compilation, 2/2 focused cases and one corpus program pass. Joined default reload at `1c3d3ff5ca` passes startup and commits reload, then fails publication of the retired original continuation; see the open settlement boundary below. |
+| Runtime host preparation | `62b6d2fd95` with `06e17ebbf1`: residency 9/9 and a separate retirement control 1/1 pass. TYPE borrowing is request-local; runtime checks retain the original World/frontier. Integrated follow-up `e4d7a344db` passes 2/2 Active/hidden and abandonment controls at its worker pin. |
+| Live TYPE reuse | Integrated `9921dfc28f` (worker `052d4b1aec`): production/test compilation and three focused controls pass, including independent canonical allocations, alias/removal/replacement, and historical versions. Exact finalized ArtifactId and live binding identity govern reuse; primary/demanded selections retain precedence. Actual JSON/Job rerun is pending. |
 | Actor fixtures | `541008587d`: 51 distinct selectors passed at recorded checkpoints; 49/76 shared-fixture selectors passed. All 89 terminal reports confirm process/compiler cleanup. This is not a joined 76-case pass. |
 | Uncertain END | Source-owned checkpoint `49dc365af3` passes the maintained physical-response-without-END control 1/1 with confirmed process/compiler cleanup. Frozen-bundle acceptance remains separate. |
 
@@ -142,17 +129,23 @@ Implementation work still open:
    group. Do not replace this proof with an owner/name lookup. Exercise a real
    authored K-to-J chain carrying a retained checked value through an ordinary
    ExactScope consumer, separately from decoder mutation controls.
-2. Reuse an unambiguous live dependency selection when a later stage produces
-   the same finalized canonical ArtifactId without demanding its earlier value.
-   Primary and demanded selections retain precedence. Different historical
-   ArtifactIds remain passive; removal of the last live reference removes the
-   borrowing opportunity. Do not permanently union host TYPE into primary.
-3. Complete joined activation, alias, JSON/Job and default-reload histories on
-   the integrated revision. Distinguish component success from joined success.
-4. Resolve held-World Bash quotation compatibility. Parsed demand currently
-   refuses quotations, while pinned skills and host command scripts use them.
-   Preserve the existing exact-session quoter route. Neither arbitrary quoter
-   rewriting nor deleting shipped surface is authorized by a fixture repair.
+2. Close the JSON/Job joined carrier boundaries. At `1c3d3ff5ca`, JSON reaches
+   native demand graph certification but lacks a source-owner seal; Job reports
+   competing exact TYPE bindings. The same two controls are running at
+   `9921dfc28f`; preserve their earlier failures and identify the actual missing
+   seal independently of the ExactScope transport repair.
+3. Resolve default reload settlement. The generation owner commits B and retires
+   A before A's original notebook continuation completes. Ordinary publication
+   correctly refuses A. Carry an owner-issued settlement outcome; do not infer
+   publication authority from a generic committed effect or rebind A's intent
+   to B. Argon is reviewing whether old private writes must be discarded or
+   produce explicit partial settlement. Committed effects must never rerun.
+4. Implement held-World Bash literal quotations through authenticated demand and
+   lowering before typechecking. Resolve lexical/import shadowing twice, before
+   demand and after alias refinement, and authenticate the selected shipped
+   Bash/Command/Text implementations. Keep arbitrary quoters, non-expression
+   quotations and splices refused; do not execute TH during demand or lowering.
+   Preserve the existing exact-session quoter route and shipped command surface.
 5. Assemble, freeze and qualify one exact bundle under
    [the G2 contract](shared-warm-compiler/completion/g2-completion.md), including
    ordinary/uncertain-END histories, Persona startup and bounded provider smoke.
@@ -160,3 +153,12 @@ Implementation work still open:
 W1 decoder retention and W5 context-baseline redesign remain deferred. W2's
 lower-level internal accessor is not globally removed. No live Persona or release
 readiness is claimed by the component checks above.
+
+Joined evidence at `1c3d3ff5ca`: `actor/joined-1c3-outcome.json` records 8/8
+distinct activation/shadowing passes and both carrier failures. One initial
+provider startup refusal executed zero tests; its unchanged retry passed.
+`host/default-reload-joined/result.json` records the committed reload followed by
+publication refusal. All terminal process/compiler cleanup is confirmed, and
+hosted cleanup is confirmed for reload. Bounded diagnostic summaries remain
+marked incomplete where applicable; the raw capture and cleanup evidence is
+retained without relabeling those flags.
