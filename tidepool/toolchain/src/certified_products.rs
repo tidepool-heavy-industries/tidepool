@@ -1752,6 +1752,17 @@ impl CertifiedSegmentOriginals {
             .map(crate::artifact_inventory::ArtifactEntry::canonical)
             .map(Arc::new)
             .collect::<Vec<_>>();
+        // Finalized source-closure canonicals are issued here alongside the
+        // executable module's products. The executable receipt module list is
+        // not the owner census for those SourceOriginal interfaces.
+        let baseline = world
+            .retain_live_type_candidates(
+                stage_primary,
+                compiler_inputs.artifacts(),
+                &artifact_entries,
+                &validation.inventory,
+            )
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let producer_sha =
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                 .sha256();
@@ -1810,34 +1821,6 @@ impl CertifiedSegmentOriginals {
             .chain(&value_entries)
             .cloned()
             .collect();
-        validation
-            .inventory
-            .reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(artifact_entries.len())?;
-        validation
-            .inventory
-            .charge(artifact_entries.len().saturating_mul(receipt.modules.len()))?;
-        let fresh_interfaces = artifact_entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.payload,
-                    crate::artifact_inventory::ArtifactPayload::Canonical(_)
-                ) && receipt.modules.iter().any(|module| {
-                    module.origin == ProductOrigin::Fresh
-                        && module.unit == entry.descriptor.owner.unit
-                        && module.module == entry.descriptor.owner.module
-                })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let baseline = world
-            .retain_live_type_candidates(
-                stage_primary,
-                compiler_inputs.artifacts(),
-                &fresh_interfaces,
-                &validation.inventory,
-            )
-            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let products = products
             .capture_certificates(&baseline, entries, validation)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
@@ -35688,6 +35671,37 @@ None,
             .module_interfaces
             .iter()
             .any(|interface| interface.module() == "Types" && interface.core_bytes().is_none()));
+        assert!(receipt
+            .modules
+            .iter()
+            .all(|module| module.module != "Types"));
+        // Re-finalization creates independent facts for the same source-only
+        // canonical. Its eligibility must come from current finalization, not
+        // membership in the executable module receipt or retained Originals.
+        let recertified = certify(&receipt).unwrap();
+        let canonical = |products: &CertifiedProducts| {
+            products
+                .module_interfaces
+                .iter()
+                .find(|interface| interface.module() == "Types")
+                .cloned()
+                .unwrap()
+        };
+        let first =
+            crate::artifact_inventory::ArtifactEntry::canonical(canonical(certified.data()));
+        let second =
+            crate::artifact_inventory::ArtifactEntry::canonical(canonical(recertified.data()));
+        assert_eq!(first, second);
+        assert!(!first.same_issued_facts(&second));
+        assert!(
+            matches!(&first.payload, crate::artifact_inventory::ArtifactPayload::Canonical(interface)
+            if matches!(interface.origin(), CanonicalOrigin::SourceOriginal { .. }))
+        );
+        assert!(certified
+            .data()
+            .recovery_products
+            .iter()
+            .all(|product| product.owner().module != "Types"));
         let mut missing = receipt.clone();
         missing.finalization.modules.remove(&types_key);
         assert!(matches!(
