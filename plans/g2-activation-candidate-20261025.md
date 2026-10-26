@@ -1,12 +1,12 @@
 # G2 remaining publication and compiler boundaries
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
-Integrated code candidate: `89e0ea1867572dc05b5b693afa218716ce32764e`.
+Integrated code candidate: `f0e599b70740baeba252f0a58b52d073310cfa7a`.
 Reviewed base: code `69a6ea506b`, docs `9bd10232b9`.
 Current evidence: `/srv/swarm/evidence/inanna/g2-four-boundaries-20261025/`.
 
-G2 remains unqualified. Finish the carried-operand repair exposed by joined
-validation, then review the integrated candidate. Preserve exact source,
+G2 remains unqualified. Review the new narrowed-availability snapshot boundary.
+Preserve exact source,
 product, lexical, TYPE, native and lifecycle authority throughout.
 
 ## Implementation and acceptance
@@ -45,14 +45,16 @@ validity recording for canonical observations. The repair preserves immutable
 completed-version and StableName checks; both targeted memo regressions fail
 against the old compiler and pass with the repair.
 
-The actor carrier now completes JSON execution and Text mounting but fails when
-the final Text cell restores carried imports. All three early
-`restoreWorldImportBasis` calls omit checked-value authority for the already
-authenticated active operand. Derive that authority from its verified capture
-and pass it through those calls, preserving SOURCE collision checks, separate
-generated-scaffold authority and the later complete checked-value union. Require
-a genuine carried-import/operand positive and foreign/missing-operand refusals,
-then rerun the actor case. See `cleanup/carried-operand-review.md`.
+The actor carrier exposed a second defect: all three early
+`restoreWorldImportBasis` calls omitted checked-value authority for the already
+authenticated active operand. The integrated repair carries that authority from
+its verified capture, preserving SOURCE collision checks, separate scaffold
+authority and the later complete union. The new positive fails with the old
+mechanism and passes repaired; foreign/missing operands refuse earlier source
+resolution and are not counted as lexical-guard controls. The joined actor case
+passes 1/1 and full prepared-STG passes 13/13 at worker `84e5967002`, whose tree
+differs from the integrated candidate only in this plan. See
+`cleanup/carried-operand-review.md`.
 
 ## Cleanup decisions
 
@@ -79,8 +81,10 @@ are source evidence, not executed qualification.
 
 ## Integrated verification still required
 
-Finish actor carrier and full source-boot/prepared-STG checks, retained under
-`joined-haskell/`. The completed runtime selections are under
+Full source-boot passed 121/121 at `89e0ea1867`; final targeted World passed 13/13
+at `84e5967002`. Corpus validation passed 12/12 cohorts and 1,052 programs at
+`f0e599b707`. Evidence is under `joined-haskell/` and `corpus/`.
+The completed runtime selections are under
 `joined-runtime/89e0/`. Rich retraction's embedded timing record list reached its
 256 KiB limit; the full retained trace separately yields 279/279 records and
 40/40 request identities under a 1 MiB extraction bound. The original diagnostic
@@ -89,12 +93,24 @@ advancement, codec DATA histories, cold-versus-delta facts/charges, malformed
 transition refusal and bounded validation work; it does not claim whole-successor
 O(delta) performance or transactional cancellation qualification.
 
-The existing broad publication test separately fails in a raw-recovery fixture
-before recorded publication authentication. A bounded test-only migration to
-emitted snapshot hydration and `context_for_expected_snapshot` is in flight;
-keep all production refusals and meaningful corruption controls. No pre-change
-execution was made in this round, so regression chronology is unknown. The new
-real-owner handoff test is isolated and passes on `89e0ea1867`.
+The actor report's timing sample and five directory resource manifests also
+remain explicitly incomplete. Its full 58,453,504-byte trace scanned cleanly;
+direct executable/compiler hashes and confirmed cleanup are retained. This
+supports the executed behavior, not complete frozen-bundle qualification.
+
+The test-only publication migration is committed separately as `cae93333fa`
+(base `89e0ea1867`), not integrated. Emitted snapshot hydration and
+`context_for_expected_snapshot` repair the old raw-role setup. Compiler controls
+pass 3/5 and DATA histories pass 2/2. The two genuine narrowed cold positives
+expose a production invariant: `source_support` drops a Helper offer while
+retaining availability contributions referencing it, so snapshot hydration
+correctly refuses a missing backing offer. Retained Target/SourceOriginalSupport
+contributions cover exactly the same scoped nodes, including Helper ordinal 3.
+Argon should identify the coupled projection that preserves required groups and
+TYPE demotion without restoring broad Full availability. See
+`publication-fixture/implementation.md`, `missing-offer.json` and
+`argon-checkpoint.md` in the evidence directory. No pre-change execution was made
+in this round, so regression chronology is unknown.
 
 Prior evidence remains bound to its own sources under
 `/srv/swarm/evidence/inanna/g2-apply-closure-20261025/`: the established joined
