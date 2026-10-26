@@ -207,6 +207,20 @@ async fn exercise_durable_attachment(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn released_root_startup_already_owns_its_source_generation() {
+    async fn settled_startup(
+        result: Result<HostedTestRuntime, super::hosted_test_context::HostedStartupError>,
+    ) -> String {
+        match result {
+            Ok(host) => {
+                let cleanup = host
+                    .stop(&super::hosted_test_context::ScenarioOutcome::Unknown)
+                    .await;
+                format!("unexpected host readiness; cleanup: {cleanup:?}")
+            }
+            Err(error) => error.to_string(),
+        }
+    }
+
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
     let (provider, _requests) = hosted_script_provider();
@@ -223,11 +237,11 @@ async fn released_root_startup_already_owns_its_source_generation() {
     ));
     let boundary = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
         tokio::select! {
-            boundary = &mut released => boundary.expect("host reaches its startup release boundary"),
-            ready = &mut starting => match ready {
-                Ok(_) => panic!("host became ready before the startup release barrier"),
-                Err(error) => panic!("host failed before the startup release barrier: {error}"),
+            boundary = &mut released => match boundary {
+                Ok(boundary) => boundary,
+                Err(_) => panic!("startup release observer closed: {}", settled_startup(starting.as_mut().await).await),
             },
+            ready = &mut starting => panic!("startup ended before the release barrier: {}", settled_startup(ready).await),
         }
     })
     .await
@@ -263,15 +277,19 @@ async fn released_root_startup_already_owns_its_source_generation() {
                 .same_revision(&selected);
             Ok((foreign_refused, unchanged))
         });
+    eprintln!(
+        "startup-source-admission {}",
+        serde_json::json!({ "actor": actor, "admission": &admission })
+    );
     drop(boundary.source);
     boundary.continue_host.send(()).unwrap();
     let held = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
         tokio::select! {
-            judgment = judgments.recv() => judgment.expect("root enters its real initializer"),
-            ready = &mut starting => match ready {
-                Ok(_) => panic!("host became ready before its initializer reached Jev"),
-                Err(error) => panic!("host failed before its initializer reached Jev: {error}"),
+            judgment = judgments.recv() => match judgment {
+                Some(judgment) => judgment,
+                None => panic!("initializer observer closed: {}", settled_startup(starting.as_mut().await).await),
             },
+            ready = &mut starting => panic!("startup ended before initializer Jev: {}", settled_startup(ready).await),
         }
     })
     .await
