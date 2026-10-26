@@ -4726,19 +4726,27 @@ sourceDependencyGraph :: ModuleGraph -> Map.Map Module (Set.Set Module)
 sourceDependencyGraph graph = Map.fromListWith Set.union
   [(ms_mod summary,sourceImportOwners summary) | ModuleNode _ summary <- mgModSummaries' graph]
 
--- Exact originals retain their authenticated inputs. Legacy value injection
--- refuses only its importing closure, including recorded indirect home uses.
+-- Exact and World originals retain their authenticated inputs. Transient value
+-- injection refuses its importing closure, including recorded indirect home uses.
 unsealedSourceInputs :: PipelineVariant -> HscEnv -> Set.Set Module
 unsealedSourceInputs variant env = Set.fromList
   [mkModule home name | name <- pvDownsweepExcludes variant
     , mkModule home name `Set.notMember` sealed]
   where
     home = homeUnitAsUnit (hsc_home_unit env)
-    sealed = Set.fromList
-      [mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
+    sealed = Set.fromList (exact ++ world)
+    exact = [mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
         | scope <- maybe [] pure (pvExactScope variant)
         , artifact <- map (\(value,_,_) -> value) (scopeInterfaces scope)
           ++ [value | scopePurpose scope /= NoCheckedPurpose, value <- scopeValueInterfaces scope]]
+    world = concat
+      -- The import basis authenticates the complete TYPE closure, including
+      -- dependency-only checked values. The active operand has a separate
+      -- owner and is deliberately not added from its downsweep exclusion.
+      [ [mi_module (worldTypeEntryInterface entry) | entry <- worldImportEntries imports]
+        ++ [mkModule (stringToUnit unit) name | (name,unit) <- Map.toAscList prefix]
+      | WorldSourceInputBasis _ _ _ _ _ imports (WorldPrefixLexicalOwners prefix)
+          <- maybe [] pure (pvWorldSources variant)]
 
 usesUnsealedSourceInputs :: Set.Set Module -> HscEnv -> GutsMemoEntry -> Bool
 usesUnsealedSourceInputs inputs _ _ | Set.null inputs = False
@@ -5933,6 +5941,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         retainedEntries <- fmap catMaybes $ forM sourceOrder $ \summary ->
           case Map.lookup (ms_mod_name summary) normalCandidates of
             Just _ -> recordValidity summary True >> pure Nothing
+            Nothing | isJust (canonicalOriginalFor summary) ->
+              recordValidity summary True >> pure Nothing
             Nothing -> do
               cached <- lookupValidMemo summary
               let ready = cached >>= \entry -> case cachedInterface summary entry of
@@ -5970,6 +5980,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     forM_ sourceOrder $ \summary -> liftIO $ do
       let retainedVersion = ms_mod summary `Map.member` validatedMemo
           canonicalVersion = ms_mod_name summary `Map.member` acceptedCandidates
+            || isJust (canonicalOriginalFor summary)
           reusable = retainedVersion || canonicalVersion
           disabled = ms_mod summary `Set.member` disabledSourceOwners
           decision | disabled = ReuseDisabled
@@ -5998,7 +6009,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       writeIORef completionRecoveryRef (Just recovery)
     let recompiledOwners = Set.fromList [ms_mod summary | summary <- sourceOrder
           , ms_mod summary `Map.notMember` validatedMemo
-          , ms_mod_name summary `Map.notMember` acceptedCandidates]
+          , ms_mod_name summary `Map.notMember` acceptedCandidates
+          , isNothing (canonicalOriginalFor summary)]
         freshSource summary = ms_hsc_src summary == HsSrcFile
           && ms_mod summary `Set.member` recompiledOwners
           && isNothing (canonicalOriginalFor summary)
@@ -6260,10 +6272,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     requiredLoadedOwnersRef <- liftIO (newIORef (Set.fromList
       [ms_mod summary | ModuleNode _ summary <- mgModSummaries' loadGraph, freshSource summary]))
     beforeLoad <- getSession
-    let selectedMemoHomes = Map.fromList
+    let canonicalHomes = Map.fromList
+          [(ms_mod summary,canonicalOriginalHome input) | summary <- Map.elems canonicalViews
+            , Just input <- [canonicalOriginalFor summary]]
+        selectedLoadHomes = Map.union (Map.fromList
           [(mi_module (hm_iface home),home) | home <- eltsHpt (hsc_HPT beforeLoad)
-            , mi_module (hm_iface home) `Map.member` validatedMemo]
-        freshIngress summary = case Map.lookup (ms_mod summary) selectedMemoHomes of
+            , mi_module (hm_iface home) `Map.member` validatedMemo
+                || mi_module (hm_iface home) `Map.member` canonicalHomes]) canonicalHomes
+        freshIngress summary = case Map.lookup (ms_mod summary) selectedLoadHomes of
           Just home -> pure (Left home)
           Nothing -> do
             when (freshSource summary) $ liftIO $
@@ -6541,15 +6557,16 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- executable epoch before planning; per-file TH backends do not change it.
     -- Make prefers its cached interface over the current summary's staged
     -- interface. An admitted original owns that choice now; remove its prior
-    -- interface and linkable together. Only this cycle's selected memo
-    -- interfaces may enter Make through its cache; an unowned disk interface
+    -- interface and linkable together. Only this cycle's selected memo or
+    -- canonical interfaces may enter Make through its cache; an unowned disk interface
     -- cannot stand in for a fresh canonical finalization.
     let candidateOwners = Set.fromList
           [ms_mod (admittedCandidateSummary candidate) | candidate <- Map.elems acceptedCandidates]
-        currentMemoInterfaces = Map.map (hm_iface . finalizedHomeModInfo .
-          loadedFinalized . (\entry -> payloadLoaded (sourceSummaries Map.! payloadOwner (gmePayload entry)) (gmePayload entry))) validatedMemo
+        currentLoadInterfaces = Map.union (Map.map (hm_iface . finalizedHomeModInfo .
+          loadedFinalized . (\entry -> payloadLoaded (sourceSummaries Map.! payloadOwner (gmePayload entry)) (gmePayload entry))) validatedMemo)
+          (Map.map hm_iface canonicalHomes)
         sourceSummaries = Map.fromList [(ms_mod summary,summary) | ModuleNode _ summary <- mgModSummaries' modGraphRaw]
-        keepCurrent iface = mi_module iface `Set.notMember` candidateOwners && case Map.lookup (mi_module iface) currentMemoInterfaces of
+        keepCurrent iface = mi_module iface `Set.notMember` candidateOwners && case Map.lookup (mi_module iface) currentLoadInterfaces of
           Nothing -> False
           Just original -> mi_hsc_src iface == mi_hsc_src original
             && mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts original)
@@ -6605,7 +6622,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           getSession >>= liftIO . validateCandidateHomeInterfaces
           current <- getSession
           -- Make prunes homes outside its deferred load graph. Restore the
-          -- validated memo selections, preserving any current SOURCE details
+          -- validated memo and canonical selections, preserving current SOURCE details
           -- knots and executable capacity that Make installed or retied.
           let restoreMemoHome home homes =
                 let name = moduleName (mi_module (hm_iface home))
@@ -6613,7 +6630,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   Just _ -> homes
                   Nothing -> addToHpt homes name home
           setSession (hscUpdateHPT (\homes -> foldr restoreMemoHome homes
-            (Map.elems selectedMemoHomes)) current
+            (Map.elems selectedLoadHomes)) current
               {hsc_mod_graph=mapMG restoreFreshSource (hsc_mod_graph current)})
           cpAfterLoad plan freshIngress
           -- Make can replace a successful source home with an interface-only
@@ -6880,6 +6897,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 when captureProducts $ liftIO $
                   modifyIORef' productInterfacesRef (Map.insert name (hm_iface hmi))
                 pure (HydratedObservation modSum hmi candidate)
+              observeCanonical modSum canonical = do
+                recordValidity modSum True
+                when captureProducts $ liftIO $
+                  modifyIORef' productInterfacesRef (Map.insert (ms_mod_name modSum)
+                    (hm_iface (canonicalOriginalHome canonical)))
+                pure (CanonicalObservation modSum canonical)
               freezeSiblings observations = liftIO $ do
                 forM_ observations $ \observation -> case observation of
                   LoadedObservation loaded ->
@@ -7039,7 +7062,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     recordExecutableValidity modSum True
                     pure observation
                   Nothing | Just canonical <- canonicalOriginalFor modSum ->
-                    pure (CanonicalObservation modSum canonical)
+                    observeCanonical modSum canonical
                   Nothing -> do
                     cached <- lookupValidMemo modSum
                     case cached of
@@ -7114,7 +7137,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 case Map.lookup (ms_mod_name modSum) acceptedCandidates of
                   Just candidate -> observeCandidate modSum candidate
                   Nothing | Just canonical <- canonicalOriginalFor modSum ->
-                    pure (CanonicalObservation modSum canonical)
+                    observeCanonical modSum canonical
                   Nothing -> do
                     cached <- lookupValidMemo modSum
                     case cached of
@@ -7163,7 +7186,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                               && interfaceReady interfaceUse summary entry
                             Nothing -> False
                         LoadedObservation{} -> False
-                        CanonicalObservation{} -> False ]
+                        -- The original fixes dependency identity; its body is
+                        -- still acquired independently when actually reached.
+                        CanonicalObservation{} -> True ]
                   normalReusableOwners = dependencyClosedReuse referencesByMod locallyReusable
                   reusableOwners
                     | bodyReuseDisabled = Set.fromList

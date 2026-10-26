@@ -95,7 +95,7 @@ import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, Check
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
 import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, withCapturedRequestInputTokens, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies, editDirectRequestInputBodies)
-import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
+import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, isReservedSessionModuleName, sessionModuleString)
 import Tidepool.DeclarationJoin (DeclarationExport(..), decodeDeclarationExports, interfaceExports, normalizeDeclarationExports)
 import Tidepool.CheckedCell
   ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures, encodeCheckedSignature, encodeRequestTypeSignatures
@@ -1638,8 +1638,13 @@ captureSourceOriginals
   -> (String,String) -> FinalizedModuleArtifacts -> DependencyEvidence
   -> IO (Map.Map (String,String) CanonicalInterfaceProof)
 captureSourceOriginals producer inherited additional inputSeals exactImports target finalized evidence = do
-  let admissions = Map.delete target (finalizedLocalAdmissions finalized)
-      rows = map localFinalizedInterface (Map.elems admissions) ++ additional
+  let local = Map.delete target (finalizedLocalAdmissions finalized)
+      -- Declaration products retain their actual local interfaces and seals;
+      -- their native issuer, rather than source certification, owns the product.
+      admissions = Map.filterWithKey (\(_,name) _ -> case parseSessionModule name of
+        Just (SessionModule LibMod _) -> False
+        _ -> True) local
+      rows = map localFinalizedInterface (Map.elems local) ++ additional
       keyOf (artifact,_,_) = (exactUnit artifact,exactModule artifact)
   interfaces <- foldM (\selected row -> case filter ((== keyOf row) . keyOf) selected of
       [] -> pure (row:selected)
@@ -1651,7 +1656,7 @@ captureSourceOriginals producer inherited additional inputSeals exactImports tar
       _ -> fail "captured source original conflicts with an admitted interface") inherited rows
   descriptors <- forM (Map.toAscList admissions) $ \(key,admission) -> do
     either fail pure =<< revalidateLocalFinalizedAdmission admission
-    unless (parseSessionModule (snd key) == Nothing)
+    unless (not (isReservedSessionModuleName (snd key)))
       (fail "source original capture uses a reserved native/session owner")
     node <- case [node | node <- dependencyModules evidence
         , (dependencyModuleUnit node,dependencyModuleName node) == key

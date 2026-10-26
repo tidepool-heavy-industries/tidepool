@@ -250,6 +250,7 @@ import Tidepool.ExactScope
   , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..)
   , scopeValueInterfaces, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, readScopedInterfaceClosure, validateExactScopeEnvironment
   , ExactScopeRequestFailure(..)
+  , CanonicalOrigin(..), canonicalOrigin, isSourceOriginal
   , scopeModuleInterfaceProofs, scopeCanonicalInterfaces, admittedInterfaceSourceSha256, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
   , ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
@@ -7829,3 +7830,25 @@ ghcOracleLexicalEnvironment graph lexical checked environment =
           (GWIB (mkModuleName (exactModule artifact)) NotBoot)
           (ms_location (exactInterfaceSummary projected artifact))
       pure (Right projected)
+
+
+mixedAuthoredSourceCapture :: IO ()
+mixedAuthoredSourceCapture = withTiming $ withScratch $ \work -> do
+  let owner = SessionModule LibMod (Generation 2)
+      source = replaceExtension (sessionHiPath work owner) "hs"
+  createDirectoryIfMissing True (takeDirectory source)
+  writeFile (work </> "AuthoredSupport.hs") $ unlines
+    ["module AuthoredSupport where", "support :: Int", "support = 41"]
+  writeFile source $ unlines
+    ["module Tidepool.Session.Lib.G2 where", "import AuthoredSupport"
+    ,"fixtureValue :: Int", "fixtureValue = support + 1"]
+  path <- writeGenuineAuthoredDeclarationScope owner [work] source work
+  scope <- readExactScope path >>= either fail pure
+  let proofs = scopeModuleInterfaceProofs scope
+  declaration <- maybe (fail "mixed capture omitted the authored native product") pure
+    (Map.lookup ("main","Tidepool.Session.Lib.G2") proofs)
+  support <- maybe (fail "mixed capture omitted the ordinary source product") pure
+    (Map.lookup ("main","AuthoredSupport") proofs)
+  unless (canonicalOrigin declaration == NativeAuthoredDeclaration (Generation 2)
+      && isSourceOriginal (canonicalOrigin support))
+    (fail "mixed capture confused native declarations and source originals")

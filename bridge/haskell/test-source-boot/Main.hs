@@ -90,6 +90,7 @@ tests = testGroup "source-boot"
   , testCase "SOURCE boot reuse" $ withTiming (withScratch sourceBootReuseAt)
   , testCase "candidate request site siblings" $ candidateRequestSitedSiblings
   , testCase "canonical current source" $ canonicalCurrentSource
+  , testCase "mixed authored declaration and source capture" mixedAuthoredSourceCapture
   , testCase "canonical mixed source adjacency" canonicalMixedSourceAdjacency
   , testCase "canonical source obligations" $ canonicalSourceObligations
   , testCase "generated scaffold imports" $ generatedScaffoldImports

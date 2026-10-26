@@ -2516,6 +2516,47 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
             _ -> fail "finalized imported global lost its exact Name/Original reference"
           unless (all ((/= "local") . occNameString . nameOccName) (Map.keys bindings))
             (fail "nominal external-reference recorder retained a locally bound variable")
+        -- Canonical TYPE dependencies remain authenticated inputs while a
+        -- fresh source module crosses prologue, declaration and execution.
+        let memoRoot = rootB </> "source-memo"
+            freshSource = BS8.unlines
+              ["module CarriedFreshSource where", "import CanonicalPartialFacadeAgain ()"
+              ,"freshCall :: Int -> Int", "freshCall value = value + 1"]
+        createDirectory memoRoot
+        (_,typeParcel) <- writeGenuineMetadataScopeWithContext
+          [last facadeNames] [last facadeNames] rootA fixture
+        memoParcel <- lexical [carriedLine] typeParcel
+        (memoPath,_) <- writeWorldCellAdmissionPacketWithSources handles memoRoot producer profile memoParcel
+          [("CarriedFreshSource.hs",freshSource)]
+        memoOwner <- newExactInputOwner
+        memoFacts <- readWorldInputsWithOwner memoOwner memoPath
+        runScope (pure ()) $ \compiler -> do
+          memoReference <- scopedEnsureWorld compiler
+            (ExactInputsRequest (worldInputsIdentity memoFacts) (CompleteExactInputs memoPath)) >>= requireReady
+          let source = unlines ["import CarriedFreshSource", "retainedMemo value = freshCall value"
+                ,"let memoAnswer = retainedMemo 7"]
+              recipe = WorldCellRecipe source template []
+              directory = memoRoot </> "stages"
+          createDirectory directory
+          planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity memoFacts)
+            memoReference recipe Nothing (directory </> "plan.cbor"))]
+          plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs)
+            >=> finishCompletion) runBoundWorldCellPlan
+          let question = WorldCellPrepareRequest (worldInputsIdentity memoFacts) memoReference recipe Nothing plan
+                (BS.replicate 32 24) 141 [(0,PlannedPrologue 141),(1,PlannedDeclaration 142),(2,PlannedBind 143)]
+                directory (directory </> "prepared.cbor")
+          args <- decodeWorldArgs [WorldCellPrepare question]
+          (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
+            (completed,counters,diagnostics) <- captureDiagnosticsWithCounters
+              [("world.cell.source_frontends.main:CarriedFreshSource",32)
+              ,("world.cell.prior_source_preparations",128)] (prepareWorldCell request)
+            completions <- either (fail . (("carried source memo refused: " ++) . show)) pure completed
+              `onException` hPutStrLn stderr diagnostics
+            unless (length completions == 3
+                && fmap sum (capturedDiagnosticCounterValues counters "world.cell.source_frontends.main:CarriedFreshSource") == Just 1
+                && maybe False ((> 0) . sum) (capturedDiagnosticCounterValues counters "world.cell.prior_source_preparations"))
+              (fail ("carried source did not retain and reuse its completed source version: " ++ diagnostics))
+            mapM_ (commitPreparedWorldDependencies request) completions
         -- The same text is newly authored in this second World. It must not
         -- borrow the carried import's source-less privilege.
         authored <- lexical [] parcel
@@ -2604,7 +2645,11 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
       (fail "root-A fixture did not issue both canonical native products")
     producer <- rawWorldHex (scopeProducerSha256 scope)
     profile <- rawWorldHex rootedProfileIdentity
-    (packetPath,_) <- writeWorldCellAdmissionPacketWithSources handles rootB producer profile contextParcel sources
+    let bridgeSource = BS8.unlines
+          ["module FreshCanonicalBridge where", "import qualified CanonicalPartialConsumer"
+          ,"bridge :: Int -> Int", "bridge value = CanonicalPartialConsumer.usePartial value"]
+    (packetPath,_) <- writeWorldCellAdmissionPacketWithSources handles rootB producer profile contextParcel
+      (("FreshCanonicalBridge.hs",bridgeSource):sources)
     owner <- newExactInputOwner
     facts <- readWorldInputsWithOwner owner packetPath
     let identity = worldInputsIdentity facts
@@ -2618,7 +2663,8 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
             frontendCounters = [("world.cell.source_frontends.main:" ++ name,1) | name <- names]
             -- These fixed-cohort native counters have a 64-row observation
             -- allowance; overflow refuses evidence rather than implying reuse.
-            nativeCounters = frontendCounters ++ [("finalized_core_admitted_seeds",64)
+            nativeCounters = frontendCounters ++ [("world.cell.source_frontends.main:FreshCanonicalBridge",32)
+              ,("finalized_core_admitted_seeds",64)
               ,("world.cell.canonical_body_cache_hits",64),("original_prepared_cache_hits",64)]
         (reference,queryEvidence,_) <- captureDiagnosticsWithCounters [(name,1) | name <- typeOnlyCounters] $ do
           ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (CompleteExactInputs packetPath))
@@ -2656,6 +2702,10 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
           (fail "repeated native World request did not reuse its decoded canonical body")
         noSelectedFrontends names firstEvidence
         noSelectedFrontends names warmEvidence
+        firstBridge <- observed firstEvidence "world.cell.source_frontends.main:FreshCanonicalBridge"
+        warmBridge <- observed warmEvidence "world.cell.source_frontends.main:FreshCanonicalBridge"
+        unless (sum firstBridge == 1 && sum warmBridge == 0)
+          (fail "canonical dependency replayed its completed source importer across stages or requests")
       -- A distinct universe has no body cache or previous HPT to lend this request.
       withQuietStdout $ withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> do
         ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (CompleteExactInputs packetPath))
@@ -2673,7 +2723,8 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
       -- bytes. A new source-domain identity does not endorse that old proof.
       let changedSources = [(name,if name == "CanonicalPartial.hs" then bytes <> "\n-- changed\n" else bytes)
             | (name,bytes) <- sources]
-      (changedPacket,_) <- writeWorldCellAdmissionPacketWithSources handles changedRoot producer profile contextParcel changedSources
+      (changedPacket,_) <- writeWorldCellAdmissionPacketWithSources handles changedRoot producer profile contextParcel
+        (("FreshCanonicalBridge.hs",bridgeSource):changedSources)
       changedOwner <- newExactInputOwner
       changedFacts <- readWorldInputsWithOwner changedOwner changedPacket
       let changedIdentity = worldInputsIdentity changedFacts
@@ -2742,8 +2793,8 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
             ,"__tidepoolInEffectRow = id","{{CELL_DECLS}}"
             ,"__tidepool_cell_check :: Eff '[] ()"
             ,"__tidepool_cell_check = do { {{CELL_BODY}} ; pure () }"]
-          source = unlines ["import qualified CanonicalPartialConsumer","readRetained :: Int -> Int"
-            ,"readRetained value = CanonicalPartialConsumer.usePartial value","let answer = readRetained 7"]
+          source = unlines ["import qualified FreshCanonicalBridge","readRetained :: Int -> Int"
+            ,"readRetained value = FreshCanonicalBridge.bridge value","let answer = readRetained 7"]
           recipe = WorldCellRecipe source template []
           directory = root </> label
           planRequest = WorldCellPlanRequest identity reference recipe Nothing (directory </> "plan.cbor")
