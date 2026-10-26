@@ -670,35 +670,41 @@ admitNativeOriginalResolutions census offered = do
   let rows = Map.fromList [(resolutionSource row,row) | row <- offered]
   unless (Map.size rows == length offered)
     (Left "duplicate native Original resolution source observation")
-  observed <- fmap concat $ forM (Map.elems census) $ \(AdmittedOriginalCensus _ _ full native availability _) -> do
-    groups <- case availability of
-      FullCarrier -> Right (nativeCensusGroupObservations native)
-      IssuedGroups issued -> selectNativeCensusGroupObservations native (map originalOrdinal issued)
-    pure [((originalUnit full,originalModule full,originalVersion full,Native.nativeGroupOrdinal group,index),global)
-      | group <- groups, (index,global) <- zip [0..] (Native.nativeGroupGlobals group)
-      , Native.NativeOriginalBindingImport{} <- [Native.nativeGlobalImport global]]
-  let expected = Map.fromList observed
-  unless (Map.keysSet rows == Map.keysSet expected)
+  unmatched <- foldM matchCensus rows (Map.elems census)
+  unless (Map.null unmatched)
     (Left "native Original resolutions differ from available census observations")
-  forM_ (Map.toAscList rows) $ \(source,row) -> do
-    let global = expected Map.! source
-    unless (resolutionImport row == Native.nativeGlobalImport global
-        && resolutionBinder row == Native.nativeGlobalIdentity global)
-      (Left "native Original resolution differs from its exact binding pairs or binder")
-    let (unit,name,version,ordinal) = resolutionTarget row
-    AdmittedOriginalCensus _ _ full _ availability _ <- maybe
-      (Left "native Original resolution target lacks its admitted census") Right
-      (Map.lookup (unit,name) census)
-    unless (originalVersion full == version
-        && any (\group -> originalOrdinal group == ordinal
-          && resolutionBinder row `elem` originalBinders group)
-          (originalGroups (availableNativeProduct full availability)))
-      (Left "native Original resolution target lacks its exact available group binder")
   let byOwner = Map.fromListWith Map.union
         [((unit,name),Map.singleton (ordinal,index) row)
         | row <- offered, let (unit,name,_,ordinal,index) = resolutionSource row]
   pure (Map.mapWithKey (\key (AdmittedOriginalCensus path sha full native availability _) ->
     AdmittedOriginalCensus path sha full native availability (Map.findWithDefault Map.empty key byOwner)) census)
+  where
+    matchCensus rows (AdmittedOriginalCensus _ _ full native availability _) = do
+      groups <- case availability of
+        FullCarrier -> Right (nativeCensusGroupObservations native)
+        IssuedGroups issued -> selectNativeCensusGroupObservations native (map originalOrdinal issued)
+      foldM (matchGroup full) rows groups
+    matchGroup full rows group = foldM (matchGlobal full (Native.nativeGroupOrdinal group))
+      rows (zip [0..] (Native.nativeGroupGlobals group))
+    matchGlobal full ordinal rows (index,global) = case Native.nativeGlobalImport global of
+      Native.NativeOriginalBindingImport{} -> do
+        let source = (originalUnit full,originalModule full,originalVersion full,ordinal,index)
+        row <- maybe (Left "native Original resolutions differ from available census observations") Right
+          (Map.lookup source rows)
+        unless (resolutionImport row == Native.nativeGlobalImport global
+            && resolutionBinder row == Native.nativeGlobalIdentity global)
+          (Left "native Original resolution differs from its exact binding pairs or binder")
+        let (unit,name,version,targetOrdinal) = resolutionTarget row
+        AdmittedOriginalCensus _ _ target _ availability _ <- maybe
+          (Left "native Original resolution target lacks its admitted census") Right
+          (Map.lookup (unit,name) census)
+        unless (originalVersion target == version
+            && any (\group -> originalOrdinal group == targetOrdinal
+              && resolutionBinder row `elem` originalBinders group)
+              (originalGroups (availableNativeProduct target availability)))
+          (Left "native Original resolution target lacks its exact available group binder")
+        pure (Map.delete source rows)
+      _ -> Right rows
 
 availableNativeProduct :: ExactProduct -> NativeAvailability -> ExactProduct
 availableNativeProduct full FullCarrier = full

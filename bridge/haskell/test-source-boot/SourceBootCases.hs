@@ -3520,6 +3520,16 @@ nativeOriginalResolutionScopeAdmission = withScratch $ \work -> do
       changedIndex (TInt value) = TInt (value + 1)
       changedIndex (TInteger value) = TInteger (value + 1)
       changedIndex _ = TInteger 4294967296
+  zeroRoots <- case scopeCodecField ScopeCodecNativeProducts fixture of
+    TList entries -> pure $ replaceScopeCodecField ScopeCodecNativeProducts (TList
+      [case entry of
+        TList values -> TList [if i == 6 then TList [] else value | (i,value) <- zip [0::Int ..] values]
+        _ -> entry | entry <- entries]) fixture
+    _ -> fail "issued resolution scope lacks native products"
+  noRoots <- readChanged "available-without-executable-roots" zeroRoots >>= either fail pure
+  noRootObservations <- either fail pure (scopeAvailableNativeGroupObservations noRoots)
+  unless (all (null . originalGroups) (scopeProducts noRoots) && noRootObservations == observations) $
+    fail "removing executable roots changed available Original dependency observations"
   refused "missing-resolution" "available census observations" (rows [])
   refused "duplicate-resolution" "duplicate native Original resolution" (rows [TList fields,TList fields])
   refused "conflicting-resolution" "duplicate native Original resolution"

@@ -40,7 +40,7 @@ writeEmptyScopeCodecFixture work = do
 writeOriginalResolutionScopeCodecFixture :: FilePath -> IO FilePath
 writeOriginalResolutionScopeCodecFixture work =
   issueCodecFixturePacket work ("scope" </> "exact-declaration-scope.cbor") (toStrictByteString (encodeTerm
-    (TList [TString "TPCODECFIXTURE1", TString "scope-original-resolutions", TList []])))
+    (TList [TString "TPCODECFIXTURE1", TString "scope_original_resolutions", TList []])))
 
 -- The fixture protocol carries typed inputs, rather than a purpose wire array.
 -- Rust's inspection and search serializers own the emitted authorization.
