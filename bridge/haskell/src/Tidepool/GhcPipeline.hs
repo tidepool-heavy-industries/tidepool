@@ -289,6 +289,7 @@ import Tidepool.PreparedStg (PreparedModule, pmModule, preparedUsesSiteAuthority
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , OwnerInterfaceCache, newOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching)
+import Tidepool.PreparedBuiltins (nullaryWorkerConstructor)
 import Tidepool.ExecutionProjection
   ( OriginalProjectionCache, newOriginalProjectionCache, mergeOriginalProjectionCaches, selectOriginalProjectionCaches, evictOriginalProjectionMatching
   , preparedRootIdentity )
@@ -6364,6 +6365,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             [(idName identifier, identity)
             | identifier <- typeEnvIds (md_types (hm_details home))
             , nameModule_maybe (idName identifier) == Just owner
+            , isNothing (nullaryWorkerConstructor identifier)
             , let identity = preparedRootIdentity identifier
             , identity `Set.member` nativeBinders])
         availableOriginalBindings env = do
@@ -6939,7 +6941,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                           HydratedObservation{} -> []
                           CanonicalObservation{} -> []]
                     bindings = concatMap (cg_binds . finalizedTidyGuts) finalized
-                    identifiers = freeIdsOfBinds bindings
+                    identifiers = filter (isNothing . nullaryWorkerConstructor) (freeIdsOfBinds bindings)
                 selected <- fmap catMaybes $ forM identifiers $ \identifier -> do
                   reference <- referenceForName (idName identifier)
                   pure ((\value -> (idName identifier,preparedRootIdentity identifier,value)) <$> reference)

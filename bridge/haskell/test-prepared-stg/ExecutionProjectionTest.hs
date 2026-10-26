@@ -41,6 +41,8 @@ import System.IO (hClose, openTempFile)
 import System.FilePath ((</>))
 import System.Process (readProcess)
 import Tidepool.PreparedStg (pmModule, pmBindings)
+import Tidepool.PreparedBuiltins (nullaryWorkerConstructor)
+import GHC.Types.Var.Set (unionVarSet)
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
@@ -347,6 +349,45 @@ verifyNullaryWorkerProjection = do
     (ioError (userError "nullary fixture did not retain a non-nullary constructor worker"))
   unless (":" `notElem` topOccurrences)
     (ioError (userError "non-nullary constructor worker was incorrectly materialized as an implicit top"))
+  let modules = pprModules prepared
+      references = [binder | module_ <- modules
+        , binder <- preparedReferencedIds (extractPreparedFacts (pmModule module_) (map fst (pmBindings module_)))
+        , Just _ <- [nullaryWorkerConstructor binder]]
+      localWorkers = [(module_,binder) | module_ <- modules
+        , (binding,_) <- pmBindings module_,binder <- topBinders binding
+        , Just _ <- [nullaryWorkerConstructor binder]]
+      localRoot = SymbolIdentity "main" "NullaryWorkers" "value" "localArgument" Nothing
+      check context' modules' = either (fail . show) pure (projectPrepared context' modules')
+      noWorkerGlobals projected = unless
+        (all ((`notElem` map preparedRootIdentity references) . globalIdentity) (programGlobals projected))
+        (fail "nullary worker became an executable import")
+  unless (not (null localWorkers)) (fail "nullary fixture lacks a genuine preallocated worker")
+  forM_ [0,7] $ \generation -> do
+    let retained = Map.fromList [(preparedRootIdentity binder,generation) | binder <- references]
+        retainedContext = context {projectionRetainedGenerations=retained,
+          projectionAuxiliaryRoots=[localRoot]}
+    noWorkerGlobals =<< check retainedContext modules
+    noWorkerGlobals =<< check (context {projectionAuxiliaryRoots=[localRoot]}) modules
+    -- Keep a retained worker in a mixed group with an ordinary definition.
+    -- This is a projection-input mutation, not a reissued compiler completion.
+    forM_ localWorkers $ \(owner,worker) -> do
+      let workerGroups = [(binder,rhs,facts) | (StgTopLifted (StgNonRec binder rhs),facts) <- pmBindings owner
+            , binder == worker]
+          others = [(binder,rhs,facts) | (StgTopLifted (StgNonRec binder rhs),facts) <- pmBindings owner
+            , preparedRootIdentity binder == localRoot]
+      case (workerGroups,others) of
+        ([(binder,rhs,facts)],[(other,otherRhs,otherFacts)]) -> do
+          let mixed = owner {preparedBindings =
+                (StgTopLifted (StgRec [(binder,rhs),(other,otherRhs)]),unionVarSet facts otherFacts)
+                : [(binding,free) | (binding,free) <- pmBindings owner
+                    , all (\value -> value /= binder && value /= other) (topBinders binding)]}
+          projected <- check retainedContext
+            [if pmModule module_ == pmModule owner then mixed else module_ | module_ <- modules]
+          noWorkerGlobals projected
+          unless (length [() | group <- programBindings projected,TopBinding identity _ <- groupItems group
+              , identity == preparedRootIdentity worker] == 1)
+            (fail "mixed retained nullary worker was lost or duplicated")
+        _ -> fail "nullary fixture lacks separate worker and argument groups"
   where
     fieldFree (HeapBinding _ (Constructor _ [])) = True
     fieldFree _ = False

@@ -8,7 +8,8 @@ module Tidepool.ExecutionProjection
   , projectPreparedTargetWithConstructors
   , ProjectedGroup(..), ProjectedGroupBody(..)
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
-  , PreparedPackageTarget, projectPreparedPackageTarget
+  , PreparedPackageTarget, PreparedPackageProjection, projectPreparedPackageProjection
+  , packageProjectionGlobals, packageProjectionDemandSeeds, attachPreparedPackageDemand
   , packageTargetName, packageTargetProgram, packageTargetConstructors, packageTargetGroups
   , packageTargetImports, packageTargetHomeImports, packageTargetCurrentHomeGroups, packageTargetPriorHomeImports, packageTargetOriginalImports, packageTargetLocalHomeBindings
   , ProjectedPackageGroup, projectPreparedPackageGroups
@@ -33,7 +34,7 @@ module Tidepool.ExecutionProjection
   , projectSelected
   , projectSelectedWithHostBindings
   , PreparedCandidate, projectSelectedCandidateWithHostBindings
-  , candidateGlobals, candidateBindingIdentities, finalizePreparedCandidate
+  , candidateGlobals, finalizePreparedCandidate
   , preparedTopIdentities, preparedTopIdentityBindings
   , preparedTargetReferences
   , ReferenceFact(..)
@@ -72,12 +73,12 @@ import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
 import Tidepool.PreparedBuiltins
-  ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
+  ( DeferredFunction(..), deferredFunction, wiredInErrorKind, nullaryWorkerConstructor )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
 import Tidepool.ExactScope (WorldOriginalReference, ExactProduct(..), ExactOriginalGroup(..))
 import Tidepool.OriginalProductRoots
-  ( PriorHomeGroup, OriginalExternalDemand, originalExternalHomeGroups, originalExternalPriorHomeGroups
+  ( OriginalDemandSeed(..), PriorHomeGroup, OriginalExternalDemand, originalExternalHomeGroups, originalExternalPriorHomeGroups
   , ReconciledOriginalProducts, unrecoveredExactProducts )
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -986,21 +987,38 @@ data PreparedPackageTarget = PreparedPackageTarget
 packageTargetCurrentHomeGroups :: PreparedPackageTarget -> Set (String, String, Word)
 packageTargetCurrentHomeGroups = targetCurrentHomeGroups
 
-projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> Text
+-- A recovery round retains one final-shaped projection and its attachment
+-- basis. Entry contracts remain deferred until that round's demand is closed.
+data PreparedPackageProjection = PreparedPackageProjection
+  PreparedCandidate (Set SymbolIdentity)
+  ((WireProgram, [IssuedConstructor]) -> OriginalExternalDemand
+    -> Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
+    -> Either ProjectionError PreparedPackageTarget)
+
+packageProjectionGlobals :: PreparedPackageProjection -> [GlobalDecl]
+packageProjectionGlobals (PreparedPackageProjection candidate _ _) = candidateGlobals candidate
+
+packageProjectionDemandSeeds :: PreparedPackageProjection -> [OriginalDemandSeed]
+packageProjectionDemandSeeds (PreparedPackageProjection candidate localHome _) =
+  [ExternalOriginalReference (globalIdentity global) | global <- candidateGlobals candidate
+    , isNothing (globalRequiredGeneration global)]
+    ++ map CurrentOriginalDefinition (Set.toAscList localHome)
+
+attachPreparedPackageDemand :: PreparedPackageProjection -> OriginalExternalDemand
+  -> Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
+  -> Either ProjectionError PreparedPackageTarget
+attachPreparedPackageDemand (PreparedPackageProjection candidate _ attach) demand originals = do
+  finalized <- finalizePreparedCandidate candidate
+  attach finalized demand originals
+
+projectPreparedPackageProjection :: HscEnv -> [HostBindingRepresentation] -> Text
   -> ProjectionContext -> Map Module (Map Word32 ProjectedGroup) -> [ModuleCandidate]
   -> ReconciledOriginalProducts
-  -> OriginalExternalDemand
-  -> Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
   -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
-  -> Either ProjectionError PreparedPackageTarget
-projectPreparedPackageTarget env hostBindings targetName context homeProducts cached exactInputs externalDemand originalImports
+  -> Either ProjectionError PreparedPackageProjection
+projectPreparedPackageProjection env hostBindings targetName context homeProducts cached exactInputs
     home components reach = do
-  let reachedHome = originalExternalHomeGroups externalDemand
-      currentHome = Set.intersection reachedHome (Set.fromList
-        [(unitString (moduleUnit owner), moduleNameString (moduleName owner), fromIntegral ordinal)
-        | (owner, groups) <- Map.toAscList homeProducts, ordinal <- Map.keys groups])
-      priorHomeImports = originalExternalPriorHomeGroups externalDemand
-      packageModules = concatMap preparedComponentModules components
+  let packageModules = concatMap preparedComponentModules components
       modules = home ++ packageModules
       identities = buildTopIdentityMap modules
       packageOwners = Set.fromList (map pmModule packageModules)
@@ -1033,86 +1051,94 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
     finishProjection context modules identities selectedHome
   candidate <- projectPreparedCandidateWithImports imported hostBindings
     checkedContext selected checkedIdentities
-  (program, constructors) <- finalizePreparedCandidate candidate
-  let isReachedHome unit name ordinal =
-        Set.member (Text.unpack unit, Text.unpack name, ordinal) reachedHome
-  preparedHomeImports <- concat <$> forM home (\prepared -> do
-    let selected = Set.fromList
-          [ ordinal
-          | (ordinal, one) <- preparedBindingGroups prepared
-          , let unit = Text.pack (unitString (moduleUnit (pmModule prepared)))
-                name = Text.pack (moduleNameString (moduleName (pmModule prepared)))
-          , isReachedHome unit name (fromIntegral ordinal) ]
-    groups <- maybe
-      (Left (InvalidPreparedRepresentation "selected HOME module lacks its issued original product"))
-      Right (Map.lookup (pmModule prepared) homeProducts)
-    rows <- forM (Set.toAscList selected) (\ordinal -> do
-      group <- maybe
-        (Left (InvalidPreparedRepresentation "selected HOME group lacks its issued original product"))
-        Right (Map.lookup ordinal groups)
-      let key = ( Text.pack (unitString (moduleUnit (pmModule prepared)))
-                , Text.pack (moduleNameString (moduleName (pmModule prepared)))
-                , fromIntegral ordinal )
-      let (unit,name,ordinalKey) = key
-          identities =
-            [ globalIdentity global
-            | global <- projectedGlobals (projectedBody group)
-            , isPackageImport global ]
-          demanded = isReachedHome unit name ordinalKey
-      pure (unit, name, ordinalKey, identities, demanded))
-    pure (map (\(unit,name,ordinal,identities,_) -> (unit,name,ordinal,identities))
-      (filter (\(_,_,_,identities,demanded) ->
-        demanded && not (null identities)) rows)))
-  let productHomeImports =
-        [ (unit,name,fromIntegral ordinal,identities)
-        | (owner, groups) <- Map.toAscList homeProducts
-        , (ordinal, group) <- Map.toAscList groups
-        , let unit = Text.pack (unitString (moduleUnit owner))
-              name = Text.pack (moduleNameString (moduleName owner))
-              identities =
-                [ globalIdentity global
-                | global <- projectedGlobals (projectedBody group)
-                , isPackageImport global ]
-              demanded = isReachedHome unit name (fromIntegral ordinal)
-        , demanded
-        , not (null identities) ]
-      cachedHomeImports =
-        [ ( Text.pack (candidateUnit candidate)
-          , Text.pack (candidateModule candidate)
-          , fromIntegral (candidateGroupOrdinal group)
-          , identities )
-        | candidate <- cached
-        , group <- candidateGroups candidate
-        , let identities =
-                [ candidateGlobalIdentity global
-                | global <- candidateGroupGlobals group
-                , candidateGlobalGeneration global == Nothing
-                , isPackageImportIdentity (candidateGlobalIdentity global) ]
-              demanded = isReachedHome
-                (Text.pack (candidateUnit candidate))
-                (Text.pack (candidateModule candidate))
-                (fromIntegral (candidateGroupOrdinal group))
-        , demanded
-        , not (null identities) ]
-      inputHomeImports =
-        [ (Text.pack (originalUnit product), Text.pack (originalModule product), originalOrdinal group, identities)
-        | product <- unrecoveredExactProducts exactInputs
-        , group <- originalGroups product
-        , isReachedHome (Text.pack (originalUnit product)) (Text.pack (originalModule product)) (originalOrdinal group)
-        , let identities = [identity | (identity, required) <- originalGlobals group
-                                    , required, isPackageImportIdentity identity]
-        , not (null identities) ]
-  homeImports <- do
-    byOwner <- foldM insertHomeImport Map.empty
-      (preparedHomeImports ++ productHomeImports ++ cachedHomeImports ++ inputHomeImports)
-    pure [ (unit,name,ordinal,identities)
-         | ((unit,name,ordinal),identities) <- Map.toAscList byOwner ]
-  let targetImports =
-        [ globalIdentity global
-        | global <- programGlobals program
-        , isPackageImport global ]
-  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports currentHome priorHomeImports originalImports
-    (Set.fromList [identity | identity <- candidateBindingIdentities candidate, isHomeUnit (symbolOwner identity)]))
+  let localHomeBindings = Set.fromList
+        [identity | identity <- candidateBindingIdentities candidate, isHomeUnit (symbolOwner identity)]
+      attach (program, constructors) externalDemand originalImports = do
+        let reachedHome = originalExternalHomeGroups externalDemand
+            currentHome = Set.intersection reachedHome (Set.fromList
+              [(unitString (moduleUnit owner), moduleNameString (moduleName owner), fromIntegral ordinal)
+              | (owner, groups) <- Map.toAscList homeProducts, ordinal <- Map.keys groups])
+            priorHomeImports = originalExternalPriorHomeGroups externalDemand
+        let isReachedHome unit name ordinal =
+              Set.member (Text.unpack unit, Text.unpack name, ordinal) reachedHome
+        preparedHomeImports <- concat <$> forM home (\prepared -> do
+          let selected = Set.fromList
+                [ ordinal
+                | (ordinal, one) <- preparedBindingGroups prepared
+                , let unit = Text.pack (unitString (moduleUnit (pmModule prepared)))
+                      name = Text.pack (moduleNameString (moduleName (pmModule prepared)))
+                , isReachedHome unit name (fromIntegral ordinal) ]
+          groups <- maybe
+            (Left (InvalidPreparedRepresentation "selected HOME module lacks its issued original product"))
+            Right (Map.lookup (pmModule prepared) homeProducts)
+          rows <- forM (Set.toAscList selected) (\ordinal -> do
+            group <- maybe
+              (Left (InvalidPreparedRepresentation "selected HOME group lacks its issued original product"))
+              Right (Map.lookup ordinal groups)
+            let key = ( Text.pack (unitString (moduleUnit (pmModule prepared)))
+                      , Text.pack (moduleNameString (moduleName (pmModule prepared)))
+                      , fromIntegral ordinal )
+            let (unit,name,ordinalKey) = key
+                identities =
+                  [ globalIdentity global
+                  | global <- projectedGlobals (projectedBody group)
+                  , isPackageImport global ]
+                demanded = isReachedHome unit name ordinalKey
+            pure (unit, name, ordinalKey, identities, demanded))
+          pure (map (\(unit,name,ordinal,identities,_) -> (unit,name,ordinal,identities))
+            (filter (\(_,_,_,identities,demanded) ->
+              demanded && not (null identities)) rows)))
+        let productHomeImports =
+              [ (unit,name,fromIntegral ordinal,identities)
+              | (owner, groups) <- Map.toAscList homeProducts
+              , (ordinal, group) <- Map.toAscList groups
+              , let unit = Text.pack (unitString (moduleUnit owner))
+                    name = Text.pack (moduleNameString (moduleName owner))
+                    identities =
+                      [ globalIdentity global
+                      | global <- projectedGlobals (projectedBody group)
+                      , isPackageImport global ]
+                    demanded = isReachedHome unit name (fromIntegral ordinal)
+              , demanded
+              , not (null identities) ]
+            cachedHomeImports =
+              [ ( Text.pack (candidateUnit candidate)
+                , Text.pack (candidateModule candidate)
+                , fromIntegral (candidateGroupOrdinal group)
+                , identities )
+              | candidate <- cached
+              , group <- candidateGroups candidate
+              , let identities =
+                      [ candidateGlobalIdentity global
+                      | global <- candidateGroupGlobals group
+                      , candidateGlobalGeneration global == Nothing
+                      , isPackageImportIdentity (candidateGlobalIdentity global) ]
+                    demanded = isReachedHome
+                      (Text.pack (candidateUnit candidate))
+                      (Text.pack (candidateModule candidate))
+                      (fromIntegral (candidateGroupOrdinal group))
+              , demanded
+              , not (null identities) ]
+            inputHomeImports =
+              [ (Text.pack (originalUnit product), Text.pack (originalModule product), originalOrdinal group, identities)
+              | product <- unrecoveredExactProducts exactInputs
+              , group <- originalGroups product
+              , isReachedHome (Text.pack (originalUnit product)) (Text.pack (originalModule product)) (originalOrdinal group)
+              , let identities = [identity | (identity, required) <- originalGlobals group
+                                          , required, isPackageImportIdentity identity]
+              , not (null identities) ]
+        homeImports <- do
+          byOwner <- foldM insertHomeImport Map.empty
+            (preparedHomeImports ++ productHomeImports ++ cachedHomeImports ++ inputHomeImports)
+          pure [ (unit,name,ordinal,identities)
+               | ((unit,name,ordinal),identities) <- Map.toAscList byOwner ]
+        let targetImports =
+              [ globalIdentity global
+              | global <- programGlobals program
+              , isPackageImport global ]
+        pure (PreparedPackageTarget targetName program constructors products targetImports homeImports currentHome priorHomeImports originalImports
+          localHomeBindings)
+  pure (PreparedPackageProjection candidate localHomeBindings attach)
   where
     insertHomeImport known row@(unit,name,ordinal,identities) =
       case Map.lookup (unit,name,ordinal) known of
@@ -3132,25 +3158,27 @@ projectReference binder = do
   case lookupVarEnv known binder of
     Just identity -> pure (Local identity)
     Nothing -> do
-      generations <- gets retainedGenerations
-      -- An executable import always resolves as a Global, regardless of
-      -- whether its defining module is also being compiled alongside this
-      -- one: retention is never inferred from module membership.
-      if Map.member (idSymbol "value" binder) generations
-        then Global <$> internGlobal binder
-        else do
-          topNames <- gets topSymbols
-          tops <- gets topValues
-          scope <- gets topScope
-          let symbol = lookupVarEnv topNames binder
-          case symbol of
-            Just home -> case Map.lookup home tops of
-              Just identity -> pure (Local identity)
-              Nothing | importsResolvedTop scope home -> Global <$> internGlobal binder
-              Nothing -> lift (Left (MissingPreparedTop home))
-            Nothing -> case nullaryWorkerConstructor binder of
-              Just con -> Local <$> internNullaryWorker binder con
-              Nothing -> Global <$> internGlobal binder
+      topNames <- gets topSymbols
+      tops <- gets topValues
+      let symbol = lookupVarEnv topNames binder
+      case nullaryWorkerConstructor binder of
+        Just con -> case Map.lookup (fromMaybe (idSymbol "value" binder) symbol) tops of
+          Just identity -> pure (Local identity)
+          Nothing -> Local <$> internNullaryWorker binder con
+        Nothing -> do
+          generations <- gets retainedGenerations
+          -- Non-nullary executable imports retain their exact generation even
+          -- when a mixed local group also contains their definition.
+          if Map.member (idSymbol "value" binder) generations
+            then Global <$> internGlobal binder
+            else do
+              scope <- gets topScope
+              case symbol of
+                Just home -> case Map.lookup home tops of
+                  Just identity -> pure (Local identity)
+                  Nothing | importsResolvedTop scope home -> Global <$> internGlobal binder
+                  Nothing -> lift (Left (MissingPreparedTop home))
+                Nothing -> Global <$> internGlobal binder
 
 deferredFunctionReference :: Id -> DeferredFunction -> P ValueId
 deferredFunctionReference binder deferred = do
@@ -3238,17 +3266,6 @@ internWiredInError binder kind = do
         , implicitTops = TopBinding symbol (HeapBinding identity rhs) : implicitTops current
         })
       pure identity
-
--- | A genuinely nullary data-con worker denotes an evaluated object, not an
--- executable import. Requiring no representation arguments also excludes
--- workers whose logical Void arguments still require application.
-nullaryWorkerConstructor :: Id -> Maybe DataCon
-nullaryWorkerConstructor binder = do
-  con <- isDataConWorkId_maybe binder
-  if dataConRepArity con == 0 && null (dataConRepArgTys con)
-      && not (isUnboxedTupleDataCon con)
-    then Just con
-    else Nothing
 
 -- | Materialize one ordinary constructor top per authoritative worker identity.
 -- These field-free objects precede source tops and need no body recovery.

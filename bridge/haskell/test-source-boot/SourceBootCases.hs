@@ -154,7 +154,7 @@ import Tidepool.ExecutionProjection
   , projectPreparedModuleProducts, projectOriginalHomeModuleProducts, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, settleOriginalHomeModuleProductsWithoutOwners, closeUnavailableOriginalGroups, closeUnavailableOriginalModules, preparedTopIdentities, topBinders
   , ReferenceFact(..), preparedModuleReferenceFacts, preparedRootIdentity, projectPrepared
   , projectRawOriginalHomeModuleProducts, rawOriginalProductBinders, rawOriginalProductDemands )
-import Tidepool.ExecutionProjection (packageTargetGroups, projectedPackageModule, projectedPackageInterfaceBody)
+import Tidepool.ExecutionProjection (packageTargetGroups, packageTargetLocalHomeBindings, projectedPackageModule, projectedPackageInterfaceBody)
 import Tidepool.ExecutionProjection (resolveTextPackageUnit, projectCachedOriginalHomeModuleProducts, preparedModuleProductEncodings, preparedModuleProductOmissions)
 import Tidepool.PreparedStg
   ( newPreparedBodyCache, PreparedBodyReuse(..), pmIdentityResolver, pmSitedSiblings, newPreparedOriginalModuleTaskPreparer
@@ -226,8 +226,8 @@ import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), Candi
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
 import Tidepool.OriginalProductRoots
-  ( requiredOriginalExternalGlobalsWithPrior, requiredOriginalExternalDemandForSeeds
-  , PriorOriginalExternalDemand(..), originalExternalPriorHomeGroups, originalExternalPackageGlobals
+  ( OriginalDemandSeed(..), requiredOriginalExternalGlobalsWithPrior, requiredOriginalExternalDemandForSeeds
+  , PriorOriginalExternalDemand(..), originalExternalHomeGroups, originalExternalPriorHomeGroups, originalExternalPackageGlobals
   , reconcileOriginalProducts, unrecoveredExactProducts )
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports
   , packageImportRoot, validatePackageImportRoot, withPackageRootObservations
@@ -2732,10 +2732,9 @@ originalPackageProjection = withScratch $ \work -> do
     fail "original purpose changed native body, ordinals or reference shape beyond package requirement issuance"
   let packageGlobals = filter ((`Set.member` packageSet) . globalIdentity) (globals executable)
   unless (any (isJust . globalEntrySignature) packageGlobals
-      && any (\global -> symbolOccurrence (globalIdentity global) == "Nothing"
-        && isNothing (globalEntrySignature global) && globalRequiredEvaluated global) packageGlobals
+      && all ((/= "Nothing") . symbolOccurrence . globalIdentity) packageGlobals
       && any (not . globalRequiredEvaluated) packageGlobals) $
-    fail "actual package fixture lacks function, retained nullary constructor or unevaluated CAF"
+    fail "actual package fixture lost function/CAF demand or imported a nullary object"
   forM_ [0,7] $ \generation -> do
     let home = SymbolIdentity "main" "PackageOriginalHome" "value" "homeValue" Nothing
         value = SymbolIdentity "main" "Tidepool.Session.Val.G7" "value" "liveValue" Nothing
@@ -3491,9 +3490,10 @@ originalProjectionProductsWithRequest compiler work request = do
     ["module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
   writeFile (work </> "ProjectionConsumer.hs") $ unlines
     [ "{-# OPTIONS_GHC -Wno-unused-imports #-}"
-    , "module ProjectionConsumer (usesGood) where"
+    , "module ProjectionConsumer (usesGood, auxiliary) where"
     , "import ProjectionOwner", "import ProjectionIndependent"
-    , "usesGood :: Int -> Int", "usesGood x = good x + 1" ]
+    , "usesGood :: Int -> Int", "usesGood x = good x + 1"
+    , "{-# NOINLINE auxiliary #-}", "auxiliary :: Int -> String", "auxiliary = show" ]
   -- The low-level projection oracle owns a separate actual compiler result;
   -- request handles never expose their environment to this test.
   paired <- scopedCompile compiler (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
@@ -3581,17 +3581,18 @@ originalProjectionProductsWithRequest compiler work request = do
   -- actual entry's whole recursive group remains inline.
   let captureDirectory = work </> "current-original-products"
       entry = SymbolIdentity "main" "ProjectionConsumer" "value" "usesGood" Nothing
+      auxiliary = SymbolIdentity "main" "ProjectionConsumer" "value" "auxiliary" Nothing
   createDirectory captureDirectory
   currentInterfaces <- newOriginalInterfaceArtifacts pairedEnv (pprFinalizedModules paired)
     (retainedOriginalInterfaces paired) captureDirectory
   currentContext <- prepareCompilerProjectionContext paired Map.empty (pmModule consumer)
-    "usesGood" [] Nothing
+    "usesGood" ["auxiliary"] Nothing
   (_,rawContext) <- prepareOriginalProducts pairedEnv Nothing pairedInterfaces
     currentContext Set.empty (pprModules paired)
   let requestDirectory = work </> "request-original-products"
   createDirectory requestDirectory
   requestInterfaces <- newPreparedCompilationInterfaceArtifacts completion requestDirectory
-  output <- prepareArtifactsWithIntent requestInterfaces ["usesGood"] [] Map.empty []
+  output <- prepareArtifactsWithIntent requestInterfaces ["usesGood"] ["auxiliary"] Map.empty []
   currentProgram <- case output of
     NativeOutputs [artifact] _ -> pure (paProgram artifact)
     _ -> fail "original product projection did not issue its actual native target"
@@ -3600,6 +3601,8 @@ originalProjectionProductsWithRequest compiler work request = do
     NativeOutputs artifacts _ -> forM artifacts $ \artifact -> maybe
       (fail "guarded projection lost its immutable package target") pure (paPackageTarget artifact)
     _ -> fail "guarded projection changed native intent"
+  unless (all (\target -> Set.fromList [entry,auxiliary] `Set.isSubsetOf` packageTargetLocalHomeBindings target) packageTargets) $
+    fail "final package target lost its independently captured entry or auxiliary HOME definition"
   let packageCaptures = Map.fromList [(projectedPackageModule group,projectedPackageInterfaceBody group)
         | target <- packageTargets,group <- packageTargetGroups target]
   provenance <- scopedNativeProductProvenance compiler
@@ -3609,7 +3612,7 @@ originalProjectionProductsWithRequest compiler work request = do
     _ -> fail "request-owned original projection changed output intent"
   issued <- maybe (fail "genuine original issuer did not return its inventory") pure
     (preparedCurrentOriginalInventory issuedContext)
-  let importedNames = currentOriginalBindingsExcept issued (Set.singleton entry)
+  let importedNames = currentOriginalBindingsExcept issued (Set.fromList [entry,auxiliary])
       importedSymbols = Set.fromList (Map.elems importedNames)
   unless (known `Set.member` importedSymbols && entry `Set.notMember` importedSymbols
       && importedSymbols `Set.isSubsetOf` currentOriginalBinders issued) $
@@ -3664,7 +3667,7 @@ originalProjectionProductsWithRequest compiler work request = do
   let packages = priorOriginalPackageGlobals priorDemand
   unless (not (Map.null (priorOriginalHomeGroups priorDemand))) $
     fail "prior native package demand lost its reached exact HOME witnesses"
-  reachedPrior <- either fail pure (requiredOriginalExternalDemandForSeeds [] [] [] Set.empty priorPackages [known])
+  reachedPrior <- either fail pure (requiredOriginalExternalDemandForSeeds [] [] [] Set.empty priorPackages [ExternalOriginalReference known])
   unless (originalExternalPriorHomeGroups reachedPrior == priorOriginalHomeGroups priorDemand
       && originalExternalPackageGlobals reachedPrior == Set.toAscList packages) $
     fail "final demand lost or widened its reached prior HOME witnesses"
@@ -3675,10 +3678,34 @@ originalProjectionProductsWithRequest compiler work request = do
   packageful <- findBinder ownerModule "packageful"
   packagefree <- findBinder ownerModule "packagefree"
   let laterDemand symbol = either fail pure
-        (requiredOriginalExternalDemandForSeeds [] [] [] Set.empty priorPackages [symbol])
+        (requiredOriginalExternalDemandForSeeds [] [] [] Set.empty priorPackages [ExternalOriginalReference symbol])
       rejectPrior label groups = case validateStagedPriorHomeGroups (Just sharedCertificate) groups of
         Left _ -> pure ()
         Right () -> fail ("prior HOME accepted " ++ label)
+  let currentInventory = [(unitString (moduleUnit owner),moduleNameString (moduleName owner),
+          either (Left . show) Right groups)
+        | (owner,groups) <- preparedModuleProductOutcomes completeProducts]
+      refuseSeed identity symbol
+        | symbol == identity = Left "local definition queried prior authority"
+        | otherwise = Right Nothing
+  localDemand <- either fail pure (requiredOriginalExternalDemandForSeeds currentInventory [] []
+    (Set.singleton packageful) (refuseSeed packageful) [CurrentOriginalDefinition packageful])
+  unless (not (Set.null (originalExternalHomeGroups localDemand))
+      && not (null (originalExternalPackageGlobals localDemand))
+      && Map.null (originalExternalPriorHomeGroups localDemand)) $
+    fail "retained local definition lost its current group or package dependencies"
+  let missingLocal = packageful {symbolOccurrence="unissuedLocalDefinition"}
+  case requiredOriginalExternalDemandForSeeds currentInventory [] [] Set.empty
+      (const (Right (Just (PriorOriginalExternalDemand Set.empty Map.empty))))
+      [CurrentOriginalDefinition missingLocal] of
+    Left _ -> pure ()
+    Right _ -> fail "missing current local definition borrowed prior authority"
+  let missingOwner = packageful {symbolModule="UnissuedLocalOwner"}
+  case requiredOriginalExternalDemandForSeeds currentInventory [] [] Set.empty
+      (const (Right (Just (PriorOriginalExternalDemand Set.empty Map.empty))))
+      [CurrentOriginalDefinition missingOwner] of
+    Left _ -> pure ()
+    Right _ -> fail "missing current HOME owner borrowed or ignored prior authority"
   laterPackageful <- laterDemand packageful
   laterPackagefree <- laterDemand packagefree
   let packagefulGroups = originalExternalPriorHomeGroups laterPackageful

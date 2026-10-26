@@ -72,10 +72,11 @@ import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, projectedGroupEncodingInput)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability
-  , projectSelectedCandidateWithHostBindings, candidateGlobals, candidateBindingIdentities
+  , PreparedCandidate, PreparedPackageProjection, projectSelectedCandidateWithHostBindings, candidateGlobals
   , finalizePreparedCandidate
   , preparedModuleProductOutcomes
-  , preparedRootIdentity, PreparedPackageTarget, projectPreparedPackageTarget
+  , preparedRootIdentity, PreparedPackageTarget, projectPreparedPackageProjection
+  , packageProjectionGlobals, packageProjectionDemandSeeds, attachPreparedPackageDemand
   , packageTargetProgram, packageTargetConstructors, packageTargetGroups, projectedPackageModule, projectedPackageInterfaceSha256, projectedPackageEncoding
   , projectedPackageConstructors, projectedPackageYieldSites
   , packageTargetCurrentHomeGroups, packageTargetPriorHomeImports )
@@ -89,7 +90,7 @@ import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.WorkerServer (NativeDemandExchange)
 import Tidepool.DependencyPlan
 import Tidepool.OriginalProductRoots
-  ( PriorOriginalExternalDemand(..), originalExternalPackageGlobals
+  ( OriginalDemandSeed(..), PriorOriginalExternalDemand(..), originalExternalPackageGlobals
   , emptyOriginalExternalDemand, requiredOriginalExternalDemandForSeeds
   , reconcileOriginalProducts, unrecoveredExactProducts )
 import Tidepool.PreparedStg (PreparedModule, pmModule, pmYieldSites, pmIdentityResolver
@@ -683,6 +684,10 @@ data PreparedArtifact = PreparedArtifact
   , paDependencyTerminals :: [DependencyTerminal]
   }
 
+-- Both modes retain their own unfinished projection through demand closure.
+data PendingTargetProjection
+  = PortableCandidate PreparedCandidate
+  | NativeProjection PreparedPackageProjection
 
 data FinalProjection
   = NativeFinal !PreparedPackageTarget !(Map.Map Module ArtifactBytes) ![SymbolIdentity]
@@ -775,7 +780,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           fail "portable output cannot consume retained native or host-binding inputs"
         reconciled <- either fail pure (reconcileOriginalProducts Nothing [])
         pure (modules,Nothing,Map.empty,Set.empty,Map.empty
-          ,const (const (Right emptyOriginalExternalDemand)),Map.empty,reconciled)
+          ,const (Right emptyOriginalExternalDemand),Map.empty,reconciled)
       NativeOriginals -> do
         (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
           prepareCompilationOriginals completion prior (contextFor firstTarget) externalOriginalBinders
@@ -801,13 +806,13 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                 [(originalOrdinal group, originalBinders group, originalGlobals group)
                  | group <- originalGroups originalProduct])
               | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
-            originalPackageGlobals globals bindings =
+            originalPackageGlobals seeds =
               requiredOriginalExternalDemandForSeeds
                 originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
                 (\identity -> case Map.lookup identity (pprOriginalReferences prepared) of
                   Just _ -> Right (Just (PriorOriginalExternalDemand (Set.singleton identity) Map.empty))
                   Nothing -> stagedOriginalExternalDemand priorNative identity)
-                (map globalIdentity globals ++ bindings)
+                seeds
         pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
           currentOriginalGroupMetadata inventory,originalPackageGlobals,homeProductGroups,
           currentReconciledOriginalProducts inventory)
@@ -830,11 +835,24 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
               reachabilityContext = context
                 { projectionAuxiliaryRoots = projectionAuxiliaryRoots context ++ roots }
           requirePreparedRecoveryPublication target recovered
-          selected <- timePhase timing "prepared_project" $
-            project (prepareComponentProjectionWithReachability reachabilityContext
-              (closureHomeModules recovered) (closureComponentSelections recovered) (closureReachability recovered))
-          candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
-          let executableGlobals = requireOriginalExecutableGlobals hscEnv admittedOriginalBinders (candidateGlobals candidate)
+          pending <- timePhase timing "prepared_project" $ case intent of
+            PortableExecutable -> do
+              selected <- project (prepareComponentProjectionWithReachability reachabilityContext
+                (closureHomeModules recovered) (closureComponentSelections recovered) (closureReachability recovered))
+              PortableCandidate <$> project (projectSelectedCandidateWithHostBindings hostBindings selected)
+            NativeOriginals -> do
+              let isHome component = isHomeUnit (hsc_home_unit hscEnv)
+                    (moduleUnit (fatOriginalOwner (preparedComponentVersion component)))
+                  homeComponents = filter isHome (closureComponentSelections recovered)
+                  packageComponents = filter (not . isHome) (closureComponentSelections recovered)
+              NativeProjection <$> project (projectPreparedPackageProjection hscEnv hostBindings (T.pack target)
+                context homeProductGroups candidates reconciledInputs
+                (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
+                packageComponents (closureReachability recovered))
+          let globals = case pending of
+                PortableCandidate candidate -> candidateGlobals candidate
+                NativeProjection projection -> packageProjectionGlobals projection
+          let executableGlobals = requireOriginalExecutableGlobals hscEnv admittedOriginalBinders globals
           case executableGlobals of
             Right () -> pure ()
             Left failure -> do
@@ -850,8 +868,10 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                 ]
           project executableGlobals
           demand <- either (ioError . userError) pure
-            (originalPackageGlobals
-              (candidateGlobals candidate) (candidateBindingIdentities candidate))
+            (originalPackageGlobals (case pending of
+              PortableCandidate candidate -> map (ExternalOriginalReference . globalIdentity)
+                (filter (isNothing . globalRequiredGeneration) (candidateGlobals candidate))
+              NativeProjection projection -> packageProjectionDemandSeeds projection))
           let required = originalExternalPackageGlobals demand
           let uses = Set.fromList [(identity,reference) | identity <- required
                 , reference <- maybe [] pure (originalReference identity)]
@@ -877,8 +897,8 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           let additions = Set.toAscList ((packages `Set.union` Map.keysSet obligations)
                 `Set.difference` Set.fromList roots)
           if null additions then do
-            final <- case intent of
-              PortableExecutable -> do
+            final <- case pending of
+              PortableCandidate _ -> do
                 -- Discovery roots select bodies, but only consumer roots issue
                 -- the final executable's auxiliary answer evidence.
                 selectedFinal <- project (prepareComponentProjectionWithReachability context
@@ -886,17 +906,8 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                 candidateFinal <- project (projectSelectedCandidateWithHostBindings hostBindings selectedFinal)
                 (program,constructors) <- project (finalizePreparedCandidate candidateFinal)
                 pure (PortableFinal program constructors roots)
-              NativeOriginals -> do
-                let isHome component = isHomeUnit (hsc_home_unit hscEnv)
-                      (moduleUnit (fatOriginalOwner (preparedComponentVersion component)))
-                    homeComponents = filter isHome (closureComponentSelections recovered)
-                    packageComponents = filter (not . isHome) (closureComponentSelections recovered)
-                    home = closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents
-                let homeProducts = homeProductGroups
-                paired <- project (projectPreparedPackageTarget hscEnv hostBindings (T.pack target)
-                  context homeProducts candidates reconciledInputs demand originalImports
-                  (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
-                  packageComponents (closureReachability recovered))
+              NativeProjection projection -> do
+                paired <- project (attachPreparedPackageDemand projection demand originalImports)
                 let groups = packageTargetGroups paired
                     moduleOf identity = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
                       (mkModuleName (T.unpack (symbolModule identity)))

@@ -3,7 +3,7 @@
 module Tidepool.OriginalProductRoots
   ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
   , requiredOriginalPackageGlobalsWithRetained, requiredOriginalExternalDemandWithPrior
-  , requiredOriginalExternalDemandForSeeds
+  , OriginalDemandSeed(..), requiredOriginalExternalDemandForSeeds
   , requiredOriginalExternalGlobalsWithPrior, OriginalExternalDemand
   , originalExternalHomeGroups, originalExternalPackageGlobals, originalExternalPriorHomeGroups
   , emptyOriginalExternalDemand
@@ -151,15 +151,22 @@ requiredOriginalExternalDemandWithPrior
   -> [GlobalDecl] -> Either String OriginalExternalDemand
 requiredOriginalExternalDemandWithPrior fresh cached exact retained prior =
   requiredOriginalExternalDemandForSeeds fresh cached exact retained prior
-    . map globalIdentity
+    . map (ExternalOriginalReference . globalIdentity)
     . filter ((== Nothing) . globalRequiredGeneration)
+
+-- Local definitions can select only the current inventory. They never acquire
+-- external authority from an earlier stage merely by sharing its symbol.
+data OriginalDemandSeed
+  = ExternalOriginalReference SymbolIdentity
+  | CurrentOriginalDefinition SymbolIdentity
+  deriving (Eq, Show)
 
 requiredOriginalExternalDemandForSeeds
   :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate]
   -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
   -> Set.Set SymbolIdentity
   -> (SymbolIdentity -> Either String (Maybe PriorOriginalExternalDemand))
-  -> [SymbolIdentity] -> Either String OriginalExternalDemand
+  -> [OriginalDemandSeed] -> Either String OriginalExternalDemand
 requiredOriginalExternalDemandForSeeds fresh cached exact retained prior =
   -- The original inventory is immutable across target and recovery passes.
   -- Partially applying this function retains its validated binder index;
@@ -167,9 +174,8 @@ requiredOriginalExternalDemandForSeeds fresh cached exact retained prior =
   case foldM insert Map.empty groups of
     Left reason -> const (Left reason)
     Right indexed -> \seeds -> do
-      (roots,packages,priorGroups) <- foldM seed ([],Set.empty,Map.empty)
-        [symbol | symbol <- seeds, symbol `Set.notMember` retained]
-      (reached, globals, reachedPrior) <- walk indexed Set.empty packages priorGroups roots
+      (roots,packages,priorGroups,localGroups) <- foldM (seed indexed) ([],Set.empty,Map.empty,Set.empty) seeds
+      (reached, globals, reachedPrior) <- walk indexed localGroups packages priorGroups roots
       Right (OriginalExternalDemand reached (Set.toAscList globals) reachedPrior)
   where
     groups =
@@ -199,12 +205,23 @@ requiredOriginalExternalDemandForSeeds fresh cached exact retained prior =
       Just demand -> do
         groups' <- mergePriorHomeGroups priorGroups (priorOriginalHomeGroups demand)
         Right (Set.union packages (priorOriginalPackageGlobals demand),groups')
-    seed (roots,packages,priorGroups) symbol
-      | (symbolUnit symbol,symbolModule symbol) `Set.member` owners = Right (symbol:roots,packages,priorGroups)
-      | otherwise = do
-          selected <- prior symbol
-          (packages',priorGroups') <- combine packages priorGroups selected
-          Right (roots,packages',priorGroups')
+    seed indexed state@(roots,packages,priorGroups,localGroups) demand = case demand of
+      CurrentOriginalDefinition symbol -> case Map.lookup symbol indexed of
+        Just (key, globals)
+          | key `Set.member` localGroups -> Right state
+          | otherwise -> Right
+              ([identity | (identity, required) <- globals, required] ++ roots,
+                packages,priorGroups,Set.insert key localGroups)
+        Nothing -> Left
+          ("local source definition has no original group in package root inventory: " ++ show symbol)
+      ExternalOriginalReference symbol
+        | symbol `Set.member` retained -> Right state
+        | (symbolUnit symbol,symbolModule symbol) `Set.member` owners ->
+            Right (symbol:roots,packages,priorGroups,localGroups)
+        | otherwise -> do
+            selected <- prior symbol
+            (packages',priorGroups') <- combine packages priorGroups selected
+            Right (roots,packages',priorGroups',localGroups)
     walk _ reached packages priorGroups [] = Right (reached, packages, priorGroups)
     walk indexed seen packages priorGroups (symbol : pending)
       | symbol `Set.member` retained = walk indexed seen packages priorGroups pending

@@ -5,11 +5,13 @@ module Tidepool.PreparedBuiltins
   ( DeferredFunction(..)
   , deferredFunction
   , wiredInErrorKind
+  , nullaryWorkerConstructor
   ) where
 
 import Data.Text (Text)
 import GHC.Builtin.Names qualified as Names
-import GHC.Types.Id (Id)
+import GHC.Types.Id (Id, isDataConWorkId_maybe)
+import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, isUnboxedTupleDataCon)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Unique (getUnique)
@@ -77,3 +79,14 @@ wiredInErrorKind binder = lookup (getUnique binder)
   , (Names.absentConstraintErrorIdKey, WiredAbsentConstraint)
   , (Names.absentSumFieldErrorIdKey, WiredAbsentSumField)
   ]
+
+-- | A genuinely nullary data-con worker denotes an evaluated object, not an
+-- executable import. Requiring no representation arguments also excludes
+-- workers whose logical Void arguments still require application.
+nullaryWorkerConstructor :: Id -> Maybe DataCon
+nullaryWorkerConstructor binder = do
+  con <- isDataConWorkId_maybe binder
+  if dataConRepArity con == 0 && null (dataConRepArgTys con)
+      && not (isUnboxedTupleDataCon con)
+    then Just con
+    else Nothing

@@ -31,3 +31,10 @@ result =
   (nullaryList, nullaryListAgain, nullaryBool, nullaryMaybe
   , nonNullaryWorker)
 {-# NOINLINE result #-}
+
+-- The defining worker is available as a real local top as well as an argument.
+data Local = Local
+
+{-# NOINLINE localArgument #-}
+localArgument :: (Local -> Int) -> Int
+localArgument f = f Local

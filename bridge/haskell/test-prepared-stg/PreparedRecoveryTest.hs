@@ -75,7 +75,7 @@ import Tidepool.ExecutionProjection qualified as Projection
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities, preparedTopIdentityBindings
   , prepareProjection, prepareProjectionWithReachability, prepareComponentProjectionWithReachability, projectSelected
-  , projectPreparedPackageTarget, packageTargetProgram, packageTargetGroups
+  , projectPreparedPackageProjection, attachPreparedPackageDemand, packageTargetProgram, packageTargetGroups
   , projectPreparedPackageGroups, projectedPackageEncoding, projectedPackageDefiningVersion, projectedPackageInterfaceSha256
   , projectPreparedTarget, projectPreparedModuleProducts, preparedModuleProductConstructors, preparedModuleReachFacts, preparedSeedUniques
   , admitReachFacts, emptyPreparedReachability, reachedUniques, admittedTops
@@ -1201,8 +1201,9 @@ scenario = do
       assert (Map.size homeProducts == length (closureHomeModules closure))
         "every fresh HOME owner has its actual projected product"
       reconciled <- either fail pure (reconcileOriginalProducts Nothing [])
-      paired <- either (fail . show) pure (projectPreparedPackageTarget hsc [] "" context homeProducts [] reconciled emptyOriginalExternalDemand Map.empty
+      projection <- either (fail . show) pure (projectPreparedPackageProjection hsc [] "" context homeProducts [] reconciled
         (closureHomeModules closure) (closureComponentSelections closure) (closureReachability closure))
+      paired <- either (fail . show) pure (attachPreparedPackageDemand projection emptyOriginalExternalDemand Map.empty)
       assert (null (Projection.packageTargetHomeImports paired))
         "fresh embedded HOME bodies require no external HOME coordinate"
       let exports = Set.fromList [identity | product <- packageTargetGroups paired
