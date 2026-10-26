@@ -155,6 +155,12 @@ ordering the test needs to explore.
 
 Build positive fixtures through the owning issuers and installed capabilities;
 reserve malformed or incomplete construction for explicit refusal controls.
+Fault injectors must preserve the issuing owner's outcome distinctions. An
+uncertain commit must not call a definitive-abort transition merely because both
+paths return errors. Otherwise the driver and model can agree while testing the
+wrong lifecycle. Check uncertain outcomes against the real publication owner,
+then distinguish them from confirmed refusal through reconciliation, dropped
+waiters and recovery; observe whether the original claim remains fenced.
 For asynchronous tests, distinguish an admitted operation, a suspended
 continuation, provider-permitted waiting, terminal completion and released
 resources. A pending future alone does not establish all of them. Use the
