@@ -11162,11 +11162,18 @@ where
                     if effects.supersession.is_some() {
                         return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
                             workbench_response(
-                                WorkbenchRunStatus::Committed,
+                                if cursor.index < request.items.len() {
+                                    WorkbenchRunStatus::Completed
+                                } else {
+                                    WorkbenchRunStatus::Committed
+                                },
                                 std::mem::take(&mut cursor.receipts),
                                 cursor.index,
                                 request.items.len(),
-                                None,
+                                cursor
+                                    .cell_check
+                                    .as_ref()
+                                    .map(|checked| checked.items.as_slice()),
                             ),
                         )));
                     }

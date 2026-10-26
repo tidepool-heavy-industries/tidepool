@@ -468,6 +468,17 @@ fn generation_reset_response_projection_preserves_receipts_and_rejects_trailing_
         if !trailing {
             original.total = original.next_index;
         }
+        let original = workbench_response(
+            if trailing {
+                WorkbenchRunStatus::Completed
+            } else {
+                WorkbenchRunStatus::Committed
+            },
+            original.items,
+            original.next_index,
+            original.total,
+            None,
+        );
         let expected_items = original.items.clone();
         let result = mark_generation_reset(
             Ok(KernelStep::Continue(original)),
@@ -487,6 +498,7 @@ fn generation_reset_response_projection_preserves_receipts_and_rejects_trailing_
                 Some(WorkbenchPublicationOutcome::Rejected { .. })
             ));
             assert_eq!(actual.total, 2);
+            assert_eq!(actual.items[1].status, WorkbenchItemStatus::NotRun);
         } else {
             assert_eq!(actual.status, WorkbenchRunStatus::Committed);
             assert_eq!(
