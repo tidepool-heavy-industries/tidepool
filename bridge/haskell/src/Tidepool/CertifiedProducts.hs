@@ -856,7 +856,12 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
             ++ "; selected seals=" ++ show (maybe [] Set.toAscList missingSeals))
       Right product { productInterfaces = requirements }
   let products = [product | Right product <- sealedProducts]
-      nativeObservations = maybe (Right []) scopeAvailableNativeGroupObservations exact
+      nativeObservations = do
+        observations <- maybe (Right []) scopeAvailableNativeGroupObservations exact
+        forM_ observations $ \(product,_) -> unless
+          (product `elem` unrecoveredExactProducts reconciled)
+          (Left "native census observation leaves its reconciled exact product admission")
+        pure observations
       nativeObservationRows =
         [ ((T.pack (originalUnit product), T.pack (originalModule product),
              Just (T.pack (originalVersion product)), Native.nativeGroupOrdinal group),
@@ -877,9 +882,7 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
       originalReferences = Map.union currentReferences previousReferences
       priorOwners = maybe Map.empty targetBinderOwners prior
       ownerMap = Map.union freshOwnerMap priorOwners
-      nativeOwners = Set.fromList ([(productUnit product,productModule product) | product <- products]
-        ++ [(T.pack (originalUnit product),T.pack (originalModule product))
-           | product <- unrecoveredExactProducts reconciled])
+      nativeOwners = Set.fromList [(productUnit product,productModule product) | product <- products]
       homeModules = Set.union (maybe Set.empty targetHomeModules prior) $ Set.fromList (
         [ (T.pack (dependencyModuleUnit node), T.pack (dependencyModuleName node))
         | node <- dependencyModules evidence, not (dependencyModuleBoot node) ]
