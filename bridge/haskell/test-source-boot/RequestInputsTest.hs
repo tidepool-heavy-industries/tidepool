@@ -2938,7 +2938,10 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
     profile <- rawWorldHex rootedProfileIdentity
     let bridgeSource = BS8.unlines
           ["module FreshCanonicalBridge where", "import qualified CanonicalPartialConsumer"
-          ,"bridge :: Int -> Int", "bridge value = CanonicalPartialConsumer.usePartial value"]
+          ,"bridge :: Int -> Int", "bridge 7 = CanonicalPartialConsumer.usePartial 7 + field Empty + missing (0 :: Int) + authored 2"
+          ,"data Record = Record { field :: Int } | Empty"
+          ,"class Missing a where missing :: a -> Int", "instance Missing Int"
+          ,"{-# LINE 91 \"Authored.hs\" #-}","{-# NOINLINE authored #-}","authored :: Int -> Int", "authored 2 = 3"]
     (packetPath,_) <- writeWorldCellAdmissionPacketWithSources handles rootB producer profile contextParcel
       (("FreshCanonicalBridge.hs",bridgeSource):sources)
     owner <- newExactInputOwner
@@ -2947,7 +2950,7 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
     rooted <- canonicalizePath rootB
     withRootedCompilerEnvironment rooted $ do
       -- One universe retains the actual native body cache across two requests.
-      withQuietStdout $ withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> do
+      firstIdentity <- withQuietStdout $ withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> do
         let typeOnlyCounters = ["world.cell.canonical_body_acquisitions","world.cell.canonical_body_cache_hits"
               ,"world.cell.canonical_make_view_core_reads","world.cell.canonical_make_view_core_bytes"
               ,"finalized_core_admitted_seeds","finalized_core_encoding_attempts"]
@@ -2997,6 +3000,7 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
         warmBridge <- observed warmEvidence "world.cell.source_frontends.main:FreshCanonicalBridge"
         unless (sum firstBridge == 1 && sum warmBridge == 0)
           (fail "canonical dependency replayed its completed source importer across stages or requests")
+        freshInterface first
       -- A distinct universe has no body cache or previous HPT to lend this request.
       withQuietStdout $ withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler -> do
         ready <- scopedEnsureWorld compiler (ExactInputsRequest identity (CompleteExactInputs packetPath))
@@ -3006,6 +3010,9 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
         (cold,coldEvidence,coldDiagnostics) <- captureDiagnosticsWithCounters coldCounters
           (prepare compiler identity reference rootB "native-cold" 101)
         requireProducts expected cold `onException` hPutStrLn stderr coldDiagnostics
+        coldIdentity <- freshInterface cold
+        unless (firstIdentity == coldIdentity)
+          (fail "identical captured sources changed interface across independent World materializations")
         coldSeeds <- observed coldEvidence "finalized_core_admitted_seeds"
         unless (sum coldSeeds > 0)
           (fail "cold native World request did not decode its retained canonical Core")
@@ -3040,7 +3047,23 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
       values <- observed evidence ("world.cell.source_frontends.main:" ++ name)
       unless (sum values == 0)
         (fail ("selected canonical original was recompiled: " ++ name))
-    requireProducts expected actual = case actual of
+    freshInterface result = case result of
+      Right products -> case Map.lookup "FreshCanonicalBridge" products of
+        Just rows -> do
+          identities <- forM rows $ \row -> case row of
+            TList [TString "main",TString "FreshCanonicalBridge",TBytes iface,TList groups] -> do
+              let bytes = BS.concat [body | TBytes body <- groups]
+              unless ("root-0/FreshCanonicalBridge.hs" `BS.isInfixOf` bytes
+                  && "Authored.hs" `BS.isInfixOf` bytes)
+                (fail "fresh error literals lost logical source or authored LINE coordinates")
+              pure iface
+            _ -> fail "fresh source lost its actual compiled interface identity"
+          case Set.toList (Set.fromList identities) of
+            [identity] -> pure identity
+            _ -> fail "fresh source interface changed within one World history"
+        _ -> fail "fresh source did not issue a compiled product"
+      Left refusal -> fail ("fresh source refused: " ++ show refusal)
+    requireProducts expected actual = case fmap (Map.delete "FreshCanonicalBridge") actual of
       Right products | Map.keysSet products == Map.keysSet expected ->
         forM_ (Map.toList products) $ \(name,rows) -> case Map.lookup name expected of
           Just [TList [TString "main",TString owner,TBytes iface,TList issuedGroups]] -> do
@@ -3103,7 +3126,7 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
           Right completed -> do
             unless (length completed == 3) (fail "canonical World fixture lost its ordered three stages")
             rows <- forM [0..2 :: Int] $ \ordinal ->
-              nativeRows ["CanonicalPartial","CanonicalPartialConsumer"]
+              nativeRows ["CanonicalPartial","CanonicalPartialConsumer","FreshCanonicalBridge"]
                 (directory </> ("stage-" ++ show ordinal) </> "module-products.cbor")
             mapM_ (commitPreparedWorldDependencies request) completed
             pure (Right (Map.unionsWith (++) rows))

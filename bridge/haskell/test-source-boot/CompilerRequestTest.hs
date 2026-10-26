@@ -331,6 +331,18 @@ worldAcquisitionDiagnostics = do
 -- They enter the same materialization owner used before world publication.
 worldMaterializationBoundaries :: IO ()
 worldMaterializationBoundaries = do
+  -- Root order is part of source selection. Equal relative paths in distinct
+  -- roots keep distinct coordinates, including after the roots are reordered.
+  forM_ [["first","second"],["second","first"]] $ \bodies -> withScratch $ \parent -> do
+    sources <- sourceRootsFixture [[("Same.hs",body)] | body <- bodies]
+    materialized <- materializeWorldSources parent sources Set.empty pure
+    child <- onlyChild parent
+    forM_ (zip [0 :: Int ..] bodies) $ \(ordinal,expected) -> do
+      actual <- BS.readFile (parent </> child </> ("root-" ++ show ordinal) </> "Same.hs")
+      unless (actual == expected)
+        (fail "World source root reordering changed its coordinate or captured bytes")
+    _ <- releaseWorldMaterialization materialized
+    requireEmpty parent
   withScratch $ \parent -> do
     sources <- sourceFixture [("A.hs","module A where\nanswer = 1\n")]
     materialized <- materializeWorldSources parent sources Set.empty pure
@@ -494,9 +506,11 @@ worldMaterializationBoundaries = do
       else do
         bytes <- getFileSize path
         pure (bytes,1)
-    sourceFixture files = either fail pure (decodeWorldSources
-      ("TPCSRC01" <> frame "fixture-generation" <> word32 1 <> word32 (length files)
-        <> foldMap (\(path,body) -> frame path <> frame body) files))
+    sourceFixture files = sourceRootsFixture [files]
+    sourceRootsFixture roots = either fail pure (decodeWorldSources
+      ("TPCSRC01" <> frame "fixture-generation" <> word32 (length roots)
+        <> foldMap (\files -> word32 (length files)
+          <> foldMap (\(path,body) -> frame path <> frame body) files) roots))
     frame bytes = word32 (BS.length bytes) <> bytes
     word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
 

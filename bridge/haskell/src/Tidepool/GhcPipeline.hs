@@ -1362,6 +1362,7 @@ data PipelineVariant = PipelineVariant
   , pvPurpose :: CompilePurpose
     -- ^ Original request purpose, shared by all compile variants.
   , pvExactScope :: Maybe ExactScope
+  , pvWorldSourceLocations :: Map.Map FilePath WorldHomeSource
   , pvWorldOnly :: Bool
   , pvWorldOriginalBindings :: Map.Map Name SymbolIdentity
   , pvWorldCompletedDependencies :: Maybe WorldPrivateCompletion
@@ -2361,6 +2362,26 @@ materializeWorldSourcesWithRelease release parent sources hints publish = mask $
       lease <- WorldBackingLease <$> newIORef (WorldBackingLive 1)
       evaluate (WorldMaterialization directory products (map fst roots) names paths hints copiedBytes nodes lease)
 
+-- Only captured World sources receive logical parser coordinates. Finder and
+-- source evidence continue to use the physical location and original byte hash.
+-- GHC consumes the already captured buffer, so authored LINE pragmas retain
+-- their lexer semantics without changing or prefixing the source bytes.
+stabilizeWorldSourceLocations :: Map.Map FilePath WorldHomeSource -> ModuleGraph -> Ghc ModuleGraph
+stabilizeWorldSourceLocations sources graph | Map.null sources = pure graph
+stabilizeWorldSourceLocations sources graph = do
+  nodes <- forM (mgModSummaries' graph) $ \node -> case node of
+    ModuleNode edges summary -> case ml_hs_file (ms_location summary) >>= (`Map.lookup` sources) of
+      Nothing -> pure node
+      Just (WorldHomeSource ordinal relative _ _) -> do
+        when (isNothing (ms_hspp_buf summary)) (liftIO (throwIO WorldCellCorrupt))
+        pure (ModuleNode edges summary
+          {ms_hspp_file=("root-" ++ show ordinal) </> relative,ms_parsed_mod=Nothing})
+    _ -> pure node
+  let stable = mkModuleGraph nodes
+  current <- getSession
+  setSession current {hsc_mod_graph=stable}
+  pure stable
+
 -- This path starts from captured source selection, never the universe's most
 -- recent HPT or a raw-custody module inventory. The universe supplies only its
 -- fixed package/NameCache/interpreter owners to the private operation.
@@ -2410,7 +2431,7 @@ runWorldPublicModule producer universe baseEnv timing
                   (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt
             CheckedPublicModuleResult target compiled evidence _ <- runCompileCycle
               (WithCompilerExecution grant executor CheckedPublicModule) cycle (retainedContext Set.empty)
-              Nothing timing identity start resources variant {pvCompilerProducer=producer} physical
+              Nothing timing identity start resources variant {pvCompilerProducer=producer,pvWorldSourceLocations=paths} physical
             selected <- liftIO (validateWorldHomeEvidence paths compiled evidence)
             let owner = mi_module (hm_iface target)
             unless (moduleNameString (moduleName owner) == requested
@@ -2882,7 +2903,7 @@ compileHeldWorldCell guard producer universe baseEnv timing attempt world grant 
 runHeldWorldSource :: IO () -> Maybe CompilerProducerIdentity -> CompilerUniverse -> HscEnv -> Bool -> IORef InterpreterAttemptState
   -> HeldCompilerWorld -> CompilerExecutionGrant -> CompilerExecutor -> WorldSourceOperation result -> Ghc result
 runHeldWorldSource guard producer universe baseEnv timing attempt
-    world@(HeldCompilerWorld facts _ (WorldMaterialization _ _ roots _ _ _ _ _ _) _) grant executor operation = do
+    world@(HeldCompilerWorld facts _ (WorldMaterialization _ _ roots _ paths _ _ _ _) _) grant executor operation = do
   let (purpose,path,operationDirectory,offset,retained) = case operation of
         WorldCellSource question _ _ stage _ selected ->
           (worldCellStagePurpose stage,heldWorldCellStagePath stage,worldCellPrepareDirectory question,
@@ -3139,7 +3160,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   resources <- beginResourceTiming timing
   let cycle = worldDependencyCycle dependencies universe attempt
       withAliases = variant
-        { pvCompilerProducer=producer,pvWorldOnly=True
+        { pvCompilerProducer=producer,pvWorldOnly=True,pvWorldSourceLocations=paths
         , pvDownsweepExcludes=maybe [] (pure . mkModuleName . exactModule . worldCellOperandInterface) operand
             ++ [mkModuleName (exactModule (worldTypeEntryArtifact entry)) | entry <- worldImportEntries importBasis]
             ++ case operation of
@@ -5347,8 +5368,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- before any shared package interface is demanded. Package unfoldings and
     -- home type identities remain available without an EPS flush.
     previous <- getSession
-    modGraphDownsweep <- withWorldModulePreprocessing (checksPublicModule selection || pvWorldOnly variant) path $
+    physicalGraph <- withWorldModulePreprocessing (checksPublicModule selection || pvWorldOnly variant) path $
       depanalSourceModules (pvDownsweepExcludes variant)
+    modGraphDownsweep <- stabilizeWorldSourceLocations (pvWorldSourceLocations variant) physicalGraph
     targetOwner <- liftIO (targetModuleFor modGraphDownsweep path)
     targetSummary <- case [summary | ModuleNode _ summary <- mgModSummaries' modGraphDownsweep
         , ms_mod summary == targetOwner, ms_hsc_src summary == HsSrcFile] of
@@ -9786,6 +9808,7 @@ normalVariant purpose = do
    { pvLabel = "runPipeline"
    , pvPurpose = purpose
    , pvExactScope = Nothing
+   , pvWorldSourceLocations = Map.empty
    , pvWorldOnly = False
    , pvWorldOriginalBindings = Map.empty
    , pvWorldCompletedDependencies = Nothing
@@ -10403,11 +10426,8 @@ validateCanonicalSourceInputsWithViews interfaceViews
   -- operation-local view, not to the canonical SOURCE closure.
   setTargets (if worldOnly then targets else hsc_targets initial ++ targets)
   swept <- withWorldModulePreprocessing worldOnly "<canonical source qualification>" (depanalSourceModules excluded)
-  graph <- if worldOnly then admitWorldQuoteFreeModuleGraph False Nothing driverRoot swept else pure swept
-  when worldOnly $ forM_ [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary -> liftIO $ do
-    requireWorldHeaderPolicy WorldCanonicalGraph (ms_hspp_file summary) (hsc_dflags initial) (ms_hspp_opts summary)
   let summaries = Map.fromList [(ownerKey (ms_mod summary),summary)
-        | ModuleNode _ summary <- mgModSummaries' graph, ms_hsc_src summary == HsSrcFile]
+        | ModuleNode _ summary <- mgModSummaries' swept, ms_hsc_src summary == HsSrcFile]
       callerSummaries = Map.fromList [(ownerKey (ms_mod summary),summary)
         | ModuleNode _ summary <- mgModSummaries' sourceGraph,ms_hsc_src summary == HsSrcFile]
   forM_ (Map.toList callerSummaries) $ \(key,old) -> forM_ (Map.lookup key summaries) $ \now -> do
@@ -10415,6 +10435,19 @@ validateCanonicalSourceInputsWithViews interfaceViews
     nowPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location now)))
     unless (ms_mod old == ms_mod now && oldPath == nowPath && ms_hs_hash old == ms_hs_hash now) $
       liftIO (throwIO (ExecutionSourceIncomplete key))
+    when (worldOnly && ms_hspp_file old /= ms_hspp_file now && isNothing (ms_hspp_buf now)) $
+      liftIO (throwIO (ExecutionSourceIncomplete key))
+  -- The caller already admitted logical parser coordinates for these exact
+  -- physical sources. Carry them across qualification's private downsweep only
+  -- after the source owner, physical path and raw hash checks above.
+  let located = if worldOnly then mapMG (\summary ->
+        case Map.lookup (ownerKey (ms_mod summary)) callerSummaries of
+          Just old | ms_hsc_src summary == HsSrcFile -> summary
+            {ms_hspp_file=ms_hspp_file old,ms_parsed_mod=Nothing}
+          _ -> summary) swept else swept
+  graph <- if worldOnly then admitWorldQuoteFreeModuleGraph False Nothing driverRoot located else pure located
+  when worldOnly $ forM_ [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary -> liftIO $ do
+    requireWorldHeaderPolicy WorldCanonicalGraph (ms_hspp_file summary) (hsc_dflags initial) (ms_hspp_opts summary)
   -- Canonical qualification checks only its own roots. The already-admitted
   -- caller graph still owns incoming source-resolution witnesses, including
   -- a selected root that no canonical dependency imports.
@@ -10648,6 +10681,7 @@ sessionVariant purpose scope = do
    { pvLabel = "runSessionPipeline"
    , pvPurpose = purpose
    , pvExactScope = exact
+   , pvWorldSourceLocations = Map.empty
    , pvWorldOnly = False
    , pvWorldOriginalBindings = Map.empty
    , pvWorldCompletedDependencies = Nothing
