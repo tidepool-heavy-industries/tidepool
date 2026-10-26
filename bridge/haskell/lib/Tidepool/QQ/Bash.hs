@@ -1,8 +1,10 @@
 {-# LANGUAGE TemplateHaskellQuotes #-}
+{-# LANGUAGE PackageImports #-}
 module Tidepool.QQ.Bash (bash) where
 
-import Language.Haskell.TH (Exp (..), Lit (..))
-import Language.Haskell.TH.Quote (QuasiQuoter (..))
+import "base" Prelude (pure, fail)
+import "template-haskell" Language.Haskell.TH (Exp (..), Lit (..))
+import "template-haskell" Language.Haskell.TH.Quote (QuasiQuoter (..))
 import qualified Tidepool.Data.Text as T
 import Tidepool.Command.Types (bashCommand)
 

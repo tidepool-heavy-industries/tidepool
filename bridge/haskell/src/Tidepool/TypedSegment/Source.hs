@@ -5,20 +5,20 @@ module Tidepool.TypedSegment.Source
   , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
   , ParsedModuleDemand, prepareModuleDemand, moduleDemandMatchesSource, moduleDemandCapturedImports
   , projectRefinedDemandImports
-  , moduleInputOccurrences, moduleImportRequests, segmentModuleDemand, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
+  , moduleDemandHasBashQuotes, moduleInputOccurrences, moduleInputOccurrencesWithBash, lowerModuleBashQuotes, moduleImportRequests, segmentModuleDemand, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName
   ) where
 
 import Control.Exception (throwIO)
 import Control.Monad (forM, foldM, unless)
+import Control.Monad.State.Strict (StateT, runStateT, get, put, liftIO)
 import qualified Data.ByteString as BS
 import Data.Data (Data)
-import Data.Generics (everything, mkQ)
+import Data.Generics (everything, everywhere, everywhereM, mkQ, mkT, mkM, extQ)
 import Data.List (intersect, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC (ParsedSource, ParsedModule(..), ModSummary(..), ModLocation(..), ms_mod_name)
-import GHC.Parser.Annotation (getLocA)
 import GHC.Data.Strict qualified as Strict
 import GHC.Driver.Session (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset, xopt)
 import GHC.Driver.Env (HscEnv, hsc_NC, hscUpdateFlags)
@@ -28,27 +28,28 @@ import GHC.Rename.Module (findSplice, rnSrcDecls)
 import GHC.Rename.Names (rnImports)
 import GHC.Tc.Types (TcGblEnv(..))
 import GHC.Tc.Utils.Monad (initTcInteractive, getGblEnv, setGblEnv, failM)
-import GHC.Types.Name (Name)
+import GHC.Types.Name (Name, mkInternalName)
+import GHC.Types.Unique.Supply (uniqFromTag)
+import GHC.Data.FastString (FastString)
+import GHC.Types.Name.Set (unionNameSets)
 import GHC.Parser.Header (mkPrelImports)
 import GHC.Driver.Ppr (showPpr)
 import GHC.Hs
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString, delFromOccEnv)
 import GHC.Types.Name.Reader
-  ( RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc
+  ( RdrName(Exact), isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc
   , GlobalRdrEnv, mkGlobalRdrEnv, mkLocalVanillaGRE, Parent(NoParent)
   , plusGlobalRdrEnv, shadowNames, extendGlobalRdrEnv )
 import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, getBufSpan, bufSpanStart, bufSpanEnd, bufPos)
 import GHC.Unit.Types (interactiveUnit, mkModule)
-import GHC.Unit.Module (ModuleName, mkModuleName)
 import GHC.Types.PkgQual (RawPkgQual)
-import Language.Haskell.Syntax.ImpExp (IsBootInterface)
 import GHC.Utils.Outputable (ppr, text, (<+>))
 import GHC.Utils.Fingerprint (fingerprintByteString)
 import System.Directory (canonicalizePath)
 import Tidepool.TypedSegment.Types
 import Tidepool.ExactHydration
-  ( CapturedGeneratedImports, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
+  ( CapturedGeneratedImports, CapturedInterfaceInputs, capturedInterfaceInputs, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
   , capturedGeneratedImportSource, capturedGeneratedImportFlags, capturedGeneratedImportSyntax )
 import Tidepool.ImportSyntax (capturedParsedSource)
 import Tidepool.ImportSyntax.Internal
@@ -58,21 +59,25 @@ import Tidepool.ImportSyntax.Internal
 import Tidepool.CheckedCell (ResolvedNativeSlots, applyNativeAnnotations)
 import Tidepool.CheckedPrefixImports (parsedDeclarationOccurrences)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
+import Tidepool.BashQuote
+import Tidepool.ExactScope (CanonicalInterfaceAdmission)
+import Tidepool.CheckedCell.Internal (NativeParsedModule(..))
+import Tidepool.ImportSyntax.Internal (mapImportPreservingSource)
 
 -- Demand analysis borrows the root's already parsed, origin-bound capture.
--- Its private constructor adds the no-quasiquote proof required before the
+-- Its private constructor adds the no-execution candidate proof required before the
 -- demand renamer can load any imported interface. The source may subsequently
 -- receive native type annotations, while the captured imports remain exact.
 data ParsedModuleDemand = ParsedModuleDemand
-  CapturedGeneratedImports ParsedSource
+  CapturedGeneratedImports ParsedSource [(RdrName,FastString)]
 
 moduleDemandCapturedImports :: ParsedModuleDemand -> CapturedGeneratedImports
-moduleDemandCapturedImports (ParsedModuleDemand captured _) = captured
+moduleDemandCapturedImports (ParsedModuleDemand captured _ _) = captured
 
 -- Source qualification always consumes the immutable captured requests.
 -- Later lexical refinement cannot create source or package import authority.
 moduleImportRequests :: ParsedModuleDemand -> [(ModuleName, RawPkgQual, IsBootInterface)]
-moduleImportRequests (ParsedModuleDemand captured _) =
+moduleImportRequests (ParsedModuleDemand captured _ _) =
   [(unLoc (ideclName declaration), ideclPkgQual declaration, ideclSource declaration)
   | L _ declaration <- hsmodImports (unLoc (capturedParsedSource (capturedGeneratedImportSyntax captured)))]
 
@@ -84,17 +89,17 @@ segmentModuleDemand :: ParsedSegmentDemand -> ParsedModuleDemand
 segmentModuleDemand (ParsedSegmentDemand parsed) = parsed
 
 moduleDemandMatchesSource :: ParsedModuleDemand -> FilePath -> BS.ByteString -> Bool
-moduleDemandMatchesSource (ParsedModuleDemand captured _) path bytes =
+moduleDemandMatchesSource (ParsedModuleDemand captured _ _) path bytes =
   capturedGeneratedScaffoldPath source == path && capturedGeneratedScaffoldBytes source == bytes
   where source = capturedGeneratedImportSource captured
 
 -- Import decisions come from the actual matched driver. The demand renamer
--- keeps its original quote-free declarations and native type annotations;
+-- keeps its original unexpanded declarations and native type annotations;
 -- segment lowering and completed aliases never enter this projection.
 projectRefinedDemandImports
   :: CapturedGeneratedImports -> DriverImportSyntax -> RefinedImportSyntax
   -> ParsedModuleDemand -> IO ParsedModuleDemand
-projectRefinedDemandImports matched driver refined demand@(ParsedModuleDemand captured parsed) = do
+projectRefinedDemandImports matched driver refined demand@(ParsedModuleDemand captured parsed sites) = do
   let source = capturedGeneratedImportSource matched
       admitted = pm_mod_summary (driverParsedModule driver)
       projected = refinedParsedModule refined
@@ -120,7 +125,7 @@ projectRefinedDemandImports matched driver refined demand@(ParsedModuleDemand ca
       && census (refinedCapturedSyntax refined) == census (capturedGeneratedImportSyntax matched)) reject
   let L location syntax = parsed
   pure (ParsedModuleDemand captured (L location syntax
-    {hsmodImports=hsmodImports (unLoc (pm_parsed_source projected))}))
+    {hsmodImports=hsmodImports (unLoc (pm_parsed_source projected))}) sites)
 
 -- Physical rendered-source boundaries are independent of user LINE pragmas.
 -- These closed modes constrain an operand to its generated expression/type
@@ -132,7 +137,7 @@ data ObservationOperand
 
 validateObservationContribution :: Int -> ObservationOperand -> [String] -> ParsedModuleDemand
   -> Either String ()
-validateObservationContribution prefix mode probes (ParsedModuleDemand _ parsed) = do
+validateObservationContribution prefix mode probes (ParsedModuleDemand _ parsed _) = do
   suffix <- fmap concat $ mapM classify (hsmodDecls (unLoc parsed))
   let expected = map (False,) probes ++ case mode of
         ObservationNoOperand -> []
@@ -185,34 +190,65 @@ validateObservationContribution prefix mode probes (ParsedModuleDemand _ parsed)
               _ -> Left "observation generated binder has extra equations"
           _ -> Left "observation operand introduced a top-level declaration"
 
--- Native type substitution preserves the source issuer and no-quasiquote proof.
+-- Native type substitution preserves the source issuer and no-execution candidate proof.
 -- The same resolved annotation product must also feed final module checking.
 annotateModuleDemand :: ResolvedNativeSlots -> ParsedModuleDemand -> IO ParsedModuleDemand
-annotateModuleDemand annotations (ParsedModuleDemand captured parsed) = do
+annotateModuleDemand annotations (ParsedModuleDemand captured parsed sites) = do
   (annotated, _) <- applyNativeAnnotations annotations parsed
   -- Only declaration types participate in demand. Retain the captured header
   -- and imports by construction, independently of the annotation traversal.
   let L location original = parsed
       declarations = hsmodDecls (unLoc annotated)
-  pure (ParsedModuleDemand captured (L location original {hsmodDecls = declarations}))
+  pure (ParsedModuleDemand captured (L location original {hsmodDecls = declarations}) sites)
 
 segmentDemandMatchesSource :: ParsedSegmentDemand -> FilePath -> BS.ByteString -> Bool
 segmentDemandMatchesSource = moduleDemandMatchesSource . segmentModuleDemand
 
+-- The parser permits only expression-shaped Bash candidates. This spelling
+-- filter is not authority: both demand and final scope must resolve every site
+-- to the source-authenticated defining Name before lowering can proceed.
+expressionQuoteSites :: Data source => source -> [(RdrName,FastString)]
+expressionQuoteSites = everything (++) (mkQ [] selected)
+  where
+    selected :: HsExpr GhcPs -> [(RdrName,FastString)]
+    selected (HsUntypedSplice _ (HsQuasiQuote _ name source)) = [(name,unLoc source)]
+    selected _ = []
+
+quoteFreeProbeSyntax :: ParsedSource -> ParsedSource
+quoteFreeProbeSyntax = everywhere (mkT erase)
+  where
+    erase :: HsExpr GhcPs -> HsExpr GhcPs
+    erase (HsUntypedSplice _ (HsQuasiQuote _ name _)) = HsVar noExtField (noLocA name)
+    erase other = other
+
+hasCompileTimeSyntax :: ParsedSource -> Bool
+hasCompileTimeSyntax = everything (||) (mkQ False splice `extQ` expression)
+  where
+    splice :: HsUntypedSplice GhcPs -> Bool
+    splice _ = True
+    expression :: HsExpr GhcPs -> Bool
+    expression HsTypedSplice{} = True
+    expression HsTypedBracket{} = True
+    expression HsUntypedBracket{} = True
+    expression _ = False
+
 prepareModuleDemand :: CapturedGeneratedImports -> Either TypedSegmentFailure ParsedModuleDemand
 prepareModuleDemand captured
-  | null quotes = Right (ParsedModuleDemand captured parsed)
+  | all ((== "bash") . occNameString . rdrNameOcc . fst) sites
+      && not (hasCompileTimeSyntax (quoteFreeProbeSyntax parsed)) =
+        Right (ParsedModuleDemand captured parsed sites)
   | otherwise = Left (ModuleDemandQuasiQuoteRejected path (map (showPpr flags) quotes))
   where
     flags = capturedGeneratedImportFlags captured
     parsed = capturedParsedSource (capturedGeneratedImportSyntax captured)
     path = capturedGeneratedScaffoldPath (capturedGeneratedImportSource captured)
+    sites = expressionQuoteSites parsed
     quotes = quasiQuoteOccurrences flags parsed
 
 prepareSegmentDemand :: TypedSegmentPlan -> CapturedGeneratedImports
   -> Either TypedSegmentFailure ParsedSegmentDemand
 prepareSegmentDemand plan captured = do
-  parsedModule@(ParsedModuleDemand _ parsed) <- prepareModuleDemand captured
+  parsedModule@(ParsedModuleDemand _ parsed _) <- prepareModuleDemand captured
   if roots parsed == [()]
     then Right (ParsedSegmentDemand parsedModule)
     else Left UnprovedRootAbstraction
@@ -285,12 +321,53 @@ typedSegmentInputOccurrences environment scope =
 
 moduleInputOccurrences :: HscEnv -> SegmentDemandScope binding -> ParsedModuleDemand
   -> IO (Either TypedSegmentFailure [(String,binding)])
-moduleInputOccurrences environment (SegmentDemandScope aliases bindings)
-    (ParsedModuleDemand captured parsed) = do
-  let flags = capturedGeneratedImportFlags captured
-      probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
+moduleInputOccurrences environment scope demand = do
+  captured <- either throwIO pure (capturedInterfaceInputs [])
+  moduleInputOccurrencesWithBash environment Map.empty captured scope demand
+
+moduleDemandHasBashQuotes :: ParsedModuleDemand -> Bool
+moduleDemandHasBashQuotes (ParsedModuleDemand _ _ sites) = not (null sites)
+
+moduleInputOccurrencesWithBash :: HscEnv -> Map.Map (String,String) CanonicalInterfaceAdmission
+  -> CapturedInterfaceInputs -> SegmentDemandScope binding -> ParsedModuleDemand
+  -> IO (Either TypedSegmentFailure [(String,binding)])
+moduleInputOccurrencesWithBash environment admitted capturedInterfaces scope (ParsedModuleDemand captured parsed sites) = do
+  authority <- if null sites then pure Nothing else Just <$> resolveBashQuoteAuthority environment admitted capturedInterfaces
+  renameDemandProbe environment scope (capturedGeneratedImportFlags captured) authority parsed
+
+-- Unique Exact markers correlate sites across renaming without relying on
+-- source spans (authored LINE pragmas may duplicate those). Marker Names are
+-- probe-local and never reach the checked or prepared program.
+markQuoteSites :: ParsedSource -> IO (ParsedSource,[Name])
+markQuoteSites parsed = do
+  markers <- forM (expressionQuoteSites parsed) $ \_ -> do
+    unique <- uniqFromTag 'q'
+    pure (mkInternalName unique (mkVarOcc "site") noSrcSpan)
+  (marked,remaining) <- runStateT (everywhereM (mkM mark) parsed) markers
+  unless (null remaining) (throwIO ModuleDemandImportSourceMismatch)
+  pure (marked,markers)
+  where
+    mark :: HsExpr GhcPs -> StateT [Name] IO (HsExpr GhcPs)
+    mark (HsUntypedSplice _ (HsQuasiQuote _ name _)) = do
+      pending <- get
+      case pending of
+        marker:rest -> do
+          put rest
+          pure (HsApp noExtField
+            (mkHsLam (noLocA [nlVarPat (Exact marker)]) (nlHsVar (Exact marker)))
+            (nlHsVar name))
+        [] -> liftIO (throwIO ModuleDemandImportSourceMismatch)
+    mark other = pure other
+
+renameDemandProbe :: HscEnv -> SegmentDemandScope binding -> DynFlags
+  -> Maybe BashQuoteAuthority -> ParsedSource
+  -> IO (Either TypedSegmentFailure [(String,binding)])
+renameDemandProbe environment (SegmentDemandScope aliases bindings) flags authority parsed = do
+  (marked,markers) <- markQuoteSites parsed
+  unless (not (hasCompileTimeSyntax marked)) (throwIO ModuleDemandImportSourceMismatch)
+  let probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
       probe = hscUpdateFlags (const probeFlags) environment
-      syntax = unLoc parsed
+      syntax = unLoc marked
       imports = hsmodImports syntax
       owner = maybe (mkModuleName "Main") unLoc (hsmodName syntax)
       allImports = mkPrelImports owner noSrcSpan (xopt LangExt.ImplicitPrelude flags) imports ++ imports
@@ -309,17 +386,50 @@ moduleInputOccurrences environment (SegmentDemandScope aliases bindings)
   pure $ case renamed of
     Nothing -> Left (InputDemandRenameRejected (showPpr probeFlags diagnostics))
     Just result ->
-      let selected = everything (++) (mkQ [] occurrence) result
-          -- Distinct resolved Names can share a presentation label. Only
-          -- repeated occurrences of the same Name select the same input fact.
+      let sites = everything (++) (mkQ [] (quoteReference markers)) result
+          expected = case authority of
+            Nothing -> []
+            Just issued -> [(marker,bashQuoteName issued) | marker <- markers]
+          selected = everything (++) (mkQ [] occurrence) result
           demanded = Map.fromList
-            [ (name,(alias,binding))
-            | name <- selected, Just (alias,binding) <- [Map.lookup name bindings] ]
-      in Right (sortOn fst (Map.elems demanded))
+            [(name,(alias,binding)) | name <- selected, Just (alias,binding) <- [Map.lookup name bindings]]
+      in if sortOn fst sites /= sortOn fst expected
+           then Left (ModuleDemandQuasiQuoteRejected "<resolved demand>" ["unproved literal Bash quoter"])
+           else Right (sortOn fst (Map.elems demanded))
   where
     occurrence :: HsExpr GhcRn -> [Name]
     occurrence (HsVar _ (L _ name)) = [name]
     occurrence _ = []
+    quoteReference :: [Name] -> HsExpr GhcRn -> [(Name,Name)]
+    quoteReference markers (HsApp _ lambda (L _ (HsVar _ (L _ quoter))))
+      | isLambda lambda =
+      case filter (`elem` markers) (everything (++) (mkQ [] occurrence) lambda) of
+        [marker] -> [(marker,quoter)]
+        _ -> []
+    quoteReference _ _ = []
+    isLambda :: LHsExpr GhcRn -> Bool
+    isLambda (L _ HsLam{}) = True
+    isLambda (L _ (HsPar _ inner)) = isLambda inner
+    isLambda _ = False
+
+lowerModuleBashQuotes :: Map.Map (String,String) CanonicalInterfaceAdmission
+  -> CapturedInterfaceInputs -> HscEnv -> ParsedModuleDemand -> NativeParsedModule -> IO NativeParsedModule
+lowerModuleBashQuotes admitted capturedInterfaces environment (ParsedModuleDemand captured _ sites)
+    native@(NativeParsedModule refined uses)
+  | null sites = pure native
+  | otherwise = do
+      let parsed = pm_parsed_source (refinedParsedModule refined)
+      unless (expressionQuoteSites parsed == sites) (throwIO ModuleDemandImportSourceMismatch)
+      authority <- resolveBashQuoteAuthority environment admitted capturedInterfaces
+      empty <- newSegmentDemandScope environment (Map.empty :: Map.Map String ())
+      verified <- renameDemandProbe environment empty (capturedGeneratedImportFlags captured) (Just authority) parsed
+      either throwIO (const (pure ())) verified
+      lowered <- mapImportPreservingSource (pure . everywhere (mkT (lower authority))) refined
+      pure (NativeParsedModule lowered (unionNameSets [uses,bashQuoteNames authority]))
+  where
+    lower :: BashQuoteAuthority -> HsExpr GhcPs -> HsExpr GhcPs
+    lower authority (HsUntypedSplice _ (HsQuasiQuote _ _ source)) = bashQuoteExpression authority (unLoc source)
+    lower _ other = other
 
 rewriteParsedSegmentRoot :: GeneratedSegmentOperations -> TypedSegmentPlan -> DynFlags -> ParsedSource -> IO ParsedSource
 rewriteParsedSegmentRoot operations plan flags source = case rewriteModule of

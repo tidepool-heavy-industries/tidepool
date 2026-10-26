@@ -9,6 +9,8 @@ extra-source-files:
   lib/Tidepool/Aeson/Scientific.hs
   lib/Tidepool/Aeson/Value.hs
   lib/Tidepool/Command/Types.hs
+  lib/Tidepool/QQ/Bash.hs
+  lib/Tidepool/Data/Text.hs
   lib/Tidepool/Data/Time.hs
   lib/Tidepool/Double.hs
   lib/Tidepool/Internal/RequestSite.hs
@@ -132,6 +134,7 @@ library tidepool-extract-internal
     Tidepool.PreparedFormatting
     Tidepool.PreparedTime
     Tidepool.PreparedJson
+    Tidepool.BashQuote
     Tidepool.SiteClassifier
     Tidepool.PreparedSites
     Tidepool.RetainedUnfoldings

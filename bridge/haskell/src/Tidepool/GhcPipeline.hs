@@ -114,7 +114,7 @@ import GHC.Utils.Logger (LogAction, makeThreadSafe, pushLogHook)
 import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, PendingTypedSegment, TypedSegmentFailure(..),
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, typedItemCaptures, typedCaptureType, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source
-  ( rewriteParsedSegmentRoot, moduleInputOccurrences, moduleImportRequests, prepareSegmentDemand, prepareModuleDemand
+  ( rewriteParsedSegmentRoot, moduleDemandHasBashQuotes, moduleInputOccurrencesWithBash, lowerModuleBashQuotes, moduleImportRequests, prepareSegmentDemand, prepareModuleDemand
   , ParsedModuleDemand, moduleDemandCapturedImports, segmentModuleDemand, moduleDemandMatchesSource, annotateModuleDemand, projectRefinedDemandImports, ObservationOperand(..), validateObservationContribution
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
@@ -1382,7 +1382,7 @@ data PipelineVariant = PipelineVariant
   , pvPlan :: CycleInterfaceViews -> Bool -> ModuleName -> SourceGraphObservation -> Maybe ExactScope -> MatchedImportDriver -> Ghc CompilePlan
     -- ^ @pvPlan compilerViewDirectory timingEnabled targetName downsweepGraph selectedExactScope@.
   , pvGeneratedInstanceCheck :: Maybe GeneratedInstanceRecipe
-  , pvTransformParsed :: ModuleName -> HscEnv -> ModSummary -> NativeParsedModule -> IO NativeParsedModule
+  , pvTransformParsed :: Map.Map (String,String) CanonicalInterfaceAdmission -> ModuleName -> HscEnv -> ModSummary -> NativeParsedModule -> IO NativeParsedModule
   }
 
 -- Operation-local source admission reuses the actual held facts. Only its
@@ -3087,13 +3087,34 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
   traceStage "import-basis-hydrated" []
   resolvedRef <- liftIO (newIORef Nothing)
   nativeRef <- liftIO (newIORef Nothing)
-  let requireNative = readIORef nativeRef >>= maybe (do
+  let quoteInputs admitted
+        | not (moduleDemandHasBashQuotes parsedDemand) = do
+            empty <- either throwIO pure (capturedInterfaceInputs [])
+            pure (Map.empty,empty)
+        | otherwise = do
+            selected <- foldM (\known entry -> do
+              origin <- either fail pure (worldTypeCanonicalInterfaceAdmission entry)
+              case origin of
+                Nothing -> pure known
+                Just proof -> do
+                  let artifact = worldTypeEntryArtifact entry
+                      key = (exactUnit artifact,exactModule artifact)
+                      same (ModuleInterfaceAdmission left) (ModuleInterfaceAdmission right) =
+                        normalizeInterfaceEvidence (ModuleInterfaceEvidence left)
+                          == normalizeInterfaceEvidence (ModuleInterfaceEvidence right)
+                      same left right = left == right
+                  forM_ (Map.lookup key known) $ \previous -> unless (same previous proof)
+                    (throwIO WorldCellCorrupt)
+                  pure (Map.insert key proof known)) admitted (worldImportEntries importBasis)
+            captured <- readIORef accumulated >>= either throwIO pure . hydratedClosureAsCapturedInputs
+            pure (selected,captured)
+      requireNative = readIORef nativeRef >>= maybe (do
         traceStageIO "native-inputs-missing" []
         throwIO WorldCellCorrupt) pure
       requireResolved = readIORef resolvedRef >>= maybe (do
         traceStageIO "resolved-inputs-missing" []
         throwIO WorldCellCorrupt) pure
-      resolveInputs environment sourceOwners matched = do
+      resolveInputs environment admitted sourceOwners matched = do
         existing <- readIORef resolvedRef
         case (operation,existing) of
           (WorldCellNameSource {},Nothing) -> do
@@ -3140,8 +3161,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                 projectRefinedDemandImports whole driver (nativeImportSyntax declared) annotatedDemand
               _ -> throwIO WorldCellCorrupt
             writeIORef nativeRef (Just annotations)
+            (quoteAdmissions,quoteCaptures) <- quoteInputs admitted
             (ready,resolved) <- resolveWorldCellInputs (universeOriginalInputs universe) facts accumulated path
-              offset sourceOwners available demandScope refinedDemand (case operation of
+              offset sourceOwners available quoteAdmissions quoteCaptures demandScope refinedDemand (case operation of
                 WorldCellSource {} -> WorldCellInputDemand
                 WorldObservationSource {} -> WorldObservationInputDemand
                 WorldCellNameSource {} -> WorldObservationInputDemand)
@@ -3182,9 +3204,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
             pure (worldResolvedTypes resolved ++ worldImportEntries importBasis
               ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
               ++ maybe [] (Map.elems . worldCellOperandTypes) operand)
-        , pvTransformParsed = \target environment summary parsed -> do
+        , pvTransformParsed = \admitted target environment summary parsed -> do
             annotated <- if ms_mod_name summary /= target
-              then pvTransformParsed variant target environment summary parsed
+              then pvTransformParsed variant admitted target environment summary parsed
               else do
                 sourceOnlyImports <- case operation of
                   WorldCellNameSource {} -> mapNativeModule (\(L location syntax) ->
@@ -3194,13 +3216,15 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                   -- The shared import-only recipe below owns this case for
                   -- both demand and final checking.
                   OriginalDeclarationCompile -> pure sourceOnlyImports
-                  _ -> pvTransformParsed variant target environment summary sourceOnlyImports
+                  _ -> pvTransformParsed variant admitted target environment summary sourceOnlyImports
                 annotations <- requireNative
                 annotateNativeModule annotations transformed
             if ms_mod_name summary /= target then pure annotated else do
               resolved <- requireResolved
               declared <- refineDeclarationImports environment annotated
-              transformCompletedValueAliases (worldResolvedAliases resolved) environment declared
+              aliased <- transformCompletedValueAliases (worldResolvedAliases resolved) environment declared
+              (quoteAdmissions,quoteCaptures) <- quoteInputs admitted
+              lowerModuleBashQuotes quoteAdmissions quoteCaptures environment parsedDemand aliased
         , pvPlan = \directory enabled target observation@(SourceGraphObservation graph _) exact matched -> do
             forM_ nativeDeclarationOwner $ \owner ->
               unless (target == moduleName owner
@@ -3260,7 +3284,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                   setSession ready
                   when (ms_mod_name summary == target) $ do
                     environment <- getSession
-                    (ready,resolved) <- liftIO (resolveInputs environment sourceOwners matched)
+                    (ready,resolved) <- liftIO (resolveInputs environment (phaseCanonicalAdmissions phaseInputs) sourceOwners matched)
                     setSession (installRetainedUnfoldingsPlugin (policyFor resolved) ready)
               , cpInjectedSessionInterfaces = do
                   resolved <- requireResolved
@@ -3849,10 +3873,10 @@ hydrateWorldCellResolvedInputs environment (WorldCellResolvedInputs inputs _ _ p
 data WorldSourceDemand = WorldCellInputDemand | WorldObservationInputDemand
 
 resolveWorldCellInputs :: ExactInputOwner -> WorldInputFacts -> IORef HydratedInterfaceClosure -> FilePath -> Int -> Set.Set (String,String)
-  -> HscEnv -> SegmentDemandScope WorldDemandBinding -> ParsedModuleDemand -> WorldSourceDemand
+  -> HscEnv -> Map.Map (String,String) CanonicalInterfaceAdmission -> CapturedInterfaceInputs -> SegmentDemandScope WorldDemandBinding -> ParsedModuleDemand -> WorldSourceDemand
   -> IO (HscEnv,WorldCellResolvedInputs)
-resolveWorldCellInputs owner facts accumulated path consumer sourceOwners environment scope parsedDemand mode = do
-  demand <- moduleInputOccurrences environment scope parsedDemand
+resolveWorldCellInputs owner facts accumulated path consumer sourceOwners environment admitted capturedInterfaces scope parsedDemand mode = do
+  demand <- moduleInputOccurrencesWithBash environment admitted capturedInterfaces scope parsedDemand
   demanded <- either (\failure -> do
     emitWorldAcquisitionRejection "world cell demand" path (case failure of
       InputDemandRenameRejected diagnostic -> diagnostic
@@ -4247,9 +4271,9 @@ parseModuleWithImportRoot owned summary = case owned of
 -- The closed purpose recipe consumes its own matched driver. Every narrowed
 -- or qualified child must still resolve to that parent's exact selected Module;
 -- ambient Finder state cannot replace an earlier choice with a namesake.
-prepareImportAdmission :: PipelineVariant -> ModuleName -> HscEnv -> ModSummary
+prepareImportAdmission :: PipelineVariant -> Map.Map (String,String) CanonicalInterfaceAdmission -> ModuleName -> HscEnv -> ModSummary
   -> CheckedValueImportAuthority -> MatchedImportDriver -> IO PreparedImportAdmission
-prepareImportAdmission variant target environment actual checkedValues matched@(MatchedImportDriver
+prepareImportAdmission variant canonicalAdmissions target environment actual checkedValues matched@(MatchedImportDriver
     (ScopedImportAdmission _ _ (ImportAttempt _ _ root path fingerprint)) driver demands _) = do
   actualPath <- traverse canonicalizePath (ml_hs_file (ms_location actual))
   let admitted = pm_mod_summary (driverParsedModule driver)
@@ -4280,7 +4304,7 @@ prepareImportAdmission variant target environment actual checkedValues matched@(
         MatchedImportDriver scoped _ imports sourceSelection ->
           MatchedImportDriver scoped activeDriver imports sourceSelection
       resolved = ResolvedImportAdmission activeMatched selected
-  native <- pvTransformParsed variant target environment actual
+  native <- pvTransformParsed variant canonicalAdmissions target environment actual
     (unannotatedModule (beginImportRefinement activeDriver))
   let occurrences = refinedImportOccurrences (nativeImportSyntax native)
       declarations = hsmodImports (unLoc (pm_parsed_source (nativeParsedModule native)))
@@ -4416,7 +4440,12 @@ data ResultBoundary = NativeMergeBoundary | CheckedReceiptBoundary
 
 -- The compile loop supplies actual successful producer owners to each phase.
 -- An HPT entry alone cannot issue captured dependency evidence.
-newtype ModulePhaseInputs = ModulePhaseInputs (Module -> Maybe (FinalizedModule,HomeModInfo))
+data ModulePhaseInputs = ModulePhaseInputs
+  (Module -> Maybe (FinalizedModule,HomeModInfo))
+  (Map.Map (String,String) CanonicalInterfaceAdmission)
+
+phaseCanonicalAdmissions :: ModulePhaseInputs -> Map.Map (String,String) CanonicalInterfaceAdmission
+phaseCanonicalAdmissions (ModulePhaseInputs _ admitted) = admitted
 
 sessionInterfaceRow :: CapturedSessionInterface -> (ExactIfaceArtifact,CapturedSessionInterface)
 sessionInterfaceRow capture =
@@ -4428,7 +4457,7 @@ sessionInterfaceRow capture =
 selectPhaseInterfaceInputs :: HscEnv -> ModulePhaseInputs -> [CapturedSessionInterface]
   -> [CapturedSessionInterface] -> Either InterfaceInputFailure
        ([(ExactIfaceArtifact,CapturedSessionInterface)],[(FinalizedModule,HomeModInfo)])
-selectPhaseInterfaceInputs environment (ModulePhaseInputs finalized) available roots =
+selectPhaseInterfaceInputs environment (ModulePhaseInputs finalized _) available roots =
   close Set.empty [] [] (map (key . fst . sessionInterfaceRow) roots)
   where
     key artifact = (exactUnit artifact,exactModule artifact)
@@ -6339,7 +6368,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 home <- lookupHpt (hsc_HPT currentPhase) (moduleName owner)
                 guard (mi_module (hm_iface home) == owner)
                 pure (product',home)
-          cpBeforeModule plan (ModulePhaseInputs selected) summary
+          cpBeforeModule plan (ModulePhaseInputs selected selectedCanonicalInterfaces) summary
         originalPhaseHook = runPhaseHook (hsc_hooks beforeLoad)
         publishLoadedFinalization loaded = do
           let name = ms_mod_name (loadedSummary loaded)
@@ -6463,10 +6492,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 (transformed,importPrepared) <- liftIO $ if ms_mod summaryC == targetOwner
                   then do
                     checkedValues <- cpCheckedValueImports plan
-                    owned <- prepareImportAdmission variant targetName current summaryC checkedValues matchedImports
+                    owned <- prepareImportAdmission variant selectedCanonicalInterfaces targetName current summaryC checkedValues matchedImports
                     pure (preparedImportModule owned,Just owned)
                   else do
-                    native <- nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summaryC
+                    native <- nativeParsedModuleFor parsed >>= pvTransformParsed variant selectedCanonicalInterfaces targetName current summaryC
                     pure (native,Nothing)
                 ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summaryC parsed
                   (typecheckNativeModuleWithDiagnostics current transformed)
@@ -6796,10 +6825,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     (transformed,importPrepared) <- liftIO $ if ms_mod modSum == targetOwner
                       then do
                         checkedValues <- cpCheckedValueImports plan
-                        owned <- prepareImportAdmission variant targetName typecheckEnv modSum checkedValues matchedImports
+                        owned <- prepareImportAdmission variant selectedCanonicalInterfaces targetName typecheckEnv modSum checkedValues matchedImports
                         pure (preparedImportModule owned,Just owned)
                       else do
-                        native <- nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName typecheckEnv modSum
+                        native <- nativeParsedModuleFor parsed >>= pvTransformParsed variant selectedCanonicalInterfaces targetName typecheckEnv modSum
                         pure (native,Nothing)
                     ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName typecheckEnv modSum parsed
                       (typecheckNativeModuleWithDiagnostics typecheckEnv transformed)
@@ -7555,10 +7584,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       (transformed,importPrepared) <- liftIO $ if ms_mod summary == targetOwner
                         then do
                           checkedValues <- cpCheckedValueImports plan
-                          owned <- prepareImportAdmission variant targetName current summary checkedValues matchedImports
+                          owned <- prepareImportAdmission variant selectedCanonicalInterfaces targetName current summary checkedValues matchedImports
                           pure (preparedImportModule owned,Just owned)
                         else do
-                          native <- nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summary
+                          native <- nativeParsedModuleFor parsed >>= pvTransformParsed variant selectedCanonicalInterfaces targetName current summary
                           pure (native,Nothing)
                       ((checkedEnvironment, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summary parsed
                         (typecheckNativeModuleWithDiagnostics current transformed)
@@ -9823,7 +9852,7 @@ normalVariant purpose = do
    , pvImportCapture = captureRoute
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvDownsweepExcludes = []
-   , pvTransformParsed = transformFor purpose
+   , pvTransformParsed = \_ -> transformFor purpose
    , pvPlan = \_compilerViewDirectory _timing _targetName (SourceGraphObservation modGraphRaw _) _selectedExact _resolved -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
       , cpAfterLoad = \_ -> pure ()
@@ -10696,7 +10725,7 @@ sessionVariant purpose scope = do
    , pvImportCapture = captureRoute
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvDownsweepExcludes = excludedOwners
-   , pvTransformParsed = \targetModName' env summary parsed -> do
+   , pvTransformParsed = \_ targetModName' env summary parsed -> do
        transformed <- transformFor purpose targetModName' env summary parsed
        case scopeRequestTypes =<< exact of
          Just (recipe, signatures) | ms_mod_name summary == targetModName' ->

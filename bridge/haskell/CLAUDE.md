@@ -77,6 +77,15 @@ value aliases depend on demand; final segment lowering and alias insertion must
 not be used to prepare the demand probe. Final import admission retains its own
 selected-owner checks after interface restoration.
 
+Held-World literal Bash expressions retain their parsed sites and payloads.
+Demand probes rename each original quoter reference in its actual lexical scope;
+final lowering repeats that check after completed aliases are installed.
+`BashQuote` issues expansion authority only from the shipped source recipe and
+its selected hydrated interfaces, then uses their exact command and text Names.
+The probe and final frontend never execute the quoter. Other splices and
+non-expression quotations remain refused. Cells without quote candidates skip
+quotation-specific interface projection.
+
 Selected Original references carry actual compiler Names and their exact selected
 interface/original association. Only reached uses enter the active handler's native
 demand exchange. A reply associates complete package obligations with each exact
