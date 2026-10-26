@@ -1,5 +1,4 @@
 use super::*;
-use tidepool_codegen::scope::ScopeId;
 use tidepool_runtime::session::ResidentError;
 
 #[tokio::test]
@@ -663,6 +662,17 @@ enum NativeFailure {
 }
 
 async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_waiter: bool) {
+    crate::resident_workbench::with_test_compiler_owner(|_| {
+        native_operation_sequence_with_compiler_owner(durable, failure, drop_waiter)
+    })
+    .await;
+}
+
+async fn native_operation_sequence_with_compiler_owner(
+    durable: bool,
+    failure: NativeFailure,
+    drop_waiter: bool,
+) {
     use crate::resident_workbench::ActivationPublicationObservation;
     use tidepool_runtime::session::PublicManifestCommit;
 
@@ -684,9 +694,6 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         drop(input);
     }
     context.actor = fixture.actor.identity();
-    if durable {
-        context.placement.lexical_scope = resident.mint_scope(ScopeId::ROOT).unwrap();
-    }
     let mut descriptor = ActorDescriptor::new("native activation", context.placement);
     let durable_owner = durable.then(|| {
         let path = tidepool_repr::ActorPath::parse("root/native-activation").unwrap();
