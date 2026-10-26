@@ -4042,15 +4042,39 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
             tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         )
         .unwrap();
+    // Ordinary ExactScope compilation carries native facts, but does not
+    // issue the checked original required for runtime installation.
+    let before_refusal = resident.public_visibility_snapshot_in(public).unwrap();
     let observed = crate::session::world_cell_test_support::source_action_with_original(
         &mut resident,
         original_source,
         |resident, settlement| resident.run_with_sites("ordinary_k", compiled.code(), settlement),
     );
-    let crate::session::ResidentOutcome::Completed { result, .. } = observed.unwrap() else {
-        panic!("ordinary K must complete through its retained native closure");
-    };
-    assert_eq!(result.to_json(), serde_json::json!(42));
+    assert!(matches!(observed,
+        Err(ResidentError::Prepared(PreparedRuntimeError::CertifiedTargetOwners { .. }))),
+        "ordinary compiler evidence must not substitute for checked installation authority: {observed:?}");
+    assert_eq!(
+        resident.public_visibility_snapshot_in(public).unwrap(),
+        before_refusal
+    );
+
+    // This separate checked World program executes K through its real published
+    // lineage. It does not install or execute the ordinary artifact above.
+    try_execute_cell_with_template_imports_expectation(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "checked_k_observation",
+        &guarded_integer_capture_source("k", 42),
+        CellDeclarationExpectation::Total(0),
+        &publication,
+        AuthorityChecks::Configured,
+        &SourceImports::new(),
+        Some(42),
+    )
+    .unwrap();
 }
 
 #[test]
