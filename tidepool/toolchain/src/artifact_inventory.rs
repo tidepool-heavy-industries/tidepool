@@ -32,7 +32,7 @@ pub use compiler_projection::{
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
-    NativeOfferContribution, ValidatedFreshNativeAvailability,
+    NativeOfferContribution, NativeOfferTransition, ValidatedFreshNativeAvailability,
 };
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;

@@ -3493,6 +3493,30 @@ impl CompilerSourceSupport {
         result
     }
 
+    fn projected_offer_facts(
+        &self,
+        offers: &[IssuedNativeOffer],
+    ) -> Result<imbl::OrdMap<[u8; 32], crate::exact_context::NativeOfferSnapshotFacts>, CompileError>
+    {
+        let mut facts = self.native_offer_facts.clone();
+        let mut retained = BTreeSet::new();
+        for offer in offers {
+            let identity = offer.snapshot_identity()?;
+            retained.insert(identity);
+            if !facts.contains_key(&identity) {
+                facts.insert(identity, offer.snapshot_facts());
+            }
+        }
+        for identity in self
+            .native_offer_facts
+            .keys()
+            .filter(|id| !retained.contains(*id))
+        {
+            facts.remove(identity);
+        }
+        Ok(facts)
+    }
+
     pub(crate) fn for_output_continuation(
         &self,
         support: &ArtifactView,
@@ -3522,21 +3546,14 @@ impl CompilerSourceSupport {
             }
         }
         let input_decisions = self.input_decisions.for_exact_roles(&projection);
-        let mut offers = Vec::new();
-        for offer in self.native_offers.iter() {
-            if let Some(offer) = offer.within_assembly(projection.role_view(), support)? {
-                if !offers
-                    .iter()
-                    .any(|prior: &IssuedNativeOffer| prior.same_issuance(&offer))
-                {
-                    offers.push(offer);
-                }
-            }
-        }
+        let (offers, availability) = self.native_availability.within_assembly(
+            &self.native_offers,
+            projection.role_view(),
+            support,
+        )?;
         let artifacts = support.retain_issued_offer_custody(offers.iter().cloned())?;
-        let availability = self
-            .native_availability
-            .for_compiler_roles(selected.admitted_roles(), &artifacts)?;
+        let availability =
+            availability.for_compiler_roles(selected.admitted_roles(), &artifacts)?;
         let mut draft = self.reopen();
         draft.projection = projection;
         draft.selected = Arc::new(selected);
@@ -4283,16 +4300,12 @@ impl CompilerSourceSupport {
         }
         projection.validate_selected_requirements(&selected)?;
         let selected = SelectedCompilerRows::from_admitted(selected);
-        let offers = offers
-            .into_iter()
-            .filter_map(
-                |offer| match offer.is_relevant_to_support(selected.admitted_roles()) {
-                    Ok(true) => Some(Ok(offer)),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(error)),
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
+        let offered = offers.into_iter().collect::<Vec<_>>();
+        let (offers, native_availability) = self.native_availability.for_support_roles(
+            &offered,
+            selected.admitted_roles(),
+            &artifacts,
+        )?;
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.compiler_support.narrow",
             "retain_acquired_rows",
@@ -4305,7 +4318,7 @@ impl CompilerSourceSupport {
                 input_decisions: decisions,
             },
             offers,
-            self.native_availability.clone(),
+            native_availability,
             Some(&self.native_fact_owner),
             self.native_closures.clone(),
             &mut timing,
@@ -5194,8 +5207,19 @@ impl CompilerSourceSupport {
             crate::declaration_context::NativeAvailabilityMerge::Unchanged(_) => Ok(self.clone()),
             crate::declaration_context::NativeAvailabilityMerge::Changed(rows) => {
                 let mut draft = self.reopen();
+                let mut offers = self.native_offers.to_vec();
+                for offer in rows.rows().flat_map(|row| row.offers()) {
+                    if !offers.iter().any(|prior| prior.same_issuance(offer)) {
+                        offers.push(offer.clone());
+                    }
+                }
+                draft.artifacts = self
+                    .artifacts
+                    .retain_issued_offer_custody(offers.iter().cloned())?;
                 draft.native_availability =
-                    rows.for_compiler_roles(self.compiler_roles(), &self.artifacts)?;
+                    rows.for_compiler_roles(self.compiler_roles(), &draft.artifacts)?;
+                draft.native_offer_facts = self.projected_offer_facts(&offers)?;
+                draft.native_offers = offers.into();
                 draft.close()
             }
         }
@@ -6025,15 +6049,19 @@ impl CompilerSourceSupport {
             home_units: Arc::clone(&self.selected.home_units),
             changed_owners: projection.roles.keys().cloned().collect(),
         });
+        let (offers, native_availability) = self.native_availability.for_support_roles(
+            &self.native_offers,
+            selected.admitted_roles(),
+            &self.artifacts,
+        )?;
+        let native_offer_facts = self.projected_offer_facts(&offers)?;
         SupportDraft {
-            native_availability: self
-                .native_availability
-                .for_compiler_roles(selected.admitted_roles(), &self.artifacts)?,
+            native_availability,
             projection,
             artifacts: self.artifacts.clone(),
-            native_offers: Arc::clone(&self.native_offers),
+            native_offers: offers.into(),
             native_fact_owner: Some(Arc::clone(&self.native_fact_owner)),
-            native_offer_facts: self.native_offer_facts.clone(),
+            native_offer_facts,
             native_closures: self.native_closures.clone(),
             selected,
             input_decisions,
@@ -6482,29 +6510,15 @@ impl CompilerSourceSupport {
         );
         let selected = Arc::new(SelectedCompilerRows::from_admitted(selected));
         let decisions = self.input_decisions.for_exact_roles(&projection);
-        let mut native_offer_facts = self.native_offer_facts.clone();
-        let offers = self
-            .native_offers
-            .iter()
-            .filter_map(
-                |offer| match offer.is_relevant_to_support(source_roots.admitted_roles()) {
-                    Ok(true) => Some(Ok(offer.clone())),
-                    Ok(false) => match offer.snapshot_identity() {
-                        Ok(identity) => {
-                            native_offer_facts.remove(&identity);
-                            None
-                        }
-                        Err(error) => Some(Err(error)),
-                    },
-                    Err(error) => Some(Err(error)),
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
+        let (offers, native_availability) = self.native_availability.for_support_roles(
+            &self.native_offers,
+            source_roots.admitted_roles(),
+            &self.artifacts,
+        )?;
+        let native_offer_facts = self.projected_offer_facts(&offers)?;
         let artifacts = artifacts.retain_issued_offer_custody(offers.iter().cloned())?;
         SupportDraft {
-            native_availability: self
-                .native_availability
-                .for_compiler_roles(source_roots.admitted_roles(), &self.artifacts)?,
+            native_availability,
             projection,
             artifacts,
             native_fact_owner: Some(Arc::clone(&self.native_fact_owner)),

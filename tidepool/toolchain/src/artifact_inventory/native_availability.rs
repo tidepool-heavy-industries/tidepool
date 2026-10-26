@@ -1853,6 +1853,48 @@ impl IssuedNativeOffer {
     }
 }
 
+/// An owner-checked qualification transition. Its private pairing cannot be
+/// reconstructed from equal payload IDs or recorded offer facts.
+pub(crate) struct NativeOfferTransition<'a> {
+    previous: &'a IssuedNativeOffer,
+    next: Option<IssuedNativeOffer>,
+}
+
+impl NativeOfferTransition<'_> {
+    pub(crate) fn matches(&self, offer: &IssuedNativeOffer) -> bool {
+        self.previous.same_issuance(offer)
+    }
+
+    pub(crate) fn offer(&self) -> Option<&IssuedNativeOffer> {
+        self.next.as_ref()
+    }
+
+    pub(crate) fn project(
+        &self,
+        contribution: &Arc<NativeOfferContribution>,
+    ) -> Result<Option<Arc<NativeOfferContribution>>, CompileError> {
+        if !self.matches(contribution.offer()) {
+            return Err(failure(
+                "native assembly transition belongs to another contribution issuer",
+            ));
+        }
+        let Some(next) = &self.next else {
+            return Ok(None);
+        };
+        if next.same_issuance(self.previous) {
+            return Ok(Some(Arc::clone(contribution)));
+        }
+        // narrow_issued_offer changes only Full qualification. It preserves
+        // custody and checked rows, including independent Artifact-only roots.
+        Ok(Some(Arc::new(NativeOfferContribution {
+            offer: next.clone(),
+            reachable: contribution.reachable.clone(),
+            originals: contribution.originals.clone(),
+            identity: OnceLock::new(),
+        })))
+    }
+}
+
 /// The exact portion of an admitted offer consumed by one request. Its
 /// membership remains tied to that offer's proof and acquisition lifetimes.
 #[derive(Clone, Debug)]
@@ -3578,6 +3620,51 @@ impl IssuedNativeOffer {
         )
     }
 
+    pub(crate) fn retained_transition(&self) -> NativeOfferTransition<'_> {
+        NativeOfferTransition {
+            previous: self,
+            next: Some(self.clone()),
+        }
+    }
+
+    /// Preserve an exact dependency proof without advertising a standalone Full body.
+    pub(crate) fn dependency_transition(&self) -> NativeOfferTransition<'_> {
+        NativeOfferTransition {
+            previous: self,
+            next: Some(self.without_full_qualification()),
+        }
+    }
+
+    fn without_full_qualification(&self) -> Self {
+        let NativeOfferBody::Full { proof, .. } = &self.0.body else {
+            return self.clone();
+        };
+        Self(Arc::new(NativeOfferFacts {
+            scope: UnissuedNativeOffer {
+                original_acquisition: Arc::clone(&self.0.original_acquisition),
+                original: self.0.original,
+                interface: self.0.interface,
+                owner: self.0.owner.clone(),
+                body: NativeOfferBody::Partial(proof.clone()),
+                custody: self.0.custody.clone(),
+                snapshot: OnceLock::new(),
+                identity: OnceLock::new(),
+            },
+            rows: self.0.rows.clone(),
+        }))
+    }
+
+    pub(crate) fn assembly_transition(
+        &self,
+        roles: AssemblyRoleView<'_>,
+        namespace: &ArtifactView,
+    ) -> Result<NativeOfferTransition<'_>, CompileError> {
+        Ok(NativeOfferTransition {
+            previous: self,
+            next: self.within_assembly(roles, namespace)?,
+        })
+    }
+
     /// Narrow an existing issuance while a compiler namespace is assembled.
     /// Permission still comes solely from this offer's acquired custody.
     pub(crate) fn within_assembly(
@@ -3626,29 +3713,13 @@ impl IssuedNativeOffer {
                 },
             ));
         }
-        let NativeOfferBody::Full {
-            proof,
-            qualification,
-        } = &self.0.body
-        else {
+        let NativeOfferBody::Full { qualification, .. } = &self.0.body else {
             return Ok(Some(self.clone()));
         };
         if qualification.matches_namespace(namespace) {
             return Ok(Some(self.clone()));
         }
-        Ok(Some(Self(Arc::new(NativeOfferFacts {
-            scope: UnissuedNativeOffer {
-                original_acquisition: Arc::clone(&self.0.original_acquisition),
-                original: self.0.original,
-                interface: self.0.interface,
-                owner: self.0.owner.clone(),
-                body: NativeOfferBody::Partial(proof.clone()),
-                custody: self.0.custody.clone(),
-                snapshot: OnceLock::new(),
-                identity: OnceLock::new(),
-            },
-            rows: self.0.rows.clone(),
-        }))))
+        Ok(Some(self.without_full_qualification()))
     }
 }
 
@@ -4156,7 +4227,7 @@ mod normalized_dependency_tests {
         let stage = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &artifacts,
-            Vec::new(),
+            entries.clone(),
             &mut validation,
         )
         .unwrap();
@@ -4265,6 +4336,41 @@ mod normalized_dependency_tests {
         );
         assert!(mixed.reachable.iter().any(|node| matches!(node,
             ArtifactBindingNode::Artifact(binding) if binding.artifact == sibling_id)));
+        let transition = broad_offer
+            .assembly_transition(
+                stage
+                    .compiler_inputs()
+                    .compiler_source_support()
+                    .projection()
+                    .role_view(),
+                &issuer.inventory().empty_view(),
+            )
+            .unwrap();
+        let narrowed_offer = transition.offer().unwrap();
+        assert!(!narrowed_offer.is_full());
+        let narrowed_mixed = transition.project(&mixed).unwrap().unwrap();
+        assert_eq!(narrowed_mixed.reachable, mixed.reachable);
+        assert_eq!(narrowed_mixed.originals, mixed.originals);
+        assert!(narrowed_mixed.offer().same_issuance(narrowed_offer));
+        assert_ne!(
+            narrowed_mixed.identity().unwrap(),
+            mixed.identity().unwrap()
+        );
+        for group in mixed.original_groups(original) {
+            assert!(Arc::ptr_eq(
+                narrowed_mixed.issued_group(group).unwrap(),
+                mixed.issued_group(group).unwrap()
+            ));
+        }
+        let empty_mixed = mixed.for_groups(&BTreeSet::new()).unwrap();
+        let narrowed_empty = transition.project(&empty_mixed).unwrap().unwrap();
+        assert!(narrowed_empty.reachable.is_empty());
+        assert!(narrowed_empty.originals.is_empty());
+        assert!(narrowed_empty.offer().same_issuance(narrowed_offer));
+        assert!(
+            transition.project(&closed).is_err(),
+            "equal group custody cannot substitute another offer acquisition"
+        );
         let all_groups = mixed
             .reachable
             .iter()

@@ -2582,6 +2582,199 @@ impl RequestNativeAvailability {
         })
     }
 
+    /// Apply each assembly transition once, carrying its returned acquisition
+    /// into every permission row without expanding the old exact membership.
+    pub(crate) fn within_assembly(
+        &self,
+        offers: &[crate::artifact_inventory::IssuedNativeOffer],
+        roles: crate::artifact_inventory::AssemblyRoleView<'_>,
+        artifacts: &ArtifactView,
+    ) -> Result<(Vec<crate::artifact_inventory::IssuedNativeOffer>, Self), CompileError> {
+        let mut transitions = Vec::new();
+        let mut retained = Vec::new();
+        for offer in offers {
+            crate::host_work::checkpoint()?;
+            if transitions.iter().any(
+                |transition: &crate::artifact_inventory::NativeOfferTransition<'_>| {
+                    transition.matches(offer)
+                },
+            ) {
+                continue;
+            }
+            let transition = offer.assembly_transition(roles, artifacts)?;
+            if let Some(next) = transition.offer() {
+                if !retained
+                    .iter()
+                    .any(|prior: &crate::artifact_inventory::IssuedNativeOffer| {
+                        prior.same_issuance(next)
+                    })
+                {
+                    retained.push(next.clone());
+                }
+            }
+            transitions.push(transition);
+        }
+        Ok((retained, self.project_offer_transitions(&transitions)?))
+    }
+
+    fn project_offer_transitions(
+        &self,
+        transitions: &[crate::artifact_inventory::NativeOfferTransition<'_>],
+    ) -> Result<Self, CompileError> {
+        let mut rows = (*self.0).clone();
+        let mut facts = self.1.clone();
+        let mut changed = false;
+        let mut projected = Vec::<(
+            Arc<crate::artifact_inventory::NativeOfferContribution>,
+            Arc<crate::artifact_inventory::NativeOfferContribution>,
+        )>::new();
+        for (id, row) in self.0.iter() {
+            crate::host_work::checkpoint()?;
+            let mut contributions = Vec::new();
+            for contribution in row.contributions.iter() {
+                let Some(transition) = transitions
+                    .iter()
+                    .find(|transition| transition.matches(contribution.offer()))
+                else {
+                    return Err(failure(
+                        "native assembly contribution lacks its backing offer",
+                    ));
+                };
+                let updated = if let Some((_, updated)) = projected
+                    .iter()
+                    .find(|(prior, _)| Arc::ptr_eq(prior, contribution))
+                {
+                    Arc::clone(updated)
+                } else {
+                    let Some(updated) = transition.project(contribution)? else {
+                        continue;
+                    };
+                    projected.push((Arc::clone(contribution), Arc::clone(&updated)));
+                    updated
+                };
+                if !contributions.iter().any(
+                    |prior: &Arc<crate::artifact_inventory::NativeOfferContribution>| {
+                        prior.same_acquisition(&updated)
+                    },
+                ) {
+                    contributions.push(updated);
+                }
+            }
+            if contributions.is_empty() && !row.contributions.is_empty() {
+                changed = true;
+                rows.remove(id);
+                facts.remove(id);
+                continue;
+            }
+            let mut selected = (**row).clone();
+            selected.contributions = contributions.into();
+            if !selected.contributions.is_empty()
+                && !selected.contributions.iter().any(|contribution| {
+                    contribution.offer().original() == *id && contribution.offer().is_full()
+                })
+            {
+                selected.mode = NativeTransportMode::IssuedGroups;
+            }
+            if !selected.same_acquisition(row) {
+                changed = true;
+                facts.insert(*id, Self::changed_row_facts(&selected)?);
+                rows.insert(*id, Arc::new(selected));
+            }
+        }
+        Ok(if changed {
+            Self(Arc::new(rows), facts)
+        } else {
+            self.clone()
+        })
+    }
+
+    /// Project source roots and their backing acquisitions as one result.
+    /// Direct TYPE rows prefer relevant suppliers; a sole historical supplier
+    /// remains an exact dependency proof and loses standalone Full qualification.
+    pub(crate) fn for_support_roles(
+        &self,
+        offers: &[crate::artifact_inventory::IssuedNativeOffer],
+        roles: AdmittedCompilerRoles<'_>,
+        artifacts: &ArtifactView,
+    ) -> Result<(Vec<crate::artifact_inventory::IssuedNativeOffer>, Self), CompileError> {
+        let relevant = offers
+            .iter()
+            .map(|offer| offer.is_relevant_to_support(roles))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut rows = (*self.0).clone();
+        let mut facts = self.1.clone();
+        let mut changed = false;
+        for (id, row) in self.0.iter() {
+            crate::host_work::checkpoint()?;
+            let Some(role) = roles.get(&row.original.descriptor.owner) else {
+                continue;
+            };
+            if role.original().is_some() || role.interface() != row.canonical {
+                continue;
+            }
+            let is_relevant =
+                |contribution: &Arc<crate::artifact_inventory::NativeOfferContribution>| {
+                    offers.iter().zip(&relevant).any(|(offer, relevant)| {
+                        *relevant && offer.same_issuance(contribution.offer())
+                    })
+                };
+            if !row.contributions.iter().any(is_relevant) {
+                continue;
+            }
+            let contributions = row
+                .contributions
+                .iter()
+                .filter(|contribution| is_relevant(contribution))
+                .cloned()
+                .collect::<Vec<_>>();
+            if contributions.len() == row.contributions.len() {
+                continue;
+            }
+            let mut selected = (**row).clone();
+            selected.contributions = contributions.into();
+            facts.insert(*id, Self::changed_row_facts(&selected)?);
+            rows.insert(*id, Arc::new(selected));
+            changed = true;
+        }
+        let pruned = if changed {
+            Self(Arc::new(rows), facts)
+        } else {
+            self.clone()
+        };
+        let projected = pruned.for_compiler_roles(roles, artifacts)?;
+        let mut transitions = Vec::new();
+        let mut retained = Vec::new();
+        for (offer, relevant) in offers.iter().zip(relevant) {
+            crate::host_work::checkpoint()?;
+            if transitions.iter().any(
+                |transition: &crate::artifact_inventory::NativeOfferTransition<'_>| {
+                    transition.matches(offer)
+                },
+            ) {
+                continue;
+            }
+            let referenced = projected.rows().any(|row| {
+                row.contributions
+                    .iter()
+                    .any(|contribution| contribution.offer().same_issuance(offer))
+            });
+            if relevant {
+                retained.push(offer.clone());
+                transitions.push(offer.retained_transition());
+            } else if referenced {
+                let transition = offer.dependency_transition();
+                retained.push(
+                    transition
+                        .offer()
+                        .expect("dependency transition retains proof")
+                        .clone(),
+                );
+                transitions.push(transition);
+            }
+        }
+        Ok((retained, projected.project_offer_transitions(&transitions)?))
+    }
+
     /// Select direct availability roots from effective compiler roles, then keep
     /// their exact dependencies. The demanded path supplies its already issued
     /// direct choices to the same closure/intersection policy below.
@@ -2723,10 +2916,19 @@ impl RequestNativeAvailability {
                 selected.mode = NativeTransportMode::IssuedGroups;
             }
             if !direct.contains(&id) {
-                let mut contributions = Vec::new();
+                let mut contributions: Vec<
+                    Arc<crate::artifact_inventory::NativeOfferContribution>,
+                > = Vec::new();
+                // Preserve the old row's exact permissions, but only through
+                // the same acquisition that supplies a selected root's closure.
                 for contribution in row.contributions.iter() {
+                    budget.checkpoint()?;
                     let mut roots = BTreeSet::new();
                     for dependency in &dependencies[&id] {
+                        budget.checkpoint()?;
+                        if !contribution.offer().same_issuance(dependency.offer()) {
+                            continue;
+                        }
                         for group in dependency.original_groups(id) {
                             budget.checkpoint()?;
                             work.group_visits += 1;
@@ -2738,8 +2940,14 @@ impl RequestNativeAvailability {
                         }
                     }
                     if !roots.is_empty() {
-                        budget.reserve::<[Arc<crate::artifact_inventory::NativeOfferContribution>; 2]>(1)?;
-                        contributions.push(budget.restrict(contribution, &roots, work)?);
+                        let restricted = budget.restrict(contribution, &roots, work)?;
+                        if !contributions
+                            .iter()
+                            .any(|existing| existing.same_acquisition(&restricted))
+                        {
+                            budget.reserve::<[Arc<crate::artifact_inventory::NativeOfferContribution>; 2]>(1)?;
+                            contributions.push(restricted);
+                        }
                     }
                 }
                 selected.mode = NativeTransportMode::IssuedGroups;
