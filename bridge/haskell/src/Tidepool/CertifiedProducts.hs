@@ -1097,8 +1097,8 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                 case kind of
                   SegmentOriginalFacts -> Right ()
                   OrdinaryProductFacts -> do
-                    let actualPrograms = Map.fromList [(T.pack name,encodeWireProgram program) | (name,program) <- targets]
-                        retainedPrograms = Map.fromList [(packageTargetName target,encodeWireProgram (packageTargetProgram target))
+                    let actualPrograms = Map.fromList [(T.pack name,program) | (name,program) <- targets]
+                        retainedPrograms = Map.fromList [(packageTargetName target,packageTargetProgram target)
                           | target <- validationTargets]
                     unless (length targets == Map.size actualPrograms && actualPrograms == retainedPrograms)
                       (Left "serialized ordinary targets differ from retained final targets")
