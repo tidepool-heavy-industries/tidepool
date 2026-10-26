@@ -729,9 +729,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             let bytes = std::fs::read(&exact_request.manifest).unwrap();
             let scope: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
             let scope = scope.as_array().unwrap();
-            prop_assert_eq!(scope.len(), 11);
+            prop_assert_eq!(scope.len(), 12);
             prop_assert_eq!(&scope[0], &Value::Text("TPEXACTSCOPE".into()));
-            prop_assert_eq!(&scope[1], &Value::Text("16".into()));
+            prop_assert_eq!(&scope[1], &Value::Text("17".into()));
             let Value::Array(rows) = &scope[9] else { unreachable!() };
             let Value::Array(row) = &rows[0] else {
                 unreachable!()

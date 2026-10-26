@@ -160,6 +160,7 @@ enum CodecOperation {
     CandidateCompact,
     CandidateExpandedWithinBound,
     ScopeEmpty,
+    ScopeOriginalResolutions,
     #[serde(rename = "world-blocks")]
     WorldBlocks,
     #[serde(rename = "world-context-blocks")]
@@ -211,6 +212,7 @@ struct ValueInterfaceInput(String, String, PathBuf, String);
 enum CodecRequest {
     Candidate(CandidateCase),
     ScopeEmpty,
+    ScopeOriginalResolutions,
     WorldBlocks,
     WorldContextBlocks(NativeBytes),
     WorldPrimaryMaps(Vec<Vec<(String, String, NativeBytes)>>),
@@ -263,6 +265,10 @@ fn packet_request(bytes: &[u8]) -> CodecRequest {
         CodecOperation::ScopeEmpty => {
             let _: [String; 0] = decode_arguments(&arguments, 0);
             CodecRequest::ScopeEmpty
+        }
+        CodecOperation::ScopeOriginalResolutions => {
+            let _: [String; 0] = decode_arguments(&arguments, 0);
+            CodecRequest::ScopeOriginalResolutions
         }
         CodecOperation::WorldBlocks => {
             let _: [String; 0] = decode_arguments(&arguments, 0);
@@ -332,6 +338,11 @@ fn source_boot_codec_packet_producer() {
                 .prepare_fixture_compilation(&root.join("scope"), producer)
                 .expect("owning empty scope serializer")
                 .manifest
+        }
+        CodecRequest::ScopeOriginalResolutions => {
+            crate::certified_products::tests::issued_original_binding_census_fixture(
+                &root.join("scope"),
+            )
         }
         CodecRequest::WorldBlocks => {
             let store = fvm_ipld_blockstore::MemoryBlockstore::new();

@@ -4809,6 +4809,127 @@ struct NativeInputSelection {
 }
 
 impl NativeInputSelection {
+    /// Project only the correspondence already certified by each native offer.
+    /// Availability is independent of executable demand, including Full with no roots.
+    fn original_census_resolutions(
+        &self,
+        metadata: &CompilerArtifactMetadata,
+    ) -> Result<Value, CompileError> {
+        use crate::certified_products::{PendingImportOwner, ReceiptImportOwner};
+        let mut resolutions = BTreeMap::new();
+        for entry in metadata.entries.values() {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                continue;
+            };
+            let availability = self
+                .availability
+                .0
+                .get(&entry.descriptor.id)
+                .ok_or_else(|| failure("transported census original lacks its availability"))?;
+            let expected = match availability.mode {
+                NativeTransportMode::Full => {
+                    crate::certified_products::original_available_groups(product)
+                        .map_err(compiler_evidence_failure)?
+                        .map(|group| group.original_ordinal())
+                        .collect()
+                }
+                NativeTransportMode::IssuedGroups => availability.issued_ordinals(),
+            };
+            let mut observed = BTreeSet::new();
+            for contribution in availability.contributions.iter() {
+                for binding in contribution.original_groups(availability.original_artifact_id()) {
+                    crate::host_work::checkpoint()?;
+                    let issued = contribution.issued_group(binding)?;
+                    if issued.owner() != product.owner()
+                        || issued.group().original_ordinal() != binding.original_ordinal
+                    {
+                        return Err(failure("census row differs from its physical original"));
+                    }
+                    observed.insert(binding.original_ordinal);
+                    for (index, reference, resolved) in issued.original_census_resolutions() {
+                        let ReceiptImportOwner::OriginalBinding {
+                            unit,
+                            module,
+                            interface,
+                            original,
+                            binder,
+                        } = reference
+                        else {
+                            return Err(failure("census projection is not an Original reference"));
+                        };
+                        let PendingImportOwner::Source {
+                            owner,
+                            original_ordinal,
+                            binder: resolved_binder,
+                        } = resolved
+                        else {
+                            return Err(failure(
+                                "census Original lacks its certified Source resolution",
+                            ));
+                        };
+                        if unit != &owner.unit
+                            || module != &owner.module
+                            || binder != resolved_binder
+                        {
+                            return Err(failure(
+                                "census Original resolution changed its owner or binder",
+                            ));
+                        }
+                        let source = issued.owner();
+                        let index = u32::try_from(index).map_err(failure)?;
+                        let key = (
+                            source.unit.clone(),
+                            source.module.clone(),
+                            source.module_version.0,
+                            binding.original_ordinal,
+                            index,
+                        );
+                        let pair = |binding: &ArtifactBinding| {
+                            Value::Array(vec![
+                                Value::Bytes(binding.artifact.0.to_vec()),
+                                Value::Bytes(binding.selection.0.to_vec()),
+                            ])
+                        };
+                        let row = Value::Array(vec![
+                            text(&source.unit),
+                            text(&source.module),
+                            text(hex(&source.module_version.0)),
+                            Value::Integer(binding.original_ordinal.into()),
+                            Value::Integer(index.into()),
+                            text(unit),
+                            text(module),
+                            pair(interface),
+                            pair(original),
+                            symbol_value(binder),
+                            text(hex(&owner.module_version.0)),
+                            Value::Integer((*original_ordinal).into()),
+                        ]);
+                        if let Some(previous) = resolutions.get(&key) {
+                            if previous != &row {
+                                return Err(failure(
+                                    "census Original has competing certified resolutions",
+                                ));
+                            }
+                        } else {
+                            if resolutions.len() >= 65536 {
+                                return Err(failure(
+                                    "census Original resolutions exceed 65536 rows",
+                                ));
+                            }
+                            resolutions.insert(key, row);
+                        }
+                    }
+                }
+            }
+            if observed != expected {
+                return Err(failure(
+                    "available census groups differ from their issued rows",
+                ));
+            }
+        }
+        Ok(Value::Array(resolutions.into_values().collect()))
+    }
+
     /// TYPE additions leave existing exact bindings and closed permissions
     /// unchanged. A newly visible native child's owner can become a direct
     /// candidate without requalifying its retained graph.
@@ -5965,8 +6086,8 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
-const EXACT_SCOPE_SCHEMA_VERSION: &str = "16";
-const EXACT_SCOPE_SCHEMA_FIELDS: usize = 11;
+const EXACT_SCOPE_SCHEMA_VERSION: &str = "17";
+const EXACT_SCOPE_SCHEMA_FIELDS: usize = 12;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
 fn validate_execution_graph_budget<'a>(
@@ -6182,6 +6303,7 @@ fn encode_scope_manifest(
         authorization,
         Value::Array(vec![]),
         Value::Array(vec![text("fresh-files")]),
+        Value::Array(vec![]),
     )
 }
 
@@ -6191,12 +6313,14 @@ fn encode_scope_manifest_with_published(
     authorization: Option<Value>,
     published: Value,
     acquisition: Value,
+    original_resolutions: Value,
 ) -> Result<Vec<u8>, CompileError> {
     fields[1] = text(EXACT_SCOPE_SCHEMA_VERSION);
     fields.push(execution_scope.unwrap_or(Value::Null));
     fields.push(authorization.unwrap_or(Value::Null));
     fields.push(published);
     fields.push(acquisition);
+    fields.push(original_resolutions);
     if fields.len() != EXACT_SCOPE_SCHEMA_FIELDS {
         return Err(failure("invalid current exact scope field count"));
     }
@@ -18101,6 +18225,9 @@ impl PreparedNativeCompilerTransport {
             authorization,
             context.published_scope_value()?,
             acquisition,
+            compiler
+                .native_selection
+                .original_census_resolutions(metadata)?,
         )?;
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::ScopeEncodedByte,

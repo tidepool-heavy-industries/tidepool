@@ -201,9 +201,9 @@ fn scope(request: &ExactCompilationRequest) -> Vec<Value> {
     let Value::Array(fields) = value else {
         panic!("scope array");
     };
-    assert_eq!(fields.len(), 11);
+    assert_eq!(fields.len(), 12);
     assert_eq!(fields[0], text("TPEXACTSCOPE"));
-    assert_eq!(fields[1], text("16"));
+    assert_eq!(fields[1], text("17"));
     fields
 }
 

@@ -11952,6 +11952,8 @@ pub enum SelectedNativeTargetImport {
 pub(crate) struct IssuedSelectedNativeGroup {
     product: Arc<PendingCertifiedGroup>,
     imports: Arc<[SelectedNativeImport]>,
+    // Physical global order and exact Original pairs belong to the same issuer.
+    original_imports: Arc<[ReceiptImportOwner]>,
 }
 
 /// Exact HOME acquisition, issued with its selected scoped row and original
@@ -12019,6 +12021,7 @@ impl IssuedSelectedNativeGroup {
     /// Physical issuance and its ordered selected destinations are inseparable.
     pub(crate) fn same_selected_issuance(&self, other: &Self) -> bool {
         self.matches_selected_product(&other.product, &other.imports)
+            && self.original_imports == other.original_imports
     }
 
     pub(crate) fn matches_selected_product(
@@ -12042,6 +12045,21 @@ impl IssuedSelectedNativeGroup {
     pub(crate) fn imports(&self) -> &[SelectedNativeImport] {
         &self.imports
     }
+    /// Observation-only projection of the already authenticated ordered globals.
+    /// The original receipt and resolved owner cannot be supplied independently.
+    pub(crate) fn original_census_resolutions(
+        &self,
+    ) -> impl Iterator<Item = (usize, &ReceiptImportOwner, &PendingImportOwner)> {
+        self.original_imports
+            .iter()
+            .zip(self.product.imports())
+            .enumerate()
+            .filter_map(|(index, (original, resolved))| {
+                matches!(original, ReceiptImportOwner::OriginalBinding { .. })
+                    .then_some((index, original, resolved))
+            })
+    }
+
     pub(crate) fn shared_imports(&self) -> &Arc<[SelectedNativeImport]> {
         &self.imports
     }
@@ -12100,10 +12118,19 @@ impl NativeGroupRowAssembly {
         issued: Option<&Arc<IssuedSelectedNativeGroup>>,
         operation: &InventoryOperation,
     ) -> CertResult<Arc<IssuedSelectedNativeGroup>> {
+        if original.imports().len() != original.group().globals().len()
+            || imports.pending.len() != original.imports().len()
+            || imports.selected.len() != original.imports().len()
+        {
+            return Err(CertificationError::Mismatch(
+                "native row ordered global count",
+            ));
+        }
         let check = |row: &IssuedSelectedNativeGroup| {
             if !row.product().same_authenticated_group(original)
                 || row.product().imports() != imports.pending.as_ref()
                 || row.imports() != imports.selected.as_ref()
+                || row.original_imports.as_ref() != original.imports()
             {
                 return Err(CertificationError::Mismatch(
                     "native row differs from authenticated scope",
@@ -12145,6 +12172,7 @@ impl NativeGroupRowAssembly {
                 Arc::new(IssuedSelectedNativeGroup {
                     product: Arc::new(product),
                     imports: Arc::clone(&imports.selected),
+                    original_imports: Arc::clone(&original.imports),
                 })
             }
         };
@@ -21572,9 +21600,9 @@ pub(crate) mod tests {
                             let bytes = std::fs::read(&next_request.manifest).unwrap();
                             let scope: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
                             let scope = scope.as_array().unwrap();
-                            assert_eq!(scope.len(), 11);
+                            assert_eq!(scope.len(), 12);
                             assert_eq!(scope[0], Value::Text("TPEXACTSCOPE".into()));
-                            assert_eq!(scope[1], Value::Text("16".into()));
+                            assert_eq!(scope[1], Value::Text("17".into()));
                             let mut wire_rows = BTreeMap::new();
                             for value in scope[6].as_array().unwrap() {
                                 let [unit, module, _, _, _, _, ordinals, _, mode, _] =
@@ -26442,9 +26470,9 @@ pub(crate) mod tests {
         let bytes = std::fs::read(&next.manifest).unwrap();
         let wire: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let fields = wire.as_array().unwrap();
-        assert_eq!(fields.len(), 11);
+        assert_eq!(fields.len(), 12);
         assert_eq!(fields[0], Value::Text("TPEXACTSCOPE".into()));
-        assert_eq!(fields[1], Value::Text("16".into()));
+        assert_eq!(fields[1], Value::Text("17".into()));
         let rows = fields[6]
             .as_array()
             .unwrap()
@@ -37749,6 +37777,14 @@ None,
 
     #[test]
     fn issued_original_binding_overlay_preserves_exact_child_graph() {
+        issued_original_binding_history(None);
+    }
+
+    pub(crate) fn issued_original_binding_census_fixture(root: &Path) -> PathBuf {
+        issued_original_binding_history(Some(root)).expect("durable census fixture")
+    }
+
+    fn issued_original_binding_history(fixture_root: Option<&Path>) -> Option<PathBuf> {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
         };
@@ -37837,11 +37873,11 @@ None,
         let draft = original_groups_fixture(
             "OverlayParent",
             vec![(
-                7,
+                13,
                 vec![PendingImportOwner::Source {
                     owner: child.owner().clone(),
                     original_ordinal: 7,
-                    binder,
+                    binder: binder.clone(),
                 }],
             )],
             2,
@@ -37914,7 +37950,62 @@ None,
                 &mut validation,
             )
             .unwrap();
-        let observations = source_target_observations(&[(&parent, 7)]);
+        // The next ordinary request observes available physical globals even
+        // before this parent is selected as executable demand.
+        let next_directory = tempfile::tempdir().unwrap();
+        let next = ExactCompileContext::new(Arc::clone(request.context()))
+            .prepare_compilation_with_private_input(
+                next_directory.path(),
+                PRODUCER,
+                None,
+                Some(physical.captured_stage().compiler_inputs().as_ref().clone()),
+            )
+            .unwrap();
+        let wire: Value =
+            ciborium::de::from_reader(std::fs::File::open(&next.manifest).unwrap()).unwrap();
+        let fields = wire.as_array().unwrap();
+        assert_eq!(fields.len(), 12);
+        assert_eq!(fields[1], Value::Text("17".into()));
+        let resolutions = fields[11].as_array().unwrap();
+        assert_eq!(resolutions.len(), 1);
+        let row = resolutions[0].as_array().unwrap();
+        assert_eq!(row.len(), 12);
+        assert_eq!(row[0], value_text(&parent.owner().unit));
+        assert_eq!(row[1], value_text(&parent.owner().module));
+        assert_eq!(row[2], value_text(hex(&parent.owner().module_version.0)));
+        assert_eq!(row[3], Value::Integer(13.into()));
+        assert_eq!(row[4], Value::Integer(0.into()));
+        assert_eq!(row[5], value_text(&child.owner().unit));
+        assert_eq!(row[6], value_text(&child.owner().module));
+        let pair = |binding: crate::artifact_inventory::ArtifactBinding| {
+            Value::Array(vec![
+                Value::Bytes(binding.artifact.0.to_vec()),
+                Value::Bytes(binding.selection.0.to_vec()),
+            ])
+        };
+        assert_eq!(row[7], pair(interface));
+        assert_eq!(row[8], pair(original));
+        assert_eq!(row[9], value_identity(&binder));
+        assert_eq!(row[10], value_text(hex(&child.owner().module_version.0)));
+        assert_eq!(row[11], Value::Integer(7.into()));
+        let fixture = fixture_root.map(|root| {
+            let context = Arc::new(
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_issued_compiler_support(
+                        physical
+                            .captured_stage()
+                            .compiler_inputs()
+                            .compiler_source_support(),
+                    )
+                    .unwrap(),
+            );
+            context
+                .prepare_fixture_compilation(root, PRODUCER)
+                .unwrap()
+                .manifest
+        });
+        let observations = source_target_observations(&[(&parent, 13)]);
         let prepared = prepared_target_fixture(&observations);
         let observed =
             AuthenticatedTargetImports::issue(&prepared, &observations, &operation).unwrap();
@@ -37986,7 +38077,7 @@ None,
             matches!(
                 parent
                     .original_native()
-                    .group(7)
+                    .group(13)
                     .unwrap()
                     .source_imports(parent.original_native()),
                 Err(CertificationError::InputDecision {
@@ -37996,6 +38087,7 @@ None,
             ),
             "context-free Original metadata still cannot reconstruct the selected child"
         );
+        fixture
     }
 
     #[test]

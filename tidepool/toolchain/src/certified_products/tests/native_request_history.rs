@@ -68,9 +68,9 @@ fn wire_rows(request: &ExactCompilationRequest) -> BTreeMap<String, (Vec<u32>, V
     let bytes = std::fs::read(&request.manifest).unwrap();
     let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
     let fields = value.as_array().unwrap();
-    assert_eq!(fields.len(), 11);
+    assert_eq!(fields.len(), 12);
     assert_eq!(fields[0], Value::Text("TPEXACTSCOPE".into()));
-    assert_eq!(fields[1], Value::Text("16".into()));
+    assert_eq!(fields[1], Value::Text("17".into()));
     let mut rows = BTreeMap::new();
     for row in fields[6].as_array().unwrap() {
         let [_, module, _, _, _, _, ordinals, _, mode, _] = row.as_array().unwrap().as_slice()
