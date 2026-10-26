@@ -3757,6 +3757,7 @@ impl CompilerSourceSupport {
                 .native_availability
                 .issued_row(id)
                 .ok_or_else(|| failure("demanded native row has no issued permission"))?;
+            let mut unchanged_facts = true;
             if !Arc::ptr_eq(old, row) {
                 // A pointer-distinct row with equal permission facts is the
                 // same permission. Only a genuinely narrowed or changed row
@@ -3767,6 +3768,7 @@ impl CompilerSourceSupport {
                 let new_facts =
                     crate::declaration_context::RequestNativeAvailability::row_snapshot_facts(row)?;
                 let (old_id, new_id) = (old_facts.identity()?, new_facts.identity()?);
+                unchanged_facts = old_id == new_id;
                 if old_id != new_id && !issued_delta.admits(self, id, &old_facts, &new_facts) {
                     // Rows narrowed by this demand owner are admitted only by
                     // the exact delta it issued for them. A raw narrower row,
@@ -3782,7 +3784,13 @@ impl CompilerSourceSupport {
                 }
             }
             charge(operation.reserve::<(ArtifactId, [usize; 4])>(1))?;
-            keys.native_availability.insert(id);
+            // Cold projection can reuse only the identical old leaf. A changed
+            // leaf has already passed the owner-issued delta above; close()
+            // maintains its exact new facts against this compatible cold subset.
+            // Pairing the old broader leaf with new offer keys would be invalid.
+            if unchanged_facts {
+                keys.native_availability.insert(id);
+            }
             for offer in row.offers() {
                 let id = offer.snapshot_identity()?;
                 if !offers.contains_key(&id) {
