@@ -5350,7 +5350,8 @@ mod tests {
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
-            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
@@ -5362,7 +5363,7 @@ mod tests {
             let stage = crate::declaration_context::CapturedCompilerStage::issue(
                 &mut selection,
                 &artifacts,
-                Vec::new(),
+                vec![entry],
                 &mut validation,
             )
             .unwrap();
@@ -7248,8 +7249,55 @@ mod tests {
                     .unwrap(),
             )
         });
+        let source_roots =
+            |graph: &crate::artifact_inventory::ArtifactGraphSelection| {
+                graph.roots.iter().filter(|root| matches!(root,
+                ArtifactBindingNode::Group(group) if group.binding.artifact() == native_id
+            )).copied().collect::<BTreeSet<_>>()
+            };
         let captured = std::array::from_fn::<_, 2, _>(|index| {
-            retain_test_value_surface(&sources[index], true, index as u64 + 1)
+            let original = &sources[index];
+            let (_inputs, value_owner, path) =
+                prepare_test_value_interface_files(index as u64 + 1, true);
+            let produced = capture_test_value_row_issuer(producer, value_owner, &path);
+            let context = Arc::new(
+                (**original)
+                    .clone()
+                    .extend_program_value_interface(produced.0.clone())
+                    .unwrap(),
+            );
+            let row =
+                crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
+                    context.compiler_source_support(),
+                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
+                )
+                .map(|(product, _)| product)
+                .unwrap();
+            // This capture carries the selected Epoch source recipe, not only
+            // the value interface's TYPE dependency on Epoch.
+            let surface = crate::declaration_context::PreparedValueSourceSupport::new(
+                context,
+                original.lexical_graph(),
+            )
+            .unwrap()
+            .retain_output(&produced.0)
+            .unwrap();
+            assert_eq!(
+                surface.compiler_support.projection().snapshot_roles()[&owner].original(),
+                Some(native_id)
+            );
+            let expected = source_roots(&original.artifact_view().capture_graph_selection());
+            assert_eq!(expected.len(), 1);
+            assert_eq!(
+                source_roots(
+                    &surface
+                        .compiler_support
+                        .artifacts()
+                        .capture_graph_selection()
+                ),
+                expected
+            );
+            (surface, row, produced.0.clone())
         });
         for reverse in [false, true] {
             let first = usize::from(reverse);
@@ -7274,11 +7322,6 @@ mod tests {
             let view = context.artifact_view();
             let projection = context.compiler_input_projection();
             let graph = view.capture_graph_selection();
-            let source_roots = |graph: &crate::artifact_inventory::ArtifactGraphSelection| {
-                graph.roots.iter().filter(|root| matches!(root,
-                    ArtifactBindingNode::Group(group) if group.binding.artifact() == native_id
-                )).copied().collect::<BTreeSet<_>>()
-            };
             assert_eq!(
                 source_roots(&graph),
                 source_roots(&sources[first].artifact_view().capture_graph_selection())
@@ -7386,25 +7429,60 @@ mod tests {
                     source_roots(&graph)
                 );
             }
-            let ambiguous = captured[first]
-                .0
-                .compiler_support
-                .artifacts()
-                .merge_fixture_selections(captured[1 - first].0.compiler_support.artifacts())
-                .unwrap();
-            let before = ambiguous.capture_graph_selection();
-            let nodes = ambiguous.inventory().node_count();
-            // Conflicting choices come from the two actual captured issuers,
-            // not from treating every available proof as a selected root.
-            let admitted = sources[first]
-                .compiler_source_support()
-                .merge(sources[1 - first].compiler_source_support());
-            assert!(
-                matches!(admitted, Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
-                ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == native_id))
+            let receiving = sources[first].compiler_source_support();
+            let incoming = sources[1 - first].compiler_source_support();
+            assert_eq!(receiving.projection(), incoming.projection());
+            assert_ne!(
+                receiving.recorded_input_decisions(),
+                incoming.recorded_input_decisions()
             );
-            assert_eq!(ambiguous.capture_graph_selection(), before);
-            assert_eq!(ambiguous.inventory().node_count(), nodes);
+            let joined = receiving.merge(incoming).unwrap();
+            assert_eq!(
+                joined.recorded_input_decisions(),
+                receiving.recorded_input_decisions()
+            );
+            assert_eq!(
+                source_roots(&joined.artifacts().capture_graph_selection()),
+                source_roots(&receiving.artifacts().capture_graph_selection())
+            );
+            let row = joined.native_availability().issued_row(native_id).unwrap();
+            assert_eq!(row.offers().len(), 2);
+            for source in [receiving, incoming] {
+                let issued = source.native_availability().issued_row(native_id).unwrap();
+                assert!(issued
+                    .offers()
+                    .all(|offer| row.offers().any(|retained| retained.same_issuance(offer))));
+            }
+
+            // Role-only demotion keeps both actual group demands while
+            // removing the Original receiver that could choose between them.
+            let types = [receiving, incoming].map(|source| {
+                let types = source.for_source_owners(&BTreeSet::new()).unwrap();
+                assert!(types
+                    .projection()
+                    .roles()
+                    .iter()
+                    .all(|role| role.original().is_none()));
+                assert!(types.recorded_input_decisions().is_empty());
+                assert_eq!(
+                    source_roots(&types.artifacts().capture_graph_selection()),
+                    source_roots(&source.artifacts().capture_graph_selection())
+                );
+                types
+            });
+            let before = types[0].artifacts().capture_graph_selection();
+            let nodes = types[0].artifacts().inventory().node_count();
+            let error = types[0]
+                .merge(&types[1])
+                .err()
+                .expect("TYPE-only roles cannot choose between independently captured group roots");
+            assert!(
+                matches!(&error, CompileError::ArtifactInventory(error) if matches!(error.failure,
+                ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == native_id)),
+                "unexpected TYPE-only merge refusal: {error:?}"
+            );
+            assert_eq!(types[0].artifacts().capture_graph_selection(), before);
+            assert_eq!(types[0].artifacts().inventory().node_count(), nodes);
         }
     }
 
