@@ -26145,6 +26145,89 @@ pub(crate) mod request_tests {
         ))
     }
 
+    struct GenerationSource {
+        issuer: crate::SourceLayerIssuer,
+        inspection: crate::SourceInspectionServices,
+        _owner: Arc<tempfile::TempDir>,
+        _entries: Arc<tempfile::TempDir>,
+        paths: Vec<PathBuf>,
+        identities: Vec<String>,
+        evidence: crate::SourceGenerationEvidence,
+        entries: crate::SourceEntryStorage,
+        compiler_sources: Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
+    }
+    impl crate::ActorSourceLayers for GenerationSource {
+        fn inspection_services(self: Arc<Self>) -> crate::SourceInspectionServices {
+            self.inspection.clone()
+        }
+
+        fn validate_source_authority(
+            &self,
+            source: &crate::CheckpointSourceLayer,
+        ) -> Result<(), String> {
+            if !self.issuer.owns(source)
+                || source.include_paths() != self.paths
+                || source.identities() != self.identities
+                || !source
+                    .generation_evidence()
+                    .is_some_and(|evidence| std::ptr::eq(evidence, &self.evidence))
+            {
+                return Err("source is not the retained quoted generation selection".into());
+            }
+            let captured = source
+                .capture_compiler_sources()
+                .map_err(|error| error.to_string())?;
+            if !captured.is_some_and(|captured| Arc::ptr_eq(&captured, &self.compiler_sources)) {
+                return Err("source differs from the retained quoted compiler bytes".into());
+            }
+            Ok(())
+        }
+
+        fn toolset_layer_from(
+            &self,
+            source: &crate::CheckpointSourceLayer,
+        ) -> Result<crate::CheckpointSourceLayer, String> {
+            self.validate_source_authority(source)?;
+            Ok(source.clone())
+        }
+
+        fn stage_reload(
+            self: Arc<Self>,
+            _: tidepool_repr::PrincipalId,
+            _: &crate::CheckpointSourceLayer,
+            _: &[String],
+        ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
+            Err(crate::SourceLayerReload::Unavailable(
+                "the retained quoted source owner does not publish reloads".into(),
+            ))
+        }
+    }
+    impl crate::RetainedSourceLayer for GenerationSource {
+        fn identities(&self) -> &[String] {
+            &self.identities
+        }
+        fn include_paths(&self) -> &[PathBuf] {
+            &self.paths
+        }
+        fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+            tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
+        }
+        fn prepared_entries(&self) -> Option<&crate::SourceEntryStorage> {
+            Some(&self.entries)
+        }
+        fn generation_evidence(&self) -> Option<&crate::SourceGenerationEvidence> {
+            Some(&self.evidence)
+        }
+        fn capture_compiler_sources(
+            &self,
+        ) -> Result<
+            Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
+            crate::SourceInspectionError,
+        > {
+            Ok(Some(self.compiler_sources.clone()))
+        }
+    }
+
     async fn run_quoted_generation_fixture(
         preparation_client: crate::CompilerPreparationClient,
         generation_replacement: Option<crate::ActorPersistencePolicy>,
@@ -26232,90 +26315,6 @@ pub(crate) mod request_tests {
             .with_toolset_support_roots(roots.clone())
             .with_spec("QuotedAgentSpec.agentSpec")
             .bind_preparation(preparation_client.clone());
-        struct GenerationSource {
-            issuer: crate::SourceLayerIssuer,
-            inspection: crate::SourceInspectionServices,
-            _owner: Arc<tempfile::TempDir>,
-            _entries: Arc<tempfile::TempDir>,
-            paths: Vec<PathBuf>,
-            identities: Vec<String>,
-            evidence: crate::SourceGenerationEvidence,
-            entries: crate::SourceEntryStorage,
-            compiler_sources: Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
-        }
-        impl crate::ActorSourceLayers for GenerationSource {
-            fn inspection_services(self: Arc<Self>) -> crate::SourceInspectionServices {
-                self.inspection.clone()
-            }
-
-            fn validate_source_authority(
-                &self,
-                source: &crate::CheckpointSourceLayer,
-            ) -> Result<(), String> {
-                if !self.issuer.owns(source)
-                    || source.include_paths() != self.paths
-                    || source.identities() != self.identities
-                    || !source
-                        .generation_evidence()
-                        .is_some_and(|evidence| std::ptr::eq(evidence, &self.evidence))
-                {
-                    return Err("source is not the retained quoted generation selection".into());
-                }
-                let captured = source
-                    .capture_compiler_sources()
-                    .map_err(|error| error.to_string())?;
-                if !captured.is_some_and(|captured| Arc::ptr_eq(&captured, &self.compiler_sources))
-                {
-                    return Err("source differs from the retained quoted compiler bytes".into());
-                }
-                Ok(())
-            }
-
-            fn toolset_layer_from(
-                &self,
-                source: &crate::CheckpointSourceLayer,
-            ) -> Result<crate::CheckpointSourceLayer, String> {
-                self.validate_source_authority(source)?;
-                Ok(source.clone())
-            }
-
-            fn stage_reload(
-                self: Arc<Self>,
-                _: tidepool_repr::PrincipalId,
-                _: &crate::CheckpointSourceLayer,
-                _: &[String],
-            ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload>
-            {
-                Err(crate::SourceLayerReload::Unavailable(
-                    "the retained quoted source owner does not publish reloads".into(),
-                ))
-            }
-        }
-        impl crate::RetainedSourceLayer for GenerationSource {
-            fn identities(&self) -> &[String] {
-                &self.identities
-            }
-            fn include_paths(&self) -> &[PathBuf] {
-                &self.paths
-            }
-            fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
-                tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
-            }
-            fn prepared_entries(&self) -> Option<&crate::SourceEntryStorage> {
-                Some(&self.entries)
-            }
-            fn generation_evidence(&self) -> Option<&crate::SourceGenerationEvidence> {
-                Some(&self.evidence)
-            }
-            fn capture_compiler_sources(
-                &self,
-            ) -> Result<
-                Option<Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>>,
-                crate::SourceInspectionError,
-            > {
-                Ok(Some(self.compiler_sources.clone()))
-            }
-        }
         let source_reference = tidepool_runtime::session::GenerationArtifactReference::capture(
             std::fs::read(authored.path().join("QuotedAgentSpec.hs")).unwrap(),
         );
@@ -28776,9 +28775,37 @@ pub(crate) mod request_tests {
             recovery = Some(fixture);
         });
         let recovery = recovery.unwrap();
-        let (captured, source_owner) =
-            world_query_test_source_files_with_support(&[], &source.base_include);
+        let roots = source.toolset_support.to_vec();
+        let (compiler_source_capsule, compiler_source_owner) =
+            world_query_test_source_files_with_support(&[], &roots);
+        let entry_storage = Arc::new(tempfile::tempdir().unwrap());
+        let issuer = crate::SourceLayerIssuer::default();
+        let source_owner = Arc::new(GenerationSource {
+            issuer: issuer.clone(),
+            inspection: crate::SourceInspectionServices::new(compiler_source_owner.clone()),
+            _owner: Arc::new(_root),
+            _entries: entry_storage.clone(),
+            paths: roots,
+            identities: compiler_source_capsule.identities().to_vec(),
+            evidence: crate::SourceGenerationEvidence {
+                reference: compiler_source_owner.evidence.reference.clone(),
+                configuration_digest: [0; 32],
+            },
+            entries: crate::SourceEntryStorage::FreshCompilation {
+                directory: entry_storage.path().to_owned(),
+                preparation: uuid::Uuid::new_v4(),
+            },
+            compiler_sources: compiler_source_capsule
+                .capture_compiler_sources()
+                .unwrap()
+                .unwrap(),
+        });
+        let captured = issuer.issue(source_owner.clone());
         let layers: crate::ActorSourceLayerResolver = source_owner;
+        assert!(layers.toolset_layer_from(&compiler_source_capsule).is_err());
+        assert!(layers
+            .toolset_layer_from(&crate::CheckpointSourceLayer::default())
+            .is_err());
         let (context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
             context,
             captured,

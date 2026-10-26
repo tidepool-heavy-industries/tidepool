@@ -29,12 +29,18 @@ async fn fatal_original_preview_retires_input_and_staged_tool_installation() {
 
 #[tokio::test]
 async fn durable_cancellation_before_native_claim_preserves_public_owner_and_second_activation() {
-    interrupt_during_preview(true, Interruption::Cancellation, false, true).await;
+    crate::resident_workbench::with_test_compiler_owner(|_| {
+        interrupt_during_preview(true, Interruption::Cancellation, false, true)
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn durable_fatal_preview_preserves_original_public_surface() {
-    interrupt_during_preview(false, Interruption::FatalPreview, true, true).await;
+    crate::resident_workbench::with_test_compiler_owner(|_| {
+        interrupt_during_preview(false, Interruption::FatalPreview, true, true)
+    })
+    .await;
 }
 
 #[derive(Clone, Copy)]

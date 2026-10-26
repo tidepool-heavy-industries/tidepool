@@ -161,10 +161,27 @@ async fn prepare_callback_fixture(
     .unwrap() else {
         panic!("display callback fixture must compile as a bind");
     };
-    let outcome = tidepool_testing::with_settlement(|settlement| {
-        session.run_with_sites("displayCallbackFixture", compiled.code(), settlement)
-    })
-    .unwrap();
+    let settled = session
+        .with_source_compiler_transaction(
+            source_lease.original_source().clone(),
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            tidepool_runtime::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |session, settlement| {
+                assert_eq!(
+                    session.run_context().lexical_scope,
+                    context.placement.lexical_scope
+                );
+                session.run_with_sites("displayCallbackFixture", compiled.code(), settlement)
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        settled.close(),
+        &tidepool_runtime::CompilerTransactionClose::NotStarted
+    );
+    let outcome = settled.into_outcome().action.unwrap();
     let holes = session
         .parked_holes()
         .into_iter()
