@@ -17,6 +17,7 @@ import ExactScopeV9Test (exactScopeChecks, nativeOriginChecks, candidateCanonica
 
 import Test.QuickCheck (quickCheckWithResult, stdArgs, maxSuccess, forAll, sublistOf, choose, classify, conjoin, counterexample, isSuccess)
 import Tidepool.OwnedInputTransport (decodeInputAcquisition)
+import Tidepool.NativeOriginalCensus qualified as Native
 import Tidepool.NativeOriginalCensus (readOriginalNativeCensus, nativeCensusExactGroups, selectNativeCensusGroups)
 
 import SourceBootFixtureSupport
@@ -247,7 +248,7 @@ import Tidepool.ImportAdmission
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
   , scopeLexical, scopeSourceSelectedOwners, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
-  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..)
+  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeAvailableNativeGroupObservations, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..)
   , scopeValueInterfaces, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, readScopedInterfaceClosure, validateExactScopeEnvironment
   , ExactScopeRequestFailure(..)
   , CanonicalOrigin(..), canonicalOrigin, isSourceOriginal
@@ -3159,6 +3160,7 @@ originalNativeAvailabilityChecks environment scope emitted = do
         Left _ -> pure ()
         Right _ -> fail "altered native selection retained its admitted census"
   full <- groupsOf owner
+  fullObservations <- either fail pure (scopeAvailableNativeGroupObservations scope)
   snapshot <- productOf owner
   unless (normalizedGroups full == normalizedGroups (originalGroups snapshot)
       && length full > 1) $
@@ -3173,6 +3175,9 @@ originalNativeAvailabilityChecks environment scope emitted = do
   forM_ [selectedScope,zeroScope] $ \selection -> do
     revalidateExactScope environment selection >>= either fail pure
     unchanged <- either fail pure (reconcile selection [])
+    observations <- either fail pure (scopeAvailableNativeGroupObservations selection)
+    unless (observations == fullObservations) $
+      fail "selected roots changed authenticated native dependency observations"
     unless (scopeAvailableOriginalProducts selection == available
         && unrecoveredExactProducts unchanged == available) $
       fail "selection changed the old native payload, version or full census"
@@ -3229,6 +3234,13 @@ originalNativeAvailabilityChecks environment scope emitted = do
     generation <- extendExactScopeGeneration bounded [] [] [] >>= either fail pure
     reread <- readExactScope (scopeManifestPath bounded) >>= either fail pure
     forM_ [bounded,extended,generation,reread] $ \retained -> do
+      observations <- either fail pure (scopeAvailableNativeGroupObservations retained)
+      let observed = [(originalUnit product,originalModule product,map Native.nativeGroupOrdinal groups)
+            | (product,groups) <- observations]
+          expected = [(originalUnit product,originalModule product,map originalOrdinal (originalGroups product))
+            | product <- boundedAvailable]
+      unless (observed == expected) $
+        fail "native dependency observations exceeded issued group availability"
       revalidateExactScope environment retained >>= either fail pure
       reconciled <- either fail pure (reconcile retained [])
       unless (scopeAvailableOriginalProducts retained == boundedAvailable

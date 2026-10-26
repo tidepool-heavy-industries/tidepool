@@ -27,7 +27,7 @@ module Tidepool.ExactScope
   , revalidateExactScopesAtWithOutputs
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
-  , scopeAvailableOriginalProducts
+  , scopeAvailableOriginalProducts, scopeAvailableNativeGroupObservations
   , originalGroupFromProjected, originalGroupFromCandidate
   , WorldInputFacts, CapturedWorldSources, WorldSourceRoot
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
@@ -120,7 +120,8 @@ import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(.
 import Tidepool.NativeOriginalCensus
   ( OriginalNativeCensus, readOriginalNativeCensusWith, decodeOriginalNativeCensusBody, nativeCensusOwner
   , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups, nativeCensusSelectionMatches
-  , nativeCensusRequirements, nativeCensusCanonicalCertificate )
+  , nativeCensusRequirements, nativeCensusCanonicalCertificate
+  , NativeGroupObservation, nativeCensusGroupObservations, selectNativeCensusGroupObservations )
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedCoreBody
@@ -621,6 +622,21 @@ scopeAvailableOriginalProducts scope =
      Nothing -> selected
   | selected <- scopeProducts scope]
   where AdmittedScopeInputs _ _ _ census _ = scopeInputs scope
+
+-- Native dependency observations follow admitted availability, independently of
+-- selected executable roots. Request-private additions have no external census.
+scopeAvailableNativeGroupObservations :: ExactScope
+  -> Either String [(ExactProduct, [NativeGroupObservation])]
+scopeAvailableNativeGroupObservations scope = mapM available
+  [row | selected <- scopeProducts scope
+       , Just row <- [Map.lookup (originalUnit selected, originalModule selected) census]]
+  where
+    AdmittedScopeInputs _ _ _ census _ = scopeInputs scope
+    available (AdmittedOriginalCensus _ _ full native availability) = do
+      groups <- case availability of
+        FullCarrier -> Right (nativeCensusGroupObservations native)
+        IssuedGroups issued -> selectNativeCensusGroupObservations native (map originalOrdinal issued)
+      pure (availableNativeProduct full availability, groups)
 
 availableNativeProduct :: ExactProduct -> NativeAvailability -> ExactProduct
 availableNativeProduct full FullCarrier = full

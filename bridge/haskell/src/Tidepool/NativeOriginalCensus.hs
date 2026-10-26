@@ -7,6 +7,10 @@ module Tidepool.NativeOriginalCensus
   , readOriginalNativeCensus, readOriginalNativeCensusWith, decodeOriginalNativeCensusBody
   , nativeCensusOwner
   , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups, nativeCensusSelectionMatches
+  , NativeGroupObservation, NativeGlobalObservation, NativeImportObservation(..)
+  , nativeCensusGroupObservations, selectNativeCensusGroupObservations
+  , nativeGroupOrdinal, nativeGroupBinders, nativeGroupGlobals
+  , nativeGlobalIdentity, nativeGlobalRep, nativeGlobalSignature, nativeGlobalEvaluated, nativeGlobalImport
   , nativeCensusRequirements
   , nativeCensusCanonicalCertificate
   ) where
@@ -32,6 +36,7 @@ data OriginalNativeCensus = OriginalNativeCensus
   { censusOwner :: !(String, String, String, String, String)
   , censusExactGroups :: ![ExactOriginalGroup]
   , censusOrdinalIndex :: !(Map.Map Word ExactOriginalGroup)
+  , censusObservedGroups :: !(Map.Map Word NativeGroupObservation)
   , censusRequirements :: !(Map.Map (String, String) String)
   , censusCanonicalCertificate :: !(Maybe String)
   } deriving (Eq, Show)
@@ -60,6 +65,56 @@ nativeCensusSelectionMatches census groups =
   Set.size (Set.fromList (map originalOrdinal groups)) == length groups
     && all (\group -> Map.lookup (originalOrdinal group) (censusOrdinalIndex census) == Just group) groups
 
+-- Full observations remain with the authenticated census. The outline used by
+-- recovery is a projection, not a replacement for exact executable imports.
+data NativeGroupObservation = NativeGroupObservation !Word ![SymbolIdentity] ![NativeGlobal]
+  deriving (Eq, Show)
+
+type NativeGlobalObservation = NativeGlobal
+
+data NativeImportObservation
+  = NativeSourceImport String String String Word SymbolIdentity
+  | NativeRetainedImport SymbolIdentity Word64
+  | NativePackageImport String String String SymbolIdentity
+  deriving (Eq, Show)
+
+nativeGroupOrdinal :: NativeGroupObservation -> Word
+nativeGroupOrdinal (NativeGroupObservation ordinal _ _) = ordinal
+
+nativeGroupBinders :: NativeGroupObservation -> [SymbolIdentity]
+nativeGroupBinders (NativeGroupObservation _ binders _) = binders
+
+nativeGroupGlobals :: NativeGroupObservation -> [NativeGlobalObservation]
+nativeGroupGlobals (NativeGroupObservation _ _ globals) = globals
+
+nativeGlobalIdentity :: NativeGlobalObservation -> SymbolIdentity
+nativeGlobalIdentity = nativeIdentity
+
+nativeGlobalRep :: NativeGlobalObservation -> RuntimeRep
+nativeGlobalRep = nativeRep
+
+nativeGlobalSignature :: NativeGlobalObservation -> Maybe Signature
+nativeGlobalSignature = nativeSignature
+
+nativeGlobalEvaluated :: NativeGlobalObservation -> Bool
+nativeGlobalEvaluated = nativeEvaluated
+
+nativeGlobalImport :: NativeGlobalObservation -> NativeImportObservation
+nativeGlobalImport global = case nativeImportOwner global of
+  SourceImport unit name version ordinal binder -> NativeSourceImport unit name version ordinal binder
+  RetainedImport identityValue generation -> NativeRetainedImport identityValue generation
+  PackageImport unit name seal binder -> NativePackageImport unit name seal binder
+
+nativeCensusGroupObservations :: OriginalNativeCensus -> [NativeGroupObservation]
+nativeCensusGroupObservations census =
+  [censusObservedGroups census Map.! originalOrdinal group | group <- censusExactGroups census]
+
+selectNativeCensusGroupObservations :: OriginalNativeCensus -> [Word]
+  -> Either String [NativeGroupObservation]
+selectNativeCensusGroupObservations census ordinals = do
+  groups <- selectNativeCensusGroups census ordinals
+  pure [censusObservedGroups census Map.! originalOrdinal group | group <- groups]
+
 nativeCensusOwner :: OriginalNativeCensus -> (String, String, String, String, String)
 nativeCensusOwner = censusOwner
 
@@ -79,12 +134,13 @@ data NativeGlobal = NativeGlobal
   , nativeSignature :: !(Maybe Signature)
   , nativeEvaluated :: !Bool
   , nativeImportOwner :: !ImportOwner
-  }
+  } deriving (Eq, Show)
 
 data ImportOwner
   = SourceImport String String String Word SymbolIdentity
   | RetainedImport SymbolIdentity Word64
   | PackageImport String String String SymbolIdentity
+  deriving (Eq, Show)
 
 data ParsedCensus = ParsedCensus
   { parsedOwner :: !HomeOwner
@@ -308,6 +364,9 @@ project parsed =
   { censusOwner = parsedOwner parsed
   , censusExactGroups = groups
   , censusOrdinalIndex = Map.fromList [(originalOrdinal group,group) | group <- groups]
+  , censusObservedGroups = Map.fromList
+      [(ordinal, NativeGroupObservation ordinal binders globals)
+      | (ordinal, binders, globals) <- parsedGroups parsed]
   , censusRequirements = Map.fromList (parsedRequirements parsed)
   , censusCanonicalCertificate = parsedCanonicalCertificate parsed
   }
