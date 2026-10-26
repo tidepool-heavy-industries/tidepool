@@ -4150,6 +4150,8 @@ def declare_haskell_components():
         "test-source-boot/fixtures/LazyBackedgeTarget.hs-boot": "test-source-boot/fixtures/LazyBackedgeTarget.hs-boot",
         "test-source-boot/fixtures/LazyBackedgeTargetChanged.hs": "test-source-boot/fixtures/LazyBackedgeTargetChanged.hs",
         "test-source-boot/fixtures/LegacyValueNativeTarget.hs": "test-source-boot/fixtures/LegacyValueNativeTarget.hs",
+        "test-source-boot/fixtures/MarkerCensusActor.hs": "test-source-boot/fixtures/MarkerCensusActor.hs",
+        "test-source-boot/fixtures/MarkerCensusExpr.hs": "test-source-boot/fixtures/MarkerCensusExpr.hs",
         "test-source-boot/fixtures/MemoReuseDependency.hs": "test-source-boot/fixtures/MemoReuseDependency.hs",
         "test-source-boot/fixtures/MemoReuseTarget.hs": "test-source-boot/fixtures/MemoReuseTarget.hs",
         "test-source-boot/fixtures/MetadataBashTarget.hs": "test-source-boot/fixtures/MetadataBashTarget.hs",

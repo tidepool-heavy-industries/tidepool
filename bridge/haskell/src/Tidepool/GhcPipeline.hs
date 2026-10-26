@@ -297,7 +297,7 @@ import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, serialCompilerExecutionGrant, compilerModuleJobs
   , CompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen, withCompilerExecutor, runCompilerTasksWithAttempt, dependencyClosedReuse )
 import Tidepool.PreparedSites
-  ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings )
+  ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings, preparedExecutableDependencies )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.Identity (stableVarId, nameSymbolIdentity)
 import Tidepool.TurnSource (generatedScaffoldModuleName)
@@ -5850,11 +5850,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               ,("selected_source",LogBool selectedSource)
               ,("original_reference_count",LogInteger (fromIntegral (length references)))
               ,("original_references",LogText (show (take 2 references)))]
-    let captureSourceDependenciesFor guts = case pvDependencyBasis variant of
+    let captureSourceDependenciesFor env guts = case pvDependencyBasis variant of
           Nothing -> pure ()
           Just basis -> do
-            let identifiers = freeIdsOfBinds (mg_binds guts)
-                isSource name = case (pvWorldSources variant,nameModule_maybe name) of
+            identifiers <- preparedExecutableDependencies env (mg_binds guts) (freeIdsOfBinds (mg_binds guts))
+            let isSource name = case (pvWorldSources variant,nameModule_maybe name) of
                   (Just (WorldSourceInputBasis _ facts _ _ _ _ _),Just owner) ->
                     worldHasSelectedSource facts (unitString (moduleUnit owner),moduleNameString (moduleName owner))
                   _ -> False
@@ -6507,7 +6507,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               desugared <- installSegment typedEnv typedSegment desugared0
               printOrThrowDiagnostics (moduleDiagnosticLogger env summaryC) (initPrintConfig flags) (initDiagOpts flags)
                 (unionMessages tcWarnings dsWarnings)
-              captureSourceDependenciesFor desugared
+              captureSourceDependenciesFor typedEnv desugared
               traceNativeUses "load.before_simplify" (mg_module desugared) (mg_binds desugared)
               plugins <- readIORef (tcg_th_coreplugins tcg)
               simplified <- timeDetailPhase timing "ghc_load_simplify"
@@ -6875,7 +6875,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 (simplified, coreMs) <- timeSection $
                   timeDetailPhase timing "deferred_simplify" (moduleNameString (ms_mod_name (mfSummary mf))) $
                     liftIO $ do
-                      captureSourceDependenciesFor (mfDesugared mf)
+                      captureSourceDependenciesFor (mfHscEnv mf) (mfDesugared mf)
                       traceNativeUses "deferred.before_simplify"
                         (mg_module (mfDesugared mf)) (mg_binds (mfDesugared mf))
                       plugins <- readIORef (tcg_th_coreplugins (mfTcGblEnv mf))
@@ -6945,7 +6945,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   modifyIORef' productInterfacesRef (Map.insert (ms_mod_name modSum)
                     (hm_iface (canonicalOriginalHome canonical)))
                 pure (CanonicalObservation modSum canonical)
-              freezeSiblings observations = liftIO $ do
+              freezeSiblings env observations = liftIO $ do
                 forM_ observations $ \observation -> case observation of
                   LoadedObservation loaded ->
                     traceNativeUses "finalized.loaded" (ms_mod (loadedSummary loaded))
@@ -6963,7 +6963,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                           HydratedObservation{} -> []
                           CanonicalObservation{} -> []]
                     bindings = concatMap (cg_binds . finalizedTidyGuts) finalized
-                    identifiers = filter (isNothing . nullaryWorkerConstructor) (freeIdsOfBinds bindings)
+                dependencies <- preparedExecutableDependencies env bindings (freeIdsOfBinds bindings)
+                let identifiers = filter (isNothing . nullaryWorkerConstructor) dependencies
                 selected <- fmap catMaybes $ forM identifiers $ \identifier -> do
                   reference <- referenceForName (idName identifier)
                   pure ((\value -> (idName identifier,preparedRootIdentity identifier,value)) <$> reference)
@@ -6974,8 +6975,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 writeIORef preparedSiblingsRef (Map.unions (map resolvePreparedSiblings
                   [cg_binds (finalizedTidyGuts product) | product <- finalized]))
               acquirePreparationEnvironment observations = do
-                freezeSiblings observations
                 env <- getSession
+                freezeSiblings env observations
                 siteEnvironment <- liftIO (resolvePreparedSiteEnvironment env)
                 siblings <- liftIO (readIORef preparedSiblingsRef)
                 let preparedNormallyReusable _ product' = preparedSiteDependenciesMatch

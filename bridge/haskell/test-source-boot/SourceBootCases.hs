@@ -170,7 +170,7 @@ import System.Mem.StableName (makeStableName)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedJson (resolveJsonAuthority)
-import Tidepool.PreparedSites (SiteRejection(..), resolvePreparedInterfaceSiblings, lookupPreparedVerb)
+import Tidepool.PreparedSites (SiteRejection(..), resolvePreparedInterfaceSiblings, lookupPreparedVerb, preparedExecutableDependencies)
 import Tidepool.SiteClassifier (SiteFailure(..), classifySiteOccurrence)
 import Tidepool.EffectSchema (YieldSite(..), SiteType(..), mergeYieldSites)
 import GHC.Driver.Env (hsc_home_unit)
@@ -6015,6 +6015,58 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
         ++ show (length receiptSafety))
   putStrLn "exact loaded metadata: parity, extension-only execution elision, source drift, quoter bytecode, hidden family and untracked input passed"
 
+-- A downstream module uses two markers, an ordinary function and nullary
+-- constructors. The frozen Original census and executable projection must
+-- agree when the defining owner is reused without executable marker bodies.
+preparedMarkerDependencies :: IO ()
+preparedMarkerDependencies = withScratch $ \work -> do
+  createDirectoryIfMissing True (work </> "Tidepool/Internal")
+  copyFile "lib/Tidepool/Internal/RequestSite.hs" (work </> "Tidepool/Internal/RequestSite.hs")
+  copyFile "test-source-boot/fixtures/MarkerCensusActor.hs" (work </> "Tidepool/Actor.hs")
+  let target = work </> "MarkerCensusExpr.hs"
+      names = ["Tidepool.Internal.RequestSite", "Tidepool.Actor"]
+      identity occurrence = SymbolIdentity "main" "Tidepool.Actor" "value" occurrence Nothing
+      expected = Set.fromList (map identity ["serveSited", "receiveSited", "ordinary"])
+      markers = Set.fromList (map identity ["serve", "receive"])
+      inspect prepared = do
+        target' <- case [value | value <- pprModules prepared
+            , moduleNameString (moduleName (pmModule value)) == "MarkerCensusExpr"] of
+          [value] -> pure value
+          _ -> fail "marker census fixture lost downstream module"
+        unless (null (pmSiteRejections target') && length (pmYieldSites target') == 2) $
+          fail "downstream marker applications did not elaborate"
+        let context = ProjectionContext "test" "matched"
+              (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
+              (SymbolIdentity "main" "MarkerCensusExpr" "value" "__result" Nothing)
+              [] Nothing Nothing Nothing Nothing
+        program <- either (fail . show) pure (projectPrepared context [target'])
+        let globals = Set.fromList (map globalIdentity (programGlobals program))
+        unless (expected `Set.isSubsetOf` globals && Set.null (Set.intersection markers globals)
+            && all ((/= "Nothing") . symbolOccurrence) (Set.toList globals)) $
+          fail "prepared executable changed ordinary/nullary dependencies or retained markers"
+  copyFile "test-source-boot/fixtures/MarkerCensusExpr.hs" target
+  cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing target [work] Nothing
+  inspect cold
+  captured <- capturePreparedFixture work cold
+  writeGenuineCandidateManifestFor names work captured
+  warm <- runPipelineSessionSelected (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+    Nothing target [work] Nothing
+  inspect warm
+  unless (all (`notElem` preparedNames warm) names) $
+    fail "marker regression did not reuse original defining owners"
+  let available = Set.fromList (Map.elems (pprOriginalBindings warm))
+  unless (expected `Set.isSubsetOf` available && Set.null (Set.intersection markers available)) $
+    fail "frozen Original symbol census disagrees with executable sibling demand"
+  let env = prHscEnv (pprPipelineResult cold)
+  home <- maybe (fail "marker fixture lost its defining HMI") pure
+    (lookupHpt (hsc_HPT env) (mkModuleName "Tidepool.Actor"))
+  let identifiers = [binder | binder <- typeEnvIds (md_types (hm_details home))
+        , getOccString binder `elem` ["serve", "receive", "ordinary"]]
+  projected <- preparedExecutableDependencies env [] identifiers
+  unless (expected `Set.isSubsetOf` Set.fromList (map preparedRootIdentity projected)) $
+    fail "early dependency census did not resolve actual executable Ids"
+
 -- Native candidates and exact owners bypass fresh preparation. Their defining
 -- interfaces must still supply typed site siblings without widening imports.
 hydratedSiteSiblings :: IO ()
@@ -6138,6 +6190,9 @@ hydratedSiteSiblings = withScratch $ \work -> do
         (nameOccName (idName sibling)) (nameSrcSpan (idName sibling)))
   -- Alter only the surface's defining unit; its occurrence, module and type
   -- remain identical to GHC's genuine request Id, and the home sibling is valid.
+  foreignDependencies <- preparedExecutableDependencies env [] [foreignSurface]
+  unless (map idName foreignDependencies == [idName foreignSurface]) $
+    fail "dependency census replaced a foreign-unit surface with a home sibling"
   case classifySiteOccurrence siblings spec foreignSurface arguments of
     Left MismatchedSiblingUnit -> pure ()
     _ -> fail "a foreign-unit request surface acquired the valid home sibling"

@@ -22,7 +22,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "source-boot"
-  [ testCase "worker request admission precedes source scratch executor and RTS effects" workerRequestAdmissionBeforeEffects
+  [ testCase "prepared marker dependencies name executable siblings" preparedMarkerDependencies
+  , testCase "worker request admission precedes source scratch executor and RTS effects" workerRequestAdmissionBeforeEffects
   , testCase "compiler receipt symbol parents use null or text" nativeReceiptIdentityChecks
   , testCase "finite native output separates package products with captured interfaces" nativePackageOutputChecks
   , testCase "target package roots are unchanged after stage issuance" packageTargetRootDriftRefusal

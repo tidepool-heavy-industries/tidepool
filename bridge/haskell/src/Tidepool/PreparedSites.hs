@@ -9,6 +9,7 @@ module Tidepool.PreparedSites
   , lookupPreparedVerb
   , resolvePreparedSiblings
   , resolvePreparedInterfaceSiblings
+  , preparedExecutableDependencies
   , IntrinsicCensus, censusPreparedIntrinsics, intrinsicFree, intrinsicNames
   , requestReplyIndex
   ) where
@@ -812,6 +813,35 @@ resolvePreparedSiblingIds identifiers = Map.fromList
         && case nameModule_maybe (idName binder) of
           Just modul -> moduleNameString (moduleName modul) == vsSitedModule spec
           Nothing -> False
+
+-- | Before simplification SOURCE capture still sees surface markers. Elaborating
+-- a site preserves its supplied type/evidence/value arguments and introduces
+-- only fresh local binders, the sibling, and the boxed Int worker. Project that
+-- dependency change using the same declared verb and actual GHC sibling owner;
+-- never publish a marker as an executable Original symbol. Missing or foreign
+-- siblings retain the surface so the ordinary rejection path remains visible.
+preparedExecutableDependencies :: HscEnv -> [CoreBind] -> [Id] -> IO [Id]
+preparedExecutableDependencies env bindings identifiers = do
+  projected <- traverse project identifiers
+  pure (nub (concat projected))
+  where
+    siblings = Map.union (resolvePreparedSiblings bindings) (resolvePreparedInterfaceSiblings env)
+    project identifier = case lookupPreparedVerb identifier of
+      Nothing -> pure [identifier]
+      Just spec -> do
+        sibling <- case Map.lookup (verbKey spec) siblings of
+          Just found -> pure (Just found)
+          Nothing -> do
+            (thing, _) <- resolveDeclaration env (vsSitedModule spec) (mkVarOcc (vsSitedName spec)) False
+            pure $ case thing of
+              Just (AnId found) -> Just found
+              _ -> Nothing
+        pure $ case sibling of
+          Just found
+            | Just surfaceOwner <- nameModule_maybe (idName identifier)
+            , Just siblingOwner <- nameModule_maybe (idName found)
+            , moduleUnit surfaceOwner == moduleUnit siblingOwner -> [found, dataConWorkId intDataCon]
+          _ -> [identifier]
 
 lookupPreparedVerb :: Id -> Maybe VerbSpec
 lookupPreparedVerb = lookupPreparedVerbName . idName
