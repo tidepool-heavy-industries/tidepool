@@ -2155,3 +2155,353 @@ fn context_v10_requires_linked_and_source_roots_and_distinguishes_missing_storag
     );
     assert_eq!(unchanged.native_closures.root, valid.native_closures.root);
 }
+
+#[derive(Clone, Debug)]
+enum OfferReferenceEdit {
+    Offer(u8, bool),
+    Row(u8, Vec<u8>),
+    RemoveRow(u8),
+    ReplaceOffer(u8, u8),
+    Role(u8),
+    Noop,
+}
+
+fn offer_reference_fixture() -> (
+    Vec<([u8; 32], NativeOfferSnapshotFacts)>,
+    NativeAvailabilitySnapshotFacts,
+) {
+    let snapshot = availability_wire_snapshot(NativeTransportMode::IssuedGroups, None);
+    let template = snapshot.offers.values().next().unwrap();
+    let offers = (0..4u8)
+        .map(|index| {
+            let mut offer = template.clone();
+            offer.original = ArtifactId([index; 32]);
+            offer.owner.module = format!("Offer{index}");
+            (offer.identity().unwrap(), offer)
+        })
+        .collect();
+    (
+        offers,
+        snapshot
+            .native_availability
+            .values()
+            .next()
+            .unwrap()
+            .clone(),
+    )
+}
+
+fn offer_reference_row(
+    template: &NativeAvailabilitySnapshotFacts,
+    index: u8,
+    selected: &[u8],
+    offers: &[([u8; 32], NativeOfferSnapshotFacts)],
+) -> NativeAvailabilitySnapshotFacts {
+    let mut row = template.clone();
+    row.original = ArtifactId([index; 32]);
+    row.contributions = selected
+        .iter()
+        .enumerate()
+        .map(|(slot, offer)| {
+            let contribution = NativeContributionSnapshotFacts {
+                offer: offers[usize::from(*offer)].0,
+                reachable: [ArtifactBindingNode::Artifact(ArtifactBinding {
+                    artifact: ArtifactId([slot as u8; 32]),
+                    selection: ArtifactSelectionId([7; 32]),
+                })]
+                .into_iter()
+                .collect(),
+            };
+            (contribution.identity().unwrap(), contribution)
+        })
+        .collect();
+    row
+}
+
+fn empty_native_maps() -> PublicationNativeMaps {
+    PublicationNativeMaps {
+        roles: OrdMap::new(),
+        offers: OrdMap::new(),
+        native_availability: OrdMap::new(),
+    }
+}
+
+// Full recomputation from supplied primary facts, without the retained index,
+// persistent diff, materializer, or hydration algorithm.
+fn recompute_offer_references(maps: &PublicationNativeMaps) -> BTreeMap<[u8; 32], usize> {
+    let mut counts = BTreeMap::new();
+    for row in maps.native_availability.values() {
+        for contribution in row.contributions.values() {
+            *counts.entry(contribution.offer).or_default() += 1;
+        }
+    }
+    counts
+}
+
+fn replay_offer_reference_history(edits: &[OfferReferenceEdit]) -> (usize, usize) {
+    let (offers, template) = offer_reference_fixture();
+    let mut held = PublicationNativeFacts::maintain(None, empty_native_maps()).unwrap();
+    let (mut accepted, mut refused) = (0, 0);
+    for edit in edits {
+        let before = Arc::clone(&held);
+        let before_counts = recompute_offer_references(&before.maps);
+        let mut maps = held.maps.clone();
+        match edit {
+            OfferReferenceEdit::Offer(index, present) => {
+                let (key, offer) = &offers[usize::from(*index)];
+                if *present {
+                    maps.offers.insert(*key, offer.clone());
+                } else {
+                    maps.offers.remove(key);
+                }
+            }
+            OfferReferenceEdit::Row(index, selected) => {
+                let row = offer_reference_row(&template, *index, selected, &offers);
+                maps.native_availability.insert(row.original, row);
+            }
+            OfferReferenceEdit::RemoveRow(index) => {
+                maps.native_availability.remove(&ArtifactId([*index; 32]));
+            }
+            OfferReferenceEdit::ReplaceOffer(old, new) => {
+                let old = offers[usize::from(*old)].0;
+                let (new, offer) = &offers[usize::from(*new)];
+                maps.offers.remove(&old);
+                maps.offers.insert(*new, offer.clone());
+                let rows = maps
+                    .native_availability
+                    .iter()
+                    .map(|(key, row)| {
+                        let mut row = row.clone();
+                        row.contributions = row
+                            .contributions
+                            .values()
+                            .map(|contribution| {
+                                let mut contribution = contribution.clone();
+                                if contribution.offer == old {
+                                    contribution.offer = *new;
+                                }
+                                (contribution.identity().unwrap(), contribution)
+                            })
+                            .collect();
+                        (*key, row)
+                    })
+                    .collect::<Vec<_>>();
+                for (key, row) in rows {
+                    maps.native_availability.insert(key, row);
+                }
+            }
+            OfferReferenceEdit::Role(value) => {
+                maps.roles.insert(
+                    ExactModuleIdentity {
+                        unit: "fixture".into(),
+                        module: "Role".into(),
+                    },
+                    RecordedCompilerRow::InterfaceOnly {
+                        interface: ArtifactId([*value; 32]),
+                    },
+                );
+            }
+            OfferReferenceEdit::Noop => {}
+        }
+        let expected = recompute_offer_references(&maps);
+        let valid = expected.keys().all(|key| maps.offers.contains_key(key));
+        take_native_fact_work();
+        let result = PublicationNativeFacts::maintain(Some(&held), maps.clone());
+        let work = take_native_fact_work();
+        if valid {
+            let next = result.unwrap_or_else(|error| panic!("valid {edit:?}: {error}"));
+            assert_eq!(
+                next.offer_references
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .collect::<BTreeMap<_, _>>(),
+                expected
+            );
+            let cold = PublicationNativeFacts::maintain(None, maps.clone()).unwrap();
+            assert_eq!(next.commitment(), cold.commitment());
+            assert_eq!(next.offer_references, cold.offer_references);
+            if maps == held.maps {
+                assert!(Arc::ptr_eq(&held, &next));
+                assert_eq!(work, NativeFactWork::default());
+            }
+            held = next;
+            accepted += 1;
+        } else {
+            assert!(
+                matches!(result, Err(SnapshotError::Malformed(ref reason))
+                if reason == "publication native row references missing offer"),
+                "invalid {edit:?}"
+            );
+            assert_eq!(
+                work.materializers_started, 0,
+                "refuse before materialization"
+            );
+            assert_eq!(work.serialized_bytes, 0);
+            assert_eq!(work.changed_entries, 0);
+            refused += 1;
+        }
+        assert_eq!(
+            before
+                .offer_references
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect::<BTreeMap<_, _>>(),
+            before_counts
+        );
+        assert_eq!(recompute_offer_references(&before.maps), before_counts);
+        if !valid {
+            assert!(Arc::ptr_eq(&held, &before));
+        }
+    }
+    (accepted, refused)
+}
+
+#[test]
+fn publication_native_offer_references_refuse_dangling_transitions_before_encoding() {
+    use OfferReferenceEdit::*;
+    let history = [
+        Offer(0, true),
+        Row(0, vec![0, 0]),
+        Row(1, vec![0]),
+        Offer(0, false),
+        Row(0, vec![1]),
+        Offer(1, true),
+        Row(0, vec![1]),
+        Offer(0, false),
+        RemoveRow(1),
+        Offer(0, false),
+        Noop,
+        ReplaceOffer(1, 2),
+        Role(1),
+        RemoveRow(0),
+        Offer(2, false),
+    ];
+    assert_eq!(replay_offer_reference_history(&history), (12, 3));
+    assert_eq!(
+        replay_offer_reference_history(&[
+            ReplaceOffer(0, 2),
+            Row(0, vec![2]),
+            ReplaceOffer(2, 1),
+            Offer(1, false),
+        ]),
+        (3, 1)
+    );
+    // Serde admission reaches the same invariant before trusting a supplied root.
+    let (offers, template) = offer_reference_fixture();
+    let empty = PublicationNativeFacts::maintain(None, empty_native_maps()).unwrap();
+    let mut maps = empty_native_maps();
+    let row = offer_reference_row(&template, 0, &[0], &offers);
+    maps.native_availability.insert(row.original, row);
+    let bytes = fvm_ipld_encoding::to_vec(&PublicationNativeTransport {
+        root: empty.commitment(),
+        maps,
+    })
+    .unwrap();
+    take_native_fact_work();
+    let error = fvm_ipld_encoding::from_slice::<PublicationNativeFacts>(&bytes).unwrap_err();
+    assert_eq!(take_native_fact_work().materializers_started, 0);
+    assert!(error
+        .to_string()
+        .contains("publication native row references missing offer"));
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+    #[test]
+    fn publication_native_offer_reference_histories_match_full_recomputation(
+        edits in prop::collection::vec(prop_oneof![
+            (0u8..4, any::<bool>()).prop_map(|(n,b)| OfferReferenceEdit::Offer(n,b)),
+            (0u8..6, prop::collection::vec(0u8..4, 0..4)).prop_map(|(n,offers)| OfferReferenceEdit::Row(n,offers)),
+            (0u8..6).prop_map(OfferReferenceEdit::RemoveRow),
+            (0u8..4,0u8..4).prop_map(|(a,b)| OfferReferenceEdit::ReplaceOffer(a,b)),
+            (0u8..4).prop_map(OfferReferenceEdit::Role),
+            Just(OfferReferenceEdit::Noop),
+        ], 1..48)
+    ) {
+        replay_offer_reference_history(&edits);
+    }
+}
+
+#[test]
+fn publication_native_offer_reference_work_ignores_unchanged_rows_and_checks_projection() {
+    use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+    let (offers, template) = offer_reference_fixture();
+    let mut maps = empty_native_maps();
+    maps.offers.insert(offers[0].0, offers[0].1.clone());
+    maps.offers.insert(offers[1].0, offers[1].1.clone());
+    for index in 0..=255u8 {
+        let row = offer_reference_row(&template, index, &[0, 0], &offers);
+        maps.native_availability.insert(row.original, row);
+    }
+    let held = PublicationNativeFacts::maintain(None, maps.clone()).unwrap();
+    assert_eq!(held.offer_references[&offers[0].0], 512);
+    maps.offers.remove(&offers[1].0);
+    take_native_fact_work();
+    let removed_unused = PublicationNativeFacts::maintain(Some(&held), maps.clone()).unwrap();
+    let work = take_native_fact_work();
+    assert_eq!(
+        (
+            work.availability_rows_checked,
+            work.contribution_edits_checked,
+            work.removed_offers_checked
+        ),
+        (0, 0, 1)
+    );
+    maps.offers.insert(offers[1].0, offers[1].1.clone());
+    maps.native_availability.insert(
+        ArtifactId([0; 32]),
+        offer_reference_row(&template, 0, &[1, 0], &offers),
+    );
+    take_native_fact_work();
+    let changed = PublicationNativeFacts::maintain(Some(&removed_unused), maps).unwrap();
+    let work = take_native_fact_work();
+    assert_eq!(
+        (
+            work.availability_rows_checked,
+            work.contribution_edits_checked,
+            work.removed_offers_checked
+        ),
+        (1, 2, 0)
+    );
+    assert_eq!(changed.offer_references[&offers[0].0], 511);
+    assert_eq!(changed.offer_references[&offers[1].0], 1);
+    let keys = || PublicationNativeMapKeys {
+        native_availability: [ArtifactId([0; 32])].into(),
+        ..Default::default()
+    };
+    take_native_fact_work();
+    let error = changed
+        .project(keys(), &InventoryOperation::new(Default::default()))
+        .unwrap_err();
+    assert_eq!(take_native_fact_work().materializers_started, 0);
+    assert!(
+        matches!(error,SnapshotProjectionError::Snapshot(SnapshotError::Malformed(ref reason))
+        if reason == "publication native row references missing offer")
+    );
+    let mut selected = keys();
+    selected.offers = [offers[0].0, offers[1].0].into();
+    let (projected, _) = changed
+        .project(selected, &InventoryOperation::new(Default::default()))
+        .unwrap();
+    assert_eq!(
+        projected
+            .offer_references
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(offers[0].0, 1), (offers[1].0, 1)])
+    );
+    let cold = PublicationNativeFacts::maintain(None, projected.maps.clone()).unwrap();
+    assert_eq!(projected.commitment(), cold.commitment());
+    assert!(matches!(
+        changed.project(
+            keys(),
+            &InventoryOperation::new(InventoryDecodeLimits {
+                max_work: 0,
+                ..Default::default()
+            })
+        ),
+        Err(SnapshotProjectionError::Operation(_))
+    ));
+    assert_eq!(changed.offer_references[&offers[0].0], 511);
+}

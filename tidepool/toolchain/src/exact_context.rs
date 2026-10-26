@@ -621,6 +621,12 @@ struct MaterializedScope {
 
 impl<'a, BS: Blockstore> Materializer<'a, BS> {
     pub fn new(base: &'a BS) -> Self {
+        #[cfg(test)]
+        NATIVE_FACT_WORK.with(|counter| {
+            let mut work = counter.get();
+            work.materializers_started += 1;
+            counter.set(work);
+        });
         Self {
             base,
             pending: MemoryBlockstore::new(),
@@ -2116,6 +2122,8 @@ pub(crate) struct PublicationNativeMaps {
 pub(crate) struct PublicationNativeFacts {
     maps: PublicationNativeMaps,
     receipt: NativeFactReceipt,
+    // Derived from contributions on this immutable owner, never transported.
+    offer_references: OrdMap<[u8; 32], usize>,
 }
 impl std::ops::Deref for PublicationNativeFacts {
     type Target = PublicationNativeMaps;
@@ -2167,6 +2175,10 @@ impl<'de> Deserialize<'de> for PublicationNativeFacts {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NativeFactWork {
+    pub(crate) materializers_started: u64,
+    pub(crate) availability_rows_checked: u64,
+    pub(crate) contribution_edits_checked: u64,
+    pub(crate) removed_offers_checked: u64,
     pub(crate) changed_entries: u64,
     pub(crate) serialized_bytes: u64,
     pub(crate) offered_bytes: u64,
@@ -2198,6 +2210,101 @@ pub(crate) struct NativeFactProjectionWork {
 }
 
 impl PublicationNativeFacts {
+    // A prior owner already proved all references. Nested persistent diffs
+    // retain that proof for unchanged rows and contributions; removed offers
+    // are checked after net reference transitions, without scanning other rows.
+    fn maintain_offer_references<E: From<SnapshotError>>(
+        prior: Option<&Arc<Self>>,
+        maps: &PublicationNativeMaps,
+        mut check: impl FnMut() -> Result<(), E>,
+    ) -> Result<OrdMap<[u8; 32], usize>, E> {
+        let empty_rows = OrdMap::new();
+        let empty_contributions = OrdMap::new();
+        let empty_offers = OrdMap::new();
+        let rows = prior.map_or(&empty_rows, |prior| &prior.native_availability);
+        let offers = prior.map_or(&empty_offers, |prior| &prior.offers);
+        let mut references = prior.map_or_else(OrdMap::new, |prior| prior.offer_references.clone());
+        for row in rows.diff(&maps.native_availability) {
+            check()?;
+            #[cfg(test)]
+            NATIVE_FACT_WORK.with(|work| {
+                let mut next = work.get();
+                next.availability_rows_checked += 1;
+                work.set(next);
+            });
+            let (before, after) = match row {
+                DiffItem::Add(_, row) => (&empty_contributions, &row.contributions),
+                DiffItem::Remove(_, row) => (&row.contributions, &empty_contributions),
+                DiffItem::Update {
+                    old: (_, old),
+                    new: (_, new),
+                } => (&old.contributions, &new.contributions),
+            };
+            for change in before.diff(after) {
+                check()?;
+                #[cfg(test)]
+                NATIVE_FACT_WORK.with(|work| {
+                    let mut next = work.get();
+                    next.contribution_edits_checked += 1;
+                    work.set(next);
+                });
+                let (old, new) = match change {
+                    DiffItem::Add(_, contribution) => (None, Some(contribution)),
+                    DiffItem::Remove(_, contribution) => (Some(contribution), None),
+                    DiffItem::Update {
+                        old: (_, old),
+                        new: (_, new),
+                    } => (Some(old), Some(new)),
+                };
+                if let Some(old) = old {
+                    let count = references
+                        .get(&old.offer)
+                        .copied()
+                        .and_then(|count| count.checked_sub(1))
+                        .ok_or_else(|| {
+                            malformed("publication native offer reference count is absent")
+                        })?;
+                    if count == 0 {
+                        references.remove(&old.offer);
+                    } else {
+                        references.insert(old.offer, count);
+                    }
+                }
+                if let Some(new) = new {
+                    if !maps.offers.contains_key(&new.offer) {
+                        return Err(
+                            malformed("publication native row references missing offer").into()
+                        );
+                    }
+                    let count = references
+                        .get(&new.offer)
+                        .copied()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            malformed("publication native offer reference count overflow")
+                        })?;
+                    references.insert(new.offer, count);
+                }
+            }
+        }
+        for change in offers.diff(&maps.offers) {
+            if let DiffItem::Remove(key, _) = change {
+                check()?;
+                #[cfg(test)]
+                NATIVE_FACT_WORK.with(|work| {
+                    let mut next = work.get();
+                    next.removed_offers_checked += 1;
+                    work.set(next);
+                });
+                if references.contains_key(key) {
+                    return Err(malformed("publication native row references missing offer").into());
+                }
+            }
+        }
+        Ok(references)
+    }
+
     /// Select exact cold facts and their own encoded wires from the same owner.
     /// Changed permission/role facts require their issuing consumer's separate
     /// refusal/encoding path and cannot be supplied to this projection.
@@ -2269,6 +2376,12 @@ impl PublicationNativeFacts {
             operation.charge(value.owner.module.len())?;
             maps.native_availability.insert(*key, value.clone());
         }
+        let offer_references =
+            Self::maintain_offer_references::<SnapshotProjectionError>(None, &maps, || {
+                crate::host_work::checkpoint()?;
+                operation.reserve::<([u8; 32], usize)>(4)?;
+                Ok(())
+            })?;
         let mut writer = Materializer::new(&self.receipt.frontier);
         let (root, rw) = writer.project_map_with(&self.receipt.roles, &keys.roles, operation)?;
         let roles = MaterializedMap {
@@ -2320,6 +2433,7 @@ impl PublicationNativeFacts {
         Ok((
             Arc::new(Self {
                 maps,
+                offer_references,
                 receipt: NativeFactReceipt {
                     root,
                     roles,
@@ -2351,6 +2465,8 @@ impl PublicationNativeFacts {
                 return Ok(Arc::clone(prior));
             }
         }
+        let offer_references =
+            Self::maintain_offer_references::<SnapshotError>(prior, &maps, || Ok(()))?;
         let empty = ReachableBlocks::default();
         let frontier = prior.map_or(&empty, |p| &p.receipt.frontier);
         let mut writer = Materializer::new(frontier);
@@ -2392,6 +2508,7 @@ impl PublicationNativeFacts {
         });
         Ok(Arc::new(Self {
             maps,
+            offer_references,
             receipt: NativeFactReceipt {
                 root,
                 roles,
