@@ -26523,9 +26523,71 @@ mod tests {
             !selected.permission_delta.changed.is_empty(),
             "the narrowed demand must issue at least one changed native row"
         );
+        let child = cold.projection().snapshot_roles()[&identity("fixture", "DemandChild")]
+            .original()
+            .unwrap();
+        let old_child = cold
+            .native_selection
+            .availability
+            .issued_row(child)
+            .unwrap();
+        let new_child = selected.native_availability().issued_row(child).unwrap();
+        let old_offers = old_child
+            .offers()
+            .map(|offer| offer.snapshot_identity().unwrap())
+            .collect::<BTreeSet<_>>();
+        let new_offers = new_child
+            .offers()
+            .map(|offer| offer.snapshot_identity().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            old_offers.len(),
+            2,
+            "cold child has standalone and parent suppliers"
+        );
+        assert_eq!(
+            new_offers.len(),
+            1,
+            "demand keeps only the parent's child proof"
+        );
+        assert!(new_offers.is_subset(&old_offers));
         let support = selected
             .semantic_source_support(&groups, &operation)
             .expect("the demand owner issues its own narrowed-row delta");
+
+        let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            producer: program_test_producer_sha256(),
+            compiler_support: support.as_ref().clone(),
+            lexical: Default::default(),
+            source_scope: Default::default(),
+            template_imports: None,
+        });
+        let snapshot = context.snapshot();
+        let recorded = &snapshot.native_availability[&child];
+        assert_eq!(
+            recorded
+                .contributions
+                .values()
+                .map(|contribution| contribution.offer)
+                .collect::<BTreeSet<_>>(),
+            new_offers
+        );
+        assert!(old_offers
+            .difference(&new_offers)
+            .all(|offer| !snapshot.offers.contains_key(offer)));
+        use fvm_ipld_blockstore::Blockstore;
+        let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+        let mut writer = crate::exact_context::Materializer::new(&store);
+        let written = writer.materialize_context(None, &snapshot).unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let decoded = crate::exact_context::hydrate_context(&store, written.root()).unwrap();
+        assert_eq!(
+            decoded.snapshot().native_availability,
+            snapshot.native_availability
+        );
+        assert_eq!(decoded.snapshot().offers, snapshot.offers);
 
         // The same narrowed rows are refused when the demand owner has issued
         // no delta for them: echoed facts alone are not permission.
@@ -26553,6 +26615,30 @@ mod tests {
             },
             other => panic!("expected compiler evidence, got {other:?}"),
         }
+
+        // Identical admitted old/new facts cannot move the delta to another
+        // acquired source owner. Demand and groups still belong to the target,
+        // so this refusal specifically exercises the delta's basis check.
+        let foreign_basis = demanded_native_fixture(32, NativeArtifactDemand::AllGroups, false);
+        assert!(!Arc::ptr_eq(
+            &foreign_basis.source_support,
+            &cold.source_support
+        ));
+        let demand = cold
+            .demanded_compiler_projection(&roots, &operation)
+            .unwrap();
+        let mut foreign_delta = cold
+            .demanded_native_inputs(demand, &roots, &operation)
+            .unwrap();
+        foreign_delta.permission_delta = IssuedNativePermissionDelta::issue(
+            foreign_basis,
+            selected.permission_delta.changed.clone(),
+        );
+        let refused = foreign_delta
+            .semantic_source_support(&groups, &operation)
+            .expect_err("equal changed-row facts cannot substitute another delta owner");
+        assert!(matches!(refused, CompileError::CompilerEvidence(error)
+            if matches!(*error, CertificationError::ChangedNativePermissionRequiresIssuance { .. })));
 
         // R8: a pointer-distinct but semantically equal native row is the same
         // permission. A genuinely changed row carries a different fact

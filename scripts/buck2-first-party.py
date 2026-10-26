@@ -113,6 +113,7 @@ TOOLCHAIN_COMPILER_FREE_TESTS = [
     "declaration_context::native_availability_tests::source_support_retains_every_original_in_a_shared_native_contribution",
     "declaration_context::native_availability_tests::matching_native_offer_role_preserves_issuance_without_rewalking_proof",
     "artifact_inventory::native_availability::normalized_dependency_tests::contribution_restriction_shares_only_unchanged_closed_membership",
+    "declaration_context::tests::demanded_world_facts_bind_certified_groups_and_refuse_narrowed_rows",
 ]
 unsupported = selected - SUPPORTED_PACKAGES
 if unsupported:
