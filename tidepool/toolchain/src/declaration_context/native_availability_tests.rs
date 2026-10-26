@@ -8659,6 +8659,16 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
 
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("RestoredOffer", 87);
+    let consumer = dependent_product(
+        "RestoredOfferConsumer",
+        88,
+        vec![(7, vec![source_import(&native, 9001)])],
+    );
+    let consumer = recovered_witness_fixtures(&[native.clone(), consumer])
+        .remove(1)
+        .product;
+    let consumer_entry =
+        Arc::new(ArtifactEntry::original(producer.sha256(), consumer.clone()).unwrap());
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native).unwrap());
     let inventory = ArtifactInventory::default();
     let artifacts = inventory
@@ -8867,15 +8877,13 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 .iter()
                 .all(|role| !interface_only || role.original().is_none()));
             if interface_only {
+                use crate::certified_products::{CertificationError, CertifiedSourceSelection};
                 let inputs = request.compiler_inputs();
                 let mut validation = PackageInterfaceValidation::default();
                 let mut selection =
-                    crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                        inputs,
-                        &validation.inventory,
-                    )
-                    .unwrap();
-                let physical = crate::declaration_context::CapturedCompilerStage::issue(
+                    CertifiedSourceSelection::from_compiler_inputs(inputs, &validation.inventory)
+                        .unwrap();
+                let physical = CapturedCompilerStage::issue(
                     &mut selection,
                     inputs.artifacts(),
                     Vec::new(),
@@ -8890,65 +8898,159 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                     index == 0
                 );
                 assert!(selection.receipt_native_body_owners().next().is_none());
+                let observe =
+                    |product: &CertifiedRecoveryProduct, ordinal, module_version, operation: &_| {
+                        let group = crate::certified_products::original_available_groups(product)
+                            .unwrap()
+                            .find(|group| group.original_ordinal() == ordinal)
+                            .unwrap();
+                        let binder = group.binders()[0].clone();
+                        let prepared = prepared_target_fixture(vec![GlobalDecl {
+                            identity: binder.clone(),
+                            rep: RuntimeRep::LiftedRef,
+                            entry_signature: None,
+                            required_evaluated: false,
+                            required_generation: None,
+                        }]);
+                        let accepted = [AcceptedGlobal {
+                            identity: binder.clone(),
+                            rep: RuntimeRep::LiftedRef,
+                            entry_signature: None,
+                            required_evaluated: false,
+                            owner: ReceiptImportOwner::Source {
+                                unit: product.owner().unit.clone(),
+                                module: product.owner().module.clone(),
+                                module_version,
+                                original_ordinal: ordinal,
+                                binder,
+                            },
+                        }];
+                        AuthenticatedTargetImports::issue(&prepared, &accepted, operation).unwrap()
+                    };
                 if index == 0 {
-                    let group = crate::certified_products::original_available_groups(native)
-                        .unwrap()
-                        .find(|group| group.original_ordinal() == 9001)
-                        .unwrap();
-                    let binder = group.binders()[0].clone();
-                    let prepared = prepared_target_fixture(vec![GlobalDecl {
-                        identity: binder.clone(),
-                        rep: RuntimeRep::LiftedRef,
-                        entry_signature: None,
-                        required_evaluated: false,
-                        required_generation: None,
-                    }]);
-                    let accepted = [AcceptedGlobal {
-                        identity: binder.clone(),
-                        rep: RuntimeRep::LiftedRef,
-                        entry_signature: None,
-                        required_evaluated: false,
-                        owner: ReceiptImportOwner::Source {
-                            unit: native.owner().unit.clone(),
-                            module: native.owner().module.clone(),
-                            module_version: Some(native.owner().module_version.clone()),
-                            original_ordinal: 9001,
-                            binder,
-                        },
-                    }];
-                    let observed = AuthenticatedTargetImports::issue(
-                        &prepared,
-                        &accepted,
-                        &validation.inventory,
-                    )
-                    .unwrap();
-                    let demanded = inputs
+                    let error = inputs
                         .artifacts()
                         .inventory()
                         .select_native_target(
                             physical.physical_cohort(),
-                            observed,
+                            observe(
+                                native,
+                                9001,
+                                Some(native.owner().module_version.clone()),
+                                &validation.inventory,
+                            ),
                             None,
                             None,
                             &[],
                             &BTreeMap::new(),
                             &mut validation,
                         )
-                        .expect("restored private Full survives certification and actual demand");
-                    assert!(demanded.artifacts().selected_native_groups().is_empty());
-                    let groups = demanded.resolve().unwrap().groups().clone();
-                    let expected = offer
+                        .err()
+                        .expect("private Full permission does not issue a direct root choice");
+                    assert!(
+                        matches!(&error, CompileError::ArtifactInventory(error)
+                        if error.native_refusal == Some(
+                            crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceMissing {
+                                owner: entry.descriptor.owner.clone(),
+                            }
+                        )),
+                        "unexpected direct-root refusal: {error:?}"
+                    );
+                }
+
+                // Fresh output may consume private availability through its actual
+                // Source dependency without promoting the input's compiler role.
+                let stage = crate::certified_products::tests::issue_retained_core_consumer_fixture(
+                    inputs,
+                    consumer_entry.clone(),
+                    &mut validation,
+                );
+                if index != 0 {
+                    let error = stage.err().expect(
+                        "TYPE-only Partial and Empty cannot advertise the consumer's dependency",
+                    );
+                    assert!(
+                        matches!(&error, CompileError::CompilerEvidence(error)
+                            if matches!(error.as_ref(), CertificationError::SourceOutsideCompilerSelection {
+                                owner, requested_version, ..
+                            } if owner == &entry.descriptor.owner
+                                && requested_version == &native.owner().module_version)),
+                        "unexpected dependency refusal for mode {index}: {error:?}"
+                    );
+                } else {
+                    let stage = stage.expect("restored Full supplies a fresh consumer dependency");
+                    let consumer_offer = stage
+                        .compiler_inputs()
+                        .native_offers()
+                        .iter()
+                        .find(|issued| issued.original() == consumer_entry.descriptor.id)
+                        .unwrap();
+                    let groups = consumer_offer.issued_group_carriers().unwrap();
+                    let expected_dependency = offer
                         .issued_group_carriers()
                         .unwrap()
                         .keys()
-                        .cloned()
+                        .copied()
                         .filter(|group| {
                             group.binding.artifact() == entry.descriptor.id
                                 && group.original_ordinal == 9001
                         })
-                        .collect::<BTreeSet<_>>();
-                    assert_eq!(expected.len(), 1);
-                    assert_eq!(groups.into_iter().collect::<BTreeSet<_>>(), expected);
+                        .collect::<Vec<_>>();
+                    let [expected_dependency] = expected_dependency.as_slice() else {
+                        panic!("one exact restored dependency binding");
+                    };
+                    let consumer_group = groups
+                        .keys()
+                        .copied()
+                        .find(|group| {
+                            group.binding.artifact() == consumer_entry.descriptor.id
+                                && group.original_ordinal == 7
+                        })
+                        .unwrap();
+                    let expected = BTreeSet::from([consumer_group, *expected_dependency]);
+                    assert_eq!(groups.keys().copied().collect::<BTreeSet<_>>(), expected);
+                    assert!(consumer_offer
+                        .custody_snapshot()
+                        .binding_dependencies()
+                        .unwrap()
+                        .contains(&(
+                            ArtifactBindingNode::Group(consumer_group),
+                            ArtifactBindingNode::Group(*expected_dependency),
+                            crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                                dependent_ordinal: 7,
+                                required_ordinal: 9001,
+                            },
+                        )));
+                    assert!(stage
+                        .compiler_inputs()
+                        .role_projection()
+                        .roles()
+                        .iter()
+                        .all(|role| { role.original().is_none() }));
+                    let demanded = inputs
+                        .artifacts()
+                        .inventory()
+                        .select_native_target(
+                            stage.physical_cohort(),
+                            observe(&consumer, 7, None, &validation.inventory),
+                            None,
+                            None,
+                            &[],
+                            &BTreeMap::new(),
+                            &mut validation,
+                        )
+                        .expect("actual current-consumer demand retains the restored dependency");
+                    assert_eq!(
+                        demanded
+                            .resolve()
+                            .unwrap()
+                            .groups()
+                            .iter()
+                            .copied()
+                            .collect::<BTreeSet<_>>(),
+                        expected
+                    );
+                    assert!(inputs.artifacts().selected_native_groups().is_empty());
                 }
             }
             assert_eq!(

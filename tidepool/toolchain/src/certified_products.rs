@@ -26218,6 +26218,42 @@ pub(crate) mod tests {
         );
     }
 
+    pub(crate) fn issue_retained_core_consumer_fixture(
+        input: &crate::declaration_context::RequestCompilerInputs,
+        entry: Arc<crate::artifact_inventory::ArtifactEntry>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<crate::declaration_context::CapturedCompilerStage, crate::CompileError> {
+        let evidence = |error| crate::CompileError::CompilerEvidence(Box::new(error));
+        let crate::artifact_inventory::ArtifactPayload::Original(consumer) = &entry.payload else {
+            return Err(evidence(CertificationError::Mismatch(
+                "retained Core consumer fixture requires Original output",
+            )));
+        };
+        let mut selection =
+            CertifiedSourceSelection::from_compiler_inputs(input, &validation.inventory)
+                .map_err(evidence)?;
+        selection
+            .admit_current(
+                consumer.owner(),
+                ProductOrigin::RetainedCore,
+                consumer.module_interface(),
+                &validation.inventory,
+            )
+            .map_err(evidence)?;
+        selection
+            .bind_produced_originals(
+                &IssuedGroupCandidates::bind(Arc::from([]), &[consumer.clone()])
+                    .map_err(evidence)?,
+            )
+            .map_err(evidence)?;
+        crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            input.artifacts(),
+            vec![entry],
+            validation,
+        )
+    }
+
     pub(crate) fn assert_request_private_product_uses_carried_dependency(
         source: &crate::declaration_context::RequestCompilerInputs,
         consumer: &crate::recovery_artifacts::CertifiedRecoveryProduct,
@@ -26274,27 +26310,10 @@ pub(crate) mod tests {
             .artifacts()
             .artifact_ids()
             .contains(&entry.descriptor.id));
-        let operation = Arc::new(InventoryOperation::new(Default::default()));
-        let mut selection =
-            CertifiedSourceSelection::from_compiler_inputs(input, &operation).unwrap();
-        selection
-            .admit_current(
-                consumer.owner(),
-                ProductOrigin::RetainedCore,
-                consumer.module_interface(),
-                &operation,
-            )
-            .unwrap();
-        selection
-            .bind_produced_originals(
-                &IssuedGroupCandidates::bind(Arc::from([]), &[consumer.clone()]).unwrap(),
-            )
-            .unwrap();
-        let stage = crate::declaration_context::CapturedCompilerStage::issue(
-            &mut selection,
-            input.artifacts(),
-            vec![entry.clone()],
-            &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
+        let stage = issue_retained_core_consumer_fixture(
+            input,
+            entry.clone(),
+            &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
         let completed = stage.compiler_inputs().as_ref().clone();
