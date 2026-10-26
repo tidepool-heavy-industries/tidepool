@@ -47,6 +47,7 @@ fn configure_startup(config: &mut super::ActorHostConfig, entry: &str, memory: &
     )
     .unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.launch.embedded = config.embedded.clone();
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec!["StartupSpec".into()];
         project.haskell.spec = Some(format!("StartupSpec.{entry}"));
