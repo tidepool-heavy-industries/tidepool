@@ -1532,12 +1532,70 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
     }
     let left_source = close_source(&left, &[left_proof], &mut offer_validation).unwrap();
     let right_source = close_source(&right, &[right_proof], &mut offer_validation).unwrap();
-    assert!(matches!(
-        left_source.compiler_source_support().merge(right_source.compiler_source_support()),
-        Err(CompileError::ArtifactInventory(error))
-            if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
-                if artifact == native_entry.descriptor.id)
-    ));
+    let left_support = left_source.compiler_source_support();
+    let right_support = right_source.compiler_source_support();
+    assert_eq!(left_support.projection(), right_support.projection());
+    assert_ne!(
+        left_support.recorded_input_decisions(),
+        right_support.recorded_input_decisions()
+    );
+    for (receiving, incoming, expected_view) in [
+        (left_support, right_support, &left),
+        (right_support, left_support, &right),
+    ] {
+        let joined = receiving.merge(incoming).unwrap();
+        assert_eq!(
+            joined.recorded_input_decisions(),
+            receiving.recorded_input_decisions()
+        );
+        assert_eq!(
+            scoped_execution_roots(joined.artifacts()),
+            scoped_execution_roots(expected_view)
+        );
+        let row = joined
+            .native_availability()
+            .issued_row(native_entry.descriptor.id)
+            .unwrap();
+        assert_eq!(row.contributions.len(), 2);
+        for source in [receiving, incoming] {
+            let issued = source
+                .native_availability()
+                .issued_row(native_entry.descriptor.id)
+                .unwrap();
+            assert!(issued.contributions.iter().all(|contribution| row
+                .contributions
+                .iter()
+                .any(|retained| retained.same_acquisition(contribution))));
+        }
+    }
+    // Change compiler roles without withdrawing either issuer's group roots.
+    // With no Original winner, the independent exact roots remain ambiguous.
+    let types = [left_support, right_support].map(|source| {
+        let types = source.for_source_owners(&BTreeSet::new()).unwrap();
+        assert!(types
+            .projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(types.recorded_input_decisions().is_empty());
+        assert_eq!(
+            scoped_execution_roots(types.artifacts()),
+            scoped_execution_roots(source.artifacts())
+        );
+        types
+    });
+    for (receiving, incoming) in [(&types[0], &types[1]), (&types[1], &types[0])] {
+        let error = receiving
+            .merge(incoming)
+            .err()
+            .expect("TYPE-only roles cannot choose between independently issued group roots");
+        assert!(
+            matches!(&error, CompileError::ArtifactInventory(error)
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                    if artifact == native_entry.descriptor.id)),
+            "unexpected TYPE-only merge refusal: {error:?}"
+        );
+    }
 }
 
 #[test]
