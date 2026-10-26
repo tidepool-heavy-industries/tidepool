@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, worldValueTypeHistories, worldCapturedValueTypeHistories, worldHistoricalValueTypeSelections, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
+module RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldCarriedLiteralBash, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries, worldValueTypeHistories, worldCapturedValueTypeHistories, worldHistoricalValueTypeSelections, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
 
 import Tidepool.RequestCompletion (finishCompletion, captureCompletion, completionResult, completionFailures, completionAsync, BodyOutcome(..), CleanupStage(CompilerScopeRestore), cleanupStage, cleanupException)
 import Tidepool.WorkerServer (runWorkerLoop, WorkerResponse(..), requireNativeDemandOwner)
@@ -2549,12 +2549,20 @@ withCapturedWorldContext use = withTiming $ withScratch $ \work ->
 -- The lower compiler probe intentionally stops before certification; it tests
 -- TYPE/Name preservation, never executable readiness or exchange permissions.
 worldCarriedImportTypes :: IO ()
-worldCarriedImportTypes = withTiming $ withScratch $ \work ->
+worldCarriedImportTypes = worldCarriedImportFixture False
+
+worldCarriedLiteralBash :: IO ()
+worldCarriedLiteralBash = worldCarriedImportFixture True
+
+worldCarriedImportFixture :: Bool -> IO ()
+worldCarriedImportFixture literalBash = withTiming $ withScratch $ \work ->
   bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
     let rootA = work </> "producer"
         rootB = work </> "consumer"
         definingNames = ["CanonicalPartial", "CanonicalPartialConsumer"]
         facadeNames = ["CanonicalPartialFacade", "CanonicalPartialFacadeAgain"]
+        bashOwners = ["Tidepool.Command.Types", "Tidepool.Data.Text"]
+        bashSources = ["Tidepool/QQ/Bash.hs"]
         names = definingNames ++ facadeNames
         carriedLine = "import qualified CanonicalPartialFacadeAgain"
         observation = unlines
@@ -2564,7 +2572,8 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
           ,"__tidepool_inspection_row :: Data.Proxy.Proxy ('[] :: [Type -> Type])"
           ,"__tidepool_inspection_row = Data.Proxy.Proxy"]
         template = unlines
-          ["{-# LANGUAGE DataKinds, FlexibleContexts #-}","{{CELL_PRAGMAS}}","module CellCheck where"
+          [if literalBash then "{-# LANGUAGE DataKinds, FlexibleContexts, QuasiQuotes #-}"
+            else "{-# LANGUAGE DataKinds, FlexibleContexts #-}","{{CELL_PRAGMAS}}","module CellCheck where"
           ,"import Prelude","import Control.Monad.Freer (Eff)","{{CELL_IMPORTS}}"
           ,"__tidepoolInEffectRow :: Eff '[] value -> Eff '[] value"
           ,"__tidepoolInEffectRow = id","{{CELL_DECLS}}"
@@ -2580,21 +2589,35 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
           _ -> fail "carried-import fixture lost the actual producer parcel"
     mapM_ (createDirectoryIfMissing True) [rootA,rootB]
     forM_ definingNames $ \name -> copyFile ("test-source-boot/fixtures" </> name ++ ".hs") (rootA </> name ++ ".hs")
-    writeFile (rootA </> "CanonicalPartialFacade.hs") $ unlines
-      ["module CanonicalPartialFacade (module CanonicalPartialConsumer) where"
-      ,"import CanonicalPartialConsumer"]
+    writeFile (rootA </> "CanonicalPartialFacade.hs") $ if literalBash then unlines
+      ["module CanonicalPartialFacade (module CanonicalPartialConsumer, bash, retainedCommand) where"
+      ,"import CanonicalPartialConsumer", "import Tidepool.QQ.Bash (bash)"
+      ,"import qualified Tidepool.Command.Types as Command"
+      ,"import qualified Tidepool.Data.Text as Text"
+      ,"retainedCommand = Command.bashCommand (Text.pack \"literal producer\")"]
+      else unlines ["module CanonicalPartialFacade (module CanonicalPartialConsumer) where"
+        ,"import CanonicalPartialConsumer"]
     writeFile (rootA </> "CanonicalPartialFacadeAgain.hs") $ unlines
       ["module CanonicalPartialFacadeAgain (module CanonicalPartialFacade) where"
       ,"import CanonicalPartialFacade"]
+    libraryRoot <- lookupEnv "TIDEPOOL_PRELUDE_DIR" >>= maybe
+      (fail "missing declared literal Bash library source") pure
+    effectsRoot <- lookupEnv "TIDEPOOL_TEST_EFFECTS_DIR" >>= maybe
+      (fail "missing declared effect source") pure
     original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-      Nothing (rootA </> "CanonicalPartialFacadeAgain.hs") [rootA] Nothing
+      Nothing (rootA </> "CanonicalPartialFacadeAgain.hs") (if literalBash then [rootA,libraryRoot,effectsRoot] else [rootA]) Nothing
     fixture <- capturePreparedFixture rootA original
-    (scopePath,parcel) <- writeGenuineExecutionScopeWithContext names names rootA fixture
+    (scopePath,parcel) <- writeGenuineExecutionScopeWithContext (names ++ if literalBash then bashOwners else []) names rootA fixture
     scope <- readExactScope scopePath >>= either fail pure
     producer <- rawWorldHex (scopeProducerSha256 scope)
     profile <- rawWorldHex rootedProfileIdentity
     carried <- lexical [carriedLine] parcel
-    (packetPath,_) <- writeWorldCellAdmissionPacket handles rootB producer profile carried
+    (packetPath,_) <- if literalBash
+      then do
+        libraryFiles <- captureWorldSourceFiles libraryRoot libraryRoot
+        writeWorldCellAdmissionPacketOmittingSources handles rootB producer profile carried []
+          (map (BS8.unpack . fst) libraryFiles)
+      else writeWorldCellAdmissionPacket handles rootB producer profile carried
     owner <- newExactInputOwner
     facts <- readWorldInputsWithOwner owner packetPath
     -- These are distinct admitted Originals that expose one defining Name.
@@ -2608,34 +2631,39 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
     unless (all (\root -> all (\name -> not (Map.member (name ++ ".hs") (worldSourceFiles root))) names)
         (worldSourceRoots (worldInputsSources facts)))
       (fail "source-less World import fixture accidentally captured producer sources")
-    operandPacket <- newPacketDirectory work "carried-operand-fixture"
-    BS.writeFile (operandPacket </> "request.cbor")
-      (encode (TList [TString "TPSOURCEBOOTHISTORICALVALUETYPE1"]))
-    operandCompletion <- runPacketProducer WorldValueTypeProducer operandPacket
-    operandBytes <- completedPacketOutput operandCompletion (operandPacket </> "world-value-types.cbor")
-    operandTerms <- worldFixtureTerm operandBytes >>= \term -> case term of
-      TList [TString "TPCWHISTORICALTYPEFIXTURE1",_,first,second] -> pure [first,second]
-      _ -> fail "carried operand fixture omitted genuine historical selections"
-    operands <- forM (zip [601,603 :: Int] operandTerms) $ \(generation,term) -> do
-      sealed <- sealWorldValueDescriptor handles term
-      let operandPath = rootB </> ("operand-" ++ show generation ++ ".cbor")
-          body = encode sealed
-          digest = SHA.hash body
-      BS.writeFile operandPath body
-      admitted <- readWorldCellOperandWithOwner owner (prHscEnv (pprPipelineResult original)) facts operandPath digest
-      let artifact = worldCellOperandInterface admitted
-          leaf = (exactUnit artifact,exactModule artifact)
-          types = worldCellOperandTypes admitted
-      unless (leaf == ("main","Tidepool.Session.Val.G" ++ show generation)
-          && Map.keysSet types == Set.fromList [leaf,("main","Module")])
-        (fail "carried operand control lost its exact leaf or passive nominal TYPE dependency")
-      dependency <- maybe (fail "carried operand omitted nominal dependency") pure (Map.lookup ("main","Module") types)
-      pure (WorldCellOperandRequest operandPath digest,artifact,worldTypeEntryArtifact dependency)
-    (matching,foreignOperand,operandModule) <- case operands of
-      [(first,firstLeaf,firstDependency),(second,secondLeaf,secondDependency)]
-        | firstLeaf /= secondLeaf, firstDependency /= secondDependency ->
-            pure (first,second,exactModule firstLeaf)
-      _ -> fail "carried operand controls collapsed distinct issued leaves or historical TYPE versions"
+    when literalBash $ unless (all (\root -> all (\path -> not (Map.member path (worldSourceFiles root))) bashSources)
+        (worldSourceRoots (worldInputsSources facts)))
+      (fail "literal Bash retained-source control accidentally captured audited provider source")
+    operandSelection <- if literalBash then pure Nothing else do
+      operandPacket <- newPacketDirectory work "carried-operand-fixture"
+      BS.writeFile (operandPacket </> "request.cbor")
+        (encode (TList [TString "TPSOURCEBOOTHISTORICALVALUETYPE1"]))
+      operandCompletion <- runPacketProducer WorldValueTypeProducer operandPacket
+      operandBytes <- completedPacketOutput operandCompletion (operandPacket </> "world-value-types.cbor")
+      operandTerms <- worldFixtureTerm operandBytes >>= \term -> case term of
+        TList [TString "TPCWHISTORICALTYPEFIXTURE1",_,first,second] -> pure [first,second]
+        _ -> fail "carried operand fixture omitted genuine historical selections"
+      operands <- forM (zip [601,603 :: Int] operandTerms) $ \(generation,term) -> do
+        sealed <- sealWorldValueDescriptor handles term
+        let operandPath = rootB </> ("operand-" ++ show generation ++ ".cbor")
+            body = encode sealed
+            digest = SHA.hash body
+        BS.writeFile operandPath body
+        admitted <- readWorldCellOperandWithOwner owner (prHscEnv (pprPipelineResult original)) facts operandPath digest
+        let artifact = worldCellOperandInterface admitted
+            leaf = (exactUnit artifact,exactModule artifact)
+            types = worldCellOperandTypes admitted
+        unless (leaf == ("main","Tidepool.Session.Val.G" ++ show generation)
+            && Map.keysSet types == Set.fromList [leaf,("main","Module")])
+          (fail "carried operand control lost its exact leaf or passive nominal TYPE dependency")
+        dependency <- maybe (fail "carried operand omitted nominal dependency") pure (Map.lookup ("main","Module") types)
+        pure (WorldCellOperandRequest operandPath digest,artifact,worldTypeEntryArtifact dependency)
+      (matching,foreignOperand,operandModule) <- case operands of
+        [(first,firstLeaf,firstDependency),(second,secondLeaf,secondDependency)]
+          | firstLeaf /= secondLeaf, firstDependency /= secondDependency ->
+              pure (first,second,exactModule firstLeaf)
+        _ -> fail "carried operand controls collapsed distinct issued leaves or historical TYPE versions"
+      pure (Just (matching,foreignOperand,operandModule,operandTerms))
     rooted <- canonicalizePath rootB
     withRootedCompilerEnvironment rooted $ withQuietStdout $
       withResidentCompilerScopes [] $ \runScope -> do
@@ -2658,6 +2686,11 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
           forM_ typeOnlyCounters $ \counter ->
             unless (fmap sum (capturedDiagnosticCounterValues counterEvidence counter) == Just 0)
               (fail ("TYPE-only carried import demanded Core or lacked complete evidence: " ++ counter))
+          when literalBash $ forM_ [("literal-bash-cold",119),("literal-bash-warm",120)] $ \(label,generation) -> do
+            quoted <- compileDeclaration compiler facts reference rootB template Nothing label generation
+              "retainedLiteral = [CanonicalPartialFacadeAgain.bash|$VAR `literal`|]"
+            unless (isJust (completedCompilerWorldCompletion quoted))
+              (fail "source-less literal Bash lost its completed World owner")
           completed <- compileDeclaration compiler facts reference rootB template Nothing "nominal" 121
             "retainedCall local = CanonicalPartialFacadeAgain.usePartial local"
           completion <- maybe (fail "carried import lost its World completion") pure
@@ -2679,197 +2712,198 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
             _ -> fail "finalized imported global lost its exact Name/Original reference"
           unless (all ((/= "local") . occNameString . nameOccName) (Map.keys bindings))
             (fail "nominal external-reference recorder retained a locally bound variable")
-        -- Checked operand authority crosses the carried lexical projection;
-        -- each selected operand also carries its distinct nominal TYPE dependency.
-        let operandTemplate = unlines
-              [if line == "{{CELL_IMPORTS}}"
-                then "import qualified " ++ operandModule ++ " as FixtureOperand\n" ++ line
-                else line | line <- lines template]
-        forM_ [("cold-missing-operand",Nothing,False)
-              ,("cold-foreign-operand",Just foreignOperand,False)
-              ,("matching-operand",Just matching,True)
-              ,("missing-operand",Nothing,False)
-              ,("foreign-operand",Just foreignOperand,False)] $ \(label,operand,accepted) ->
+        forM_ operandSelection $ \(matching,foreignOperand,operandModule,operandTerms) -> do
+          -- Checked operand authority crosses the carried lexical projection;
+          -- each selected operand also carries its distinct nominal TYPE dependency.
+          let operandTemplate = unlines
+                [if line == "{{CELL_IMPORTS}}"
+                  then "import qualified " ++ operandModule ++ " as FixtureOperand\n" ++ line
+                  else line | line <- lines template]
+          forM_ [("cold-missing-operand",Nothing,False)
+                ,("cold-foreign-operand",Just foreignOperand,False)
+                ,("matching-operand",Just matching,True)
+                ,("missing-operand",Nothing,False)
+                ,("foreign-operand",Just foreignOperand,False)] $ \(label,operand,accepted) ->
+            runScope (pure ()) $ \compiler -> do
+              reference <- scopedEnsureWorld compiler
+                (ExactInputsRequest (worldInputsIdentity facts) (CompleteExactInputs packetPath)) >>= requireReady
+              (outcome,diagnostics) <- captureDiagnostics $ try $ do
+                let expressionRecipe = WorldCellRecipe "(1 :: Int)" operandTemplate []
+                expressionArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity facts)
+                  reference expressionRecipe operand (rootB </> (label ++ "-expression.cbor")))]
+                _ <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest expressionArgs) >=> finishCompletion)
+                  runBoundWorldCellPlan
+                compileDeclaration compiler facts reference rootB operandTemplate operand label 151
+                  "operandProbe = (1 :: Int)"
+              case (accepted,outcome) of
+                (True,Right _) -> pure ()
+                (True,Left failure) -> hPutStrLn stderr diagnostics >> fail (label ++ ": " ++ show (failure :: SomeException))
+                (False,Right _) -> fail (label ++ " borrowed another operand's lexical authority")
+                (False,Left failure)
+                  | fromException failure == Just WorldCellUnavailable
+                      && "import frontend lacks its admitted selected module" `isInfixOf` diagnostics
+                      && operandModule `isInfixOf` diagnostics ->
+                      hPutStrLn stderr (label ++ ": exact selected interface unavailable")
+                  | otherwise -> hPutStrLn stderr diagnostics >> fail (label ++ ": " ++ show failure)
+              scopedRunGhc compiler $ do
+                environment <- getSession
+                found <- liftIO (findImportedModule environment (mkModuleName operandModule) NoPkgQual)
+                case found of
+                  Found {} -> liftIO (fail (label ++ ": operation leaked its operand into caller Finder"))
+                  _ -> pure ()
+          -- The imported operand must survive name planning as well as actual
+          -- compilation. Source qualification must not downsweep the generated
+          -- operand/prefix imports as ordinary workspace files.
+          let sourceRoot = rootB </> "operand-source"
+          createDirectory sourceRoot
+          sourceFiles <- forM names $ \name -> do
+            bytes <- BS.readFile (rootA </> name ++ ".hs")
+            pure (BS8.pack (name ++ ".hs"),bytes)
+          (sourcePath,_) <- writeWorldCellAdmissionPacketWithSources handles sourceRoot producer profile carried sourceFiles
+          sourceOwner <- newExactInputOwner
+          sourceFacts <- readWorldInputsWithOwner sourceOwner sourcePath
+          forM_ [(0,"input"),(1,"sessionInput")] $ \(exposure,alias) -> do
+            sealed <- sealWorldValueDescriptor handles (head operandTerms)
+            exposed <- case sealed of
+              TList (magic:_:fields) -> pure (TList (magic:TInt exposure:fields))
+              _ -> fail "operand fixture lost its exposure field"
+            let descriptor = sourceRoot </> (alias ++ ".cbor")
+                bytes = encode exposed
+                selectedOperand = WorldCellOperandRequest descriptor (SHA.hash bytes)
+            BS.writeFile descriptor bytes
+            selected <- readWorldCellOperandWithOwner owner (prHscEnv (pprPipelineResult original)) facts descriptor (SHA.hash bytes)
+            let aliasTemplate = unlines [if line == "{{CELL_DECLS}}"
+                  then "class TidepoolCellExpression value where { __tidepoolCellExpression :: value -> Eff '[] () }\n"
+                    ++ "instance TidepoolCellExpression Int where { __tidepoolCellExpression value = value `seq` pure () }\n"
+                    ++ alias ++ " = FixtureOperand." ++ T.unpack (symbolOccurrence (worldBindingSymbol (worldCellOperandBinding selected))) ++ "\n" ++ line
+                  else line | line <- lines operandTemplate]
+            forM_ [("plain",packetPath,facts,""),("source",sourcePath,sourceFacts,"import CanonicalPartialConsumer\n")] $
+              \(label,selectedPath,selectedFacts,imports) -> runScope (pure ()) $ \compiler -> do
+                reference <- scopedEnsureWorld compiler (ExactInputsRequest (worldInputsIdentity selectedFacts)
+                  (CompleteExactInputs selectedPath)) >>= requireReady
+                let directory = sourceRoot </> (label ++ "-" ++ alias)
+                    recipe = WorldCellRecipe (imports ++ "operandPrefix = (1 :: Int)\n" ++ alias ++ " `seq` operandPrefix") aliasTemplate []
+                createDirectory directory
+                planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity selectedFacts)
+                  reference recipe (Just selectedOperand) (directory </> "plan.cbor"))]
+                plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs) >=> finishCompletion) runBoundWorldCellPlan
+                expressionNames <- case deserialiseFromBytes decodeTerm (BL.fromStrict plan) of
+                  Right (remaining,TList [TString "TPCELLPLAN6",_,_,_,_,_,_,_,_,_,TList rows]) | BL.null remaining ->
+                    forM rows $ \row -> case row of
+                      TList [TInt ordinal,TString name] -> pure (ordinal,T.unpack name)
+                      _ -> fail "operand expression plan lost its name"
+                  _ -> fail "operand expression plan lost its receipt"
+                let ordinal = if null imports then 1 else 2
+                expressionName <- maybe (fail "operand expression plan lost its ordinal") pure (lookup ordinal expressionNames)
+                let slots = (if null imports then [] else [(0,PlannedPrologue 161)])
+                      ++ [(fromIntegral (ordinal-1),PlannedDeclaration 162),(fromIntegral ordinal,PlannedExpression 163 expressionName)]
+                    question = WorldCellPrepareRequest (worldInputsIdentity selectedFacts) reference recipe (Just selectedOperand)
+                      plan (BS.replicate 32 25) 161 slots directory (directory </> "prepared.cbor")
+                args <- decodeWorldArgs [WorldCellPrepare question]
+                (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
+                  -- Bound request admission has already checked the plan and
+                  -- captured this operand. Stages must consume that same owner.
+                  removeFile descriptor
+                  completed <- (prepareWorldCell request >>= either (fail . show) pure)
+                    `finally` BS.writeFile descriptor bytes
+                  unless (length completed == length slots) (fail "operand expression lost a completed stage")
+                  inputs <- maybe (fail "operand expression lost its input facts") pure
+                    (preparedCompilationWorldInputs (last completed))
+                  unless (any ((== operandModule) . exactModule . fst) (worldCellTypeInterfaces inputs))
+                    (fail "operand expression lost its exact TYPE interface")
+                  when (label == "source") $ do
+                    selections <- forM completed $ \completion -> do
+                      current <- maybe (fail "source stage lost its input facts") pure
+                        (preparedCompilationWorldInputs completion)
+                      case worldCellSourceSelection current of
+                        Nothing -> pure []
+                        Just selection -> do
+                          let evidence = selectedOriginalEvidence selection
+                              selectedOwners = Set.fromList [key | (key,_,_,_) <- selectedOriginalRows selection]
+                              incoming = [(qualifier,name,boot,unit)
+                                | ((sourceUnit,source,_),edges) <- worldCellExactImports current
+                                , (sourceUnit,source) `Set.notMember` selectedOwners
+                                , (qualifier,name,boot,unit) <- edges
+                                , (unit,name) `Set.member` selectedOwners]
+                          forM_ incoming $ \(qualifier,name,boot,unit) -> do
+                            source <- case [dependencyModuleSource node | node <- dependencyModules evidence
+                                , dependencyModuleUnit node == unit,dependencyModuleName node == name
+                                , dependencyModuleBoot node == boot] of
+                              [path] -> pure path
+                              _ -> fail "incoming canonical import lost its unique source owner"
+                            case [resolution | resolution <- dependencyResolutions evidence
+                                , dependencyResolutionQualifier resolution == qualifier
+                                , dependencyResolutionModule resolution == name
+                                , dependencyResolutionBoot resolution == boot] of
+                              [resolution] | dependencyResolutionSelected resolution == Just source
+                                , source `elem` dependencyResolutionCandidates resolution -> pure ()
+                              _ -> fail ("incoming canonical import omitted its resolution witness: " ++ name)
+                          pure incoming
+                    unless (any (any (\(_,name,_,_) -> name == "CanonicalPartialFacadeAgain")) selections)
+                      (fail "source history omitted its standalone canonical root")
+                  mapM_ (commitPreparedWorldDependencies request) completed
+          -- Canonical TYPE dependencies remain authenticated inputs while a
+          -- fresh source module crosses prologue, declaration and execution.
+          let memoRoot = rootB </> "source-memo"
+              freshSource = BS8.unlines
+                ["module CarriedFreshSource where", "import CanonicalPartialFacadeAgain ()"
+                ,"freshCall :: Int -> Int", "freshCall value = value + 1"]
+          createDirectory memoRoot
+          (_,typeParcel) <- writeGenuineMetadataScopeWithContext
+            [last facadeNames] [last facadeNames] rootA fixture
+          memoParcel <- lexical [carriedLine] typeParcel
+          (memoPath,_) <- writeWorldCellAdmissionPacketWithSources handles memoRoot producer profile memoParcel
+            [("CarriedFreshSource.hs",freshSource)]
+          memoOwner <- newExactInputOwner
+          memoFacts <- readWorldInputsWithOwner memoOwner memoPath
           runScope (pure ()) $ \compiler -> do
-            reference <- scopedEnsureWorld compiler
-              (ExactInputsRequest (worldInputsIdentity facts) (CompleteExactInputs packetPath)) >>= requireReady
-            (outcome,diagnostics) <- captureDiagnostics $ try $ do
-              let expressionRecipe = WorldCellRecipe "(1 :: Int)" operandTemplate []
-              expressionArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity facts)
-                reference expressionRecipe operand (rootB </> (label ++ "-expression.cbor")))]
-              _ <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest expressionArgs) >=> finishCompletion)
-                runBoundWorldCellPlan
-              compileDeclaration compiler facts reference rootB operandTemplate operand label 151
-                "operandProbe = (1 :: Int)"
-            case (accepted,outcome) of
-              (True,Right _) -> pure ()
-              (True,Left failure) -> hPutStrLn stderr diagnostics >> fail (label ++ ": " ++ show (failure :: SomeException))
-              (False,Right _) -> fail (label ++ " borrowed another operand's lexical authority")
-              (False,Left failure)
-                | fromException failure == Just WorldCellUnavailable
-                    && "import frontend lacks its admitted selected module" `isInfixOf` diagnostics
-                    && operandModule `isInfixOf` diagnostics ->
-                    hPutStrLn stderr (label ++ ": exact selected interface unavailable")
-                | otherwise -> hPutStrLn stderr diagnostics >> fail (label ++ ": " ++ show failure)
-            scopedRunGhc compiler $ do
-              environment <- getSession
-              found <- liftIO (findImportedModule environment (mkModuleName operandModule) NoPkgQual)
-              case found of
-                Found {} -> liftIO (fail (label ++ ": operation leaked its operand into caller Finder"))
-                _ -> pure ()
-        -- The imported operand must survive name planning as well as actual
-        -- compilation. Source qualification must not downsweep the generated
-        -- operand/prefix imports as ordinary workspace files.
-        let sourceRoot = rootB </> "operand-source"
-        createDirectory sourceRoot
-        sourceFiles <- forM names $ \name -> do
-          bytes <- BS.readFile (rootA </> name ++ ".hs")
-          pure (BS8.pack (name ++ ".hs"),bytes)
-        (sourcePath,_) <- writeWorldCellAdmissionPacketWithSources handles sourceRoot producer profile carried sourceFiles
-        sourceOwner <- newExactInputOwner
-        sourceFacts <- readWorldInputsWithOwner sourceOwner sourcePath
-        forM_ [(0,"input"),(1,"sessionInput")] $ \(exposure,alias) -> do
-          sealed <- sealWorldValueDescriptor handles (head operandTerms)
-          exposed <- case sealed of
-            TList (magic:_:fields) -> pure (TList (magic:TInt exposure:fields))
-            _ -> fail "operand fixture lost its exposure field"
-          let descriptor = sourceRoot </> (alias ++ ".cbor")
-              bytes = encode exposed
-              selectedOperand = WorldCellOperandRequest descriptor (SHA.hash bytes)
-          BS.writeFile descriptor bytes
-          selected <- readWorldCellOperandWithOwner owner (prHscEnv (pprPipelineResult original)) facts descriptor (SHA.hash bytes)
-          let aliasTemplate = unlines [if line == "{{CELL_DECLS}}"
-                then "class TidepoolCellExpression value where { __tidepoolCellExpression :: value -> Eff '[] () }\n"
-                  ++ "instance TidepoolCellExpression Int where { __tidepoolCellExpression value = value `seq` pure () }\n"
-                  ++ alias ++ " = FixtureOperand." ++ T.unpack (symbolOccurrence (worldBindingSymbol (worldCellOperandBinding selected))) ++ "\n" ++ line
-                else line | line <- lines operandTemplate]
-          forM_ [("plain",packetPath,facts,""),("source",sourcePath,sourceFacts,"import CanonicalPartialConsumer\n")] $
-            \(label,selectedPath,selectedFacts,imports) -> runScope (pure ()) $ \compiler -> do
-              reference <- scopedEnsureWorld compiler (ExactInputsRequest (worldInputsIdentity selectedFacts)
-                (CompleteExactInputs selectedPath)) >>= requireReady
-              let directory = sourceRoot </> (label ++ "-" ++ alias)
-                  recipe = WorldCellRecipe (imports ++ "operandPrefix = (1 :: Int)\n" ++ alias ++ " `seq` operandPrefix") aliasTemplate []
-              createDirectory directory
-              planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity selectedFacts)
-                reference recipe (Just selectedOperand) (directory </> "plan.cbor"))]
-              plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs) >=> finishCompletion) runBoundWorldCellPlan
-              expressionNames <- case deserialiseFromBytes decodeTerm (BL.fromStrict plan) of
-                Right (remaining,TList [TString "TPCELLPLAN6",_,_,_,_,_,_,_,_,_,TList rows]) | BL.null remaining ->
-                  forM rows $ \row -> case row of
-                    TList [TInt ordinal,TString name] -> pure (ordinal,T.unpack name)
-                    _ -> fail "operand expression plan lost its name"
-                _ -> fail "operand expression plan lost its receipt"
-              let ordinal = if null imports then 1 else 2
-              expressionName <- maybe (fail "operand expression plan lost its ordinal") pure (lookup ordinal expressionNames)
-              let slots = (if null imports then [] else [(0,PlannedPrologue 161)])
-                    ++ [(fromIntegral (ordinal-1),PlannedDeclaration 162),(fromIntegral ordinal,PlannedExpression 163 expressionName)]
-                  question = WorldCellPrepareRequest (worldInputsIdentity selectedFacts) reference recipe (Just selectedOperand)
-                    plan (BS.replicate 32 25) 161 slots directory (directory </> "prepared.cbor")
-              args <- decodeWorldArgs [WorldCellPrepare question]
-              (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
-                -- Bound request admission has already checked the plan and
-                -- captured this operand. Stages must consume that same owner.
-                removeFile descriptor
-                completed <- (prepareWorldCell request >>= either (fail . show) pure)
-                  `finally` BS.writeFile descriptor bytes
-                unless (length completed == length slots) (fail "operand expression lost a completed stage")
-                inputs <- maybe (fail "operand expression lost its input facts") pure
-                  (preparedCompilationWorldInputs (last completed))
-                unless (any ((== operandModule) . exactModule . fst) (worldCellTypeInterfaces inputs))
-                  (fail "operand expression lost its exact TYPE interface")
-                when (label == "source") $ do
-                  selections <- forM completed $ \completion -> do
-                    current <- maybe (fail "source stage lost its input facts") pure
-                      (preparedCompilationWorldInputs completion)
-                    case worldCellSourceSelection current of
-                      Nothing -> pure []
-                      Just selection -> do
-                        let evidence = selectedOriginalEvidence selection
-                            selectedOwners = Set.fromList [key | (key,_,_,_) <- selectedOriginalRows selection]
-                            incoming = [(qualifier,name,boot,unit)
-                              | ((sourceUnit,source,_),edges) <- worldCellExactImports current
-                              , (sourceUnit,source) `Set.notMember` selectedOwners
-                              , (qualifier,name,boot,unit) <- edges
-                              , (unit,name) `Set.member` selectedOwners]
-                        forM_ incoming $ \(qualifier,name,boot,unit) -> do
-                          source <- case [dependencyModuleSource node | node <- dependencyModules evidence
-                              , dependencyModuleUnit node == unit,dependencyModuleName node == name
-                              , dependencyModuleBoot node == boot] of
-                            [path] -> pure path
-                            _ -> fail "incoming canonical import lost its unique source owner"
-                          case [resolution | resolution <- dependencyResolutions evidence
-                              , dependencyResolutionQualifier resolution == qualifier
-                              , dependencyResolutionModule resolution == name
-                              , dependencyResolutionBoot resolution == boot] of
-                            [resolution] | dependencyResolutionSelected resolution == Just source
-                              , source `elem` dependencyResolutionCandidates resolution -> pure ()
-                            _ -> fail ("incoming canonical import omitted its resolution witness: " ++ name)
-                        pure incoming
-                  unless (any (any (\(_,name,_,_) -> name == "CanonicalPartialFacadeAgain")) selections)
-                    (fail "source history omitted its standalone canonical root")
-                mapM_ (commitPreparedWorldDependencies request) completed
-        -- Canonical TYPE dependencies remain authenticated inputs while a
-        -- fresh source module crosses prologue, declaration and execution.
-        let memoRoot = rootB </> "source-memo"
-            freshSource = BS8.unlines
-              ["module CarriedFreshSource where", "import CanonicalPartialFacadeAgain ()"
-              ,"freshCall :: Int -> Int", "freshCall value = value + 1"]
-        createDirectory memoRoot
-        (_,typeParcel) <- writeGenuineMetadataScopeWithContext
-          [last facadeNames] [last facadeNames] rootA fixture
-        memoParcel <- lexical [carriedLine] typeParcel
-        (memoPath,_) <- writeWorldCellAdmissionPacketWithSources handles memoRoot producer profile memoParcel
-          [("CarriedFreshSource.hs",freshSource)]
-        memoOwner <- newExactInputOwner
-        memoFacts <- readWorldInputsWithOwner memoOwner memoPath
-        runScope (pure ()) $ \compiler -> do
-          memoReference <- scopedEnsureWorld compiler
-            (ExactInputsRequest (worldInputsIdentity memoFacts) (CompleteExactInputs memoPath)) >>= requireReady
-          let source = unlines ["import CarriedFreshSource", "retainedMemo value = freshCall value"
-                ,"let memoAnswer = retainedMemo 7"]
-              recipe = WorldCellRecipe source template []
-              directory = memoRoot </> "stages"
-          createDirectory directory
-          planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity memoFacts)
-            memoReference recipe Nothing (directory </> "plan.cbor"))]
-          plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs)
-            >=> finishCompletion) runBoundWorldCellPlan
-          let question = WorldCellPrepareRequest (worldInputsIdentity memoFacts) memoReference recipe Nothing plan
-                (BS.replicate 32 24) 141 [(0,PlannedPrologue 141),(1,PlannedDeclaration 142),(2,PlannedBind 143)]
-                directory (directory </> "prepared.cbor")
-          args <- decodeWorldArgs [WorldCellPrepare question]
-          (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
-            (completed,counters,diagnostics) <- captureDiagnosticsWithCounters
-              [("world.cell.source_frontends.main:CarriedFreshSource",32)
-              ,("world.cell.prior_source_preparations",128)] (prepareWorldCell request)
-            completions <- either (fail . (("carried source memo refused: " ++) . show)) pure completed
-              `onException` hPutStrLn stderr diagnostics
-            unless (length completions == 3
-                && fmap sum (capturedDiagnosticCounterValues counters "world.cell.source_frontends.main:CarriedFreshSource") == Just 1
-                && maybe False ((> 0) . sum) (capturedDiagnosticCounterValues counters "world.cell.prior_source_preparations"))
-              (fail ("carried source did not retain and reuse its completed source version: " ++ diagnostics))
-            mapM_ (commitPreparedWorldDependencies request) completions
-        -- The same text is newly authored in this second World. It must not
-        -- borrow the carried import's source-less privilege.
-        authored <- lexical [] parcel
-        let authoredRoot = rootB </> "authored"
-        createDirectory authoredRoot
-        (authoredPath,_) <- writeWorldCellAdmissionPacket handles authoredRoot producer profile authored
-        authoredOwner <- newExactInputOwner
-        authoredFacts <- readWorldInputsWithOwner authoredOwner authoredPath
-        runScope (pure ()) $ \compiler -> do
-          authoredReference <- scopedEnsureWorld compiler
-            (ExactInputsRequest (worldInputsIdentity authoredFacts) (CompleteExactInputs authoredPath)) >>= requireReady
-          (refused,sourceDiagnostics) <- captureDiagnostics $ try $ compileDeclaration compiler authoredFacts authoredReference
-            authoredRoot template Nothing "current" 131 (carriedLine ++ "\nretainedCall local = CanonicalPartialFacadeAgain.usePartial local")
-          case refused of
-            Left failure
-              | (case fromException failure of Just WorldCellUnsupported -> True; _ -> False)
-                  || (case sourceFailureDiagnostics failure of Just _ -> True; _ -> False)
-              , "Could not find module" `isInfixOf` sourceDiagnostics
-              , "CanonicalPartialFacadeAgain" `isInfixOf` sourceDiagnostics -> pure ()
-              | otherwise -> throwIO (failure :: SomeException)
-            Right _ -> fail "newly authored import silently reused the source-less carried interface"
+            memoReference <- scopedEnsureWorld compiler
+              (ExactInputsRequest (worldInputsIdentity memoFacts) (CompleteExactInputs memoPath)) >>= requireReady
+            let source = unlines ["import CarriedFreshSource", "retainedMemo value = freshCall value"
+                  ,"let memoAnswer = retainedMemo 7"]
+                recipe = WorldCellRecipe source template []
+                directory = memoRoot </> "stages"
+            createDirectory directory
+            planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity memoFacts)
+              memoReference recipe Nothing (directory </> "plan.cbor"))]
+            plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs)
+              >=> finishCompletion) runBoundWorldCellPlan
+            let question = WorldCellPrepareRequest (worldInputsIdentity memoFacts) memoReference recipe Nothing plan
+                  (BS.replicate 32 24) 141 [(0,PlannedPrologue 141),(1,PlannedDeclaration 142),(2,PlannedBind 143)]
+                  directory (directory </> "prepared.cbor")
+            args <- decodeWorldArgs [WorldCellPrepare question]
+            (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
+              (completed,counters,diagnostics) <- captureDiagnosticsWithCounters
+                [("world.cell.source_frontends.main:CarriedFreshSource",32)
+                ,("world.cell.prior_source_preparations",128)] (prepareWorldCell request)
+              completions <- either (fail . (("carried source memo refused: " ++) . show)) pure completed
+                `onException` hPutStrLn stderr diagnostics
+              unless (length completions == 3
+                  && fmap sum (capturedDiagnosticCounterValues counters "world.cell.source_frontends.main:CarriedFreshSource") == Just 1
+                  && maybe False ((> 0) . sum) (capturedDiagnosticCounterValues counters "world.cell.prior_source_preparations"))
+                (fail ("carried source did not retain and reuse its completed source version: " ++ diagnostics))
+              mapM_ (commitPreparedWorldDependencies request) completions
+          -- The same text is newly authored in this second World. It must not
+          -- borrow the carried import's source-less privilege.
+          authored <- lexical [] parcel
+          let authoredRoot = rootB </> "authored"
+          createDirectory authoredRoot
+          (authoredPath,_) <- writeWorldCellAdmissionPacket handles authoredRoot producer profile authored
+          authoredOwner <- newExactInputOwner
+          authoredFacts <- readWorldInputsWithOwner authoredOwner authoredPath
+          runScope (pure ()) $ \compiler -> do
+            authoredReference <- scopedEnsureWorld compiler
+              (ExactInputsRequest (worldInputsIdentity authoredFacts) (CompleteExactInputs authoredPath)) >>= requireReady
+            (refused,sourceDiagnostics) <- captureDiagnostics $ try $ compileDeclaration compiler authoredFacts authoredReference
+              authoredRoot template Nothing "current" 131 (carriedLine ++ "\nretainedCall local = CanonicalPartialFacadeAgain.usePartial local")
+            case refused of
+              Left failure
+                | (case fromException failure of Just WorldCellUnsupported -> True; _ -> False)
+                    || (case sourceFailureDiagnostics failure of Just _ -> True; _ -> False)
+                , "Could not find module" `isInfixOf` sourceDiagnostics
+                , "CanonicalPartialFacadeAgain" `isInfixOf` sourceDiagnostics -> pure ()
+                | otherwise -> throwIO (failure :: SomeException)
+              Right _ -> fail "newly authored import silently reused the source-less carried interface"
   where
     requireReady (ExactInputsReady _ reference _) = pure reference
     requireReady other = fail ("carried-import fixture could not acquire its actual World: " ++ show other)
@@ -4312,7 +4346,13 @@ captureWorldSourceFiles root directory = do
 writeWorldCellAdmissionPacketWithSources
   :: IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString
   -> [(BS.ByteString,BS.ByteString)] -> IO (FilePath,BS.ByteString)
-writeWorldCellAdmissionPacketWithSources handles work producer profile parcelBytes extraSources = do
+writeWorldCellAdmissionPacketWithSources handles work producer profile parcelBytes extraSources =
+  writeWorldCellAdmissionPacketOmittingSources handles work producer profile parcelBytes extraSources []
+
+writeWorldCellAdmissionPacketOmittingSources
+  :: IORef [Handle] -> FilePath -> BS.ByteString -> BS.ByteString -> BS.ByteString
+  -> [(BS.ByteString,BS.ByteString)] -> [FilePath] -> IO (FilePath,BS.ByteString)
+writeWorldCellAdmissionPacketOmittingSources handles work producer profile parcelBytes extraSources omitted = do
   (primary,association,base,durable,contextBlocks,lexical) <- worldParcel parcelBytes
   acquisition <- sealWorldParcel handles (TList durable)
   (_,emptyBinding,emptyBase,_,emptyBlocks,_) <- fixture "world-context-blocks" [TBytes producer] >>= worldParcel
@@ -4324,7 +4364,8 @@ writeWorldCellAdmissionPacketWithSources handles work producer profile parcelByt
   libraryRoot <- lookupEnv "TIDEPOOL_PRELUDE_DIR" >>= maybe
     (fail "missing declared renderer source resource") pure
   library <- captureWorldSourceFiles libraryRoot libraryRoot
-  let capturedFiles = sortOn fst (captured ++ library ++ extraSources)
+  let capturedFiles = sortOn fst [(name,body) | (name,body) <- captured ++ library ++ extraSources
+        , BS8.unpack name `notElem` omitted]
       word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
       frame bytes = word32 (BS.length bytes) <> bytes
       sources = "TPCSRC01" <> frame "world-stage-source" <> word32 1 <> word32 (length capturedFiles)

@@ -1798,6 +1798,8 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertEqual(generic["case_compiler_modes"], {
             **cohort["case_compiler_modes"],
             "checked_quoter_program::fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm": "owned-resident",
+            "held_world_bash::held_world_literal_bash_preserves_scope_and_bytes": "owned-resident",
+            "held_world_bash::held_world_literal_bash_refuses_same_named_workspace_provider": "owned-resident",
         })
         self.assertIn("TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT", generic["resource_env"])
         self.assertIn("TIDEPOOL_COMPILER_DEPLOYMENT", generic["resource_env"])

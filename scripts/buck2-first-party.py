@@ -1498,6 +1498,10 @@ RUNTIME_PREPARED_RESIDENCY_ADMISSION_CASES = ["prepared_residency::" + name for 
 
 
 RUNTIME_CHECKED_QUOTER_CASE = "checked_quoter_program::fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm"
+RUNTIME_LITERAL_BASH_CASES = [
+    "held_world_bash::held_world_literal_bash_preserves_scope_and_bytes",
+    "held_world_bash::held_world_literal_bash_refuses_same_named_workspace_provider",
+]
 
 
 def runtime_prepared_residency_test_cases(binary):
@@ -2761,7 +2765,7 @@ tidepool_buildscript_run(
         extra = runtime_arguments(env, resources, worker)
         if package_name == "tidepool-runtime" and target["name"] == "session":
             extra += '\n    case_compiler_modes = {' + ", ".join(
-                json.dumps(test) + ': "owned-resident"' for test in RUNTIME_PREPARED_RESIDENCY_ADMISSION_CASES + [RUNTIME_CHECKED_QUOTER_CASE]
+                json.dumps(test) + ': "owned-resident"' for test in RUNTIME_PREPARED_RESIDENCY_ADMISSION_CASES + [RUNTIME_CHECKED_QUOTER_CASE] + RUNTIME_LITERAL_BASH_CASES
             ) + "},"
         if package_name == "exomonad-node" and target["name"] == "command_resources":
             extra += '\n    ignored = True,\n    delegated_service = True,\n    expected_count = 4,\n    jobs = 1,'

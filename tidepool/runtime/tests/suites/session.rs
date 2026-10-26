@@ -10,6 +10,8 @@
 mod candidate_native_demand;
 #[path = "../checked_quoter_program.rs"]
 mod checked_quoter_program;
+#[path = "../held_world_bash.rs"]
+mod held_world_bash;
 #[path = "../compiler_test_support.rs"]
 mod compiler_test_support;
 #[path = "../prepared_execution.rs"]

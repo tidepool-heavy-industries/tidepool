@@ -7,7 +7,7 @@ import CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptId
 import CompilerRequestTest (checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (diagnosticCounterCapture, ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRecoveryCustody, worldRejectionDiagnosticBoundaries)
-import RequestInputsTest (compilerServiceBootBoundaries, worldCanonicalOriginalReuse, worldCarriedImportTypes)
+import RequestInputsTest (compilerServiceBootBoundaries, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldCarriedLiteralBash)
 import RequestInputsTest (bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage)
 import RequestInputsTest (worldValueTypeHistories, worldCapturedValueTypeHistories, worldHistoricalValueTypeSelections)
 import SourceBootFixtureSupport (withTiming, withScratch)
@@ -65,6 +65,7 @@ tests = testGroup "source-boot"
   , testCase "world cell admission parses one recipe" worldCellAdmissionParse
   , testCase "World interface-only canonical body survives source relocation and cold reuse" worldCanonicalOriginalReuse
   , testCase "World carried imports keep exact types and global Names without source" worldCarriedImportTypes
+  , testCase "World carried literal Bash keeps its original quoter without source" worldCarriedLiteralBash
   , testCase "bounded World rejection diagnostics" worldRejectionDiagnosticBoundaries
   , testCase "bounded artifact reads" boundedReadChecks
   , testCase "resident source summary continuation" sourceSummaryContinuation
