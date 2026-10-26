@@ -1,7 +1,7 @@
 # G2 fixture closure and Persona admission
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
-Current integrated code: `e04edfaca7`.
+Current integrated code: `95d120a5f8`.
 Active evidence: `/srv/swarm/evidence/inanna/g2-final-qualification-20261026/`.
 
 G2 remains unqualified. Executable projection, Original demand and certification
@@ -120,6 +120,8 @@ Current component evidence under `g2-final-qualification-20261026`:
 | Live TYPE reuse | `6f7293e247` includes actual finalized source-closure canonical rows, with exact ArtifactId, liveness and primary-precedence guards. Worker production/test compilation and four controls pass. Joined Job passes initial host use, publication and private readmission, then exposes a generated companion alias collision. `bacf4ecf74` reserves inherited namespaces during both planning and re-admission; component compilation, recovery/refusal and World-admission controls pass. Joined Job rerun remains required. |
 | Prior native seals | `232cf9bed4` and `9b68f3cf77` carry the prior issuer's finalized native seal under exact raw/historical coordinates. Five focused controls and eight corpus programs pass; removing prior carry reproduces the refusal. Actual JSON now passes Haskell certification and exposes a separate Rust predecessor-product lookup gap. |
 | Reload supersession | `3cfea77099..034f9a58b1` carries actual source-retirement proof through the exact execution control, settles private publication and preserves committed operation evidence across terminal ordering. Runtime controls pass 7/7; actor production/test/binary compilation and six controls pass at their worker pins. Source review accepted. Hosted consumer checks, actual reload/replay histories and postcommit cancellation remain pending; task-destruction cleanup remains unconfirmed. |
+| Native predecessor receipts | `090148b3e2` carries actual completed World native products through the continuation. Exact Source version/ordinal/binder and HOME ordinal queries share one issuer selection boundary; historical alternatives remain passive. Production/test compilation and three controls pass at `f74ed3e0bb`, including real World stage carry and final HOME selection. Source review accepted; actual joined JSON/Job run is pending at `95d120a5f8`. |
+| Bash quotation and recovery | `48cdf9ee5b..08719df146` authenticates shipped implementation evidence and defining Names, rechecks the refined scope, and lowers literal expression quotations before typechecking. Runtime controls 2/2, carried tests 2/2, legacy reexport 1/1 and ten text-corpus programs pass at worker pins. Final-scope recheck ordering is source-reviewed, not isolated by a mutant. `95d120a5f8` separately repairs the recovery oracle: complete acquisition succeeds, exact value-interface and canonical TYPE-only omissions refuse, and the full cold/warm test passes 1/1 at worker `289489d608`. |
 | Actor fixtures | `541008587d`: 51 distinct selectors passed at recorded checkpoints; 49/76 shared-fixture selectors passed. All 89 terminal reports confirm process/compiler cleanup. This is not a joined 76-case pass. |
 | Uncertain END | Source-owned checkpoint `49dc365af3` passes the maintained physical-response-without-END control 1/1 with confirmed process/compiler cleanup. Frozen-bundle acceptance remains separate. |
 
@@ -135,7 +137,9 @@ Implementation work still open:
    The isolated ordinary ExactScope attempt separately carries legitimate
    CertifyHomeProducts and RetainedGeneration(x,1); add tag 38 to that mode's
    allowlist while retaining injected-product, portable-output and activation
-   refusals. The compiler path already consumes retained generations. Combine
+   refusals. This repair is integrated as `b772fb9c04`, with production/test
+   compilation and two codec controls passing. The compiler path already
+   consumes retained generations. Combine
    both repairs with the full World history and final runtime result 42; do not
    omit retained evidence or weaken NativeAuthoredDeclaration/SOURCE guards.
    Failed reproducers remain retained; no K-to-J execution pass is claimed.
@@ -143,10 +147,10 @@ Implementation work still open:
    group 178/global 5 reaches prior Scientific group 57 and passes Haskell
    certification, but Rust cannot find the prior physical native product through
    SOURCE adjacency. The actual completed native receipt already belongs to
-   WorldStageNativeProducts; carry that authority for nominal lookup without
-   widening SOURCE or execution selection. Preserve raw unversioned coordinates
-   and reject competing proofs at the exact lookup boundary. Run Job again with
-   `bacf4ecf74`'s companion alias repair, then JSON with the native carry repair.
+   WorldStageNativeProducts. `090148b3e2` carries that authority for nominal lookup
+   without widening SOURCE or execution selection. Raw coordinates remain exact
+   and competing matching proofs refuse. JSON and Job are running unchanged on
+   `95d120a5f8`, including `bacf4ecf74`'s companion alias repair.
 3. Qualify default reload settlement. The generation owner commits B and retires
    A before A's original notebook continuation completes. Ordinary publication
    correctly refuses A. Carry an owner-issued settlement outcome; do not infer
@@ -162,19 +166,25 @@ Implementation work still open:
    the bindingless trailing-unit control separately checks NotRun and no effect.
    Actual task destruction is distinct from external waiter loss and cooperative
    cancellation: retained committed evidence does not establish private cleanup.
-4. Finish and integrate held-World Bash literal quotations through authenticated demand and
-   lowering before typechecking. Resolve lexical/import shadowing twice, before
-   demand and after alias refinement, and authenticate the selected shipped
-   Bash/Command/Text implementations. Keep arbitrary quoters, non-expression
-   quotations and splices refused; do not execute TH during demand or lowering.
-   Preserve the existing exact-session quoter route and shipped command surface.
-   Runtime scope/literal and same-named-provider refusal controls pass, as does
-   the legacy exact-session positive. Separate the retained Bash cold/warm test
-   from the existing full-library operand history before its final counted run.
-   The unchanged quoter recovery test now compiles its quotation but fails a
-   recovery-inventory fixture premise; retain that finding separately.
-5. Rerun the full prepared corpus after the compiler changes, then assemble,
-   freeze and qualify one exact bundle under
+   Argon's forward audit also identifies three concrete follow-ups: Failed/Active
+   suffix state is refused before private retirement; publication failure replaces
+   the original suffix error/cancellation; Green failure drops active-unit operation
+   and recovered-binding evidence. Repair cleanup through the actual checked-prefix
+   and parked-hole owners, preserve typed primary and secondary failures, and keep
+   committed receipts. A confirmed empty GenerationReset must also participate in
+   CellExit's commit-versus-late-cancellation rule. Running/parked work still requires
+   its real abort owner; dropping a guard is not confirmation of cleanup.
+   The joined default case at `e04edfaca7` now reaches Committed/GenerationReset,
+   committed operation and confirmed cleanup, then fails a stale model omission
+   assertion. Production uses an exact resultRef; retained native data contains
+   149,429 bytes with both 581-module inventories. Repair the assertion against
+   that real projection while keeping native-value, replay and successor checks.
+4. Preserve the qualified compiler evidence at `08719df146`: worker/source-boot/
+   cell-splitter targets compile, three carried/recipe tests and two request codec
+   tests pass. Full fixtures-check passes 12/12 cohorts and 1,052 programs
+   (fresh Suite 1,004 plus 48 fixed programs), with no failures, skips, omissions
+   or timeouts. Later runtime/toolchain integration remains separately qualified.
+5. Assemble, freeze and qualify one exact bundle under
    [the G2 contract](shared-warm-compiler/completion/g2-completion.md), including
    ordinary/uncertain-END histories, Persona startup and bounded provider smoke.
 
@@ -205,3 +215,10 @@ Companion evidence: `review/companion-handoff.txt` and
 `review/companion-4d676d5-source-review.md`.
 Reload evidence: `reload-settlement-runtime/result.json`,
 `actor/reload-99b-outcome.json`, and `review/reload-supersession.md`.
+The actor notebook contract cohort passes 5/5 at its recorded joined reload pin;
+host production and test targets compile (`actor/reload-9d2-notebook-outcome.json`,
+`actor/reload-host-32b-outcome.json`). Latest native carry evidence:
+`host-type-world/followup/prior-native-handoff.json`, `review/json-prior-native-f74.md`.
+Bash/recovery evidence: `review/quoter-policy.md`,
+`quoter-recovery-triage/result.json`. Full joined compiler evidence and hashes:
+`joined-compiler-08719df/result.json`.
