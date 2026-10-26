@@ -81,6 +81,24 @@ fn published_source_composition_preserves_sealed_selection_across_repeated_impor
             .is_err(),
         "a distinct sealed publication policy cannot replace the selected policy"
     );
+    assert_eq!(source.semantic_sha256(), before);
+    assert_eq!(source.artifact_view().capture_graph_selection(), graph);
+}
+
+#[test]
+#[ignore = "requires the declared rooted compiler service"]
+fn authored_publication_retains_incoming_lexical_selection_and_refuses_conflict() {
+    let fixture = compiled_publication_fixture();
+    let publication = &fixture.publication;
+    let source = publication.context();
+    let role =
+        source.compiler_input_projection().snapshot_roles()[publication.public_root()].clone();
+    let before = source.semantic_sha256();
+    let alternative = fixture
+        .entry
+        .products()
+        .published_source_original_selection("other-revision", publication.public_root())
+        .unwrap();
     // An unrelated authored declaration still carries published compiler roles.
     // Its receiving publication must retain their independently issued lexical proof.
     let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
@@ -133,7 +151,6 @@ fn published_source_composition_preserves_sealed_selection_across_repeated_impor
     ));
     assert_eq!(conflicting.semantic_sha256(), conflicting_before);
     assert_eq!(source.semantic_sha256(), before);
-    assert_eq!(source.artifact_view().capture_graph_selection(), graph);
 }
 
 /// Equal payload custody is not the publication's exact native issuer.
