@@ -1544,6 +1544,7 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.assertNotIn("//web:dist", unit_rule["deps"])
         cases = {}
         for name in ("facade_process_tests", "facade_host_tests", "facade_host_raw_test",
+                     "facade_root_startup_source_test",
                      "facade_introspection_service_test",
                      "facade_late_output_test", "facade_browser_test", "exomonad_host_unit_tests_all"):
             cases[name] = self.rule("exomonad/host", name, "tidepool_rust_test_cases")
@@ -1559,6 +1560,19 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
                                  "//build/testing/browser:driver_bundle"):
             self.assertNotIn(browser_resource, process["resources"])
         host = cases["facade_host_tests"]
+        startup = cases["facade_root_startup_source_test"]
+        self.assertEqual(startup["exact_tests"], [
+            "actor_host::startup_context_acceptance_tests::released_root_startup_already_owns_its_source_generation",
+        ])
+        self.assertEqual(startup["expected_count"], 1)
+        self.assertFalse(startup["ignored"])
+        self.assertEqual(startup["case_compiler_modes"], {
+            name: "owned-resident" for name in startup["exact_tests"]
+        })
+        self.assertEqual(startup["resource_env"]["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"],
+                         "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin")
+        self.assertIn("//build/package:compiler_service_deployment", startup["resources"])
+        self.assertNotIn("//build/package:compiler_deployment", startup["resources"])
         service = cases["facade_introspection_service_test"]
         self.assertEqual(service["exact_tests"], [
             "actor_host::documentation_tests::published_introspection_example_returns_structured_declaration",
