@@ -4838,9 +4838,17 @@ where
     pub fn prepare_private_host_carrier(
         &mut self,
         execution: Arc<super::PrivateExecutionAdmission>,
+        authority_digest: [u8; 32],
     ) -> Result<Arc<super::PrivateHostCarrierPreparation>, SessionError> {
         self.settle_dropped_custody();
-        self.state.prepare_private_host_carrier(execution)
+        let type_interfaces = self
+            .host_binding_prototypes
+            .iter()
+            .filter(|prototype| prototype.authority_digest == authority_digest)
+            .map(|prototype| prototype.compiler.type_interfaces().clone())
+            .collect::<Vec<_>>();
+        self.state
+            .prepare_private_host_carrier(execution, authority_digest, &type_interfaces)
     }
 
     pub fn admit_world_planned_private_host_carrier(

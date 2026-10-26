@@ -273,11 +273,13 @@ impl PrivateCellPreparation {
     }
 }
 
-/// A narrow internal carrier uses the current idle World or the active
-/// program's exact parked predecessor, without draining accepted host deltas.
+/// An idle carrier reconciles accepted host deltas before capture; an active
+/// program retains its exact parked predecessor.
 pub struct PrivateHostCarrierPreparation {
     execution: Arc<PrivateExecutionAdmission>,
     association: Arc<super::inspection::InspectionWorldAssociation>,
+    prepared_world: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
+    authority_digest: [u8; 32],
     mode: PrivateCarrierMode,
 }
 
@@ -288,7 +290,7 @@ enum PrivateCarrierMode {
 
 impl PrivateHostCarrierPreparation {
     pub fn world(&self) -> &Arc<tidepool_toolchain::compiler_world::CompilerWorld> {
-        &self.association.world
+        &self.prepared_world
     }
 
     pub(super) fn scope(&self) -> ScopeId {
@@ -635,6 +637,9 @@ impl PersistentSession {
         prototype: Arc<super::resident::HostBindingPrototype>,
     ) -> Result<Arc<RuntimeHostBindingAdmission>, SessionError> {
         self.validate_private_host_carrier(&preparation)?;
+        if prototype.authority_digest() != preparation.authority_digest {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         self.admit_host_binding_interface_with_preparation(
             preparation.scope(),
             binding,
@@ -3848,11 +3853,21 @@ impl PersistentSession {
             })
             .collect()
     }
-    pub fn prepare_private_host_carrier(
-        &self,
+    pub(super) fn prepare_private_host_carrier(
+        &mut self,
         execution: Arc<PrivateExecutionAdmission>,
+        authority_digest: [u8; 32],
+        type_interfaces: &[Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>],
     ) -> Result<Arc<PrivateHostCarrierPreparation>, SessionError> {
-        let association = self.current_private_world_association(&execution)?;
+        let ready = matches!(
+            execution.state.lock().authored,
+            PrivateAuthoredProgram::Ready(_)
+        );
+        let association = if ready {
+            self.reconcile_private_visible_hosts(&execution, false)?
+        } else {
+            self.current_private_world_association(&execution)?
+        };
         let state = execution.state.lock();
         if state.phase != PrivateExecutionPhase::Open {
             return Err(SessionError::StaleStagedDeclaration);
@@ -3873,9 +3888,14 @@ impl PersistentSession {
             _ => return Err(SessionError::WorldCellPublicationIncomplete),
         };
         drop(state);
+        // Host constructor compilation borrows its retained prototype TYPE owners.
+        // This request-local projection never advances the authored SOURCE basis.
+        let prepared_world = association.world.with_type_interfaces(type_interfaces)?;
         Ok(Arc::new(PrivateHostCarrierPreparation {
             execution,
             association,
+            prepared_world,
+            authority_digest,
             mode,
         }))
     }
@@ -3899,12 +3919,12 @@ impl PersistentSession {
                     predecessor,
                     ..
                 },
-            ) => captured == current && Arc::ptr_eq(predecessor, preparation.world()),
+            ) => captured == current && Arc::ptr_eq(predecessor, &preparation.association.world),
             _ => false,
         };
         if state.phase != PrivateExecutionPhase::Open
             || !same_mode
-            || !Arc::ptr_eq(&current.world, preparation.world())
+            || !Arc::ptr_eq(&current.world, &preparation.association.world)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -5639,6 +5659,9 @@ impl PersistentSession {
         authority_digest: [u8; 32],
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.validate_private_host_carrier(&preparation)?;
+        if authority_digest != preparation.authority_digest {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         self.admit_world_planned_host_carrier(
             preparation.scope(),
             plan,
@@ -5712,8 +5735,11 @@ impl PersistentSession {
         if let Some(reason) = shape_refusal {
             return Err(self.host_carrier_refusal(scope, reason));
         }
-        if !Arc::ptr_eq(plan.world().restoration(), published.world.restoration())
-            || plan.world().logical_id() != published.world.logical_id()
+        let prepared_world = private_preparation
+            .as_ref()
+            .map_or(&published.world, |preparation| preparation.world());
+        if !Arc::ptr_eq(plan.world().restoration(), prepared_world.restoration())
+            || plan.world().logical_id() != prepared_world.logical_id()
         {
             return Err(SessionError::StaleStagedDeclaration);
         }

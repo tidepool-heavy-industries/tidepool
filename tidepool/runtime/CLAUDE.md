@@ -149,7 +149,11 @@ migration because its ceiling cannot certify issued value identities.
 Host mounts consume their actual thin-interface or checked-carrier reservation
 and require a fresh visible term name before transfer. Installation never
 retracts or recompiles a declaration to make that name available. Checked World
-values use their own admitted private overlay instead.
+values use their own admitted private overlay instead. Host constructor preparation
+borrows TYPE interfaces from retained prototypes under the same authority digest
+in a request-local World; its runtime admission still validates the captured
+private World and frontier. These prototype TYPE selections never advance the
+authored SOURCE basis or establish payload publication.
 
 Notebook generations qualify public recovery ownership independently of actor
 incarnation and declaration allocation. Reload inserts a fresh public owner and

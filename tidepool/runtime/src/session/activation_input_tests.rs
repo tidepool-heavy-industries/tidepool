@@ -6386,7 +6386,7 @@ fn abandoned_private_mount_after_epoch_change_settles_only_after_scope_retiremen
         })
         .unwrap();
     let preparation = source_action(&mut resident, |resident, _| {
-        resident.prepare_private_host_carrier(execution.clone())
+        resident.prepare_private_host_carrier(execution.clone(), [19; 32])
     })
     .unwrap();
     let imports = SourceImports::from_specs([

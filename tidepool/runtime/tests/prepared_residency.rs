@@ -221,7 +221,7 @@ impl CheckedExecution {
         };
         let digest = [19; 32];
         let preparation = source_action(session, &self.source, |session, _| {
-            session.prepare_private_host_carrier(self.execution.clone())
+            session.prepare_private_host_carrier(self.execution.clone(), digest)
         })
         .unwrap();
         if let Some(prototype) = session.host_binding_prototype(expected, digest) {
@@ -1217,6 +1217,39 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         json_anchor,
         imports,
     );
+    let before_refusal = source_action(&mut notebook.session, &checked.source, |session, _| {
+        session.prepare_private_host_carrier(checked.execution.clone(), [19; 32])
+    })
+    .unwrap();
+    let visibility_before_refusal = notebook
+        .session
+        .public_visibility_snapshot_in(checked.execution.private_scope())
+        .unwrap();
+    let refused = source_action(&mut notebook.session, &checked.source, |session, report| {
+        session.mount_private_visible_host_input(
+            &checked.execution,
+            &carrier_a,
+            HostPayload::Job("wrong nominal payload"),
+            report,
+        )
+    });
+    assert!(refused.is_err(), "wrong payload refuses its private mount");
+    let after_refusal = source_action(&mut notebook.session, &checked.source, |session, _| {
+        session.prepare_private_host_carrier(checked.execution.clone(), [19; 32])
+    })
+    .unwrap();
+    assert_eq!(
+        before_refusal.world().logical_id(),
+        after_refusal.world().logical_id()
+    );
+    assert_eq!(
+        notebook
+            .session
+            .public_visibility_snapshot_in(checked.execution.private_scope())
+            .unwrap(),
+        visibility_before_refusal,
+    );
+    // The refusal retained the original reservation for its matching payload.
     let binder_a = checked.mount(
         &mut notebook.session,
         &carrier_a,
