@@ -334,6 +334,12 @@ those references and preserves the recorded mode, even when a partial graph can
 now qualify as complete. Recorded Full validates its complete exact carrier and
 canonical edge in its issuing graph, including proofs with no compiler namespace.
 Current request compatibility remains a separate check after restoration.
+Narrowing projects availability rows and their backing offers together: every
+contribution retains its issuer in the same fact owner. Intersect permissions
+with prior same-issuance contributions instead of recreating them from broader
+custody. Source-root relevance pruning belongs to explicit narrowing, not support
+accumulation. Cold keyed projection may reuse only unchanged fact leaves; changed
+permission rows enter the closing fact owner through their issued delta.
 Context snapshots use version 10 and persist selected source scope, normalized native availability plus
 references to the same linked native components and acquired occurrence records
 held by compiler prefixes. Restore authenticates exact product/source custody and

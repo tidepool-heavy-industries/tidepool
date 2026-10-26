@@ -16,6 +16,10 @@ When a fixture migration breaks this contract, inspect its other callers and
 keep a real-owner control proving that a duplicate transition refuses without
 replacing the original result or preventing subsequent valid use. Do not make
 production transitions permissive to compensate for duplicate test setup.
+Positive private-admission probes must enter through the production compiler-world
+or source-transaction owner. A machine checkout alone does not supply source
+authority. Keep deliberate pre-admission refusal probes separate, and check which
+generated history families actually reach each fixture transition.
 
 For private notebook policy, source reload, or settlement changes confined to
 this crate, compile the actor's test configuration and the hosted consumer:
