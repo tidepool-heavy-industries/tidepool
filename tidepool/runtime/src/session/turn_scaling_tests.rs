@@ -1610,11 +1610,13 @@ where
     let previous_context = resident.run_context();
     let public_source = resident.adopt_initial_notebook_scope(public)?;
     let original = public_source.original_source().clone();
-    let include = resident
-        .compile_view_in(public)
-        .unwrap()
-        .include_paths(effects.include_paths());
-    let recipe = InputRecipe::capture(preamble.to_owned(), effects.row().to_owned(), include);
+    // Generated session modules remain carried compiler evidence, never fresh
+    // workspace SOURCE inputs to the next World recipe.
+    let recipe = InputRecipe::capture(
+        preamble.to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
     measured(
         resident,
         images,
@@ -3767,6 +3769,12 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
             .unwrap(),
         PublicManifestCommit::Durable
     ));
+    use crate::session::world_cell_test_support::{bootstrap_world_for, InputRecipe};
+    let initial_recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
     execute_cell(
         &mut resident,
         public,
@@ -3806,6 +3814,37 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
         .expect("authored J original")
         .owner()
         .clone();
+    let retained_recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    assert_eq!(
+        initial_recipe.reference.bytes(),
+        retained_recipe.reference.bytes()
+    );
+    assert_eq!(
+        initial_recipe.sources.seal(),
+        retained_recipe.sources.seal()
+    );
+    let source = resident.adopt_initial_notebook_scope(public).unwrap();
+    let submissions = tidepool_extract_cmd::extract_spawn_count();
+    bootstrap_world_for(&mut resident, &retained_recipe, &source);
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        submissions,
+        "publishing generated modules must not trigger a fresh World bootstrap"
+    );
+    let j_import = j_view.library_import_module().expect("J lexical facade");
+    assert_ne!(
+        j_import, j.module,
+        "native J is carried through its lexical facade"
+    );
+    let k_source = format!(
+        "import {} (j)\n{}",
+        j_import,
+        include_str!("fixtures/original-binding-capture-k.hs")
+    );
     execute_cell(
         &mut resident,
         public,
@@ -3813,8 +3852,8 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
         &images,
         (0, 0),
         "original_k",
-        include_str!("fixtures/original-binding-capture-k.hs"),
-        1,
+        &k_source,
+        2,
         &publication,
     );
     let view = resident.compile_view_in(public).unwrap();
@@ -3993,19 +4032,32 @@ fn ordinary_exact_scope_retains_transitive_original_binding_capture() {
         .any(|owner| matches!(owner, tidepool_toolchain::certified_products::PendingImportOwner::Retained { identity, generation }
             if (identity, *generation) == (&retained_x.0, retained_x.1))),
         "ordinary compiler closure must keep J's exact retained x through K");
-    // Open retained-value programs install through checked execution; the
-    // preceding ordinary compilation independently exercises ExactScope census.
-    execute_cell(
-        &mut resident,
-        public,
-        &effects,
-        &images,
-        (0, 0),
-        "read_k",
-        "if k == (42 :: Int) then pure () else error \"lost transitive original capture\"",
-        0,
-        &publication,
-    );
+    resident
+        .set_actor_execution(
+            SessionRunContext {
+                lexical_scope: public,
+                ..SessionRunContext::ROOT
+            },
+            tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+            tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .unwrap();
+    let observed = original_source
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |_, settlement| resident.run_with_sites("ordinary_k", compiled.code(), settlement),
+        )
+        .unwrap();
+    assert!(observed.close().resources_retired());
+    let crate::session::ResidentOutcome::Completed { result, .. } =
+        observed.into_outcome().action.unwrap()
+    else {
+        panic!("ordinary K must complete through its retained native closure");
+    };
+    assert_eq!(result.to_json(), serde_json::json!(42));
 }
 
 #[test]
