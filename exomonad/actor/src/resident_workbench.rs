@@ -34388,7 +34388,7 @@ pub(crate) mod request_tests {
             let expected = durable_owner.clone();
             let custody = workbench
                 .access
-                .with_machine(context.clone(), move |session, _, _| {
+                .with_compiler_world(context.clone(), None, move |session, _, _| {
                     let _admission = session
                         .begin_durable_private_execution(&expected, public_scope)
                         .map_err(ResidentError::Session)?;
@@ -34413,7 +34413,7 @@ pub(crate) mod request_tests {
         }
         workbench
             .access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_world(context, None, move |session, _, _| {
                 let _admission = session
                     .begin_durable_private_execution(&durable_owner, public_scope)
                     .map_err(ResidentError::Session)?;
