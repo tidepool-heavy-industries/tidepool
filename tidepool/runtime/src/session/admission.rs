@@ -1652,6 +1652,7 @@ pub struct RuntimeCellAdmission {
 
 struct RuntimeCellDeclarations {
     root: PathBuf,
+    initial_context: Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     declaration_baseline: Option<super::lexical_projection::DeclarationProjectionBaseline>,
     prepared_declarations: std::sync::OnceLock<
         Vec<(
@@ -3715,6 +3716,7 @@ impl RuntimeCellAdmission {
             let includes = item.include_paths();
             let projection = super::lexical_projection::prepare_authored_projection(
                 baseline.as_ref(),
+                self.declarations.initial_context.as_ref(),
                 generation,
                 evidence.clone(),
                 &[],
@@ -5910,6 +5912,26 @@ impl PersistentSession {
             *reservation.admission_digest(),
         )
         .map_err(SessionError::Compile)?;
+        let has_declarations = reservation.items().iter().any(|item| {
+            matches!(
+                item.slot(),
+                tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue { .. }
+                    | tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. }
+            )
+        });
+        let declaration_baseline = if has_declarations {
+            super::lexical_projection::DeclarationProjectionBaseline::capture(
+                self.lib(),
+                self.lib().scope_tip(scope),
+            )?
+        } else {
+            None
+        };
+        let initial_context = if has_declarations && declaration_baseline.is_none() {
+            self.lib().current_exact_context_in(scope)
+        } else {
+            None
+        };
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
@@ -5922,18 +5944,8 @@ impl PersistentSession {
             initial_value_generation,
             declarations: RuntimeCellDeclarations {
                 root: self.lib().root.clone(),
-                declaration_baseline: if !reservation.items().iter().any(|item| {
-                    matches!(item.slot(),
-                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue { .. } |
-                    tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })
-                }) {
-                    None
-                } else {
-                    super::lexical_projection::DeclarationProjectionBaseline::capture(
-                        self.lib(),
-                        self.lib().scope_tip(scope),
-                    )?
-                },
+                initial_context,
+                declaration_baseline,
                 prepared_declarations: std::sync::OnceLock::new(),
             },
             compiler_basis: RuntimeWorldCellInputs {

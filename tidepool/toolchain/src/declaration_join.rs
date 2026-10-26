@@ -165,6 +165,7 @@ fn validate_instance_inventory(inventory: &InstanceInventory) -> Result<(), Comp
 pub struct CertifiedAuthoredDeclaration {
     product: CertifiedRecoveryProduct,
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
+    published_sources: Vec<Arc<crate::declaration_context::PublishedSourceOriginalSelection>>,
     lexical_exports: Vec<DeclarationExport>,
     introduced_exports: Vec<DeclarationExport>,
     instances: InstanceInventory,
@@ -744,6 +745,12 @@ impl CertifiedAuthoredDeclaration {
             && self
                 .compiler_support
                 .same_recorded_facts(&other.compiler_support)
+            && self.published_sources.len() == other.published_sources.len()
+            && self
+                .published_sources
+                .iter()
+                .zip(&other.published_sources)
+                .all(|(left, right)| left.same_recorded_facts(right))
     }
 
     pub fn same_selected_acquisitions(&self, other: &Self) -> bool {
@@ -752,6 +759,12 @@ impl CertifiedAuthoredDeclaration {
             && self
                 .compiler_support
                 .same_selected_acquisitions(&other.compiler_support)
+            && self.published_sources.len() == other.published_sources.len()
+            && self
+                .published_sources
+                .iter()
+                .zip(&other.published_sources)
+                .all(|(left, right)| left.same_authenticated_selection(right))
     }
 
     fn same_declaration_facts(&self, other: &Self) -> bool {
@@ -771,6 +784,12 @@ impl CertifiedAuthoredDeclaration {
         &self,
     ) -> &crate::artifact_inventory::CompilerSourceSupport {
         &self.compiler_support
+    }
+
+    pub(crate) fn published_sources(
+        &self,
+    ) -> &[Arc<crate::declaration_context::PublishedSourceOriginalSelection>] {
+        &self.published_sources
     }
 
     pub(crate) fn publication_compiler_support(
@@ -1198,9 +1217,12 @@ fn certify_authored_declaration_inner(
         .collect();
     let compiler_support =
         crate::declaration_context::certified_artifact_view(&originals, artifact_context.as_ref())?;
+    let published_sources =
+        artifact_context.published_source_original_selections_for_support(&compiler_support)?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
         compiler_support,
+        published_sources,
         lexical_exports: inventory.exports,
         introduced_exports,
         instances: inventory.instances,

@@ -161,6 +161,7 @@ impl PreparedAuthoredDeclaration {
 
 pub(super) fn prepare_authored_projection(
     baseline: Option<&DeclarationProjectionBaseline>,
+    initial_context: Option<&Arc<ExactDeclarationContext>>,
     generation: Generation,
     evidence: Arc<CertifiedAuthoredDeclaration>,
     retractions: &[DeclarationRetraction],
@@ -211,7 +212,9 @@ pub(super) fn prepare_authored_projection(
             .unwrap_or_default(),
     )?;
     let context = baseline
-        .map(|prior| (*prior.context).clone())
+        .map(|prior| &prior.context)
+        .or(initial_context)
+        .map(|context| (**context).clone())
         .unwrap_or_else(ExactDeclarationContext::empty)
         .admit_authored_publication(std::slice::from_ref(&evidence), &surface)?;
     let projection = issue_projection(

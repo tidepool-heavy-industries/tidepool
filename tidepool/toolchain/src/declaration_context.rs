@@ -15031,18 +15031,13 @@ impl ExactDeclarationContext {
     ) -> Result<Self, CompileError> {
         let prior_scope = self.source_scope().clone();
         let prior_support = self.compiler_source_support().clone();
-        let retained_publications = self.published_source_original_selections()?;
-        let lexical = if retained_publications.is_empty() {
-            lexical
-        } else {
-            compose_lexical_nodes(
-                lexical.iter().chain(
-                    retained_publications
-                        .iter()
-                        .flat_map(|selection| selection.context().owner.facts.lexical.iter()),
-                ),
-            )?
-        };
+        let mut retained_publications = self.published_source_original_selections()?;
+        for certificate in authored {
+            retained_publications.extend(certificate.published_sources().iter().cloned());
+        }
+        for join in joins {
+            retained_publications.extend(join.context().published_source_original_selections()?);
+        }
         for certificate in authored {
             self = self.admit_producer(certificate.toolchain_identity_sha256())?;
             let incoming = certificate.publication_compiler_support(selected_sources)?;
@@ -15055,6 +15050,23 @@ impl ExactDeclarationContext {
             let updated = self.owner.facts.compiler_support.merge(&incoming)?;
             self = self.rebuild(|facts| facts.compiler_support = updated);
         }
+        retained_publications.retain(|selection| {
+            self.compiler_source_support()
+                .projection()
+                .snapshot_roles()
+                .get(selection.public_root())
+                .is_some_and(CompilerInputRole::is_published_source_original)
+        });
+        for selection in &retained_publications {
+            selection.validate_retained_role(self.compiler_source_support())?;
+        }
+        let lexical = compose_lexical_nodes(
+            lexical.iter().chain(
+                retained_publications
+                    .iter()
+                    .flat_map(|selection| selection.context().lexical_graph().iter()),
+            ),
+        )?;
         let mut source_scope = prior_scope.restrict(&lexical)?;
         source_scope.preserve_support(&prior_support, self.compiler_source_support())?;
         for certificate in authored {

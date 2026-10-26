@@ -3476,6 +3476,7 @@ pub fn validate_declaration_candidate(
         match certified {
             Ok(certified) => Some(lexical_projection::prepare_authored_projection(
                 candidate.projection_baseline.as_ref(),
+                candidate.exact_context.as_ref(),
                 candidate.generation,
                 Arc::new(certified),
                 &candidate.turn.retracts,

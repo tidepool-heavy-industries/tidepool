@@ -39,6 +39,24 @@ impl PublishedSourceOriginalSelection {
             && self.context.same_authenticated_context(&other.context)
     }
 
+    pub(super) fn validate_retained_role(
+        &self,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<(), CompileError> {
+        let issued = self
+            .context
+            .compiler_input_projection()
+            .snapshot_roles()
+            .get(&self.public_root);
+        let retained = support.projection().snapshot_roles().get(&self.public_root);
+        if issued != retained {
+            return Err(failure(
+                "publication lexical evidence differs from its retained compiler role",
+            ));
+        }
+        Ok(())
+    }
+
     fn selects_target(
         &self,
         lexical: &BTreeSet<ExactModuleIdentity>,
@@ -433,6 +451,28 @@ impl ExactDeclarationContext {
             }
         }
         Ok(())
+    }
+
+    /// Carry publication evidence only for roles retained by the receiving owner.
+    pub(crate) fn published_source_original_selections_for_support(
+        &self,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<Vec<Arc<PublishedSourceOriginalSelection>>, CompileError> {
+        let selections = self
+            .published_source_original_selections()?
+            .into_iter()
+            .filter(|selection| {
+                support
+                    .projection()
+                    .snapshot_roles()
+                    .get(selection.public_root())
+                    .is_some_and(CompilerInputRole::is_published_source_original)
+            })
+            .collect::<Vec<_>>();
+        for selection in &selections {
+            selection.validate_retained_role(support)?;
+        }
+        Ok(selections)
     }
 
     pub fn published_source_original_selections(

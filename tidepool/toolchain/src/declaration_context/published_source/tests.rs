@@ -81,6 +81,57 @@ fn published_source_composition_preserves_sealed_selection_across_repeated_impor
             .is_err(),
         "a distinct sealed publication policy cannot replace the selected policy"
     );
+    // An unrelated authored declaration still carries published compiler roles.
+    // Its receiving publication must retain their independently issued lexical proof.
+    let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
+    let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(47));
+    let path = directory.path().join(module.relative_hs_path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let authored_source = format!(
+        "module {} where\nanswer :: Int\nanswer = 1\n",
+        module.module_name(),
+    );
+    std::fs::write(&path, &authored_source).unwrap();
+    let declaration = Arc::new(
+        crate::artifacts::test_support::certify_authored_declaration_in_context(
+            module,
+            &path,
+            &authored_source,
+            &[directory.path().to_path_buf()],
+            directory.path(),
+            source.clone(),
+        )
+        .unwrap(),
+    );
+    let surface = declaration
+        .extend_source_surface(&Default::default())
+        .unwrap();
+    let authored = ExactDeclarationContext::empty()
+        .admit_authored_publication(std::slice::from_ref(&declaration), &surface)
+        .expect("authored handoff retains incoming publication lexical proof");
+    assert_eq!(
+        authored.compiler_input_projection().snapshot_roles()[publication.public_root()],
+        role,
+    );
+    for node in source.lexical_graph() {
+        assert!(authored.lexical_graph().contains(node));
+    }
+    let repeated = authored
+        .clone()
+        .admit_authored_publication(std::slice::from_ref(&declaration), &surface)
+        .unwrap();
+    assert!(authored.same_authenticated_context(&repeated));
+    let conflicting = ExactDeclarationContext::empty()
+        .with_published_source_originals(&alternative)
+        .unwrap();
+    let conflicting_before = conflicting.semantic_sha256();
+    assert!(matches!(
+        conflicting
+            .clone()
+            .admit_authored_publication(std::slice::from_ref(&declaration), &surface),
+        Err(CompileError::ExtractFailed(_))
+    ));
+    assert_eq!(conflicting.semantic_sha256(), conflicting_before);
     assert_eq!(source.semantic_sha256(), before);
     assert_eq!(source.artifact_view().capture_graph_selection(), graph);
 }

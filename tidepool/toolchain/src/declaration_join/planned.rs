@@ -678,9 +678,12 @@ fn certify_admitted_planned_declaration(
     inventory.validate(&original_owner, &interfaces)?;
     let compiler_support =
         crate::declaration_context::certified_artifact_view(&originals, artifact_context.as_ref())?;
+    let published_sources =
+        artifact_context.published_source_original_selections_for_support(&compiler_support)?;
     Ok(CertifiedAuthoredDeclaration {
         product: selected.clone(),
         compiler_support,
+        published_sources,
         lexical_exports: inventory.selection.exports.clone(),
         introduced_exports: inventory.selection.exports,
         instances: inventory.selection.instances,
