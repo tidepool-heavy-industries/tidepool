@@ -1,6 +1,7 @@
 # G2 remaining publication and compiler boundaries
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
+Integrated code candidate: `89e0ea1867572dc05b5b693afa218716ce32764e`.
 Reviewed base: code `69a6ea506b`, docs `9bd10232b9`.
 Current evidence: `/srv/swarm/evidence/inanna/g2-four-boundaries-20261025/`.
 
@@ -17,10 +18,23 @@ product, lexical, TYPE, native and lifecycle authority throughout.
 | Imported session declaration captured as SourceOriginal | Keep authored local admissions, interfaces and seals, but exclude genuine session declaration modules from SourceOriginal descriptors. | Mixed authored/non-session capture and attached-domain certified retraction. |
 | Authenticated World TYPE closure treated as unsealed injection | Seal actual World import-basis TYPE modules and prefix Original homes; keep the separately carried transient operand and raw injection unsealed. | World carried-import memo history, legacy unsealed refusal, actual typed host-carrier joined case. |
 
-The render repair is integrated as `a9315212f2` (worker `b6f46a70d8`): production
-and test compilation plus **39/39** render controls passed; see
-`render/summary.json`. The other repairs remain in isolated implementation and
-validation checkouts. No joined pass is claimed for their new integrated state.
+All four repairs and the bounded W1/W7 cleanups are integrated. Component evidence:
+
+| Worker source | Executed controls | Evidence |
+|---|---|---|
+| `b6f46a70d8` | Render 39/39 | `render/summary.json` |
+| `c74f92386f` | Durable activation 1/1 | `lexical/` |
+| `0a45beb4c9` | Focused Haskell 4/4 plus reserved-session 1/1 | `haskell/final-q3-q4.log`, `haskell/reserved-session-identity.log` |
+| `9c827f6110` | Visibility deletion: World histories 2/2 | `haskell/final-w1.log` |
+| `07fca7c546` | W7 differential and genuine World histories 3/3 | `primary-delta/delivery.json` |
+
+Owning production/test compilation passed. The Q4 regressions fail against the
+old compiler; the W7 omitted-base-check mutant fails its targeted refusal. The
+mixed-origin Haskell case is positive-only and passes both versions. Q3's actual
+discriminator is the new authored-in-exact-context Rust test: it fails before Q3
+and passes with Q1+Q3 on `25aa73f6c8`. Early authored/durable joined checks passed
+2/2 there. Final joined validation is running at `89e0ea1867`; component results
+and the earlier pin are not substitutes for those outcomes.
 
 Argon's source trace corrects the earlier rich-case investigation: its checked
 inspection pass succeeded; the subsequent authored product probe intentionally
@@ -41,9 +55,9 @@ evicting the just-compiled source memo before a later stage acquires it.
   commit to logical World identity. They are already absent from Haskell's
   transported frontier. Replacing them with the existing whole-context semantic
   digest has no established equivalence or cost benefit; defer the redesign.
-- W7: implement CID-pruned primary association updates. Validate association
-  changes plus actual base-row changes, preserve exact census/charge and lexical
-  revalidation, and compare against independent cold admission. Remaining
+- W7: CID-pruned primary association updates are implemented. Validation covers
+  association changes plus actual base-row changes, preserves exact census/charge
+  and lexical revalidation, and compares against independent cold admission. Remaining
   source-hint/lexical scans must not be described as delta-sized.
 
 The source audits and concrete controls are in `cleanup/haskell-audit.md`,
@@ -56,9 +70,17 @@ Run durable activation, rich suffix retraction, attached-domain rollback and
 typed host-carrier mounting on the integrated candidate, plus the affected
 Haskell World/source controls and representative publication/retirement
 histories. Preserve full diagnostics and process/compiler cleanup evidence.
-W7 additionally requires genuine primary-changing histories, cold-versus-delta
-facts and charge comparisons, malformed transition refusal and bounded-work
-observations. Compile changed production and test consumers before acceptance.
+The final runtime core-four and adjacent-two selections are under
+`joined-runtime/89e0/`; actor carrier and full source-boot/prepared-STG checks are
+under `joined-haskell/`. W7's component evidence covers genuine primary-only
+advancement, codec DATA histories, cold-versus-delta facts/charges, malformed
+transition refusal and bounded validation work; it does not claim whole-successor
+O(delta) performance or transactional cancellation qualification.
+
+The existing broad publication test separately fails in an unchanged raw-recovery
+fixture before the new handoff assertions. No pre-change execution was made in
+this round. The new real-owner test is isolated from that setup; retain the
+failure as an open fixture boundary rather than treating it as a handoff pass.
 
 Prior evidence remains bound to its own sources under
 `/srv/swarm/evidence/inanna/g2-apply-closure-20261025/`: the established joined
