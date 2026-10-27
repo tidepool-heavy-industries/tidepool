@@ -473,6 +473,8 @@ certifiedOriginalExternalDemand :: TargetCertificationContext -> SymbolIdentity
   -> Either String (Maybe PriorOriginalExternalDemand)
 certifiedOriginalExternalDemand context identity = case Map.lookup identity (targetBinderOwners context) of
   Nothing
+    | Map.member identity (targetOriginalReferences context) ->
+        Right (Just (PriorOriginalExternalDemand (Set.singleton identity) Map.empty))
     | (symbolUnit identity,symbolModule identity) `Set.member` targetNativeOwners context ->
         Left "prior native package demand lacks its certified binder"
     | otherwise -> Right Nothing
