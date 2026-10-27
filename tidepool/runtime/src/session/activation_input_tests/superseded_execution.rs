@@ -168,12 +168,27 @@ fn retired_source_refuses_active_execution_without_mutation() {
             ..resident.public_context()
         })
         .unwrap();
-    let (_bound, _compiled, _item) = compile_checked_binding(
+    let checked = check_fixture_cell(
         &mut resident,
         &recipe,
         "stillActive <- pure (41 :: Int)",
         execution.clone(),
+        0,
     );
+    let (_bound, compiled, _item) = checked.compile_binding(&mut resident, 0);
+    let native = compiled
+        .certification
+        .as_ref()
+        .unwrap()
+        .checked_execution()
+        .unwrap()
+        .clone();
+    let running = source_action(&mut resident, |resident, _| {
+        checked
+            .prefix
+            .start(&resident.state, execution.private_scope(), native)
+    })
+    .unwrap();
     let before = resident.public_visibility_snapshot_in(execution.private_scope());
     let proof = retire(&resident);
     assert!(matches!(
@@ -193,6 +208,37 @@ fn retired_source_refuses_active_execution_without_mutation() {
         execution.checked_progress(),
         PrivateCheckedItemProgress::Started
     );
+    running
+        .completion()
+        .park(execution.private_scope())
+        .unwrap();
+    assert!(matches!(
+        resident.settle_superseded_private_execution(&execution, &proof),
+        Err(SessionError::WorldCellPublicationIncomplete)
+    ));
+    running
+        .completion()
+        .begin_reentry(&resident.state, execution.private_scope())
+        .unwrap();
+    let capture = running.completion().capture_ticket().unwrap();
+    assert!(matches!(
+        resident.settle_superseded_private_execution(&execution, &proof),
+        Err(SessionError::WorldCellPublicationIncomplete)
+    ));
+    drop(capture);
+    let settled = resident
+        .settle_superseded_private_execution(&execution, &proof)
+        .unwrap();
+    assert!(
+        matches!(settled, SupersededPrivateExecution::Discarded { writes, .. } if writes.compiler_progress == SupersededCompilerProgress::Incomplete)
+    );
+    assert_eq!(
+        execution.checked_progress(),
+        PrivateCheckedItemProgress::Started
+    );
+    assert_eq!(checked.prefix.snapshot().compiler_prefix().next_item(), 0);
+    assert!(running.completion().capture_ticket().is_err());
+    drop(running);
 }
 
 #[test]
@@ -240,7 +286,7 @@ fn retired_source_discards_declaration_without_publishing() {
 }
 
 #[test]
-fn retired_source_requires_host_settlement_and_reconciliation() {
+fn retired_source_refuses_pending_hosts_and_discards_accepted_hosts_without_reconciliation() {
     for (index, accept, reconcile) in [(0, false, false), (1, true, false), (2, true, true)] {
         let (_root, recipe, mut resident) = session(1885 + index);
         let execution = begin_fixture_execution(&mut resident);
@@ -272,10 +318,12 @@ fn retired_source_requires_host_settlement_and_reconciliation() {
         }
         let public_before = resident.public_visibility_snapshot_in(resident.public_scope());
         let private_before = resident.public_visibility_snapshot_in(execution.private_scope());
+        let other_public = resident.mint_notebook_scope_with_lease(None).unwrap();
+        let other_before = resident.public_visibility_snapshot_in(other_public.scope());
         let proof = retire(&resident);
         let roots_before = resident.state.persistent_roots_count();
         let result = resident.settle_superseded_private_execution(&execution, &proof);
-        if reconcile {
+        if accept {
             let SupersededPrivateExecution::Discarded { writes, retirement } = result.unwrap()
             else {
                 panic!("host classified empty")
@@ -301,6 +349,11 @@ fn retired_source_requires_host_settlement_and_reconciliation() {
                 .scope_tree()
                 .is_live(execution.private_scope()));
         }
+        assert_eq!(
+            resident.public_visibility_snapshot_in(other_public.scope()),
+            other_before
+        );
+        assert!(resident.public_source.source_admission().admit().is_err());
         assert_eq!(
             resident.public_visibility_snapshot_in(resident.public_scope()),
             public_before
@@ -336,4 +389,150 @@ fn retired_source_refuses_stale_epoch_without_mutation() {
         .scope_tree()
         .is_live(execution.private_scope()));
     assert!(execution.final_intent.get().is_none());
+}
+
+#[test]
+fn retired_source_aborts_reserved_prefix_without_completing_it() {
+    let (_root, recipe, mut resident) = session(1889);
+    let execution = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let checked = check_fixture_cell(
+        &mut resident,
+        &recipe,
+        "unstarted <- pure (41 :: Int)",
+        execution.clone(),
+        0,
+    );
+    let (_, compiled, _) = checked.compile_binding(&mut resident, 0);
+    let native = compiled
+        .certification
+        .as_ref()
+        .unwrap()
+        .checked_execution()
+        .unwrap()
+        .clone();
+    let proof = retire(&resident);
+    let public_before = resident.public_visibility_snapshot_in(resident.public_scope());
+    let settled = resident
+        .settle_superseded_private_execution(&execution, &proof)
+        .unwrap();
+    let SupersededPrivateExecution::Discarded { writes, retirement } = settled else {
+        panic!("reserved program cannot claim empty completed frontier")
+    };
+    assert_eq!(
+        writes.compiler_progress,
+        SupersededCompilerProgress::Incomplete
+    );
+    assert!(writes.bindings.is_empty());
+    assert_eq!(
+        execution.checked_progress(),
+        PrivateCheckedItemProgress::Started
+    );
+    assert_eq!(checked.prefix.snapshot().compiler_prefix().next_item(), 0);
+    assert_eq!(retirement.scopes_retired, 1);
+    assert!(checked
+        .prefix
+        .start(&resident.state, execution.private_scope(), native)
+        .is_err());
+    assert!(resident.freeze_private_execution(&execution).is_err());
+    assert_eq!(
+        resident.public_visibility_snapshot_in(resident.public_scope()),
+        public_before
+    );
+}
+
+#[test]
+fn retired_source_discards_failed_and_cancelled_suffixes_without_losing_prior_writes() {
+    for cancel in [false, true] {
+        let (_root, recipe, mut resident) = session(1890 + u64::from(cancel));
+        let execution = begin_fixture_execution(&mut resident);
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..resident.public_context()
+            })
+            .unwrap();
+        let source = if cancel {
+            "prior <- pure (41 :: Int)\nsuffix <- pure (42 :: Int)"
+        } else {
+            "prior <- pure (41 :: Int)\nsuffix <- (error \"superseded suffix\" >> pure (42 :: Int))"
+        };
+        let checked = check_fixture_cell(&mut resident, &recipe, source, execution.clone(), 0);
+        let (bound, compiled, item) = checked.compile_binding(&mut resident, 0);
+        let first = source_action(&mut resident, |resident, settlement| {
+            resident.run_bind_with_sites(
+                "prior",
+                compiled.code(),
+                &bound[0],
+                item.generation(),
+                settlement,
+            )
+        })
+        .unwrap();
+        assert!(matches!(first, ResidentOutcome::Completed { .. }));
+        let (bound, compiled, item) = checked.compile_binding(&mut resident, 1);
+        let failed = source_action(&mut resident, |resident, settlement| {
+            resident.with_invocation_cancel(
+                Arc::new(std::sync::atomic::AtomicBool::new(cancel)),
+                |resident| {
+                    resident.run_bind_with_sites(
+                        "suffix",
+                        compiled.code(),
+                        &bound[0],
+                        item.generation(),
+                        settlement,
+                    )
+                },
+            )
+        });
+        let error = failed.expect_err("the suffix must actually fail or observe cancellation");
+        if cancel {
+            assert!(
+                matches!(&error, ResidentError::Prepared(prepared) if prepared.kind() == crate::session::prepared::PreparedFailureKind::Cancelled),
+                "{error:?}"
+            );
+        } else {
+            assert!(error.is_language_failure(), "{error:?}");
+        }
+        let proof = retire(&resident);
+        let before = resident.public_visibility_snapshot_in(resident.public_scope());
+        let settled = resident
+            .settle_superseded_private_execution(&execution, &proof)
+            .unwrap();
+        let SupersededPrivateExecution::Discarded { writes, retirement } = settled else {
+            panic!("failed suffix lost prior staged value")
+        };
+        assert_eq!(
+            writes.compiler_progress,
+            SupersededCompilerProgress::Incomplete
+        );
+        assert_eq!(
+            writes
+                .bindings
+                .iter()
+                .map(|binding| binding.name.as_str())
+                .collect::<Vec<_>>(),
+            ["prior"]
+        );
+        assert_eq!(checked.prefix.snapshot().compiler_prefix().next_item(), 1);
+        assert_eq!(
+            execution.checked_progress(),
+            PrivateCheckedItemProgress::Started
+        );
+        assert_eq!(retirement.scopes_retired, 1);
+        assert!(execution.completed_values.lock().is_empty());
+        assert_eq!(
+            resident.public_visibility_snapshot_in(resident.public_scope()),
+            before
+        );
+        assert!(resident.freeze_private_execution(&execution).is_err());
+        assert!(resident
+            .settle_superseded_private_execution(&execution, &proof)
+            .is_err());
+    }
 }

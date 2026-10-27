@@ -127,6 +127,8 @@ pub enum SupersededCompilerProgress {
     Unchanged,
     Checked,
     HostChanged,
+    /// An admitted program ended before its complete private frontier was sealed.
+    Incomplete,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,6 +195,7 @@ enum PrivateExecutionPhase {
 enum PrivateAuthoredProgram {
     Ready(Arc<PrivateSettledFrontier>),
     Active {
+        prefix: std::sync::Weak<RuntimeCheckedPrefix>,
         admission_digest: [u8; 32],
         settled: Arc<PrivateSettledFrontier>,
         predecessor: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
@@ -1531,9 +1534,10 @@ impl PrivateExecutionAdmission {
 
     pub(super) fn claim_authored_program(
         &self,
-        admission_digest: [u8; 32],
+        prefix: &Arc<RuntimeCheckedPrefix>,
         snapshot: &PrivatePreparationSnapshot,
     ) -> Result<(), SessionError> {
+        let admission_digest = prefix.admission.digest();
         let mut state = self.state.lock();
         if state.phase != PrivateExecutionPhase::Open {
             return Err(SessionError::StaleStagedDeclaration);
@@ -1545,6 +1549,7 @@ impl PrivateExecutionAdmission {
         }
         execution_snapshot_is_ready(&state, snapshot)?;
         state.authored = PrivateAuthoredProgram::Active {
+            prefix: Arc::downgrade(prefix),
             admission_digest,
             settled: snapshot.frontier.clone(),
             predecessor: snapshot.world().clone(),
@@ -2529,6 +2534,20 @@ struct RunningCheckedItem {
 }
 
 impl RuntimeCheckedState {
+    fn can_abort_after_source_retirement(&self) -> bool {
+        matches!(
+            self.phase,
+            CellPhase::Ready(_) | CellPhase::Reserved(_) | CellPhase::Failed(_)
+        )
+    }
+
+    // Running, parked and capturing operations retain their affine completion
+    // obligation. Their owner must settle that obligation before scope cleanup.
+    fn abort_after_source_retirement(&mut self) {
+        debug_assert!(self.can_abort_after_source_retirement());
+        self.phase = CellPhase::Failed(self.snapshot().clone());
+    }
+
     fn snapshot(&self) -> &Arc<RuntimeCheckedPrefixSnapshot> {
         match &self.phase {
             CellPhase::Ready(snapshot)
@@ -4155,7 +4174,7 @@ impl PersistentSession {
                     .preparation
                     .as_ref()
                     .ok_or(SessionError::StaleStagedDeclaration)?;
-                execution.claim_authored_program(prefix.admission.digest(), preparation)?;
+                execution.claim_authored_program(&prefix, preparation)?;
             }
             state.phase = CellPhase::Reserved(reservation);
             Ok(())
@@ -4962,7 +4981,7 @@ impl PersistentSession {
         }
     }
 
-    fn current_private_world_association(
+    fn retained_private_world_association(
         &self,
         execution: &PrivateExecutionAdmission,
     ) -> Result<Arc<super::inspection::InspectionWorldAssociation>, SessionError> {
@@ -4985,15 +5004,25 @@ impl PersistentSession {
         let original_source = execution.original_source()?;
         original_source.validate_source_issuer()?;
         self.validate_lexical_scope_lease(scope, &execution.scope_lease)?;
-        if !Arc::ptr_eq(&association.base.owner, self.admission_owner())
+        if association.base.scope != scope
+            || !Arc::ptr_eq(&association.base.owner, self.admission_owner())
             || association.base.epoch != self.admission_owner().epoch()
-            || !self.inspection_world_base_is_current(
-                &association.base,
-                &execution.compiler_basis.source,
-                &original_source,
-            )
+            || association.base.source.sha256() != execution.compiler_basis.source.sha256()
+            || !association.base.original_source.matches(&original_source)
             || !association.base.target.matches(&execution.scope_lease)
-            || self.compile_view_key_in(scope).as_ref() != Some(&association.base.key)
+        {
+            return Err(SessionError::WorldCellPublicationBaseStale);
+        }
+        Ok(association)
+    }
+
+    fn current_private_world_association(
+        &self,
+        execution: &PrivateExecutionAdmission,
+    ) -> Result<Arc<super::inspection::InspectionWorldAssociation>, SessionError> {
+        let association = self.retained_private_world_association(execution)?;
+        if self.compile_view_key_in(execution.private_scope()).as_ref()
+            != Some(&association.base.key)
         {
             return Err(SessionError::WorldCellPublicationBaseStale);
         }
@@ -5015,29 +5044,73 @@ impl PersistentSession {
         {
             return Err(super::SessionTransitionReason::OwnerChanged.into());
         }
-        // Completion/acceptance takes lifecycle exclusion before issuer locks.
+        // Completion takes checked-prefix exclusion before private lifecycle
+        // exclusion, then issuer locks. Inspect without retaining the first guard.
+        let active_prefix = match &execution.state.lock().authored {
+            PrivateAuthoredProgram::Active { prefix, .. } => Some(
+                prefix
+                    .upgrade()
+                    .ok_or(SessionError::WorldCellPublicationIncomplete)?,
+            ),
+            _ => None,
+        };
+        let mut prefix_state = active_prefix.as_ref().map(|prefix| prefix.state.lock());
         let mut state = execution.state.lock();
         if state.phase != PrivateExecutionPhase::Open || execution.final_intent.get().is_some() {
             return Err(super::SessionTransitionReason::WrongPhase.into());
         }
-        let PrivateAuthoredProgram::Ready(frontier) = &state.authored else {
-            return Err(SessionError::WorldCellPublicationIncomplete);
-        };
-        if !state.pending_hosts.is_empty()
-            || state.accepted_visible_revision != state.applied_visible_revision
-            || !state.unapplied_visible_hosts.is_empty()
-        {
+        if !state.pending_hosts.is_empty() {
             return Err(SessionError::WorldCellPublicationIncomplete);
         }
-        let association = self.current_private_world_association(execution)?;
-        if !frontier.matches_world(&association.world) {
-            return Err(SessionError::WorldCellPublicationBaseStale);
-        }
-        let compiler_progress = match frontier.publication() {
-            CompletedPrivateCompilerProgress::Unchanged => SupersededCompilerProgress::Unchanged,
-            CompletedPrivateCompilerProgress::Checked(_) => SupersededCompilerProgress::Checked,
-            CompletedPrivateCompilerProgress::HostChanged(_) => {
-                SupersededCompilerProgress::HostChanged
+        // Failed installation/capture can change runtime custody without
+        // advancing a successful compiler frontier. Cleanup authenticates the
+        // retained source/target owners; publication still requires a current key.
+        let association = self.retained_private_world_association(execution)?;
+        let compiler_progress = match &state.authored {
+            PrivateAuthoredProgram::Ready(frontier) => {
+                if !frontier.matches_world(&association.world) {
+                    return Err(SessionError::WorldCellPublicationBaseStale);
+                }
+                match frontier.publication() {
+                    CompletedPrivateCompilerProgress::Unchanged => {
+                        SupersededCompilerProgress::Unchanged
+                    }
+                    CompletedPrivateCompilerProgress::Checked(_) => {
+                        SupersededCompilerProgress::Checked
+                    }
+                    CompletedPrivateCompilerProgress::HostChanged(_) => {
+                        SupersededCompilerProgress::HostChanged
+                    }
+                }
+            }
+            PrivateAuthoredProgram::Active {
+                prefix,
+                admission_digest,
+                predecessor,
+                ..
+            } => {
+                let Some(active) = active_prefix.as_ref() else {
+                    return Err(SessionError::WorldCellPublicationIncomplete);
+                };
+                let checked = prefix_state
+                    .as_ref()
+                    .ok_or(SessionError::WorldCellPublicationIncomplete)?;
+                if !std::sync::Weak::ptr_eq(prefix, &Arc::downgrade(active))
+                    || *admission_digest != active.admission.digest()
+                    || !checked.can_abort_after_source_retirement()
+                {
+                    return Err(SessionError::WorldCellPublicationIncomplete);
+                }
+                if !Arc::ptr_eq(predecessor, &association.world)
+                    || !Arc::ptr_eq(checked.snapshot().world(), &association.world)
+                {
+                    return Err(SessionError::WorldCellPublicationBaseStale);
+                }
+                SupersededCompilerProgress::Incomplete
+            }
+            PrivateAuthoredProgram::Failed => SupersededCompilerProgress::Incomplete,
+            PrivateAuthoredProgram::Superseded(_) => {
+                return Err(super::SessionTransitionReason::WrongPhase.into())
             }
         };
         let original = execution.original_source()?;
@@ -5074,14 +5147,21 @@ impl PersistentSession {
             };
             // No fallible work follows this terminal transition. Retiring the
             // private frame uses the existing root/native ownership accounting.
+            if compiler_progress == SupersededCompilerProgress::Incomplete {
+                if let Some(checked) = prefix_state.as_mut() {
+                    checked.abort_after_source_retirement();
+                }
+            }
             state.phase = PrivateExecutionPhase::Superseded;
             state.authored = PrivateAuthoredProgram::Superseded(match compiler_progress {
                 SupersededCompilerProgress::Checked => PrivateCheckedItemProgress::Completed,
+                SupersededCompilerProgress::Incomplete => PrivateCheckedItemProgress::Started,
                 _ => PrivateCheckedItemProgress::NotStarted,
             });
             let retirement = self.retire_scope_exclusive(execution.private_scope(), true);
             completed.clear();
             state.accepted_host_progress = None;
+            state.unapplied_visible_hosts.clear();
             Ok(if empty {
                 SupersededPrivateExecution::Empty { retirement }
             } else {

@@ -1378,7 +1378,9 @@ RUNTIME_SUPERSEDED_EXECUTION_CASES = ["session::resident::activation_input_tests
     "retired_source_discards_completed_value_without_publishing",
     "retired_source_refuses_active_execution_without_mutation",
     "retired_source_discards_declaration_without_publishing",
-    "retired_source_requires_host_settlement_and_reconciliation",
+    "retired_source_refuses_pending_hosts_and_discards_accepted_hosts_without_reconciliation",
+    "retired_source_aborts_reserved_prefix_without_completing_it",
+    "retired_source_discards_failed_and_cancelled_suffixes_without_losing_prior_writes",
     "retired_source_refuses_stale_epoch_without_mutation",
 )]
 
