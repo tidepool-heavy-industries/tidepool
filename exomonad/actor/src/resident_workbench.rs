@@ -5828,7 +5828,9 @@ fn outcome_continuation_id(outcome: &ResidentOutcome) -> Option<String> {
         ResidentOutcome::Suspended { hole, .. } | ResidentOutcome::Deferred { hole, .. } => {
             Some(hole.cont_id().to_owned())
         }
-        ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. } => None,
+        ResidentOutcome::Completed { .. }
+        | ResidentOutcome::BindingsCommitted { .. }
+        | ResidentOutcome::SupersededReturn { .. } => None,
     }
 }
 
@@ -8131,6 +8133,10 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     ) -> Self {
         self.compilation_authority = Some(authority);
         self
+    }
+
+    pub(crate) fn private_execution(&self) -> Option<&Arc<ExecutionPrivateScope>> {
+        self.private_execution.as_ref()
     }
 
     pub(crate) fn with_private_execution(mut self, execution: Arc<ExecutionPrivateScope>) -> Self {
@@ -12333,6 +12339,121 @@ fn render_cell_runtime_failure(input_ordinal: usize, detail: &str, cell_text: &s
     format!("<cell item {input_ordinal}>: runtime error: {detail}")
 }
 
+fn render_tool_fragment_result(
+    display: &WorkbenchDisplay,
+    result: &tidepool_runtime::EvalResult,
+    recovered_bindings: &[String],
+) -> Result<(String, Option<serde_json::Value>), ResidentActorWorkbenchError> {
+    // A bounded observation marks what it could not afford to
+    // materialize. That is a size answer, so say so instead of
+    // letting the decoder call it a type mismatch.
+    if tidepool_codegen::observation::contains_oversize_sentinel(result.value()) {
+        return Err(ResidentActorWorkbenchError::CompletedResultObservation {
+            detail: "the tool's answer exceeded the observation budget; return a \
+                             smaller Text, or bind the whole value in a cell and select from it"
+                .into(),
+            recovered_bindings: recovered_bindings.to_vec(),
+        });
+    }
+    let text = String::from_value(result.value(), result.table()).map_err(|error| {
+        ResidentActorWorkbenchError::CompletedResultObservation {
+            detail: error.to_string(),
+            recovered_bindings: recovered_bindings.to_vec(),
+        }
+    })?;
+    if matches!(display, WorkbenchDisplay::ToolDispatch) {
+        let reply = decode_tool_dispatch_reply(&text).map_err(|error| {
+            ResidentActorWorkbenchError::CompletedResultObservation {
+                detail: error.to_string(),
+                recovered_bindings: recovered_bindings.to_vec(),
+            }
+        })?;
+        let (value, presentation) = reply
+            .into_parts()
+            .map_err(ResidentActorWorkbenchError::ToolDispatch)?;
+        Ok((presentation, value))
+    } else {
+        Ok((text, None))
+    }
+}
+
+fn settle_superseded_fragment(
+    mut fragment: ResidentWorkbenchFragment,
+    output: Vec<String>,
+    result: Option<tidepool_runtime::EvalResult>,
+    bindings: Vec<tidepool_runtime::session::DiscardedPrivateBinding>,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+    fragment.output.extend(output);
+    let discarded = bindings
+        .into_iter()
+        .map(|binding| binding.name)
+        .collect::<Vec<_>>();
+    let (receipt, value) = match &fragment.display {
+        WorkbenchDisplay::Tool | WorkbenchDisplay::ToolDispatch => {
+            let result = result.as_ref().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "superseded tool return has no semantic result".into(),
+                )
+            })?;
+            render_tool_fragment_result(&fragment.display, result, &[])?
+        }
+        WorkbenchDisplay::Binding { .. } | WorkbenchDisplay::Discard => (String::new(), None),
+    };
+    if !receipt.is_empty() {
+        fragment.output.push(receipt);
+    }
+    if !discarded.is_empty() {
+        fragment.output.push(format!(
+            "[discarded bindings after generation reset: {}]",
+            discarded.join(", ")
+        ));
+    }
+    Ok(ResidentWorkbenchStep::Committed {
+        output: fragment.output.join("\n"),
+        value,
+        warnings: fragment.warnings,
+        installed_bindings: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+mod superseded_return_projection_tests {
+    use super::*;
+
+    #[test]
+    fn discarded_return_names_never_become_installed_binding_receipts() {
+        // Formatting only: this data cannot issue a checked-return owner or
+        // generation-retirement proof. Runtime/host tests own those transitions.
+        let mut fragment = ResidentWorkbenchFragment::empty_for_test();
+        fragment.output.push("prior output".into());
+        fragment.recovered_jobs.push("priorJob".into());
+        fragment.warnings.push("retained warning".into());
+        let step = settle_superseded_fragment(
+            fragment,
+            vec!["suffix output".into()],
+            None,
+            vec![tidepool_runtime::session::DiscardedPrivateBinding {
+                id: tidepool_repr::SessionVarId::from_extract(71),
+                name: "retiredBinding".into(),
+            }],
+        )
+        .unwrap();
+        let ResidentWorkbenchStep::Committed {
+            output,
+            value,
+            warnings,
+            installed_bindings,
+        } = step
+        else {
+            panic!("returned effects retain their completed receipt")
+        };
+        assert_eq!(output, "prior output\nsuffix output\n[discarded bindings after generation reset: retiredBinding]");
+        assert!(value.is_none());
+        assert_eq!(warnings, ["retained warning"]);
+        assert!(installed_bindings.is_empty());
+    }
+}
+
 fn settle_fragment<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -12393,39 +12514,13 @@ where
                 ),
                 WorkbenchDisplay::Discard => String::new(),
                 WorkbenchDisplay::Tool | WorkbenchDisplay::ToolDispatch => {
-                    // A bounded observation marks what it could not afford to
-                    // materialize. That is a size answer, so say so instead of
-                    // letting the decoder call it a type mismatch.
-                    if tidepool_codegen::observation::contains_oversize_sentinel(result.value()) {
-                        return Err(ResidentActorWorkbenchError::CompletedResultObservation {
-                            detail: "the tool's answer exceeded the observation budget; return a \
-                             smaller Text, or bind the whole value in a cell and select from it"
-                                .into(),
-                            recovered_bindings: installed_bindings.clone(),
-                        });
-                    }
-                    let text =
-                        String::from_value(result.value(), result.table()).map_err(|error| {
-                            ResidentActorWorkbenchError::CompletedResultObservation {
-                                detail: error.to_string(),
-                                recovered_bindings: installed_bindings.clone(),
-                            }
-                        })?;
-                    if matches!(&fragment.display, WorkbenchDisplay::ToolDispatch) {
-                        let reply = decode_tool_dispatch_reply(&text).map_err(|error| {
-                            ResidentActorWorkbenchError::CompletedResultObservation {
-                                detail: error.to_string(),
-                                recovered_bindings: installed_bindings.clone(),
-                            }
-                        })?;
-                        let (value, presentation) = reply
-                            .into_parts()
-                            .map_err(ResidentActorWorkbenchError::ToolDispatch)?;
-                        semantic_value = value;
-                        presentation
-                    } else {
-                        text
-                    }
+                    let (text, value) = render_tool_fragment_result(
+                        &fragment.display,
+                        &result,
+                        &installed_bindings,
+                    )?;
+                    semantic_value = value;
+                    text
                 }
             };
             let mut transcript = fragment.output.join("\n");
@@ -12440,6 +12535,11 @@ where
                 installed_bindings,
             })
         }
+        ResidentOutcome::SupersededReturn {
+            output,
+            result,
+            bindings,
+        } => settle_superseded_fragment(fragment, output, result, bindings),
         ResidentOutcome::BindingsCommitted { output } => {
             let bound_name = match &fragment.display {
                 WorkbenchDisplay::Binding { binders, .. } => Some(
@@ -13698,7 +13798,9 @@ where
         mode: BoundaryCapture,
     ) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError> {
         let (hole, request) = match outcome {
-            ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. } => {
+            ResidentOutcome::Completed { .. }
+            | ResidentOutcome::BindingsCommitted { .. }
+            | ResidentOutcome::SupersededReturn { .. } => {
                 return Ok(ResidentActorBoundary::Completed);
             }
             ResidentOutcome::Deferred { hole, work, .. } => {
@@ -14743,9 +14845,10 @@ where
                 ResidentOutcome::Deferred { hole, work, .. } => {
                     outcome = self.run_external(context.clone(), hole, work).await?;
                 }
-                ResidentOutcome::BindingsCommitted { .. } => {
+                ResidentOutcome::BindingsCommitted { .. }
+                | ResidentOutcome::SupersededReturn { .. } => {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "shutdown completed as an impossible projected binding".into(),
+                        "shutdown completed with an unsupported checked return".into(),
                     ));
                 }
                 ResidentOutcome::Suspended { hole, request, .. } => {
@@ -15322,6 +15425,72 @@ where
                 session
                     .retain_continuation_resource_owner(&hole, lease)
                     .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    /// Capture the running checked item's exact return owner while its source
+    /// admission is still open. Unchecked actor continuations carry no such owner.
+    pub(crate) async fn capture_checked_return_owner(
+        &self,
+        context: crate::ActorSessionContext,
+        execution: Option<Arc<ExecutionPrivateScope>>,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        hole: ResidentHole,
+    ) -> Result<
+        Option<tidepool_runtime::session::RuntimeCheckedReturnOwner>,
+        ResidentActorWorkbenchError,
+    > {
+        let Some(execution) = execution else {
+            return Ok(None);
+        };
+        let mut public_context = context.clone();
+        public_context.placement.lexical_scope = execution.public_scope;
+        if context.placement.lexical_scope != execution.private_scope
+            || !execution.owner.matches_context(&public_context)
+            || !control.as_ref().is_some_and(|control| {
+                Arc::ptr_eq(&execution.decision, &control.publication_decision())
+            })
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "checked return requires its original actor and private execution".into(),
+            ));
+        }
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .capture_checked_return_owner(&execution.admission, &hole)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_superseded_value<T: ToHaskell + Send + 'static>(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: T,
+        supersession: Arc<crate::local_actor::run_control::CommittedGenerationSupersession>,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        if !control
+            .as_ref()
+            .is_some_and(|control| supersession.matches(context.actor, control))
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "superseded return requires its original execution".into(),
+            ));
+        }
+        self.access
+            .with_continuation_machine(context, move |session, _, _, settlement| {
+                session
+                    .resume_superseded_classified(
+                        hole,
+                        outcome,
+                        supersession.retirement(),
+                        settlement,
+                    )
+                    .map_err(classify_resumption)
             })
             .await
     }

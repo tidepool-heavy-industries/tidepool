@@ -40,14 +40,20 @@ pub(crate) struct CommittedGenerationSupersession {
 /// This is not retirement evidence and cannot authorize private settlement.
 #[derive(Clone, Debug)]
 struct ContinuingPublicationExecution {
+    checked_return: Option<tidepool_runtime::session::RuntimeCheckedReturnOwner>,
     actor: ActorRef,
     execution: tidepool_runtime::session::WorkbenchExecutionId,
     control: Arc<crate::WorkbenchExecutionControl>,
 }
 
 impl ContinuingPublicationExecution {
-    fn capture(actor: ActorRef, control: Arc<crate::WorkbenchExecutionControl>) -> Self {
+    fn capture(
+        actor: ActorRef,
+        control: Arc<crate::WorkbenchExecutionControl>,
+        checked_return: Option<tidepool_runtime::session::RuntimeCheckedReturnOwner>,
+    ) -> Self {
         Self {
+            checked_return,
             actor,
             execution: control.execution_id(actor),
             control,
@@ -596,6 +602,7 @@ impl KernelContext {
         diagnostic: crate::resident_actor::WorkbenchOperationDiagnosticOwner,
         force: bool,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        checked_return: Option<tidepool_runtime::session::RuntimeCheckedReturnOwner>,
     ) -> Result<GenerationRetirementResult, GenerationRetirementRequestError> {
         if preparation.actor() != self.identity {
             return Err(GenerationRetirementRequestError::ActorChanged);
@@ -620,9 +627,9 @@ impl KernelContext {
             report,
             candidate: preparation.candidate_custody().identity_observer(),
             operation,
-            continuing: control
-                .clone()
-                .map(|control| ContinuingPublicationExecution::capture(self.identity, control)),
+            continuing: control.clone().map(|control| {
+                ContinuingPublicationExecution::capture(self.identity, control, checked_return)
+            }),
         };
         self.directory
             .request_generation_retirement(
@@ -2264,6 +2271,7 @@ fn reconcile_unstarted(
 fn retire_published_source(
     cutoff: &mut GenerationRetirementCutoffPhase,
     successor: tidepool_runtime::session::NotebookGenerationId,
+    checked_return: Option<tidepool_runtime::session::RuntimeCheckedReturnOwner>,
 ) -> bool {
     if matches!(cutoff, GenerationRetirementCutoffPhase::Retired { .. }) {
         return true;
@@ -2277,7 +2285,7 @@ fn retire_published_source(
         unreachable!()
     };
     *cutoff = GenerationRetirementCutoffPhase::RetirementInProgress { capture };
-    let result = fence.retire(successor);
+    let result = fence.retire_with_checked_return(successor, checked_return);
     let GenerationRetirementCutoffPhase::RetirementInProgress { capture } =
         std::mem::replace(cutoff, GenerationRetirementCutoffPhase::NotStarted)
     else {
@@ -2476,7 +2484,14 @@ impl GenerationRetirementCore {
             let Ok(ActorGenerationCommit::Published { generation, .. }) = outcome.as_ref() else {
                 return None;
             };
-            let original_retired = retire_published_source(cutoff, generation.id());
+            let original_retired = retire_published_source(
+                cutoff,
+                generation.id(),
+                attempt
+                    .continuing
+                    .as_ref()
+                    .and_then(|execution| execution.checked_return.clone()),
+            );
             (original_retired
                 && *notification == preparation::PublicationNotificationObservation::Accepted)
                 .then(|| GenerationRetirementCompletion::BPublished {
@@ -4601,7 +4616,7 @@ mod supersession_execution_tests {
             control.execution_id(actor),
             independently_allocated.execution_id(actor)
         );
-        let execution = ContinuingPublicationExecution::capture(actor, control.clone());
+        let execution = ContinuingPublicationExecution::capture(actor, control.clone(), None);
         assert!(execution.matches(actor, &control.clone()));
         assert!(
             !execution.matches(actor, &independently_allocated),

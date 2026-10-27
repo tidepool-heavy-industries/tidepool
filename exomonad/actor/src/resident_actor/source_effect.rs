@@ -263,6 +263,7 @@ where
         &self,
         kernel: KernelContext,
         coordinator: Option<Arc<InvocationWork>>,
+        private: Option<Arc<crate::resident_workbench::ExecutionPrivateScope>>,
         context: ActorSessionContext,
         issued: Option<ActorRequestSnapshot>,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
@@ -273,6 +274,7 @@ where
     ) -> futures_util::future::BoxFuture<'static, commands::CommandResolution> {
         use crate::generated::reload::{ReloadError, ReloadReq};
         let runner = self.environment.runner.clone();
+        let return_control = control.clone();
         let ReloadReq::ReloadSourceWith(options) = request;
         let operation = if !authorized {
             Err(SourceError::SourceUnavailable(
@@ -321,7 +323,20 @@ where
             // Publication B and continuation A retain their separate immutable owners.
             let _issued = issued;
             let answer = match operation {
-                Ok(operation) => operation.run().await,
+                Ok(operation) => {
+                    let checked_return = runner
+                        .capture_checked_return_owner(
+                            context.clone(),
+                            private,
+                            return_control.clone(),
+                            continuation.clone(),
+                        )
+                        .await;
+                    match checked_return {
+                        Ok(owner) => operation.run(owner).await,
+                        Err(error) => Err(SourceError::SourceUnavailable(error.to_string())),
+                    }
+                }
                 Err(error) => Err(error),
             };
             let (answer, supersession) = match answer {
@@ -334,7 +349,23 @@ where
                 SourceError::SourceUnreadable(detail) => ReloadError::ReloadUnreadable(detail),
             });
             let mut resolution = resume_source_answer(answer, disposition, |answer| {
-                runner.resume_value(context, continuation, answer)
+                let supersession = supersession.clone();
+                async move {
+                    match supersession {
+                        Some(supersession) => {
+                            runner
+                                .resume_superseded_value(
+                                    context,
+                                    continuation,
+                                    answer,
+                                    supersession,
+                                    return_control,
+                                )
+                                .await
+                        }
+                        None => runner.resume_value(context, continuation, answer).await,
+                    }
+                }
             })
             .await;
             resolution.supersession = supersession;

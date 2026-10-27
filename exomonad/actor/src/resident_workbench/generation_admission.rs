@@ -856,9 +856,20 @@ impl GenerationRetirementFence {
         tidepool_runtime::session::RuntimeSourceRetirementProof,
         (Self, GenerationRetirementFenceError),
     > {
+        self.retire_with_checked_return(successor, None)
+    }
+
+    pub(crate) fn retire_with_checked_return(
+        self,
+        successor: NotebookGenerationId,
+        checked_return: Option<tidepool_runtime::session::RuntimeCheckedReturnOwner>,
+    ) -> Result<
+        tidepool_runtime::session::RuntimeSourceRetirementProof,
+        (Self, GenerationRetirementFenceError),
+    > {
         match self.state {
             GenerationRetirementFenceState::Held(fence) => fence
-                .retire(successor)
+                .retire_with_checked_return(successor, checked_return)
                 .map_err(|(fence, error)| (Self::new(fence), error.into())),
             state @ GenerationRetirementFenceState::ReopenAttempted(_) => Err((
                 Self { state },
@@ -925,9 +936,20 @@ impl GenerationFence {
         tidepool_runtime::session::RuntimeSourceRetirementProof,
         (Self, GenerationAdmissionError),
     > {
+        self.retire_with_checked_return(successor, None)
+    }
+
+    pub(crate) fn retire_with_checked_return(
+        self,
+        successor: NotebookGenerationId,
+        checked_return: Option<tidepool_runtime::session::RuntimeCheckedReturnOwner>,
+    ) -> Result<
+        tidepool_runtime::session::RuntimeSourceRetirementProof,
+        (Self, GenerationAdmissionError),
+    > {
         let Self { dependency, fence } = self;
         fence
-            .retire(successor)
+            .retire_with_checked_return(successor, checked_return)
             .map_err(|(fence, error)| (Self { dependency, fence }, error))
     }
 }

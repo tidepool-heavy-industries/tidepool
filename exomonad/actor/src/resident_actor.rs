@@ -3671,7 +3671,10 @@ enum FragmentAdvance {
 /// borrow the exact admitted call instead of consulting an actor singleton.
 #[derive(Clone)]
 enum CurrentEffectOwner<'a> {
-    Workbench(&'a WorkbenchEffectState),
+    Workbench(
+        &'a WorkbenchEffectState,
+        Option<&'a Arc<crate::resident_workbench::ExecutionPrivateScope>>,
+    ),
     Scoped {
         base: Box<CurrentEffectOwner<'a>>,
         scope: Arc<InvocationWork>,
@@ -3694,10 +3697,18 @@ enum CurrentEffectOwner<'a> {
 }
 
 impl CurrentEffectOwner<'_> {
+    fn private_execution(&self) -> Option<Arc<crate::resident_workbench::ExecutionPrivateScope>> {
+        match self {
+            Self::Scoped { base, .. } => base.private_execution(),
+            Self::Workbench(_, private) => private.cloned(),
+            Self::Tool { .. } | Self::Actor { .. } => None,
+        }
+    }
+
     fn callback_scope(&self) -> Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>> {
         match self {
             Self::Scoped { base, .. } => base.callback_scope(),
-            Self::Workbench(execution) => execution.callback_scope.clone(),
+            Self::Workbench(execution, _) => execution.callback_scope.clone(),
             Self::Actor { callback_scope, .. } => callback_scope.clone(),
             Self::Tool { .. } => None,
         }
@@ -3706,7 +3717,7 @@ impl CurrentEffectOwner<'_> {
     fn issued_snapshot(&self) -> Option<&crate::resident_workbench::ActorRequestSnapshot> {
         match self {
             Self::Scoped { base, .. } => base.issued_snapshot(),
-            Self::Workbench(execution) => execution.issued_snapshot.as_ref(),
+            Self::Workbench(execution, _) => execution.issued_snapshot.as_ref(),
             Self::Tool {
                 issued_snapshot, ..
             }
@@ -3721,7 +3732,7 @@ impl CurrentEffectOwner<'_> {
     fn effect_keys(&self) -> Option<&[exomonad_tool::ToolEffectKey]> {
         match self {
             Self::Scoped { base, .. } => base.effect_keys(),
-            Self::Workbench(execution) => {
+            Self::Workbench(execution, _) => {
                 if execution.initial_context {
                     Some(
                         &execution
@@ -3764,7 +3775,7 @@ impl CurrentEffectOwner<'_> {
     fn reply_activation(&self) -> Option<Arc<crate::RequestReplyActivation>> {
         match self {
             Self::Scoped { base, .. } => base.reply_activation(),
-            Self::Workbench(execution)
+            Self::Workbench(execution, _)
                 if !execution.after_tool_active && !execution.initial_context =>
             {
                 execution
@@ -3779,7 +3790,7 @@ impl CurrentEffectOwner<'_> {
     fn admits_reload(&self, actor: ActorRef) -> bool {
         match self {
             Self::Scoped { base, .. } => base.admits_reload(actor),
-            Self::Workbench(execution)
+            Self::Workbench(execution, _)
                 if !execution.after_tool_active
                     && !execution.initial_context
                     && execution.context.actor == actor =>
@@ -3797,7 +3808,7 @@ impl CurrentEffectOwner<'_> {
         match self {
             Self::Scoped { base, .. } => base.context_binding(),
 
-            Self::Workbench(execution) if !execution.after_tool_active => {
+            Self::Workbench(execution, _) if !execution.after_tool_active => {
                 execution.context_binding.clone()
             }
             _ => None,
@@ -3807,7 +3818,7 @@ impl CurrentEffectOwner<'_> {
         match self {
             Self::Scoped { base, .. } => base.model(),
 
-            Self::Workbench(execution) => execution.model.clone(),
+            Self::Workbench(execution, _) => execution.model.clone(),
             Self::Actor { ephemeral_work, .. } => ephemeral_work.model(),
             Self::Tool { work, .. } => work.model(),
         }
@@ -3817,7 +3828,7 @@ impl CurrentEffectOwner<'_> {
         match self {
             Self::Scoped { base, .. } => base.invocation_work(),
 
-            Self::Workbench(execution) => {
+            Self::Workbench(execution, _) => {
                 assert!(execution
                     .invocation_work
                     .matches(execution.context.actor, &execution.reservation_owner));
@@ -3841,7 +3852,7 @@ impl CurrentEffectOwner<'_> {
         match self {
             Self::Scoped { base, .. } => base.publication(),
 
-            Self::Workbench(execution) => &execution.publication,
+            Self::Workbench(execution, _) => &execution.publication,
             Self::Actor { publication, .. } | Self::Tool { publication, .. } => publication,
         }
     }
@@ -3849,7 +3860,7 @@ impl CurrentEffectOwner<'_> {
     fn interaction_control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
         match self {
             Self::Scoped { base, .. } => base.interaction_control(),
-            Self::Workbench(execution) => execution.control.clone(),
+            Self::Workbench(execution, _) => execution.control.clone(),
             Self::Actor { control, .. } => control.clone(),
             Self::Tool { control, .. } => Some(control.clone()),
         }
@@ -3861,7 +3872,7 @@ impl CurrentEffectOwner<'_> {
                 base, wait_control, ..
             } => wait_control.clone().or_else(|| base.control()),
 
-            Self::Workbench(execution) => execution.control.clone(),
+            Self::Workbench(execution, _) => execution.control.clone(),
             Self::Actor { control, .. } => control.clone(),
             Self::Tool { control, .. } => Some(control.clone()),
         }
@@ -3871,7 +3882,7 @@ impl CurrentEffectOwner<'_> {
         match self {
             Self::Scoped { base, .. } => base.admitted_source(),
 
-            Self::Workbench(execution) => Some(&execution.admitted_source),
+            Self::Workbench(execution, _) => Some(&execution.admitted_source),
             Self::Actor {
                 issued_snapshot, ..
             }
@@ -3887,7 +3898,7 @@ impl CurrentEffectOwner<'_> {
         match self {
             Self::Scoped { scope, .. } => Some(scope.reservation_owner()),
 
-            Self::Workbench(execution) => Some(execution.reservation_owner.clone()),
+            Self::Workbench(execution, _) => Some(execution.reservation_owner.clone()),
             Self::Actor {
                 reservation_owner, ..
             } => reservation_owner.clone(),
@@ -3905,7 +3916,7 @@ impl CurrentEffectOwner<'_> {
     fn after_tool_active(&self) -> bool {
         match self {
             Self::Scoped { base, .. } => base.after_tool_active(),
-            Self::Workbench(execution) => execution.after_tool_active,
+            Self::Workbench(execution, _) => execution.after_tool_active,
             Self::Actor { .. } | Self::Tool { .. } => false,
         }
     }
@@ -6289,6 +6300,7 @@ where
                 let operation = self.prepare_reload_effect(
                     kernel,
                     effect_owner.invocation_work(),
+                    effect_owner.private_execution(),
                     context,
                     effect_owner.issued_snapshot().cloned(),
                     control,
@@ -10258,11 +10270,17 @@ where
                             .or_else(|| current.execution.active_work())
                         {
                             Some(work) => CurrentEffectOwner::Scoped {
-                                base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
+                                base: Box::new(CurrentEffectOwner::Workbench(
+                                    execution_state,
+                                    workbench.private_execution(),
+                                )),
                                 scope: work,
                                 wait_control: current.execution.active_wait_control(),
                             },
-                            None => CurrentEffectOwner::Workbench(execution_state),
+                            None => CurrentEffectOwner::Workbench(
+                                execution_state,
+                                workbench.private_execution(),
+                            ),
                         };
                         let boundary = match boundary {
                             ResidentActorBoundary::Green(boundary) => {

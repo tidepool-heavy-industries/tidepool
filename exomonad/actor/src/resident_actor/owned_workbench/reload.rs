@@ -22,6 +22,7 @@ where
 {
     pub(crate) async fn run(
         self,
+        checked_return: Option<tidepool_runtime::session::RuntimeCheckedReturnOwner>,
     ) -> Result<
         (
             SrReloadOutcome,
@@ -67,6 +68,7 @@ where
                 self.diagnostic,
                 false,
                 self.control,
+                checked_return,
             )
             .await
             .map_err(|error| SourceError::SourceUnavailable(error.to_string()))?;
