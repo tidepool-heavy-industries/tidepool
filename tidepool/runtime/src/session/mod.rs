@@ -105,10 +105,10 @@ pub use admission::{
     PendingHostValueWrite, PrivateCellPreparation, PrivateExecutionAdmission,
     PrivateHostCarrierPreparation, PrivatePreparationSnapshot, ReservedNotebookScope,
     RuntimeBindingInterfaceReservation, RuntimeCellAdmission, RuntimeCheckedItemAdmission,
-    RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot, RuntimeDurablePublicReadiness,
-    RuntimeHostBindingAdmission, RuntimeLexicalScopeLease, RuntimeOriginalSource,
-    RuntimeWorldCellOperand, SupersededCompilerProgress, SupersededPrivateExecution,
-    UnpublishedNotebookScope,
+    RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot, RuntimeCheckedReturnOwner,
+    RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
+    RuntimeOriginalSource, RuntimeWorldCellOperand, SupersededCompilerProgress,
+    SupersededPrivateExecution, UnpublishedNotebookScope,
 };
 pub use paired_publication::FrozenWorldExecution;
 pub use paired_publication::{

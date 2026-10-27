@@ -2801,6 +2801,13 @@ pub enum ResidentOutcome {
     /// in the resident lexical scope. Unlike an expression completion, this
     /// operation has no result value of its own.
     BindingsCommitted { output: Vec<String> },
+    /// An already-issued checked return completed after its exact source
+    /// retirement. Its semantic result survives; captured bindings were discarded.
+    SupersededReturn {
+        output: Vec<String>,
+        result: Option<EvalResult>,
+        bindings: Vec<super::DiscardedPrivateBinding>,
+    },
     /// The turn suspended at an `Ask`. The machine holds the continuation
     /// internally (stowed as data); call [`ResidentSession::resume`] with the
     /// answer. `request` is the bridged `Ask` request; `hole` is the minted
@@ -9228,7 +9235,28 @@ where
         ) {
             if let Some(captured) = captured {
                 let (ticket, values) = captured.into_parts();
-                ticket.settle(&mut self.state, values)?;
+                if let super::admission::CheckedCaptureSettlement::Discarded(bindings) =
+                    ticket.settle(&mut self.state, values)?
+                {
+                    self.settle_dropped_custody();
+                    return Ok(match outcome {
+                        ResidentOutcome::Completed { output, result } => {
+                            ResidentOutcome::SupersededReturn {
+                                output,
+                                result: Some(result),
+                                bindings,
+                            }
+                        }
+                        ResidentOutcome::BindingsCommitted { output } => {
+                            ResidentOutcome::SupersededReturn {
+                                output,
+                                result: None,
+                                bindings,
+                            }
+                        }
+                        _ => unreachable!("capture settles only a completed return"),
+                    });
+                }
             }
         }
         Ok(outcome)
@@ -9932,6 +9960,66 @@ where
     {
         self.resume_classified(hole, answer, settlement)
             .map_err(ResidentResumeError::into_inner)
+    }
+
+    /// Select an existing parked checked return before its source is fenced.
+    pub fn capture_checked_return_owner(
+        &self,
+        private: &super::PrivateExecutionAdmission,
+        hole: &ResidentHole,
+    ) -> Result<Option<super::RuntimeCheckedReturnOwner>, ResidentError> {
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == hole.cont_id())
+            .ok_or_else(|| ResidentError::WrongContinuation {
+                attempted: hole.cont_id().to_owned(),
+                pending: self.parked.iter().map(|entry| entry.name.clone()).collect(),
+            })?;
+        entry
+            .seed
+            .checked
+            .as_ref()
+            .map(|checked| {
+                checked
+                    .capture_return_owner(&self.state, private, hole.cont_id())
+                    .map_err(Into::into)
+            })
+            .transpose()
+    }
+
+    /// Resume only the checked return selected by this actual retirement.
+    pub fn resume_superseded_classified<T>(
+        &mut self,
+        hole: ResidentHole,
+        answer: T,
+        proof: &super::RuntimeSourceRetirementProof,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<ResidentOutcome, ResidentResumeError>
+    where
+        T: tidepool_bridge::ToHaskell + Send + 'static,
+    {
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == hole.cont_id())
+            .ok_or_else(|| {
+                ResidentResumeError::Rejected(ResidentError::WrongContinuation {
+                    attempted: hole.cont_id().to_owned(),
+                    pending: self.parked.iter().map(|entry| entry.name.clone()).collect(),
+                })
+            })?;
+        if let Some(checked) = &entry.seed.checked {
+            checked
+                .accept_retired_return(&self.state, hole.cont_id(), proof)
+                .map_err(ResidentError::from)
+                .map_err(ResidentResumeError::Rejected)?;
+        } else if proof.checked_return().is_some() {
+            return Err(ResidentResumeError::Rejected(
+                SessionError::from(super::SessionTransitionReason::OwnerChanged).into(),
+            ));
+        }
+        self.resume_classified(hole, answer, settlement)
     }
 
     /// [`Self::resume`] with authoritative pre-consume versus post-consume

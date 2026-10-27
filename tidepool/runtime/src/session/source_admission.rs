@@ -464,9 +464,14 @@ pub struct RuntimeSourceFence {
 pub struct RuntimeSourceRetirementProof {
     owner: RuntimeSourceAdmission,
     successor: NotebookGenerationId,
+    checked_return: Option<super::RuntimeCheckedReturnOwner>,
 }
 
 impl RuntimeSourceRetirementProof {
+    pub(super) fn checked_return(&self) -> Option<&super::RuntimeCheckedReturnOwner> {
+        self.checked_return.as_ref()
+    }
+
     pub fn successor(&self) -> NotebookGenerationId {
         self.successor
     }
@@ -869,10 +874,26 @@ impl RuntimeSourceFence {
         self,
         successor: NotebookGenerationId,
     ) -> Result<RuntimeSourceRetirementProof, (Self, SourceAdmissionError)> {
+        self.retire_with_checked_return(successor, None)
+    }
+
+    /// Seal the exact pre-cutoff return owner only when this fence retires.
+    pub fn retire_with_checked_return(
+        self,
+        successor: NotebookGenerationId,
+        checked_return: Option<super::RuntimeCheckedReturnOwner>,
+    ) -> Result<RuntimeSourceRetirementProof, (Self, SourceAdmissionError)> {
+        if checked_return
+            .as_ref()
+            .is_some_and(|selected| !selected.matches_source(&self.owner))
+        {
+            return Err((self, SourceAdmissionError::DifferentOriginalSource));
+        }
         self.settle(SourceAdmissionPhase::Retired { successor })
             .map(|()| RuntimeSourceRetirementProof {
                 owner: self.owner.clone(),
                 successor,
+                checked_return,
             })
             .map_err(|error| (self, error))
     }

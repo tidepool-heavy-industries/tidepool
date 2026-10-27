@@ -201,6 +201,10 @@ enum PrivateAuthoredProgram {
         predecessor: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
     },
     Failed,
+    ReturnedAfterRetirement {
+        publication_empty: bool,
+        bindings: Vec<DiscardedPrivateBinding>,
+    },
     Superseded(PrivateCheckedItemProgress),
 }
 
@@ -242,6 +246,14 @@ impl std::fmt::Debug for PrivateAuthoredProgram {
                 .field("predecessor", predecessor.logical_id())
                 .finish(),
             Self::Failed => formatter.write_str("Failed"),
+            Self::ReturnedAfterRetirement {
+                publication_empty,
+                bindings,
+            } => formatter
+                .debug_struct("ReturnedAfterRetirement")
+                .field("publication_empty", publication_empty)
+                .field("bindings", bindings)
+                .finish(),
             Self::Superseded(progress) => {
                 formatter.debug_tuple("Superseded").field(progress).finish()
             }
@@ -1404,7 +1416,9 @@ impl PrivateExecutionAdmission {
                 }
                 _ => PrivateCheckedItemProgress::NotStarted,
             },
-            PrivateAuthoredProgram::Active { .. } | PrivateAuthoredProgram::Failed => {
+            PrivateAuthoredProgram::Active { .. }
+            | PrivateAuthoredProgram::Failed
+            | PrivateAuthoredProgram::ReturnedAfterRetirement { .. } => {
                 PrivateCheckedItemProgress::Started
             }
             PrivateAuthoredProgram::Superseded(progress) => *progress,
@@ -2129,7 +2143,9 @@ impl RuntimeLexicalScopeLease {
                     PrivateAuthoredProgram::Active { predecessor, .. } => {
                         Arc::ptr_eq(predecessor, world)
                     }
-                    PrivateAuthoredProgram::Failed | PrivateAuthoredProgram::Superseded(_) => false,
+                    PrivateAuthoredProgram::Failed
+                    | PrivateAuthoredProgram::ReturnedAfterRetirement { .. }
+                    | PrivateAuthoredProgram::Superseded(_) => false,
                 };
                 if !same_predecessor {
                     return Err(SessionError::StaleStagedDeclaration);
@@ -2525,11 +2541,13 @@ enum CellPhase {
     Complete(Arc<RuntimeCheckedPrefixSnapshot>),
     HostConstructorConsumed(Arc<RuntimeCheckedPrefixSnapshot>),
     Failed(Arc<RuntimeCheckedPrefixSnapshot>),
+    ReturnedAfterRetirement(Arc<RuntimeCheckedPrefixSnapshot>),
 }
 
 #[derive(Debug)]
 struct RunningCheckedItem {
     reservation: Arc<CheckedItemReservation>,
+    retirement: parking_lot::Mutex<Option<super::RuntimeSourceRetirementProof>>,
     execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
 }
 
@@ -2553,7 +2571,8 @@ impl RuntimeCheckedState {
             CellPhase::Ready(snapshot)
             | CellPhase::Complete(snapshot)
             | CellPhase::HostConstructorConsumed(snapshot)
-            | CellPhase::Failed(snapshot) => snapshot,
+            | CellPhase::Failed(snapshot)
+            | CellPhase::ReturnedAfterRetirement(snapshot) => snapshot,
             CellPhase::Reserved(ticket) => &ticket.snapshot,
             CellPhase::Running(ticket)
             | CellPhase::Parked(ticket)
@@ -2591,6 +2610,7 @@ impl RuntimeCheckedState {
             .ok_or(super::SessionTransitionReason::WrongPhase)?;
         let running = Arc::new(RunningCheckedItem {
             reservation: ticket,
+            retirement: parking_lot::Mutex::new(None),
             execution,
         });
         self.phase = CellPhase::Running(Arc::clone(&running));
@@ -2919,6 +2939,27 @@ fn validate_private_value_overlay<'a>(
     Ok(())
 }
 
+/// Exact already-issued checked return selected while its source is open.
+/// Weak references identify the existing affine owner without extending its lifetime.
+#[derive(Clone, Debug)]
+pub struct RuntimeCheckedReturnOwner {
+    prefix: std::sync::Weak<RuntimeCheckedPrefix>,
+    running: std::sync::Weak<RunningCheckedItem>,
+    original: super::RuntimeSourceAdmission,
+    hole: String,
+}
+
+impl RuntimeCheckedReturnOwner {
+    pub(super) fn matches_source(&self, source: &super::RuntimeSourceAdmission) -> bool {
+        self.original.same_owner(source)
+    }
+}
+
+pub(crate) enum CheckedCaptureSettlement {
+    Committed,
+    Discarded(Vec<DiscardedPrivateBinding>),
+}
+
 /// Travels with the existing resident continuation token. It records no
 /// completed prefix while an effect is parked or an execution has failed.
 #[derive(Debug)]
@@ -2982,14 +3023,14 @@ impl CheckedCaptureTicket {
         mut self,
         session: &mut PersistentSession,
         captured: super::resident::CapturedCheckedValueSet,
-    ) -> Result<(), SessionError> {
+    ) -> Result<CheckedCaptureSettlement, SessionError> {
         let completion = CheckedTurnCompletion {
             prefix: Arc::clone(&self.prefix),
             running: Arc::clone(&self.running),
         };
-        completion.settle_captured(session, &self, captured)?;
+        let outcome = completion.settle_captured(session, &self, captured)?;
         self.committed = true;
-        Ok(())
+        Ok(outcome)
     }
 }
 
@@ -3010,6 +3051,64 @@ impl Drop for CheckedCaptureTicket {
 }
 
 impl CheckedTurnCompletion {
+    pub(crate) fn capture_return_owner(
+        &self,
+        session: &PersistentSession,
+        private: &PrivateExecutionAdmission,
+        hole: &str,
+    ) -> Result<RuntimeCheckedReturnOwner, SessionError> {
+        self.validate_reentry(session, private.private_scope())?;
+        if !self
+            .prefix
+            .admission
+            .private_execution()
+            .is_some_and(|actual| std::ptr::eq(actual.as_ref(), private))
+        {
+            return Err(super::SessionTransitionReason::OwnerChanged.into());
+        }
+        self.prefix
+            .admission
+            .with_open_sources(|| RuntimeCheckedReturnOwner {
+                prefix: Arc::downgrade(&self.prefix),
+                running: Arc::downgrade(&self.running),
+                original: self
+                    .prefix
+                    .admission
+                    .original_source()
+                    .expect("validated original")
+                    .source_admission()
+                    .clone(),
+                hole: hole.to_owned(),
+            })
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn accept_retired_return(
+        &self,
+        session: &PersistentSession,
+        hole: &str,
+        proof: &super::RuntimeSourceRetirementProof,
+    ) -> Result<(), SessionError> {
+        self.validate_reentry(session, self.prefix.admission.scope)?;
+        let selected = proof
+            .checked_return()
+            .ok_or(super::SessionTransitionReason::OwnerChanged)?;
+        if selected.hole != hole
+            || !std::sync::Weak::ptr_eq(&selected.prefix, &Arc::downgrade(&self.prefix))
+            || !std::sync::Weak::ptr_eq(&selected.running, &Arc::downgrade(&self.running))
+        {
+            return Err(super::SessionTransitionReason::OwnerChanged.into());
+        }
+        proof.validate_current(self.prefix.admission.original_source()?.source_admission())?;
+        let mut retirement = self.running.retirement.lock();
+        if retirement.is_some() {
+            // A rejected answer may retry the same still-parked return.
+            return Ok(());
+        }
+        *retirement = Some(proof.clone());
+        Ok(())
+    }
+
     pub(crate) fn capture_ticket(&self) -> Result<CheckedCaptureTicket, SessionError> {
         let mut state = self.prefix.state.lock();
         if !matches!(&state.phase, CellPhase::Running(running) if Arc::ptr_eq(running, &self.running))
@@ -3273,7 +3372,7 @@ impl CheckedTurnCompletion {
         session: &mut PersistentSession,
         ticket: &CheckedCaptureTicket,
         captured: super::resident::CapturedCheckedValueSet,
-    ) -> Result<(), SessionError> {
+    ) -> Result<CheckedCaptureSettlement, SessionError> {
         self.validate_capture_ticket(ticket)?;
         if let Some(private) = self.prefix.admission.private_execution() {
             private.ensure_open()?;
@@ -3306,6 +3405,50 @@ impl CheckedTurnCompletion {
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
+        }
+        if let Some(proof) = self.running.retirement.lock().as_ref() {
+            let private = self
+                .prefix
+                .admission
+                .private_execution()
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            let mut lifecycle = private.state.lock();
+            let PrivateAuthoredProgram::Active {
+                admission_digest,
+                settled,
+                ..
+            } = &lifecycle.authored
+            else {
+                return Err(super::SessionTransitionReason::WrongPhase.into());
+            };
+            if *admission_digest != self.prefix.admission.digest() {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            let bindings = captured
+                .values()
+                .iter()
+                .map(|value| DiscardedPrivateBinding {
+                    id: value.id(),
+                    name: value.name().to_owned(),
+                })
+                .collect::<Vec<_>>();
+            let publication_empty = bindings.is_empty()
+                && matches!(
+                    settled.publication(),
+                    CompletedPrivateCompilerProgress::Unchanged
+                )
+                && state.snapshot().compiler_prefix.next_item() == 0
+                && self.running.execution.item().index() + 1 == self.prefix.program.items().len();
+            proof.validate_current(self.prefix.admission.original_source()?.source_admission())?;
+            // Completion of this native return is not a completed compiler frontier.
+            // The staged values retain their custody until dropped below; none are installed.
+            state.phase = CellPhase::ReturnedAfterRetirement(state.snapshot().clone());
+            lifecycle.authored = PrivateAuthoredProgram::ReturnedAfterRetirement {
+                publication_empty,
+                bindings: bindings.clone(),
+            };
+            drop(captured);
+            return Ok(CheckedCaptureSettlement::Discarded(bindings));
         }
         let compiler_prefix = state
             .snapshot()
@@ -3436,7 +3579,7 @@ impl CheckedTurnCompletion {
                 "checked World item successor installed");
         }
 
-        Ok(())
+        Ok(CheckedCaptureSettlement::Committed)
     }
 }
 
@@ -5108,7 +5251,10 @@ impl PersistentSession {
                 }
                 SupersededCompilerProgress::Incomplete
             }
-            PrivateAuthoredProgram::Failed => SupersededCompilerProgress::Incomplete,
+            PrivateAuthoredProgram::Failed
+            | PrivateAuthoredProgram::ReturnedAfterRetirement { .. } => {
+                SupersededCompilerProgress::Incomplete
+            }
             PrivateAuthoredProgram::Superseded(_) => {
                 return Err(super::SessionTransitionReason::WrongPhase.into())
             }
@@ -5129,7 +5275,14 @@ impl PersistentSession {
             let mut completed = execution.completed_values.lock();
             let empty = completed.is_empty()
                 && state.accepted_visible_revision == 0
-                && compiler_progress == SupersededCompilerProgress::Unchanged;
+                && (compiler_progress == SupersededCompilerProgress::Unchanged
+                    || matches!(
+                        &state.authored,
+                        PrivateAuthoredProgram::ReturnedAfterRetirement {
+                            publication_empty: true,
+                            ..
+                        }
+                    ));
             let mut bindings = completed
                 .iter()
                 .map(|(id, value)| DiscardedPrivateBinding {
@@ -5137,6 +5290,12 @@ impl PersistentSession {
                     name: value.name.clone(),
                 })
                 .collect::<Vec<_>>();
+            if let PrivateAuthoredProgram::ReturnedAfterRetirement {
+                bindings: returned, ..
+            } = &state.authored
+            {
+                bindings.extend(returned.iter().cloned());
+            }
             bindings.sort_by_key(|binding| binding.id.raw());
             let writes = DiscardedPrivateWrites {
                 bindings,
