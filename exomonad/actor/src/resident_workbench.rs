@@ -13742,6 +13742,9 @@ where
         context: crate::ActorSessionContext,
         scopes: Vec<tidepool_codegen::scope::ScopeId>,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        if scopes.is_empty() {
+            return Ok(());
+        }
         self.access
             .with_machine(context, move |session, _, _| {
                 for scope in scopes {
@@ -36420,6 +36423,20 @@ pub(crate) mod request_tests {
                 .await
                 .expect("failed private parent releases its unpublishable scope");
             drop(failing_workbench);
+            runner
+                .retire_context_scopes(failing_context.clone(), Vec::new())
+                .await
+                .expect("empty cleanup does not reacquire the retired private context");
+            assert!(
+                runner
+                    .retire_context_scopes(
+                        failing_context.clone(),
+                        vec![failing_context.placement.lexical_scope]
+                    )
+                    .await
+                    .is_err(),
+                "nonempty cleanup still validates its context"
+            );
             assert!(admissions
                 .settle_checkpoints(context.actor, &boundary, false)
                 .is_empty());
