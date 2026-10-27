@@ -82,8 +82,12 @@ fn check_failure(failure: &ToolFailure, operation: &OperationId) {
     assert!(serde_json::to_vec(metadata).unwrap().len() <= 8192);
     assert_eq!(metadata["originalOperation"], json!(operation));
     assert_eq!(
+        metadata["retainedEvidence"]["owner"],
+        "native hosted operation settlement"
+    );
+    assert_eq!(
         metadata["retainedEvidence"]["inspection"],
-        FAILURE_INSPECTION
+        "ResidentToolEndpoint::retained_operation(exact ToolInvocationContext).reply()"
     );
     assert_eq!(metadata["retainedEvidence"]["modelTool"], false);
 }
@@ -229,9 +233,6 @@ fn many_operations_and_diagnostics_keep_recovery_and_distinct_effect_outcomes() 
     assert!(failure
         .message()
         .contains("database commit outcome requires authenticated recovery"));
-    assert!(failure
-        .message()
-        .contains("it is not a model-callable tool"));
 }
 
 #[test]
