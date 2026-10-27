@@ -1677,7 +1677,9 @@ fn provider_tool_error(error: ResidentToolError, operation: Option<&OperationId>
     } else {
         ToolFailure::with_metadata(message, metadata)
     };
-    let failure = match (invocation.filter(|failure| failure.receipts().iter().any(|receipt| receipt.value.is_some())), operation) {
+    // A typed unit receipt or publication outcome is native evidence even when
+    // execution produced no application value (for example after an effect).
+    let failure = match (invocation.filter(|failure| !failure.receipts().is_empty() || failure.publication().is_some()), operation) {
         (Some(invocation), Some(operation)) => match super::embedded_policy::native_original(operation) {
             Ok(original) => failure.with_result_receipt(super::embedded_policy::encode_native_failure(
                 json!({"items": invocation.receipts(), "publication": invocation.publication()}), original)),

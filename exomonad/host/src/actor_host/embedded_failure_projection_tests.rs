@@ -369,3 +369,193 @@ fn unconfirmed_cancellation_keeps_its_kind_and_bounds_retained_error_output() {
     assert!(message.contains("bindings were published"));
     assert!(!message.contains("retained prefix payload"));
 }
+
+fn without_publication(mut error: ResidentToolError) -> ResidentToolError {
+    let ResidentToolError::Invocation(exomonad_actor::KernelInvocationFailure::Workbench(
+        ref mut failure,
+    )) = error
+    else {
+        unreachable!()
+    };
+    failure.publication = None;
+    error
+}
+
+fn recorded_failure(
+    output: &JobOutput,
+    operation: &OperationId,
+) -> harness::store::RecordedToolOutput {
+    let terminal = harness::store::TerminalOutcome::from(output);
+    harness::store::RecordedToolOutput {
+        item: harness::item::Item::tool_output(
+            &operation.call,
+            harness::item::ToolKind::Function,
+            output,
+        ),
+        terminal,
+        output_format: native_output_format(output),
+    }
+}
+
+#[test]
+fn valueless_native_failure_evidence_survives_recording_and_exact_decoding() {
+    let operation = origin();
+    let mut committed = receipt(0, "effect completed".into(), &[Disposition::Committed]);
+    committed.value = None;
+    let mut unknown = receipt(0, "effect unresolved".into(), &[Disposition::Unknown]);
+    unknown.value = None;
+    let mut binding = receipt(0, "binding installed".into(), &[]);
+    binding.value = None;
+    binding.installed_bindings = vec!["installedValue".into()];
+    let mut stopped = receipt(0, "unit stopped before returning a value".into(), &[]);
+    stopped.value = None;
+    for item in [committed, unknown, binding, stopped] {
+        let expected = serde_json::to_value(&item).unwrap();
+        let failure = provider_tool_error(
+            without_publication(error(
+                vec![item],
+                "later failure".into(),
+                Publication::NotPublished {
+                    reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+                },
+            )),
+            Some(&operation),
+        )
+        .into_tool_failure();
+        check_failure(&failure, &operation);
+        let canonical = failure
+            .result_receipt()
+            .expect("typed receipt must retain native format");
+        assert_eq!(canonical["nativeResult"]["body"]["items"][0], expected);
+        let output = JobOutput::Completed(Err(failure));
+        let recorded = recorded_failure(&output, &operation);
+        assert_eq!(
+            recorded.output_format,
+            harness::provider::OutputFormat::NativeReceiptV1
+        );
+        assert!(
+            super::super::embedded_policy::project_retained_result(&recorded, &operation)
+                .unwrap()
+                .is_some()
+        );
+        let mut other = operation.clone();
+        other.call.0.push_str("-other");
+        assert!(super::super::embedded_policy::project_retained_result(&recorded, &other).is_err());
+    }
+}
+
+#[test]
+fn publication_only_is_native_but_empty_or_unowned_failures_are_opaque() {
+    let operation = origin();
+    for publication in [
+        Publication::NotPublished {
+            reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+        },
+        Publication::Published {
+            bindings: vec!["publishedValue".into()],
+        },
+        Publication::Rejected {
+            detail: "rejected".into(),
+        },
+        Publication::RecoveryRequired {
+            detail: "uncertain".into(),
+        },
+    ] {
+        let failure = provider_tool_error(
+            error(vec![], "publication failure".into(), publication.clone()),
+            Some(&operation),
+        )
+        .into_tool_failure();
+        check_failure(&failure, &operation);
+        let output = JobOutput::Completed(Err(failure));
+        let recorded = recorded_failure(&output, &operation);
+        assert_eq!(
+            recorded.output_format,
+            harness::provider::OutputFormat::NativeReceiptV1
+        );
+        assert!(
+            super::super::embedded_policy::project_retained_result(&recorded, &operation)
+                .unwrap()
+                .is_some()
+        );
+        let mut foreign = operation.clone();
+        foreign.origin = ConversationIdentity::Standalone {
+            store: "foreign-store".into(),
+            actor: AgentPath("/root".into()),
+        };
+        for original in [None, Some(&foreign)] {
+            let unowned = provider_tool_error(
+                error(vec![], "unowned".into(), publication.clone()),
+                original,
+            )
+            .into_tool_failure();
+            let output = JobOutput::Completed(Err(unowned));
+            assert_eq!(
+                native_output_format(&output),
+                harness::provider::OutputFormat::LegacyOpaque
+            );
+        }
+    }
+    let empty = without_publication(error(
+        vec![],
+        "no execution evidence".into(),
+        Publication::NotPublished {
+            reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+        },
+    ));
+    let output = JobOutput::Completed(Err(
+        provider_tool_error(empty, Some(&operation)).into_tool_failure()
+    ));
+    let recorded = recorded_failure(&output, &operation);
+    assert_eq!(
+        recorded.output_format,
+        harness::provider::OutputFormat::LegacyOpaque
+    );
+    assert!(
+        super::super::embedded_policy::project_retained_result(&recorded, &operation)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn unconfirmed_cancellation_preserves_valueless_native_failure() {
+    let operation = origin();
+    let mut item = receipt(0, "prefix".into(), &[Disposition::Unknown]);
+    item.value = None;
+    let failure = provider_tool_error(
+        without_publication(error(
+            vec![item],
+            "operation outcome uncertain".into(),
+            Publication::NotPublished {
+                reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Cancelled,
+            },
+        )),
+        Some(&operation),
+    )
+    .into_tool_failure();
+    let canonical = failure
+        .result_receipt()
+        .cloned()
+        .expect("native effect evidence");
+    let output = native_terminal_output(
+        Err(failure),
+        Err(ResidentToolError::Unavailable("cleanup unconfirmed".into())),
+        Some(&operation),
+    );
+    let JobOutput::CancellationUnconfirmed(ref failure) = output else {
+        panic!("lost cancellation kind")
+    };
+    check_failure(failure, &operation);
+    assert_eq!(failure.result_receipt(), Some(&canonical));
+    let recorded = recorded_failure(&output, &operation);
+    assert_eq!(
+        recorded.output_format,
+        harness::provider::OutputFormat::NativeReceiptV1
+    );
+    assert!(
+        super::super::embedded_policy::project_retained_result(&recorded, &operation)
+            .unwrap()
+            .is_some()
+    );
+}
