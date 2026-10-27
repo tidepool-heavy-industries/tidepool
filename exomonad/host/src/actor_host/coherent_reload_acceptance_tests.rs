@@ -757,12 +757,15 @@ async fn standard_reload_retains_complete_large_source_receipts_after_publicatio
         assert!(shown.starts_with("Published source "), "{shown}");
         assert!(shown.len() < 1024);
         assert!(model["items"][0].get("value").is_none());
-        assert_eq!(model["items"][0]["valueOmitted"], serde_json::json!({
-            "reason":"modelBudget", "limitBytes":28 * 1024,
-            "nativeReceipt":{"availability":"nativeOnly","operation":context},
+        let original = context.model_operation().expect("original model operation");
+        let exomonad_tool::ConversationOrigin::Embedded { run, actor, incarnation } =
+            &original.origin else { panic!("hosted reload has an embedded origin") };
+        assert_eq!(model["resultRef"], serde_json::json!({
+            "resultRun":run, "resultActor":actor, "resultIncarnation":incarnation,
+            "resultRequest":original.request_id, "resultCall":original.call_id,
         }));
         assert!(serde_json::to_vec(&model).unwrap().len() < 28 * 1024,
-            "the provider sees the compact presentation and omission receipt, not the full inventories");
+            "the provider sees the compact presentation and exact result reference, not the full inventories");
         let retained = installation_a.policy.retained_operation(context.clone()).unwrap();
         assert_eq!(retained.finalization(), exomonad_actor::HostedOperationFinalization::Settled(
             Ok(exomonad_actor::ProviderFinalizationKind::Completed)));
