@@ -677,7 +677,7 @@ async fn items_callbacks_and_after_tool_prepare_on_the_original_model_binding_wi
         );
         let boundary = prepare_execution_effect(
             &execution.state.effects.context,
-            &CurrentEffectOwner::Workbench(&execution.state.effects),
+            &CurrentEffectOwner::Workbench(&execution.state.effects, execution.private.as_ref()),
             ResidentActorBoundary::Model {
                 continuation: ResidentHole::plain(format!("model-{index}")),
                 request,
@@ -847,14 +847,14 @@ async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks_with_p
     };
     let routed = prepare_execution_effect(
         &execution.state.effects.context,
-        &CurrentEffectOwner::Workbench(&execution.state.effects),
+        &CurrentEffectOwner::Workbench(&execution.state.effects, execution.private.as_ref()),
         boundary(),
     );
     assert!(matches!(routed, ResidentActorBoundary::External { .. }));
     assert_eq!(binding.prepared.load(Ordering::SeqCst), 1);
     execution.state.effects.after_tool_active = true;
     let owners = [
-        CurrentEffectOwner::Workbench(&execution.state.effects),
+        CurrentEffectOwner::Workbench(&execution.state.effects, execution.private.as_ref()),
         CurrentEffectOwner::Actor {
             issued_snapshot: None,
             callback_scope: None,

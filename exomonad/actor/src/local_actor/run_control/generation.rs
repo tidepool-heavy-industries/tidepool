@@ -11,8 +11,7 @@ use crate::resident_workbench::generation_admission::{
 };
 use crate::resident_workbench::{
     ActorGeneration, ActorGenerationCandidateCustody, ActorGenerationCandidateObserver,
-    ActorGenerationCommit, ActorGenerationPublicationBody, ActorGenerationPublicationBodyResult,
-    ActorGenerationPublicationDriver, ActorGenerationPublicationOwner,
+    ActorGenerationCommit, ActorGenerationPublicationDriver, ActorGenerationPublicationOwner,
     ActorGenerationPublicationRefusalObservation, ActorGenerationReservationDriver,
     ActorGenerationRetirementCutoff, ActorGenerationRetirementPreparation,
     ActorGenerationRetirementPreparationOutcome, ActorPublicationAttemptObserver,
