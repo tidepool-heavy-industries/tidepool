@@ -1,7 +1,7 @@
 # G2 fixture closure and Persona admission
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
-Current integrated code: `95d120a5f8`.
+Current integrated code: `22b6d9380b`.
 Active evidence: `/srv/swarm/evidence/inanna/g2-final-qualification-20261026/`.
 
 G2 remains unqualified. Executable projection, Original demand and certification
@@ -112,81 +112,76 @@ Current component evidence under `g2-final-qualification-20261026`:
 | Boundary | Evidence and remaining limitation |
 |---|---|
 | Admitted native census | `a7f90b60f312`: worker/test compilation and 2/2 controls pass; independent source review accepted. Exact destination groups own both binders and globals. FullCarrier/IssuedGroups availability does not widen stage ownership. Six actual activation histories and the counting history pass in the joined eight-case run at `1c3d3ff5ca`. |
-| Original-binding transport | Integrated `24fabf915a..d56aedc271`: Rust projects its already-authenticated group resolution into ExactScope v17; Haskell matches both binding pairs, source coordinate/global index, binder and available destination group. Matched worker Rust controls pass 4/4 plus codec producer 1/1; Haskell controls pass 3/3 plus eight corpus programs. Independent source review accepted. The joined activation-metadata renderer passes 1/1 on the exact integration; the separate K-to-J retained-capture history remains pending. |
+| Original-binding transport | Integrated `24fabf915a..d56aedc271`: Rust projects authenticated group resolution into ExactScope v17 without widening execution selection. Matched Rust controls pass 4/4 plus codec producer 1/1; Haskell controls pass 3/3 plus eight corpus programs. The real x-to-J-to-K history and adjacent control pass 1/1 each at `34568c4e40`, integrated through `3b18426f8f`. Ordinary compilation retains the closure; ordinary installation correctly refuses `CertifiedTargetOwners`; a separate checked World observation proves k == 42. Full v17 pair correlation is retained external evidence, not an additional maintained assertion. |
 | Alias shadowing | `fc2e84da42`: worker compilation and one producer test with 38 requests pass, including selectors, qualified names and NoFieldSelectors. The actual distinct-private-program actor history passes at `1c3d3ff5ca`. |
 | World source identity | `06e17ebbf1`: worker/test compilation and 2/2 controls pass. Logical parser coordinates preserve physical evidence paths, raw hashes and authored LINE directives. |
 | Prepared marker census | `0b4420d595`: compilation, 2/2 focused cases and one corpus program pass. Joined default reload at `1c3d3ff5ca` passes startup and commits reload, then fails publication of the retired original continuation; see the open settlement boundary below. |
 | Runtime host preparation | `62b6d2fd95` with `06e17ebbf1`: residency 9/9 and a separate retirement control 1/1 pass. TYPE borrowing is request-local; runtime checks retain the original World/frontier. Integrated follow-up `e4d7a344db` passes 2/2 Active/hidden and abandonment controls at its worker pin. |
-| Live TYPE reuse | `6f7293e247` includes actual finalized source-closure canonical rows, with exact ArtifactId, liveness and primary-precedence guards. Worker production/test compilation and four controls pass. Joined Job passes initial host use, publication and private readmission, then exposes a generated companion alias collision. `bacf4ecf74` reserves inherited namespaces during both planning and re-admission; component compilation, recovery/refusal and World-admission controls pass. Joined Job rerun remains required. |
-| Prior native seals | `232cf9bed4` and `9b68f3cf77` carry the prior issuer's finalized native seal under exact raw/historical coordinates. Five focused controls and eight corpus programs pass; removing prior carry reproduces the refusal. Actual JSON now passes Haskell certification and exposes a separate Rust predecessor-product lookup gap. |
-| Reload supersession | `3cfea77099..034f9a58b1` carries actual source-retirement proof through the exact execution control, settles private publication and preserves committed operation evidence across terminal ordering. Runtime controls pass 7/7; actor production/test/binary compilation and six controls pass at their worker pins. Source review accepted. Hosted consumer checks, actual reload/replay histories and postcommit cancellation remain pending; task-destruction cleanup remains unconfirmed. |
-| Native predecessor receipts | `090148b3e2` carries actual completed World native products through the continuation. Exact Source version/ordinal/binder and HOME ordinal queries share one issuer selection boundary; historical alternatives remain passive. Production/test compilation and three controls pass at `f74ed3e0bb`, including real World stage carry and final HOME selection. Source review accepted; actual joined JSON/Job run is pending at `95d120a5f8`. |
+| Live TYPE reuse | `6f7293e247` includes actual finalized source-closure canonical rows with exact ArtifactId, liveness and primary-precedence guards. Four component controls pass. `bacf4ecf74` reserves inherited companion namespaces during planning and re-admission. The unchanged actual Job history passes on `95d120a5f8`, with confirmed process/compiler cleanup. |
+| Prior native seals | `232cf9bed4` and `9b68f3cf77` carry the prior issuer's finalized native seal under exact raw/historical coordinates. Five focused controls and eight corpus programs pass; removing prior carry reproduces the refusal. The actual JSON history passes with the Rust predecessor repair below. The forward audit found no reachable duplicate raw-seal issuer; do not introduce last-writer-wins. |
+| Reload supersession | `4f31a97254`, `13200d79c4`, and `22b6d9380b` preserve typed suffix/cleanup failures, active-unit receipts, exact continuation drain and uncertainty after continuing publication; failed/reserved private executions retire through their actual owners. Runtime controls pass 8/8 at `363db253`; actor/host compilation and actor controls pass 3/3 at `5928fb8e7b` plus 2/2 at `5744f0762c`. Source reviews accepted. Real checked return-discard and task-destruction qualification remain open. |
+| Native predecessor receipts | `090148b3e2` carries actual completed World native products through the continuation. Exact Source version/ordinal/binder and HOME ordinal queries share one issuer selection boundary; historical alternatives remain passive. Three component controls pass at `f74ed3e0bb`. Both actual joined JSON/Job histories pass unchanged at `95d120a5f8` (2/2), with confirmed process/compiler cleanup. |
 | Bash quotation and recovery | `48cdf9ee5b..08719df146` authenticates shipped implementation evidence and defining Names, rechecks the refined scope, and lowers literal expression quotations before typechecking. Runtime controls 2/2, carried tests 2/2, legacy reexport 1/1 and ten text-corpus programs pass at worker pins. Final-scope recheck ordering is source-reviewed, not isolated by a mutant. `95d120a5f8` separately repairs the recovery oracle: complete acquisition succeeds, exact value-interface and canonical TYPE-only omissions refuse, and the full cold/warm test passes 1/1 at worker `289489d608`. |
 | Actor fixtures | `541008587d`: 51 distinct selectors passed at recorded checkpoints; 49/76 shared-fixture selectors passed. All 89 terminal reports confirm process/compiler cleanup. This is not a joined 76-case pass. |
 | Uncertain END | Source-owned checkpoint `49dc365af3` passes the maintained physical-response-without-END control 1/1 with confirmed process/compiler cleanup. Frozen-bundle acceptance remains separate. |
 
-Implementation work still open:
+Implementation and qualification still open:
 
-1. Finish the real authored K-to-J retained-capture control through an ordinary
-   ExactScope consumer, separately from the passing decoder mutation controls.
-   Argon's retained stderr corrects the initial World diagnosis: failure is in
-   current source qualification, not lexical closure. The test helper captured
-   the generated session root through view.include_paths, causing J's native
-   declaration to appear as a disk SOURCE module. Capture only workspace/effects
-   roots, preserve recipe identity and use the published LexicalJoin facade.
-   The isolated ordinary ExactScope attempt separately carries legitimate
-   CertifyHomeProducts and RetainedGeneration(x,1); add tag 38 to that mode's
-   allowlist while retaining injected-product, portable-output and activation
-   refusals. This repair is integrated as `b772fb9c04`, with production/test
-   compilation and two codec controls passing. The compiler path already
-   consumes retained generations. Combine
-   both repairs with the full World history and final runtime result 42; do not
-   omit retained evidence or weaken NativeAuthoredDeclaration/SOURCE guards.
-   Failed reproducers remain retained; no K-to-J execution pass is claimed.
-2. Close the JSON/Job joined carrier boundaries. At `232cf9bed4`, JSON's Display
-   group 178/global 5 reaches prior Scientific group 57 and passes Haskell
-   certification, but Rust cannot find the prior physical native product through
-   SOURCE adjacency. The actual completed native receipt already belongs to
-   WorldStageNativeProducts. `090148b3e2` carries that authority for nominal lookup
-   without widening SOURCE or execution selection. Raw coordinates remain exact
-   and competing matching proofs refuse. JSON and Job are running unchanged on
-   `95d120a5f8`, including `bacf4ecf74`'s companion alias repair.
-3. Qualify default reload settlement. The generation owner commits B and retires
-   A before A's original notebook continuation completes. Ordinary publication
-   correctly refuses A. Carry an owner-issued settlement outcome; do not infer
-   publication authority from a generic committed effect or rebind A's intent
-   to B. The accepted contract combines actual generation-retirement proof with
-   exact actor/execution/control identity and runtime-proven emptiness. Empty
-   settlement with no trailing units is Committed/NotPublished(GenerationReset).
-   Discarded staged writes or trailing units are Rejected with rejected
-   publication. Both retain committed operation receipts and cache a terminal
-   response; retries must never rerun reload. The runtime retires private scope
-   custody and reports its actual cleanup outcome. Hosted staged-write controls
-   must omit trailing units, so they independently detect a false Empty result;
-   the bindingless trailing-unit control separately checks NotRun and no effect.
-   Actual task destruction is distinct from external waiter loss and cooperative
-   cancellation: retained committed evidence does not establish private cleanup.
-   Argon's forward audit also identifies three concrete follow-ups: Failed/Active
-   suffix state is refused before private retirement; publication failure replaces
-   the original suffix error/cancellation; Green failure drops active-unit operation
-   and recovered-binding evidence. Repair cleanup through the actual checked-prefix
-   and parked-hole owners, preserve typed primary and secondary failures, and keep
-   committed receipts. A confirmed empty GenerationReset must also participate in
-   CellExit's commit-versus-late-cancellation rule. Running/parked work still requires
-   its real abort owner; dropping a guard is not confirmation of cleanup.
-   The joined default case at `e04edfaca7` now reaches Committed/GenerationReset,
-   committed operation and confirmed cleanup, then fails a stale model omission
-   assertion. Production uses an exact resultRef; retained native data contains
-   149,429 bytes with both 581-module inventories. Repair the assertion against
-   that real projection while keeping native-value, replay and successor checks.
-4. Preserve the qualified compiler evidence at `08719df146`: worker/source-boot/
-   cell-splitter targets compile, three carried/recipe tests and two request codec
-   tests pass. Full fixtures-check passes 12/12 cohorts and 1,052 programs
-   (fresh Suite 1,004 plus 48 fixed programs), with no failures, skips, omissions
-   or timeouts. Later runtime/toolchain integration remains separately qualified.
-5. Assemble, freeze and qualify one exact bundle under
+1. Complete post-reload checked return settlement. Capture the exact parked
+   checked-return owner before publication; only the actual successful retirement
+   may seal it into a discard grant. Resume must match the same private admission,
+   prefix and running owner. Discard temporary captures before compiler-prefix
+   advancement, without publishing a binding or World successor into A or B.
+   Value, Binding and Projected returns use the same owning path. Keep successful
+   empty return, discarded writes, failed suffix and unrun tail distinct. A
+   bindingless complete return may be Committed/GenerationReset; discarded writes
+   or trailing units require explicit rejected publication. Fresh A compilation,
+   installation, host admission and another execution's continuation remain refused.
+2. Qualify joined reload failure and destruction histories. The four e04 hosted
+   controls failed after retaining the actual committed reload operation; their
+   publication-basis error masked the earlier cause. The joined runtime/actor
+   repairs are running on exact `22b6d9380b`. Running/Parked/Capturing tickets and
+   pending host owners must drain before private retirement. Test actual task
+   destruction through a genuine continuing publication, including cancellation
+   during CommitClaimed followed by task loss. Component publication-owner tests
+   and external waiter loss do not establish this cross-owner cleanup guarantee.
+3. Resolve fresh generation B's executable `Tidepool.Effects.Core.error` demand.
+   Default reload at `a6a383a7bc` passes the exact model resultRef, full native
+   149,429-byte receipt, both 581-module inventories, Completed acknowledgement,
+   exact retry and no third generation. It then fails compiling the subsequent
+   B cell because the required HOME helper has no original group in the package
+   root inventory. Preserve the valid partial-pattern fixture and investigate
+   the actual compiler product/census boundary; do not reclassify this HOME helper
+   as a wired-in error or drop its executable demand.
+4. Finish canonical native failure receipt validation. Candidate `5263d34f70`
+   preserves typed item/publication evidence even without an application value;
+   production/test compilation and ten focused cases are queued in the warm host
+   checkout. Model budget and exact OriginalOperation checks remain unchanged.
+5. Exercise the joined crash cut after durable B publication but before Harness
+   Store output settlement. Same-process retained terminal replay is distinct
+   from cross-process recovery: a persisted terminal can replay exactly; a pending
+   claim without a surviving job is interrupted without redispatch. Verify those
+   contracts through the actual pinned Harness and source recovery owners, without
+   introducing another journal. The current roster has seven persona-startup and
+   two persona-release-contract cases; the reported phantom JSON/Job selector is
+   absent and must not be added as if it already existed.
+6. Assemble, freeze and qualify one exact bundle under
    [the G2 contract](shared-warm-compiler/completion/g2-completion.md), including
    ordinary/uncertain-END histories, Persona startup and bounded provider smoke.
+
+Preserve qualified compiler evidence at `08719df146`: worker/source-boot/
+cell-splitter targets compile, three carried/recipe and two request codec tests
+pass, and full fixtures-check passes 12/12 cohorts and 1,052 programs with no
+failures, skips, omissions or timeouts. Later runtime/actor joins are separate
+qualification; a new compiler repair requires its affected checks.
+
+The forward TYPE/seal audits found no supported basis for relaxing identity
+checks. Ordinary reload starts an empty isolated scope, and incompatible demanded
+historical TYPE versions intentionally refuse. A compatible historical operand
+or content-revert claim needs an actual authorized transfer plus exact outgoing
+selection evidence. Prior native ownership also rejects same-owner re-emission
+before raw-seal finalization. Keep these as bounded investigation questions,
+not implementation blockers or speculative changes.
 
 W1 decoder retention and W5 context-baseline redesign remain deferred. W2's
 lower-level internal accessor is not globally removed. No live Persona or release
@@ -207,8 +202,9 @@ activation-metadata renderer pass. Matched transport evidence is in
 `census-transport/handoff.json` and `authenticated-resolution/result.json`;
 source review is `review/exactscope-v17.md`.
 
-Latest carrier evidence: `actor/joined-6f7-outcome.json` (Job progression and alias
-failure), `actor/joined-232-outcome.json` (JSON Rust predecessor failure).
+Latest carrier evidence: `actor/joined-95d-outcome.json` (2/2 pass). Earlier
+`actor/joined-6f7-outcome.json` and `actor/joined-232-outcome.json` retain the
+alias and predecessor counterexamples.
 Seal evidence: `json-source-seal/result.json`; source reviews:
 `review/json-source-seal-381.md`, `review/json-prior-source-version.md`.
 Companion evidence: `review/companion-handoff.txt` and
@@ -222,3 +218,11 @@ host production and test targets compile (`actor/reload-9d2-notebook-outcome.jso
 Bash/recovery evidence: `review/quoter-policy.md`,
 `quoter-recovery-triage/result.json`. Full joined compiler evidence and hashes:
 `joined-compiler-08719df/result.json`.
+Latest reload evidence: `reload-settlement-runtime/ended-result.json`,
+`actor/failure-592-outcome.json`, `actor/failure-574-outcome.json`, and
+`host/reload-supersession/default-result-ref-receipt.json`.
+The x-to-J-to-K receipt is `runtime/original-binding/world-final-receipt.json`;
+its primary diagnostic summary retains five unmarked scratch directories and
+`diagnostic_evidence_complete: false`, with both cleanup owners confirmed.
+Forward audit corrections are in `review/forward-native-seals.md` and
+`review/forward-type-history.md`.
