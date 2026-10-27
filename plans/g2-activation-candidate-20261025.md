@@ -1,7 +1,7 @@
 # G2 fixture closure and Persona admission
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
-Current integrated code: `22b6d9380b`.
+Current integrated code: `5e032d780f`.
 Active evidence: `/srv/swarm/evidence/inanna/g2-final-qualification-20261026/`.
 
 G2 remains unqualified. Executable projection, Original demand and certification
@@ -137,10 +137,19 @@ Implementation and qualification still open:
    bindingless complete return may be Committed/GenerationReset; discarded writes
    or trailing units require explicit rejected publication. Fresh A compilation,
    installation, host admission and another execution's continuation remain refused.
+   Runtime `c4470ae30d..6ebccf045d` and actor `587323db3d` are source-reviewed;
+   the runtime thirteen-case controls and joined actor/host compilation are in
+   progress. Expression observations are distinguished by the exact checked item
+   kind, with all temporary roots released; authored binding names never decide
+   whether publication is empty.
 2. Qualify joined reload failure and destruction histories. The four e04 hosted
    controls failed after retaining the actual committed reload operation; their
    publication-basis error masked the earlier cause. The joined runtime/actor
-   repairs are running on exact `22b6d9380b`. Running/Parked/Capturing tickets and
+   repairs at exact `22b6d9380b` preserve the original retired-source error and
+   committed operation in all four controls, but all four still fail. Successful
+   checked returns need the discard grant, and a later empty checkpoint cleanup
+   must avoid reacquiring the retired private scope (`083a380f2b`).
+   Running/Parked/Capturing tickets and
    pending host owners must drain before private retirement. Test actual task
    destruction through a genuine continuing publication, including cancellation
    during CommitClaimed followed by task loss. Component publication-owner tests
@@ -153,18 +162,25 @@ Implementation and qualification still open:
    root inventory. Preserve the valid partial-pattern fixture and investigate
    the actual compiler product/census boundary; do not reclassify this HOME helper
    as a wired-in error or drop its executable demand.
-4. Finish canonical native failure receipt validation. Candidate `5263d34f70`
-   preserves typed item/publication evidence even without an application value;
-   production/test compilation and ten focused cases are queued in the warm host
-   checkout. Model budget and exact OriginalOperation checks remain unchanged.
+4. Include native failure receipt repairs `f5faed8542..5e032d780f` in joined
+   qualification. They preserve typed item/publication evidence even without an
+   application value. Host production/test compilation and all ten focused cases
+   pass at `1221c20cf7`, with confirmed process cleanup. The stale prose assertion
+   was reproduced on baseline `5744f0762c`; its replacement checks the structured
+   recovery contract. Model budget and exact OriginalOperation checks are unchanged.
 5. Exercise the joined crash cut after durable B publication but before Harness
    Store output settlement. Same-process retained terminal replay is distinct
-   from cross-process recovery: a persisted terminal can replay exactly; a pending
-   claim without a surviving job is interrupted without redispatch. Verify those
-   contracts through the actual pinned Harness and source recovery owners, without
-   introducing another journal. The current roster has seven persona-startup and
-   two persona-release-contract cases; the reported phantom JSON/Job selector is
-   absent and must not be added as if it already existed.
+   from cross-process recovery: a persisted terminal can replay exactly. A pending
+   claim with no output blocks production host recovery with `UncertainEffects`
+   before Harness Engine orphan-job recovery can run; startup does not interrupt
+   that claim. Candidate `23cee3a07d..720c108cb0` tests active B plus the exact
+   pending call/no-output cut, process destruction and both refused recovery modes
+   without redispatch. Source review accepts the corrected response-identity
+   oracle; native compilation and execution remain pending. No additional journal
+   is introduced. Its proposed outer-restart roster grows from five to six; the
+   current roster also has seven persona-startup and two persona-release-contract
+   cases. The reported phantom JSON/Job selector is absent and must not be added
+   as if it already existed.
 6. Assemble, freeze and qualify one exact bundle under
    [the G2 contract](shared-warm-compiler/completion/g2-completion.md), including
    ordinary/uncertain-END histories, Persona startup and bounded provider smoke.
