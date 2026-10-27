@@ -1,7 +1,7 @@
 # G2 fixture closure and Persona admission
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
-Current integrated code: `0f2cf5e427`.
+Current integrated code: `7976b4dd74`.
 Active evidence: `/srv/swarm/evidence/inanna/g2-final-qualification-20261026/`.
 
 G2 remains unqualified. Executable projection, Original demand and certification
@@ -137,11 +137,13 @@ Implementation and qualification still open:
    bindingless complete return may be Committed/GenerationReset; discarded writes
    or trailing units require explicit rejected publication. Fresh A compilation,
    installation, host admission and another execution's continuation remain refused.
+   Integrated `83e509574d..7976b4dd74` carries the runtime and actor repair.
    Runtime `c4470ae30d..d19fa1c4e2` passes eight existing and five new controls
    at its recorded pins. Actor `587323db3d`, empty-checkpoint cleanup `083a380f2b`
    and fixture callers `ca279e02c3` are source-reviewed. Joined `f51f3991de`
    actor/host production and test targets compile; three focused actor controls
-   pass and the five-case notebook cohort is running. Expression observations
+   and the five-case notebook cohort pass (8/8), with process cleanup confirmed
+   and compiler cleanup confirmed for all six compiler-using cases. Expression observations
    are distinguished by the exact checked item
    kind, with all temporary roots released; authored binding names never decide
    whether publication is empty.
@@ -151,7 +153,13 @@ Implementation and qualification still open:
    repairs at exact `22b6d9380b` preserve the original retired-source error and
    committed operation in all four controls, but all four still fail. Successful
    checked returns need the discard grant, and a later empty checkpoint cleanup
-   must avoid reacquiring the retired private scope (`083a380f2b`).
+   must avoid reacquiring the retired private scope (`083a380f2b`). At joined
+   `ab54eefe15`, all four now pass settlement, finalization and exact retry/no
+   third-generation assertions, then fail fresh-B compilation at the shared
+   carried-Original demand defect. Their post-B absence probes remain unexecuted.
+   All process, compiler and hosted cleanup is confirmed. Joined `eebcc3ce98`
+   adds the semantic demand repair and is running the default reload history,
+   followed by the four unchanged controls if that history passes.
    Running/Parked/Capturing tickets and
    pending host owners must drain before private retirement. Test actual task
    destruction through a genuine continuing publication, including cancellation
