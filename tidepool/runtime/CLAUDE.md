@@ -162,6 +162,12 @@ the existing RunRecoveryStore transaction. It never transfers the prior owner or
 advances the machine admission epoch. Source admission has a separate lexical-scope
 owner: fencing it refuses fresh compilation, installation and binding publication
 while retained code, pure continuation and receipt observation keep their custody.
+An already-issued checked return may discard its captures only with the exact
+parked owner selected before cutoff and sealed by actual source retirement.
+Discard releases custody without advancing the compiler prefix or authorizing
+another item. The issued Expression kind distinguishes observation captures from
+authored bindings; their names do not decide publication. Native return completion,
+compiler completion, and failed or skipped suffixes remain separate facts.
 Actual source work carries its original prerequisites through compiler END;
 unconfirmed cleanup retains that obligation. A frontend's scoped admission hook
 may carry its exact bootstrap owner into the same compiler transaction, but does

@@ -2547,7 +2547,7 @@ enum CellPhase {
 #[derive(Debug)]
 struct RunningCheckedItem {
     reservation: Arc<CheckedItemReservation>,
-    retirement: parking_lot::Mutex<Option<super::RuntimeSourceRetirementProof>>,
+    retirement: OnceLock<super::RuntimeSourceRetirementProof>,
     execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
 }
 
@@ -2610,7 +2610,7 @@ impl RuntimeCheckedState {
             .ok_or(super::SessionTransitionReason::WrongPhase)?;
         let running = Arc::new(RunningCheckedItem {
             reservation: ticket,
-            retirement: parking_lot::Mutex::new(None),
+            retirement: OnceLock::new(),
             execution,
         });
         self.phase = CellPhase::Running(Arc::clone(&running));
@@ -3001,11 +3001,11 @@ impl Drop for RunningCheckedTicket {
 static_assertions::assert_not_impl_any!(RunningCheckedTicket: Clone, Copy);
 
 /// The exact running operation transfers its one capture obligation. Dropping
-/// an uncommitted capture cannot make a successful private frontier.
+/// an unsettled capture cannot make a successful private frontier.
 pub(crate) struct CheckedCaptureTicket {
     prefix: Arc<RuntimeCheckedPrefix>,
     running: Arc<RunningCheckedItem>,
-    committed: bool,
+    settled: bool,
 }
 
 static_assertions::assert_not_impl_any!(CheckedCaptureTicket: Clone, Copy);
@@ -3029,14 +3029,14 @@ impl CheckedCaptureTicket {
             running: Arc::clone(&self.running),
         };
         let outcome = completion.settle_captured(session, &self, captured)?;
-        self.committed = true;
+        self.settled = true;
         Ok(outcome)
     }
 }
 
 impl Drop for CheckedCaptureTicket {
     fn drop(&mut self) {
-        if self.committed {
+        if self.settled {
             return;
         }
         let mut state = self.prefix.state.lock();
@@ -3100,12 +3100,8 @@ impl CheckedTurnCompletion {
             return Err(super::SessionTransitionReason::OwnerChanged.into());
         }
         proof.validate_current(self.prefix.admission.original_source()?.source_admission())?;
-        let mut retirement = self.running.retirement.lock();
-        if retirement.is_some() {
-            // A rejected answer may retry the same still-parked return.
-            return Ok(());
-        }
-        *retirement = Some(proof.clone());
+        // Rejected answer delivery may retry this same still-parked return.
+        self.running.retirement.get_or_init(|| proof.clone());
         Ok(())
     }
 
@@ -3119,7 +3115,7 @@ impl CheckedTurnCompletion {
         Ok(CheckedCaptureTicket {
             prefix: Arc::clone(&self.prefix),
             running: Arc::clone(&self.running),
-            committed: false,
+            settled: false,
         })
     }
 
@@ -3406,7 +3402,7 @@ impl CheckedTurnCompletion {
                 return Err(SessionError::StaleStagedDeclaration);
             }
         }
-        if let Some(proof) = self.running.retirement.lock().as_ref() {
+        if let Some(proof) = self.running.retirement.get() {
             let private = self
                 .prefix
                 .admission
@@ -3424,9 +3420,14 @@ impl CheckedTurnCompletion {
             if *admission_digest != self.prefix.admission.digest() {
                 return Err(SessionError::StaleStagedDeclaration);
             }
+            // The checked issuer reserves expression captures for observation.
+            // They own roots but introduce no authored binding publication.
+            let observation = self.running.execution.item().kind()
+                == tidepool_toolchain::checked_cell::CheckedItemKind::Expression;
             let bindings = captured
                 .values()
                 .iter()
+                .filter(|_| !observation)
                 .map(|value| DiscardedPrivateBinding {
                     id: value.id(),
                     name: value.name().to_owned(),

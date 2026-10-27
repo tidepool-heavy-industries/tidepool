@@ -1382,6 +1382,12 @@ RUNTIME_SUPERSEDED_EXECUTION_CASES = ["session::resident::activation_input_tests
     "retired_source_aborts_reserved_prefix_without_completing_it",
     "retired_source_discards_failed_and_cancelled_suffixes_without_losing_prior_writes",
     "retired_source_refuses_stale_epoch_without_mutation",
+    "retired_checked_returns_preserve_results_and_discard_unpublished_captures",
+    "retired_checked_return_refuses_sibling_and_unknown_holes_without_consuming",
+    "source_retirement_without_selected_return_does_not_authorize_capture",
+    "selected_return_survives_same_item_reparking_without_authorizing_tail",
+    "refused_source_retirement_cannot_seal_selected_return",
+
 )]
 
 RUNTIME_CHECKED_CAPTURE_CASES = ["session::resident::authored_publication_tests::" + name for name in (

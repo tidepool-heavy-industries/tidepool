@@ -6,10 +6,21 @@ use crate::session::{
 use tidepool_toolchain::compiler_world::PrivateCheckedItemProgress;
 
 fn session(id: u64) -> (tempfile::TempDir, Arc<InputRecipe>, TestSession) {
+    session_with_effects(id, &[])
+}
+
+fn session_with_effects(
+    id: u64,
+    declarations: &[tidepool_mcp::EffectDecl],
+) -> (tempfile::TempDir, Arc<InputRecipe>, TestSession) {
     tidepool_testing::eval_harness::require_extract();
-    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let effects = TestEffectSurface::minimal(declarations).unwrap();
     let recipe = Arc::new(InputRecipe::capture(
-        effects.preamble().to_owned(),
+        if declarations.is_empty() {
+            effects.preamble().to_owned()
+        } else {
+            insert_preamble_imports(effects.preamble(), "Tidepool.Duration (milliseconds)")
+        },
         effects.row().to_owned(),
         effects.include_paths().to_vec(),
     ));
@@ -535,4 +546,341 @@ fn retired_source_discards_failed_and_cancelled_suffixes_without_losing_prior_wr
             .settle_superseded_private_execution(&execution, &proof)
             .is_err());
     }
+}
+
+fn start_parked_return(
+    resident: &mut TestSession,
+    recipe: &InputRecipe,
+    execution: Arc<crate::session::PrivateExecutionAdmission>,
+    source: &str,
+) -> (CheckedFixtureCell, ResidentHole) {
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let checked = check_fixture_cell(resident, recipe, source, execution, 0);
+    let item = checked.checked.checked_item(0).unwrap();
+    let admission = source_action(resident, |resident, _| {
+        resident.admit_checked_item(checked.prefix.clone(), item)
+    })
+    .unwrap();
+    let turn = turn::consume_cell_program_item(admission.clone()).unwrap();
+    let outcome = source_action(resident, |resident, settlement| match &turn {
+        TurnResult::Expr { compiled, .. } => {
+            resident.run_with_sites("retiredReturn", compiled.code(), settlement)
+        }
+        TurnResult::Bind {
+            bound, compiled, ..
+        } if bound.is_empty() => {
+            resident.run_with_sites("retiredReturn", compiled.code(), settlement)
+        }
+        TurnResult::Bind {
+            bound, compiled, ..
+        } if bound.len() == 1 => resident.run_bind_with_sites(
+            "retiredReturn",
+            compiled.code(),
+            &bound[0],
+            admission.generation(),
+            settlement,
+        ),
+        TurnResult::Bind {
+            bound, compiled, ..
+        } => resident.run_projected_bind_with_sites(
+            "retiredReturn",
+            compiled.code(),
+            bound,
+            admission.generation(),
+            settlement,
+        ),
+        TurnResult::Decl(_) => panic!("return fixture must execute"),
+    })
+    .unwrap();
+    (checked, suspended(outcome))
+}
+
+fn retire_return(
+    resident: &TestSession,
+    owner: crate::session::RuntimeCheckedReturnOwner,
+) -> RuntimeSourceRetirementProof {
+    resident
+        .public_source
+        .original_source()
+        .source_admission()
+        .fence()
+        .unwrap()
+        .retire_with_checked_return(NotebookGenerationId::INITIAL.next().unwrap(), Some(owner))
+        .unwrap_or_else(|(_, error)| panic!("{error:?}"))
+}
+
+#[test]
+fn retired_checked_returns_preserve_results_and_discard_unpublished_captures() {
+    let cases = [
+        ("sleep (milliseconds 1) >> pure (41 :: Int)", vec![]),
+        ("returnedValue <- sleep (milliseconds 1) >> pure (41 :: Int)", vec!["returnedValue"]),
+        ("(returnedLeft, returnedRight) <- sleep (milliseconds 1) >> pure (41 :: Int, 42 :: Int)", vec!["returnedLeft", "returnedRight"]),
+        ("_ <- sleep (milliseconds 1)", vec![]),
+        ("observation0 <- sleep (milliseconds 1) >> pure (41 :: Int)", vec!["observation0"]),
+    ];
+    for (index, (source, expected_names)) in cases.into_iter().enumerate() {
+        let (_root, recipe, mut resident) =
+            session_with_effects(1900 + index as u64, &[tidepool_mcp::sleep_decl()]);
+        let execution = begin_fixture_execution(&mut resident);
+        let (checked, hole) =
+            start_parked_return(&mut resident, &recipe, execution.clone(), source);
+        let successor = resident.mint_notebook_scope_with_lease(None).unwrap();
+        let before = resident.public_visibility_snapshot_in(resident.public_scope());
+        let successor_before = resident.public_visibility_snapshot_in(successor.scope());
+        let owner = resident
+            .capture_checked_return_owner(&execution, &hole)
+            .unwrap()
+            .unwrap();
+        let proof = retire_return(&resident, owner);
+        assert!(resident
+            .capture_checked_return_owner(&execution, &hole)
+            .is_err());
+        let outcome = resident
+            .resume_superseded_classified(hole, (), &proof, &mut |_| {})
+            .unwrap();
+        let ResidentOutcome::SupersededReturn {
+            bindings, result, ..
+        } = outcome
+        else {
+            panic!("retired return reported ordinary publication")
+        };
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| binding.name.as_str())
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+        assert_eq!(result.is_some(), index != 2);
+        if index == 0 || index == 1 || index == 4 {
+            assert_eq!(result.as_ref().unwrap().to_json(), serde_json::json!(41));
+        }
+        assert_eq!(checked.prefix.snapshot().compiler_prefix().next_item(), 0);
+        assert_eq!(
+            execution.checked_progress(),
+            PrivateCheckedItemProgress::Started
+        );
+        assert!(execution.completed_values.lock().is_empty());
+        assert!(resident.parked_holes().is_empty());
+        assert_eq!(resident.stowed_roots_count(), 0);
+        assert!(resident.custody_cleanup.abandoned.lock().is_empty());
+        assert_eq!(resident.outstanding_custody(), 0);
+        for name in &expected_names {
+            assert!(resident
+                .state
+                .resolve_in(execution.private_scope(), name)
+                .is_none());
+        }
+        assert_eq!(
+            resident.public_visibility_snapshot_in(resident.public_scope()),
+            before
+        );
+        assert_eq!(
+            resident.public_visibility_snapshot_in(successor.scope()),
+            successor_before
+        );
+        assert!(resident.public_source.admit_source().is_err());
+        assert!(resident.freeze_private_execution(&execution).is_err());
+        let settled = resident
+            .settle_superseded_private_execution(&execution, &proof)
+            .unwrap();
+        match settled {
+            SupersededPrivateExecution::Empty { .. } => assert!(expected_names.is_empty()),
+            SupersededPrivateExecution::Discarded { writes, .. } => {
+                assert!(!expected_names.is_empty());
+                assert_eq!(
+                    writes
+                        .bindings
+                        .iter()
+                        .map(|binding| binding.name.as_str())
+                        .collect::<Vec<_>>(),
+                    expected_names
+                );
+                assert_eq!(
+                    writes.compiler_progress,
+                    SupersededCompilerProgress::Incomplete
+                );
+            }
+        }
+        assert_eq!(
+            resident.public_visibility_snapshot_in(resident.public_scope()),
+            before
+        );
+        assert_eq!(
+            resident.public_visibility_snapshot_in(successor.scope()),
+            successor_before
+        );
+    }
+}
+
+#[test]
+fn retired_checked_return_refuses_sibling_and_unknown_holes_without_consuming() {
+    let (_root, recipe, mut resident) = session_with_effects(1904, &[tidepool_mcp::sleep_decl()]);
+    let first = begin_fixture_execution(&mut resident);
+    let (_, first_hole) = start_parked_return(
+        &mut resident,
+        &recipe,
+        first.clone(),
+        "sleep (milliseconds 1)",
+    );
+    let owner = resident
+        .capture_checked_return_owner(&first, &first_hole)
+        .unwrap()
+        .unwrap();
+    let sibling = begin_fixture_execution(&mut resident);
+    let (_, sibling_hole) = start_parked_return(
+        &mut resident,
+        &recipe,
+        sibling.clone(),
+        "sleep (milliseconds 1)",
+    );
+    assert!(resident
+        .capture_checked_return_owner(&sibling, &first_hole)
+        .is_err());
+    let proof = retire_return(&resident, owner);
+    let before = resident
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for hole in [
+        sibling_hole.clone(),
+        ResidentHole::plain("not-an-issued-hole".to_owned()),
+    ] {
+        assert!(matches!(
+            resident.resume_superseded_classified(hole, (), &proof, &mut |_| {}),
+            Err(ResidentResumeError::Rejected(_))
+        ));
+        assert_eq!(
+            resident.parked_holes(),
+            before.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+    assert!(matches!(
+        resident
+            .resume_superseded_classified(first_hole, (), &proof, &mut |_| {})
+            .unwrap(),
+        ResidentOutcome::SupersededReturn { .. }
+    ));
+    assert!(
+        resident
+            .resume_classified(sibling_hole, (), &mut |_| {})
+            .is_err(),
+        "ordinary sibling capture still needs open source"
+    );
+    resident
+        .settle_superseded_private_execution(&first, &proof)
+        .unwrap();
+    assert!(matches!(
+        resident
+            .settle_superseded_private_execution(&sibling, &proof)
+            .unwrap(),
+        SupersededPrivateExecution::Discarded { .. }
+    ));
+}
+
+#[test]
+fn source_retirement_without_selected_return_does_not_authorize_capture() {
+    let (_root, recipe, mut resident) = session_with_effects(1905, &[tidepool_mcp::sleep_decl()]);
+    let execution = begin_fixture_execution(&mut resident);
+    let (_, hole) = start_parked_return(
+        &mut resident,
+        &recipe,
+        execution.clone(),
+        "sleep (milliseconds 1)",
+    );
+    let proof = retire(&resident);
+    assert!(matches!(
+        resident.resume_superseded_classified(hole.clone(), (), &proof, &mut |_| {}),
+        Err(ResidentResumeError::Rejected(_))
+    ));
+    assert_eq!(resident.parked_holes(), vec![hole.cont_id()]);
+    assert!(resident.resume_classified(hole, (), &mut |_| {}).is_err());
+    assert!(matches!(
+        resident
+            .settle_superseded_private_execution(&execution, &proof)
+            .unwrap(),
+        SupersededPrivateExecution::Discarded { .. }
+    ));
+}
+
+#[test]
+fn selected_return_survives_same_item_reparking_without_authorizing_tail() {
+    let (_root, recipe, mut resident) = session_with_effects(1906, &[tidepool_mcp::sleep_decl()]);
+    let execution = begin_fixture_execution(&mut resident);
+    let (checked, hole) = start_parked_return(
+        &mut resident,
+        &recipe,
+        execution.clone(),
+        "sleep (milliseconds 1) >> sleep (milliseconds 2)\nlet forbiddenTail = 9 :: Int",
+    );
+    let owner = resident
+        .capture_checked_return_owner(&execution, &hole)
+        .unwrap()
+        .unwrap();
+    let proof = retire_return(&resident, owner);
+    let second = suspended(
+        resident
+            .resume_superseded_classified(hole, (), &proof, &mut |_| {})
+            .unwrap(),
+    );
+    assert!(
+        matches!(resident.resume_classified(second, (), &mut |_| {}).unwrap(), ResidentOutcome::SupersededReturn { bindings, .. } if bindings.is_empty())
+    );
+    assert_eq!(checked.prefix.snapshot().compiler_prefix().next_item(), 0);
+    assert!(resident
+        .admit_checked_item(
+            checked.prefix.clone(),
+            checked.checked.checked_item(1).unwrap()
+        )
+        .is_err());
+    assert!(resident
+        .state
+        .resolve_in(execution.private_scope(), "forbiddenTail")
+        .is_none());
+    assert!(
+        matches!(resident.settle_superseded_private_execution(&execution, &proof).unwrap(), SupersededPrivateExecution::Discarded { writes, .. } if writes.bindings.is_empty() && writes.compiler_progress == SupersededCompilerProgress::Incomplete)
+    );
+}
+
+#[test]
+fn refused_source_retirement_cannot_seal_selected_return() {
+    let (_root, recipe, mut resident) = session_with_effects(1907, &[tidepool_mcp::sleep_decl()]);
+    let execution = begin_fixture_execution(&mut resident);
+    let (_, hole) = start_parked_return(
+        &mut resident,
+        &recipe,
+        execution.clone(),
+        "sleep (milliseconds 1)",
+    );
+    let selected = resident
+        .capture_checked_return_owner(&execution, &hole)
+        .unwrap()
+        .unwrap();
+    let original = resident.public_source.original_source().clone();
+    let claim = original.admit_source().unwrap();
+    let fence = original.source_admission().fence().unwrap();
+    let (fence, _) = fence
+        .retire_with_checked_return(
+            NotebookGenerationId::INITIAL.next().unwrap(),
+            Some(selected),
+        )
+        .expect_err("live admitted source work prevents retirement");
+    drop(claim);
+    fence.reopen(&original).unwrap();
+    assert!(matches!(
+        source_action(&mut resident, |resident, settlement| resident
+            .resume_classified(hole, (), settlement))
+        .unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+    assert_eq!(
+        execution.checked_progress(),
+        PrivateCheckedItemProgress::Completed
+    );
 }
