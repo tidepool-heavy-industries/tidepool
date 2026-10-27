@@ -179,7 +179,9 @@ import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOrigi
   , withWorldStageInputs, stageWorldProducts, pendingWorldNative, completeWorldProducts
   , admitCurrentOriginalProducts, preparedCurrentOriginalInventory, currentOriginalGroupMetadata
   , lookupStageGroupMetadata, selectStageGroupMetadata
-  , stagedOriginalOutputFiles, publishStagedOriginalProducts, CertifiedOriginalProducts, certifiedOriginalProducts)
+  , stagedOriginalOutputFiles, publishStagedOriginalProducts, CertifiedOriginalProducts, certifiedOriginalProducts
+  , stagedOriginalExternalDemand, stagedOriginalReference)
+import Tidepool.OriginalProductRoots (PriorOriginalExternalDemand(..))
 import Tidepool.ExecutionProjection (ProjectionContext(..))
 import Tidepool.ConstructorIdentity (issuedConstructorIdentity)
 import Tidepool.EffectSchema qualified as Effect
@@ -2691,27 +2693,61 @@ worldCarriedImportFixture literalBash = withTiming $ withScratch $ \work ->
               "retainedLiteral = [CanonicalPartialFacadeAgain.bash|$VAR `literal`|]"
             unless (isJust (completedCompilerWorldCompletion quoted))
               (fail "source-less literal Bash lost its completed World owner")
-          completed <- compileDeclaration compiler facts reference rootB template Nothing "nominal" 121
-            "retainedCall local = CanonicalPartialFacadeAgain.usePartial local"
-          completion <- maybe (fail "carried import lost its World completion") pure
-            (completedCompilerWorldCompletion completed)
-          let imports = worldCellExactImports (worldCompilerCompletionInputs completion)
-              declared = [edges | (("main","Tidepool.Session.Lib.G121",False),edges) <- imports]
-          case declared of
-            [edges] | [(name,boot,unit) | (_,name,boot,unit) <- edges
-                , name `elem` names] == [("CanonicalPartialFacadeAgain",False,"main")] -> pure ()
-            _ -> fail "carried lexical import was lost or its TYPE dependency became a lexical edge"
-          let prepared = completedCompilerResult completed
-              bindings = pprOriginalBindings prepared
-              references = pprOriginalReferences prepared
-              selected = [(name,identity) | (name,identity) <- Map.toList bindings
-                , symbolModule identity == "CanonicalPartialConsumer",symbolOccurrence identity == "usePartial"]
-          case selected of
-            [(name,identity)] | fmap (moduleNameString . moduleName) (nameModule_maybe name) == Just "CanonicalPartialConsumer"
-              , Map.lookup identity references == (nameModule_maybe name >>= worldOriginalReferenceFor facts) -> pure ()
-            _ -> fail "finalized imported global lost its exact Name/Original reference"
-          unless (all ((/= "local") . occNameString . nameOccName) (Map.keys bindings))
-            (fail "nominal external-reference recorder retained a locally bound variable")
+          _ <- compileDeclarationWith (\completed -> do
+            completion <- maybe (fail "carried import lost its World completion") pure
+              (completedCompilerWorldCompletion completed)
+            let imports = worldCellExactImports (worldCompilerCompletionInputs completion)
+                declared = [edges | (("main","Tidepool.Session.Lib.G121",False),edges) <- imports]
+            case declared of
+              [edges] | [(name,boot,unit) | (_,name,boot,unit) <- edges
+                  , name `elem` names] == [("CanonicalPartialFacadeAgain",False,"main")] -> pure ()
+              _ -> fail "carried lexical import was lost or its TYPE dependency became a lexical edge"
+            let prepared = completedCompilerResult completed
+                bindings = pprOriginalBindings prepared
+                references = pprOriginalReferences prepared
+                selected = [(name,identity) | (name,identity) <- Map.toList bindings
+                  , symbolModule identity == "CanonicalPartialConsumer",symbolOccurrence identity == "usePartial"]
+            case selected of
+              [(name,identity)] | fmap (moduleNameString . moduleName) (nameModule_maybe name) == Just "CanonicalPartialConsumer"
+                , Map.lookup identity references == (nameModule_maybe name >>= worldOriginalReferenceFor facts) -> pure ()
+              _ -> fail "finalized imported global lost its exact Name/Original reference"
+            unless (all ((/= "local") . occNameString . nameOccName) (Map.keys bindings))
+              (fail "nominal external-reference recorder retained a locally bound variable")
+            unless literalBash $ do
+              stage <- maybe (fail "carried Original control lost its compiled stage") pure
+                (completedCompilerWorldStage completed)
+              inputs <- bindWorldStageInputs stage Nothing
+              withWorldStageCompilation inputs $ \current recovery executor -> do
+                let environment = prHscEnv (pprPipelineResult current)
+                    owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult current))
+                    directory = rootB </> "carried-original-demand"
+                createDirectory directory
+                projection <- prepareCompilerProjectionContext current Map.empty owner scaffoldTargetName [] Nothing
+                (_,raw) <- prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext current))
+                  (compilerPreparedBodies recovery) (Just (compilerOriginalProjections recovery)) executor
+                  (Just inputs) environment (compilationScope <$> preparedExactCompilation current)
+                  (pprProductInterfaces current) projection (Map.keysSet references) (pprModules current)
+                interfaces <- newPreparedWorldInterfaceArtifacts inputs directory
+                admitted <- admitCurrentOriginalProducts interfaces directory current
+                  (withWorldStageInputs (Just inputs) raw)
+                pending <- stageWorldProducts interfaces directory inputs admitted
+                let prior = Just (pendingWorldNative pending)
+                forM_ selected $ \(_,identity) -> do
+                  demand <- either fail pure (stagedOriginalExternalDemand prior identity)
+                  unless (case demand of
+                      Just actual -> priorOriginalPackageGlobals actual == Set.singleton identity
+                        && Map.null (priorOriginalHomeGroups actual)
+                      Nothing -> False)
+                    (fail "prior staged Original availability lost its external leaf demand")
+                  unless (stagedOriginalReference prior identity == Map.lookup identity references)
+                    (fail "prior staged Original demand changed its authenticated reference")
+                  let missing = identity {symbolOccurrence="absentOriginalControl"}
+                  unless (stagedOriginalExternalDemand prior missing == Right Nothing
+                      && stagedOriginalReference prior missing == Nothing)
+                    (fail "prior staged Original demand fabricated another binder's authority")
+            pure ()) compiler facts reference rootB template Nothing "nominal" 121
+              "retainedCall local = CanonicalPartialFacadeAgain.usePartial local"
+          pure ()
         forM_ operandSelection $ \(matching,foreignOperand,operandModule,operandTerms) -> do
           -- Checked operand authority crosses the carried lexical projection;
           -- each selected operand also carries its distinct nominal TYPE dependency.
@@ -2907,7 +2943,8 @@ worldCarriedImportFixture literalBash = withTiming $ withScratch $ \work ->
   where
     requireReady (ExactInputsReady _ reference _) = pure reference
     requireReady other = fail ("carried-import fixture could not acquire its actual World: " ++ show other)
-    compileDeclaration compiler facts reference root template operand label generation source = do
+    compileDeclaration = compileDeclarationWith (const (pure ()))
+    compileDeclarationWith inspect compiler facts reference root template operand label generation source = do
       let directory = root </> label
           recipe = WorldCellRecipe source template []
       createDirectory directory
@@ -2929,7 +2966,9 @@ worldCarriedImportFixture literalBash = withTiming $ withScratch $ \work ->
       (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
         admitted <- boundWorldCellPreparation request >>= either throwIO pure
         _ <- scopedPrepareWorldCellStage compiler admitted >>= maybe (fail "carried-import declaration omitted its stage") pure
-        scopedCompileWorldCell compiler admitted (PreparedProducts Nothing) Set.empty
+        completed <- scopedCompileWorldCell compiler admitted (PreparedProducts Nothing) Set.empty
+        inspect completed
+        pure completed
 
 -- The partial match embeds its defining source location in finalized Core.
 -- The consuming World selects InterfaceOnly metadata, so new body demand must
