@@ -578,6 +578,22 @@ fn start_parked_return(
         }
         TurnResult::Bind {
             bound, compiled, ..
+        } if admission.observation_name().is_some() => {
+            assert_eq!(bound.len(), 1);
+            assert_eq!(bound[0].tier, ValueTier::RetainOpaque);
+            resident.run_observation_with_sites(
+                compiled.code(),
+                &bound[0],
+                admission.generation(),
+                matches!(
+                    admission.item().expression_lift().unwrap(),
+                    Some(tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful)
+                ),
+                settlement,
+            )
+        }
+        TurnResult::Bind {
+            bound, compiled, ..
         } if bound.len() == 1 => resident.run_bind_with_sites(
             "retiredReturn",
             compiled.code(),
@@ -616,6 +632,32 @@ fn retire_return(
 
 #[test]
 fn retired_checked_returns_preserve_results_and_discard_unpublished_captures() {
+    // The ordinary observation owner retains its value for later presentation.
+    // Its immediate result is an opaque capture marker, not a forced Int.
+    let ordinary_result = {
+        let (_root, recipe, mut resident) =
+            session_with_effects(1908, &[tidepool_mcp::sleep_decl()]);
+        let execution = begin_fixture_execution(&mut resident);
+        let (checked, hole) = start_parked_return(
+            &mut resident,
+            &recipe,
+            execution.clone(),
+            "sleep (milliseconds 1) >> pure (41 :: Int)",
+        );
+        let outcome = source_action(&mut resident, |resident, settlement| {
+            resident.resume_classified(hole, (), settlement)
+        })
+        .unwrap();
+        let ResidentOutcome::Completed { result, .. } = outcome else {
+            panic!("ordinary observation did not complete")
+        };
+        assert!(
+            matches!(result.value(), HaskellValue::Con(tag, fields) if *tag == tidepool_codegen::observation::CLOSURE_SENTINEL && fields.is_empty())
+        );
+        assert_eq!(execution.completed_values.lock().len(), 1);
+        assert_eq!(checked.prefix.snapshot().compiler_prefix().next_item(), 1);
+        result
+    };
     let cases = [
         ("sleep (milliseconds 1) >> pure (41 :: Int)", vec![]),
         ("returnedValue <- sleep (milliseconds 1) >> pure (41 :: Int)", vec!["returnedValue"]),
@@ -629,6 +671,7 @@ fn retired_checked_returns_preserve_results_and_discard_unpublished_captures() {
         let execution = begin_fixture_execution(&mut resident);
         let (checked, hole) =
             start_parked_return(&mut resident, &recipe, execution.clone(), source);
+        let predecessor = checked.prefix.snapshot().world().clone();
         let successor = resident.mint_notebook_scope_with_lease(None).unwrap();
         let before = resident.public_visibility_snapshot_in(resident.public_scope());
         let successor_before = resident.public_visibility_snapshot_in(successor.scope());
@@ -657,10 +700,18 @@ fn retired_checked_returns_preserve_results_and_discard_unpublished_captures() {
             expected_names
         );
         assert_eq!(result.is_some(), index != 2);
-        if index == 0 || index == 1 || index == 4 {
+        if index == 0 {
+            let result = result.as_ref().unwrap();
+            assert!(
+                matches!((ordinary_result.value(), result.value()), (HaskellValue::Con(before, before_fields), HaskellValue::Con(after, after_fields)) if before == after && before_fields.is_empty() && after_fields.is_empty())
+            );
+            assert_eq!(result.to_json(), ordinary_result.to_json());
+        }
+        if index == 1 || index == 4 {
             assert_eq!(result.as_ref().unwrap().to_json(), serde_json::json!(41));
         }
         assert_eq!(checked.prefix.snapshot().compiler_prefix().next_item(), 0);
+        assert!(Arc::ptr_eq(checked.prefix.snapshot().world(), &predecessor));
         assert_eq!(
             execution.checked_progress(),
             PrivateCheckedItemProgress::Started
