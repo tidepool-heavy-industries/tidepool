@@ -1,7 +1,7 @@
 # G2 fixture closure and Persona admission
 
 Integration branch: `integration/g2-domain-runtime-20261023`.
-Current integrated code: `5e032d780f`.
+Current integrated code: `0f2cf5e427`.
 Active evidence: `/srv/swarm/evidence/inanna/g2-final-qualification-20261026/`.
 
 G2 remains unqualified. Executable projection, Original demand and certification
@@ -137,9 +137,12 @@ Implementation and qualification still open:
    bindingless complete return may be Committed/GenerationReset; discarded writes
    or trailing units require explicit rejected publication. Fresh A compilation,
    installation, host admission and another execution's continuation remain refused.
-   Runtime `c4470ae30d..6ebccf045d` and actor `587323db3d` are source-reviewed;
-   the runtime thirteen-case controls and joined actor/host compilation are in
-   progress. Expression observations are distinguished by the exact checked item
+   Runtime `c4470ae30d..d19fa1c4e2` passes eight existing and five new controls
+   at its recorded pins. Actor `587323db3d`, empty-checkpoint cleanup `083a380f2b`
+   and fixture callers `ca279e02c3` are source-reviewed. Joined `f51f3991de`
+   actor/host production and test targets compile; three focused actor controls
+   pass and the five-case notebook cohort is running. Expression observations
+   are distinguished by the exact checked item
    kind, with all temporary roots released; authored binding names never decide
    whether publication is empty.
 2. Qualify joined reload failure and destruction histories. The four e04 hosted
@@ -159,9 +162,14 @@ Implementation and qualification still open:
    149,429-byte receipt, both 581-module inventories, Completed acknowledgement,
    exact retry and no third generation. It then fails compiling the subsequent
    B cell because the required HOME helper has no original group in the package
-   root inventory. Preserve the valid partial-pattern fixture and investigate
-   the actual compiler product/census boundary; do not reclassify this HOME helper
-   as a wired-in error or drop its executable demand.
+   root inventory. Integrated `f661b4d860..0f2cf5e427` repairs the actual mismatch:
+   staged certification retained the exact remote Original reference and excluded
+   fresh emission, but its demand reader consulted only local HOME owners. The
+   reader now carries that certified external leaf into normal native acquisition.
+   Production/test compilation and two focused controls pass at `9b15f5dc4f`;
+   removing only the two-line repair fails the new real-stage assertion. Local
+   ownership precedence and exact acquisition checks remain intact. Joined fresh-B
+   execution is queued; the valid partial-pattern fixture remains unchanged.
 4. Include native failure receipt repairs `f5faed8542..5e032d780f` in joined
    qualification. They preserve typed item/publication evidence even without an
    application value. Host production/test compilation and all ten focused cases
@@ -193,11 +201,26 @@ qualification; a new compiler repair requires its affected checks.
 
 The forward TYPE/seal audits found no supported basis for relaxing identity
 checks. Ordinary reload starts an empty isolated scope, and incompatible demanded
-historical TYPE versions intentionally refuse. A compatible historical operand
-or content-revert claim needs an actual authorized transfer plus exact outgoing
-selection evidence. Prior native ownership also rejects same-owner re-emission
-before raw-seal finalization. Keep these as bounded investigation questions,
-not implementation blockers or speculative changes.
+historical TYPE versions intentionally refuse. A new same-generation prototype
+history is under investigation: hidden-host retirement can remove the last World
+dependency while retaining a cached prototype, after which ordinary source
+issuance may mint a competing selection for identical interface bytes. Reproducer
+`d0a96db9e3` is source-only; exact ArtifactId equality and SelectionId divergence
+require execution. Do not permanently select prototype TYPE rows or relax
+identity checks to accommodate it. Prior native ownership rejects same-owner
+re-emission before raw-seal finalization; the collision allegation is withdrawn.
+
+Two cleanup follow-ups remain separate from checked-return settlement. Runtime
+hole removal can drop the last admission lease after the checkout's initial
+reap; validate prompt reclamation without a subsequent checkout masking the lag.
+After the last hole has already been consumed, task abandonment has no autonomous
+lease-drain trigger, although production task/actor loss correctly records an
+Unconfirmed terminal and retains committed receipts. Extend the existing
+abandonment owner rather than inventing successful cleanup or a new registry.
+Candidate `94594febfb` additionally prevents an earlier completed sleep and
+historical publication wait from masking invocation uncertainty; source review
+accepts it, while compilation and state-history tests remain pending. The reported
+Green error bypass is stale at `f51f3991de`: errors enter owned finalization.
 
 W1 decoder retention and W5 context-baseline redesign remain deferred. W2's
 lower-level internal accessor is not globally removed. No live Persona or release
