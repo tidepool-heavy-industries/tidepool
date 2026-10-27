@@ -1395,6 +1395,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuing_commit_with_lost_task_keeps_receipt_but_not_settlement_proof() {
+        // Actual journal and publication-decision owners; no generation reset
+        // capability is manufactured by this transport-classification control.
+        let fixture = invocation_work::tests::Fixture::start().await;
+        let actor = fixture.actor.identity();
+        let invocation = exomonad_tool::ToolInvocationContext::external(
+            "thread".into(),
+            "turn".into(),
+            "reload".into(),
+            None,
+            None,
+        );
+        let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
+        let hosted = crate::HostedOperationSettlement::issue(actor, control.clone());
+        let execution = control.execution_id(actor);
+        let request = WorkbenchRequest::from_cell_input("reload receipt classification")
+            .with_execution_id(execution.clone());
+        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+        let work = journal
+            .lock()
+            .begin_selecting_invocation(actor, &execution, &request, None, &control);
+        let owner = WorkbenchExecutions::admit_operation_diagnostic(
+            &journal,
+            WorkbenchOperationId {
+                execution: execution.clone(),
+                input_unit_index: 0,
+                effect_ordinal: 0,
+            },
+            None,
+            &work,
+        )
+        .unwrap();
+        control.arm_sleep();
+        let decision = control.publication_decision();
+        let claim = decision.claim_commit().unwrap();
+        assert!(!control.request_cancellation());
+        let pending = claim.published_continuing();
+        assert!(pending);
+        control.complete_continuing_publication(pending);
+        let committed = Arc::new(WorkbenchOperationReceipt {
+            id: owner.operation().clone(),
+            effect: "reloadSource".into(),
+            disposition: WorkbenchOperationDisposition::Committed,
+            display: None,
+            display_publication: None,
+        });
+        owner.record_committed_operation(committed.clone()).unwrap();
+        control.mark_unconfirmed();
+        let failure = Err(crate::KernelInvocationFailure::ActorExited(actor));
+        journal.lock().record(
+            execution.clone(),
+            request.clone(),
+            failure,
+            crate::WorkbenchCancellationOutcome::Unconfirmed {
+                execution: execution.clone(),
+            },
+            None,
+        );
+        let reply = journal
+            .lock()
+            .lookup(&execution, &request, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reply.as_ref().unwrap_err().receipts()[0].operations,
+            [committed.as_ref().clone()]
+        );
+        control.settle(reply.clone());
+        assert!(matches!(
+            control.cancellation_outcome(execution, reply.clone()),
+            crate::WorkbenchCancellationOutcome::Unconfirmed { .. }
+        ));
+        assert!(matches!(
+            hosted.terminal(),
+            crate::HostedOperationTerminal::Settled(
+                crate::WorkbenchCancellationOutcome::Unconfirmed { .. }
+            )
+        ));
+        assert_eq!(hosted.reply(), Some(reply));
+        work.close();
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
     async fn retirement_diagnostic_write_survives_lost_receipt_and_continuation_failure() {
         let fixture = invocation_work::tests::Fixture::start().await;
         let actor = fixture.actor.identity();

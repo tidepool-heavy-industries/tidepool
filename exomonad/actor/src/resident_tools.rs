@@ -800,6 +800,9 @@ impl WorkbenchExecutionControl {
             .load(std::sync::atomic::Ordering::Acquire)
         {
             SLEEP_CANCELLED => WorkbenchCancellationOutcome::Cancelled { execution, reply },
+            // A completed effect does not prove that its continuation or cleanup
+            // settled. In particular, continuing publication resets its phase.
+            SLEEP_UNCONFIRMED => WorkbenchCancellationOutcome::Unconfirmed { execution },
             _ if self.publication.phase() == PublicationPhase::Published
                 || self
                     .publication_waited
@@ -2638,6 +2641,8 @@ mod tests {
         let exit = control.finish_cell(execution.clone(), &result, true);
         assert_eq!(exit.cause, crate::CellExitCause::Failed);
         assert!(control.context_cancellation_requested());
+        // Later transport uncertainty cannot replace an accepted cell cutoff.
+        control.mark_unconfirmed();
         control.settle(Err(failure.clone()));
         assert!(
             matches!(control.cancellation_outcome(execution, Err(failure.clone())),
